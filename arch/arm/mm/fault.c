@@ -26,6 +26,10 @@
 #include <asm/system_info.h>
 #include <asm/tlbflush.h>
 
+#ifdef CONFIG_DO_RAMDUMP_WHEN_STUCKED_AT_EXCEPTION
+#include <../../../kernel/sched/sched.h>
+#endif
+
 #include "fault.h"
 
 #ifdef CONFIG_MMU
@@ -162,17 +166,31 @@ __do_user_fault(struct task_struct *tsk, unsigned long addr,
 		struct pt_regs *regs)
 {
 	struct siginfo si;
+	int dump;
+	unsigned long int flags;
 
+	spin_lock_irqsave(&tsk->sighand->siglock, flags);
+	set_flag_block_sigkill_lockless(tsk, sig);
+	dump = !sig_user_defined(tsk, sig);
+	spin_unlock_irqrestore(&tsk->sighand->siglock, flags);
+
+#ifndef CONFIG_SHOW_FAULT_TRACE_INFO
 #ifdef CONFIG_DEBUG_USER
-	if (((user_debug & UDBG_SEGV) && (sig == SIGSEGV)) ||
-	    ((user_debug & UDBG_BUS)  && (sig == SIGBUS))) {
-		printk(KERN_DEBUG "%s: unhandled page fault (%d) at 0x%08lx, code 0x%03x\n",
-		       tsk->comm, sig, addr, fsr);
+	if (dump && (((user_debug & UDBG_SEGV) && (sig == SIGSEGV)) ||
+		((user_debug & UDBG_BUS)  && (sig == SIGBUS)))) {
+		pr_alert("%s: unhandled page fault (%d) at 0x%08lx, code 0x%03x\n",
+			tsk->comm, sig, addr, fsr);
 		show_pte(tsk->mm, addr);
 		show_regs(regs);
 	}
 #endif
-
+#else
+	if (dump) {
+		pr_alert("%s: unhandled page fault (%d) at 0x%08lx, code 0x%03x\n",
+							tsk->comm, sig, addr, fsr);
+		dump_info(tsk, regs, addr);
+	}
+#endif
 	tsk->thread.address = addr;
 	tsk->thread.error_code = fsr;
 	tsk->thread.trap_no = 14;
@@ -538,6 +556,32 @@ hook_fault_code(int nr, int (*fn)(unsigned long, unsigned int, struct pt_regs *)
 	fsr_info[nr].name = name;
 }
 
+#ifdef CONFIG_DO_RAMDUMP_WHEN_STUCKED_AT_EXCEPTION
+extern void crash_kexec(struct pt_regs *regs);
+
+static inline void is_cpu_regs_valid(struct pt_regs *regs)
+{
+        register unsigned long sp __asm__("sp");
+        register unsigned long fp  __asm__("fp");
+
+        /* use read_cpuid_mpidr() insead of smp_processor_id() becasue sp,fp could be not untrustworthy */
+        unsigned int cpu = read_cpuid_mpidr() & 0xf;
+
+        if((unsigned long)cpu_curr(cpu)->stack != (sp & ~(THREAD_SIZE - 1)) ||
+                (unsigned long)cpu_curr(cpu)->stack != (fp & ~(THREAD_SIZE - 1)))
+        {
+                pr_alert("[SABSP] Invalid sp,fp detected! correct sp = 0x%08lx\n",(unsigned long)cpu_curr(cpu)->stack);
+                wmb();
+                if (regs)
+                        crash_kexec(regs); /* do ramdump */
+                while(1){
+                        smp_send_stop(); /* in case ramdump failed */
+                        cpu_relax();
+                }
+        }
+
+}
+#endif
 /*
  * Dispatch a data abort to the relevant handler.
  */
@@ -547,6 +591,9 @@ do_DataAbort(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 	const struct fsr_info *inf = fsr_info + fsr_fs(fsr);
 	struct siginfo info;
 
+#ifdef CONFIG_DO_RAMDUMP_WHEN_STUCKED_AT_EXCEPTION
+        is_cpu_regs_valid(regs);
+#endif
 	if (!inf->fn(addr, fsr & ~FSR_LNX_PF, regs))
 		return;
 
@@ -580,6 +627,9 @@ do_PrefetchAbort(unsigned long addr, unsigned int ifsr, struct pt_regs *regs)
 	const struct fsr_info *inf = ifsr_info + fsr_fs(ifsr);
 	struct siginfo info;
 
+#ifdef CONFIG_DO_RAMDUMP_WHEN_STUCKED_AT_EXCEPTION
+        is_cpu_regs_valid(regs);
+#endif
 	if (!inf->fn(addr, ifsr | FSR_LNX_PF, regs))
 		return;
 

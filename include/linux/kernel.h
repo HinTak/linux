@@ -254,6 +254,9 @@ extern long (*panic_blink)(int state);
 __printf(1, 2)
 void panic(const char *fmt, ...)
 	__noreturn __cold;
+#ifdef CONFIG_SHOW_PC_LR_INFO
+extern void show_pc_lr_kernel(const struct pt_regs *regs);
+#endif
 extern void oops_enter(void);
 extern void oops_exit(void);
 void print_oops_end_marker(void);
@@ -393,6 +396,7 @@ extern unsigned long simple_strtoul(const char *,char **,unsigned int);
 extern long simple_strtol(const char *,char **,unsigned int);
 extern unsigned long long simple_strtoull(const char *,char **,unsigned int);
 extern long long simple_strtoll(const char *,char **,unsigned int);
+#define strict_strtoul  kstrtoul
 
 extern int num_to_str(char *buf, int size, unsigned long long num);
 
@@ -827,4 +831,23 @@ static inline void ftrace_dump(enum ftrace_dump_mode oops_dump_mode) { }
 	 /* Other writable?  Generally considered a bad idea. */	\
 	 BUILD_BUG_ON_ZERO((perms) & 2) +				\
 	 (perms))
+
+#ifdef CONFIG_DTVLOGD
+/* Add for DTVLOGD */
+extern int do_dtvlog(int type, const char __user *buf, int len);
+/* functions required for reading buffer */
+extern void dtvlogd_write_start(void);
+extern void dtvlogd_write_stop(void);
+extern int acquire_dtvlogd_buffer(char **buf1, int *len1,
+		char **buf2, int *len);
+extern int acquire_dtvlogd_all_buffer(char **buf1, int *len1,
+		char **buf2, int *len);
+extern int get_dtvlogd_max_length(void);
+
+#endif
+
+#ifdef CONFIG_KPI_SYSTEM_SUPPORT
+extern void set_kpi_fault(unsigned long pc, unsigned long lr, char* thread_name, char* process_name, char* type, pid_t pgid);
+#endif
+
 #endif

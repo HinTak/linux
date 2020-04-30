@@ -360,7 +360,9 @@ struct class {
 
 	int (*dev_uevent)(struct device *dev, struct kobj_uevent_env *env);
 	char *(*devnode)(struct device *dev, umode_t *mode);
-
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+	int (*get_smack64_label)(struct device *dev, char* buf, int size);
+#endif
 	void (*class_release)(struct class *class);
 	void (*dev_release)(struct device *dev);
 
@@ -505,6 +507,9 @@ struct device_type {
 	int (*uevent)(struct device *dev, struct kobj_uevent_env *env);
 	char *(*devnode)(struct device *dev, umode_t *mode,
 			 kuid_t *uid, kgid_t *gid);
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+	int (*get_smack64_label)(struct device *dev, char* buf, int size);
+#endif
 	void (*release)(struct device *dev);
 
 	const struct dev_pm_ops *pm;
@@ -732,6 +737,10 @@ struct device {
 	struct mutex		mutex;	/* mutex to synchronize calls to
 					 * its driver.
 					 */
+	struct mutex            udev_mutex; /* mutex to synchronize dev_uevent
+					     * to get driver details and
+					     * unregister
+					     */
 
 	struct bus_type	*bus;		/* type of bus device is on */
 	struct device_driver *driver;	/* which driver has allocated this
@@ -936,7 +945,9 @@ extern int device_move(struct device *dev, struct device *new_parent,
 extern const char *device_get_devnode(struct device *dev,
 				      umode_t *mode, kuid_t *uid, kgid_t *gid,
 				      const char **tmp);
-
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+extern int device_get_smack64_label(struct device *dev, char** lab_smk64);
+#endif
 static inline bool device_supports_offline(struct device *dev)
 {
 	return dev->bus && dev->bus->offline && dev->bus->online;

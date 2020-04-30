@@ -1573,6 +1573,115 @@ static inline bool may_mount(void)
 	return ns_capable(current->nsproxy->mnt_ns->user_ns, CAP_SYS_ADMIN);
 }
 
+#ifdef CONFIG_FCOUNT_DEBUG
+static int __print_mount(struct vfsmount *mnt, void *arg)
+{
+	char buff[256];
+	struct path mnt_path = { .dentry = mnt->mnt_root, .mnt = mnt };
+	struct mount *r = real_mount(mnt);
+	const char *name, *devname;
+
+	name = d_path(&mnt_path, buff, sizeof(buff));
+	if (IS_ERR(name))
+		name = "(error)";
+
+	devname = r->mnt_devname;
+	if (!devname)
+		devname = "(no device)";
+
+	pr_err("devname: %s, path: %s\n", devname, name);
+
+	return 0;
+}
+
+void print_mounts(void)
+{
+	int err;
+	struct path path;
+	struct vfsmount *root_mnt;
+
+	err = kern_path("/", LOOKUP_FOLLOW, &path);
+	if (err)
+		return;
+
+	root_mnt = collect_mounts(&path);
+	path_put(&path);
+	if (IS_ERR(root_mnt))
+		return;
+
+	iterate_mounts(__print_mount, NULL, root_mnt);
+	drop_collected_mounts(root_mnt);
+}
+
+static int __print_file_path(struct file *f, void *arg)
+{
+        char buf[256];
+        struct task_struct *p;
+        const char *path, *tsk_name;
+        long refs;
+
+        if (!file_count(f))
+                return 0;
+
+        path = d_path(&f->f_path, buf, sizeof(buf));
+        if (IS_ERR(path))
+                path = "(error)";
+        refs = atomic_long_read(&f->f_count);
+
+#ifdef CONFIG_FD_PID
+        rcu_read_lock();
+        p = pid_task(f->f_pid, PIDTYPE_PID);
+        tsk_name = (p ? p->comm : "Task struct is not available");
+        pr_alert("* %s(%ld) - %s\n", path, refs, tsk_name);
+        rcu_read_unlock();
+#else
+        (void)tsk_name;
+        (void)p;
+        pr_alert("* %s(%ld)\n", path, refs);
+#endif
+
+        return 0;
+}
+
+static void check_files_count(struct path *path, bool explicit_log)
+{
+	char buf1[64], buf2[64];
+	struct super_block *sb = path->mnt->mnt_sb;
+
+	/* Path to mount point of this dentry */
+	struct path mnt_path = {
+		.mnt	= path->mnt,
+		.dentry = path->mnt->mnt_root
+	};
+
+	const char *p  = d_path(path, buf1, sizeof(buf1));
+	const char *mp = d_path(&mnt_path, buf2, sizeof(buf2));
+
+	if (IS_ERR(p))
+		p = "(error)";
+	if (IS_ERR(mp))
+		mp = "(error)";
+
+	pr_alert("=========================================================\n");
+	pr_alert("	Umount path : %s(length:%zu)\n", p, strlen(p));
+	pr_alert(" Mount point path : %s(length:%zu)\n", mp, strlen(mp));
+
+	if (explicit_log) {
+		pr_alert("File Name(File Count) - Task(optional - CONFIG_FD_PID)\n");
+		pr_alert("---------------------------------------------------------\n");
+
+		//iterate_sb_files(sb, __print_file_path, NULL);
+
+		pr_alert("=========================================================\n");
+
+		pr_alert("Current Mount Info\n");
+		pr_alert("---------------------------------------------------------\n");
+
+		print_mounts();
+	}
+}
+#endif
+
 /*
  * Now umount can handle mount points as well as block devices.
  * This is important for filesystems which use unnamed block devices.
@@ -1614,6 +1723,15 @@ SYSCALL_DEFINE2(umount, char __user *, name, int, flags)
 
 	retval = do_umount(mnt, flags);
 dput_and_out:
+#ifdef CONFIG_FCOUNT_DEBUG
+        if (retval) {
+                printk("\n------------------------------------------\n");
+                printk("retval : %d\n", retval);
+                printk("------------------------------------------\n");
+                check_files_count(&path, retval == -EBUSY);
+        }
+#endif
+
 	/* we mustn't call path_put() as that would clear mnt_expiry_mark */
 	dput(path.dentry);
 	mntput_no_expire(mnt);
@@ -2390,8 +2508,10 @@ static int do_new_mount(struct path *path, const char *fstype, int flags,
 			mnt_flags |= MNT_NODEV | MNT_LOCK_NODEV;
 		}
 		if (type->fs_flags & FS_USERNS_VISIBLE) {
-			if (!fs_fully_visible(type, &mnt_flags))
+			if (!fs_fully_visible(type, &mnt_flags)) {
+				put_filesystem(type);
 				return -EPERM;
+			}
 		}
 	}
 
@@ -2879,6 +2999,10 @@ struct dentry *mount_subtree(struct vfsmount *mnt, const char *name)
 }
 EXPORT_SYMBOL(mount_subtree);
 
+#ifdef CONFIG_GUESS_VDFS_TYPE
+const char *vdfs_list[] = {"vdfs4", "vdfs", "vdfs2", "vdfs1", NULL};
+#endif
+
 SYSCALL_DEFINE5(mount, char __user *, dev_name, char __user *, dir_name,
 		char __user *, type, unsigned long, flags, void __user *, data)
 {
@@ -2901,6 +3025,21 @@ SYSCALL_DEFINE5(mount, char __user *, dev_name, char __user *, dir_name,
 	if (ret < 0)
 		goto out_data;
 
+#ifdef CONFIG_GUESS_VDFS_TYPE
+	/* HQ request : Jongpil Lee jongpil8017.lee@samsung.com */
+	/* in case if an user calls the mount command with "-t vdfs" param try
+	 * to mount the volume by vdfs in the following order:
+	 * vdfs4 -> vdfs3 -> vdfs2 -> vdfs1 */
+	if (kernel_type && (strlen(kernel_type) == 4) &&
+			(!memcmp(kernel_type, &"vdfs", 4))) {
+		int count = 0;
+		do {
+			ret = do_mount(kernel_dev, dir_name,
+					vdfs_list[count], flags, (void *) data_page);
+
+		} while ((vdfs_list[++count] != NULL) && ret);
+	} else
+#endif
 	ret = do_mount(kernel_dev, dir_name, kernel_type, flags,
 		(void *) data_page);
 

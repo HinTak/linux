@@ -51,6 +51,11 @@
 #include <linux/async.h>
 #include <linux/slab.h>
 #include <linux/pm_runtime.h>
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG_MREADER
+#include <linux/buffer_head.h>
+#include <linux/kthread.h>
+#include <linux/freezer.h>
+#endif
 #include <asm/uaccess.h>
 #include <asm/unaligned.h>
 
@@ -67,6 +72,46 @@
 #include "sd.h"
 #include "scsi_priv.h"
 #include "scsi_logging.h"
+
+
+#ifdef CONFIG_SAMSUNG_USB_TVKEY_SUPPORT
+#include <linux/usb.h>
+#include <linux/cas_proto.h>
+
+typedef int (*cas_filter_t)(struct Scsi_Host *, int *, int *, int *, struct cas_port_info *);
+static cas_filter_t cas_device_filter = NULL;
+
+typedef void (*cas_callback_t)(struct cas_proto_evt_ctx *);
+static cas_callback_t cas_callback = NULL;
+
+void hcas_probe(struct scsi_device *sdp, struct gendisk *gd);
+void hcas_remove(struct device *dev);
+
+void send_event_notification(struct cas_proto_evt_ctx *evt_ctx);
+
+int find_dongle_update(__u8 serial, char * dev_path, int dev_path_len);
+int find_next_dongle(__u8 serial, char * dev_path, int dev_path_len);
+
+void register_scsi_cas_filter(cas_filter_t filter)
+{
+	cas_device_filter = filter;
+}
+EXPORT_SYMBOL(register_scsi_cas_filter);
+
+void unregister_scsi_cas_filter(void)
+{
+	cas_device_filter = NULL;
+}
+EXPORT_SYMBOL(unregister_scsi_cas_filter);
+
+static struct cas_proto_dongle_ctx dongle_ctx[] = {
+	{.idVendor = 0x0, .idProduct = 0x0, .iSerialNumber = 0x0, .valid = 0, .dongle_id = 0, .dev_path={0}},
+	{.idVendor = 0x0, .idProduct = 0x0, .iSerialNumber = 0x0, .valid = 0, .dongle_id = 1, .dev_path={0}},
+	{.idVendor = 0x0, .idProduct = 0x0, .iSerialNumber = 0x0, .valid = 0, .dongle_id = 2, .dev_path={0}},
+	{.idVendor = 0x0, .idProduct = 0x0, .iSerialNumber = 0x0, .valid = 0, .dongle_id = 3, .dev_path={0}}
+};
+#endif	// CONFIG_SAMSUNG_USB_TVKEY_SUPPORT
+
 
 MODULE_AUTHOR("Eric Youngdale");
 MODULE_DESCRIPTION("SCSI disk (sd) driver");
@@ -120,6 +165,11 @@ static void sd_print_result(const struct scsi_disk *, const char *, int);
 
 static DEFINE_SPINLOCK(sd_index_lock);
 static DEFINE_IDA(sd_index_ida);
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG_MREADER
+//patch JAN-26-2007
+////static DECLARE_MUTEX(sd_thread_create_sem);   //change 3.0.20 by yanuvis
+static DEFINE_SEMAPHORE(sd_thread_create_sem);
+#endif
 
 /* This semaphore is used to mediate the 0->1 reference get in the
  * face of object destruction (i.e. we can't allow a get on an
@@ -499,7 +549,9 @@ static struct class sd_disk_class = {
 	.dev_release	= scsi_disk_release,
 	.dev_groups	= sd_disk_groups,
 };
-
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG_MREADER
+static int sd_poller_thread (void * __sdkp);
+#endif
 static const struct dev_pm_ops sd_pm_ops = {
 	.suspend		= sd_suspend_system,
 	.resume			= sd_resume,
@@ -2898,11 +2950,35 @@ static void sd_probe_async(void *data, async_cookie_t cookie)
 		sd_dif_config_host(sdkp);
 
 	sd_revalidate_disk(gd);
-
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG_MREADER
+        //need to check by kks
+         KKS_DEBUG("kks test : %s %d\n", __FILE__,__LINE__);
+        if (sdp->removable){
+                KKS_DEBUG("kks test : %s %d\n", __FILE__,__LINE__);
+                init_completion(&sdkp->poller.done_notify);
+                //patch JAN-26-2007
+                //this lock will be up in sd_poller_thread()
+                down(&sd_thread_create_sem);
+//              sdkp->poller.pid = kernel_thread(sd_poller_thread, sdkp, CLONE_VM | CLONE_FS | CLONE_FILES);
+	 sdkp->sd_task = kthread_run(sd_poller_thread, sdkp, "%s", "scsi-poller");
+                if (IS_ERR(sdkp->sd_task)) {
+                        //20_dec_2013 by kanak.priey@samsung.com
+                         up(&sd_thread_create_sem);
+                        printk(KERN_ERR "Error in creating sd_poller_thread\n");
+                }
+                sdkp->poller.pid = sdkp->sd_task->pid;
+        }
+#endif
+              
 	sd_printk(KERN_NOTICE, sdkp, "Attached SCSI %sdisk\n",
 		  sdp->removable ? "removable " : "");
 	scsi_autopm_put_device(sdp);
 	put_device(&sdkp->dev);
+
+
+#ifdef CONFIG_SAMSUNG_USB_TVKEY_SUPPORT
+	hcas_probe(sdp,gd);
+#endif
 }
 
 /**
@@ -2975,6 +3051,9 @@ static int sd_probe(struct device *dev)
 	atomic_set(&sdkp->openers, 0);
 	atomic_set(&sdkp->device->ioerr_cnt, 0);
 
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG_MREADER
+	mutex_init(&sdkp->sd_disk_del_mutex);
+#endif
 	if (!sdp->request_queue->rq_timeout) {
 		if (sdp->type != TYPE_MOD)
 			blk_queue_rq_timeout(sdp->request_queue, SD_TIMEOUT);
@@ -3011,31 +3090,259 @@ static int sd_probe(struct device *dev)
 	scsi_autopm_put_device(sdp);
 	return error;
 }
+//Newly  add
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG_MREADER
+static int sd_poller_thread (void * __sdkp)
+{
+        struct scsi_disk *sdkp =  (struct scsi_disk *)__sdkp;
+        struct block_device *bdev = NULL;
+        unsigned int retval;
+	int state=1;
+        struct buffer_head *bh;
+        int isNoPartition = 0;
+	struct hd_struct *part = NULL;
+    struct gendisk *disk = sdkp->disk;
+	struct disk_part_iter piter;
+	
+	/*Disable event polling in Block Layer*/
+        sdkp->disk->events = 0;
 
+//      lock_kernel();
+//      //      daemonize("scsi-poller");                       //demonize() function disapear kernel 3.8.2
+        allow_signal(SIGTERM);
+        current->flags |= PF_NOFREEZE;
+//      unlock_kernel();
+	
+      	 KKS_DEBUG(KERN_DEBUG "Pollera thread started for %s, PID = %d\n",sdkp->disk->disk_name, current->pid);
+
+        //patch JAN-27-2007
+        //        //sd_thread_create_sem is down when sd_poller_thread created in sd_probe function
+        up(&sd_thread_create_sem);
+        KKS_DEBUG("kks test : %s %d\n", __FILE__,__LINE__);
+#define POLL_INTERVAL 1 //Poll interval in seconds
+
+        for (;;){
+                KKS_DEBUG("kks test : %s %d\n", __FILE__,__LINE__);
+                if(signal_pending(current))
+                complete_and_exit(&sdkp->poller.done_notify, 0);
+
+                msleep(POLL_INTERVAL*1000);
+
+                //retval = sd_media_changed(sdkp->disk);                //change 3.0.20 by yanuvis
+                 retval = sd_check_events(sdkp->disk, 0);
+                KKS_DEBUG("kks test : retval = %d, state = %d   %s %d\n", retval, state, __FILE__,__LINE__);
+                if (retval != state)
+                {
+                        KKS_DEBUG("kks test : %s %d\n", __FILE__,__LINE__);
+                        //Connection state changed
+                        if (retval == 0){
+                                //Connected
+                                 KKS_DEBUG("kks test : %s %d\n", __FILE__,__LINE__);
+                                bdev = bdget_disk(sdkp->disk, 0);
+                                if (!bdev){
+                                        KKS_DEBUG("kks test : %s %d\n", __FILE__,__LINE__);
+                                        printk(KERN_ERR "Unable to get block device pointer\n");
+                                        continue;
+                                }
+                                bdev->bd_disk = sdkp->disk;
+                                bdev->bd_contains = bdev;
+
+                                //We should rescan partitions only if they were not found
+				 isNoPartition = 0;
+                                //if (!sdkp->disk->part_tbl->part[0]){
+				//if ((sdkp->disk->part_tbl->len>1) && (!sdkp->disk->part_tbl->part[1])){
+				
+				part = disk_get_part(disk, 1);
+				if (!part) {
+
+                                        KKS_DEBUG("kks test : %s %d\n", __FILE__,__LINE__);
+                                        bh = __getblk(bdev, 0, sdkp->device->sector_size);
+					if(bh==NULL)
+						continue;
+                                        ll_rw_block(READ, 1, &bh);
+                                        wait_on_buffer(bh);
+                                        //2013.03.27 add mutex lock for bdev->bd_disk
+                                        mutex_lock(&bdev->bd_mutex);
+                                        //patch FEB-01-2007
+                                        if(bdev->bd_disk != NULL)
+                                        {
+                                                rescan_partitions(sdkp->disk, bdev);
+                                                KKS_DEBUG("kks test : %s %d\n", __FILE__,__LINE__);
+                                        }
+                                        mutex_unlock(&bdev->bd_mutex);
+                                        /* this is no partition media and check card reader */
+                                        //if( !sdkp->disk.part0){
+					//if ((sdkp->disk->part_tbl->len>1) && (!sdkp->disk->part_tbl->part[1])){
+	                                part = disk_get_part(disk, 1);
+        	                        if (!part) {
+
+                                                KKS_DEBUG("kks test : %s %d\n", __FILE__,__LINE__);
+                                                printk(KERN_ERR "FIXED SELP: no partition Media Connected\n");
+                                                isNoPartition = 1;
+                                                if (likely(disk_to_dev(sdkp->disk) != NULL)) {
+                                                /* Avoiding spurious call to kobject_uevent */
+                                                if(disk_to_dev(sdkp->disk)->kobj.state_add_uevent_sent == 0)
+                                                {
+                                                        printk(KERN_ERR "FIXED SELP: sd_probe_async did not add this disk yet");
+                                                        kobject_uevent(&disk_to_dev(sdkp->disk)->kobj, KOBJ_ADD);
+                                                        disk_to_dev(sdkp->disk)->kobj.state_remove_uevent_sent = 0;
+                                                 }
+
+                                           }
+                                        }
+                                }
+                        }
+                        //Disconnected
+                         else{
+                                KKS_DEBUG("kks test : %s %d\n", __FILE__,__LINE__);
+                                //Let's delete partitions only if they exist
+                                //                                //if (sdkp->disk.part0){
+				//if ((sdkp->disk->part_tbl->len>1) && (sdkp->disk->part_tbl->part[1])){
+
+                                part = disk_get_part(disk, 1);
+                                if (part) {
+                                        KKS_DEBUG("kks test : %s %d\n", __FILE__,__LINE__);
+                                        //invalidate_partition(sdkp->disk, 0);//
+                                        bdev->bd_invalidated = 0;
+
+										disk_part_iter_init(&piter, disk,
+												DISK_PITER_INCL_EMPTY | DISK_PITER_REVERSE);
+										mutex_lock(&sdkp->sd_disk_del_mutex);
+										while ((part = disk_part_iter_next(&piter))) {
+												invalidate_partition(disk, part->partno);
+												delete_partition(disk, part->partno);
+										}
+										mutex_unlock(&sdkp->sd_disk_del_mutex);
+										disk_part_iter_exit(&piter);
+
+                                }                                                        
+				else if(isNoPartition){
+                                        KKS_DEBUG("kks test : %s %d\n", __FILE__,__LINE__);
+                                        printk(KERN_ERR "FIXED SELP: no partition Media Disconnected\n");
+                                        /* for no partiton device , make hotplug event */
+					mutex_lock(&sdkp->sd_disk_del_mutex);
+                                       /* Avoiding spurious call to kobject_uevent */
+                                        if (disk_to_dev(sdkp->disk)->kobj.state_remove_uevent_sent == 0)
+                                        {
+                                                printk(KERN_ERR "FIXED SELP: sd_remove did not remove this disk yet");
+                                                kobject_uevent(&disk_to_dev(sdkp->disk)->kobj, KOBJ_REMOVE);
+                                                disk_to_dev(sdkp->disk)->kobj.state_add_uevent_sent = 0;
+                                        }
+					mutex_unlock(&sdkp->sd_disk_del_mutex);
+   
+                                        //invalidate_partition(sdkp->disk, 0);//
+                                         bdev->bd_invalidated = 0;
+                                        /* remove disk */
+                                        //sd_revalidate_disk(sdkp->disk);//
+                                }
+                        }
+                        state = retval;
+                }
+        }
+}
+#endif
 /**
- *	sd_remove - called whenever a scsi disk (previously recognized by
- *	sd_probe) is detached from the system. It is called (potentially
- *	multiple times) during sd module unload.
- *	@sdp: pointer to mid level scsi device object
- *
- *	Note: this function is invoked from the scsi mid-level.
- *	This function potentially frees up a device name (e.g. /dev/sdc)
- *	that could be re-used by a subsequent sd_probe().
- *	This function is not called when the built-in sd driver is "exit-ed".
- **/
+*      sd_remove - called whenever a scsi disk (previously recognized by
+*      sd_probe) is detached from the system. It is called (potentially
+*      multiple times) during sd module unload.
+*      @sdp: pointer to mid level scsi device object
+*
+*      Note: this function is invoked from the scsi mid-level.
+*      This function potentially frees up a device name (e.g. /dev/sdc)
+*      that could be re-used by a subsequent sd_probe().
+*      This function is not called when the built-in sd driver is "exit-ed".
+**/
+
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG_MREADER
+static int sd_remove(struct device *dev)
+{
+        struct scsi_disk *sdkp = dev_get_drvdata(dev);
+        struct scsi_device *sdp = to_scsi_device(dev);
+	struct block_device *bdev;
+
+        async_synchronize_full();
+        sdkp = dev_get_drvdata(dev);
+        if(sdkp == NULL)
+                return 0;
+        sdp = to_scsi_device(dev);
+        KKS_DEBUG("kks test : %s %d\n", __FILE__,__LINE__);
+        blk_queue_prep_rq(sdkp->device->request_queue, scsi_prep_fn);
+
+
+#ifdef CONFIG_SAMSUNG_USB_TVKEY_SUPPORT
+	hcas_remove(dev);
+#endif
+
+
+	bdev = bdget_disk(sdkp->disk, 0);
+	if (likely(bdev)) {
+		mutex_lock(&bdev->bd_mutex);
+		mutex_lock(&sdkp->sd_disk_del_mutex);
+		device_del(&sdkp->dev);
+		del_gendisk(sdkp->disk);
+		mutex_unlock(&sdkp->sd_disk_del_mutex);
+		mutex_unlock(&bdev->bd_mutex);
+		bdput(bdev);
+	} else { /* should never happen */
+		mutex_lock(&sdkp->sd_disk_del_mutex);
+		device_del(&sdkp->dev);
+		del_gendisk(sdkp->disk);
+		mutex_unlock(&sdkp->sd_disk_del_mutex);
+	}
+
+        if ((sdp != NULL) && (sdp->removable)){
+                //patch JAN-27-2007
+                //kill_proc should be called after thread function start
+                 down(&sd_thread_create_sem);
+                KKS_DEBUG("kks test : %s %d\n", __FILE__,__LINE__);
+                //kill_proc(sdkp->poller.pid, SIGTERM, 1);
+                 kill_proc_info(SIGTERM, (struct siginfo *)1 ,(pid_t)sdkp->poller.pid);
+                //patch JAN-27-2007
+                up(&sd_thread_create_sem);
+                wait_for_completion(&sdkp->poller.done_notify);
+//              kthread_stop(sdkp->sd_task);
+        }
+        KKS_DEBUG("kks test : %s %d\n", __FILE__,__LINE__);
+        sd_shutdown(dev);
+
+        mutex_lock(&sd_ref_mutex);
+        dev_set_drvdata(dev, NULL);
+    put_device(&sdkp->dev);
+    mutex_unlock(&sd_ref_mutex);
+
+        return 0;
+}
+#else //org		                           
 static int sd_remove(struct device *dev)
 {
 	struct scsi_disk *sdkp;
 	dev_t devt;
+	struct block_device *bdev;
 
 	sdkp = dev_get_drvdata(dev);
 	devt = disk_devt(sdkp->disk);
 	scsi_autopm_get_device(sdkp->device);
 
+
+#ifdef CONFIG_SAMSUNG_USB_TVKEY_SUPPORT
+	hcas_remove(dev);
+#endif
+
+
 	async_synchronize_full_domain(&scsi_sd_pm_domain);
 	async_synchronize_full_domain(&scsi_sd_probe_domain);
-	device_del(&sdkp->dev);
-	del_gendisk(sdkp->disk);
+
+	bdev = bdget_disk(sdkp->disk, 0);
+	if (likely(bdev)) {
+		mutex_lock(&bdev->bd_mutex);
+		device_del(&sdkp->dev);
+		del_gendisk(sdkp->disk);
+		mutex_unlock(&bdev->bd_mutex);
+		bdput(bdev);
+	} else { /* should never happen */
+		device_del(&sdkp->dev);
+		del_gendisk(sdkp->disk);
+	}
 	sd_shutdown(dev);
 
 	blk_register_region(devt, SD_MINORS, NULL,
@@ -3048,6 +3355,7 @@ static int sd_remove(struct device *dev)
 
 	return 0;
 }
+#endif
 
 /**
  *	scsi_disk_release - Called to free the scsi_disk structure
@@ -3249,6 +3557,176 @@ err_out:
 		unregister_blkdev(sd_major(i), "sd");
 	return err;
 }
+
+
+#ifdef CONFIG_SAMSUNG_USB_TVKEY_SUPPORT
+int find_dongle_update(__u8 serial, char * dev_path, int dev_path_len)
+{
+	int index = -1;
+
+	for(index = 0; index < MAX_NUM_DONGLE; index++)
+	{
+		if((dongle_ctx[index].iSerialNumber == serial) && !(memcmp(dev_path,dongle_ctx[index].dev_path, dev_path_len)))
+		{
+			dongle_ctx[index].iSerialNumber = 0x0;
+			dongle_ctx[index].valid = 0;
+			memset(dongle_ctx[index].dev_path, 0, dev_path_len);
+
+			break;
+		}
+	}
+
+	if(index == MAX_NUM_DONGLE)
+	{
+		index = -1;
+	}
+
+	return index;
+}
+
+
+int find_next_dongle(__u8 serial, char * dev_path, int dev_path_len)
+{
+	int index = -1;
+
+	for(index = 0; index < MAX_NUM_DONGLE; index++)
+	{
+		if(dongle_ctx[index].valid == 0)
+		{
+			dongle_ctx[index].valid = 1;
+			dongle_ctx[index].iSerialNumber = serial;
+			memcpy(dongle_ctx[index].dev_path,dev_path,dev_path_len);
+
+			printk(KERN_ERR "[%s] dev_path=%s dev_path len=%d\n", __func__, dongle_ctx[index].dev_path, dev_path_len);
+
+			break;
+		}
+	}
+
+	if(index == MAX_NUM_DONGLE)
+	{
+		index = -1;
+	}
+
+	return index;
+}
+
+
+void send_event_notification(struct cas_proto_evt_ctx *evt_ctx)
+{
+	if(cas_callback)
+	{
+		cas_callback(evt_ctx);
+	}
+	else
+	{
+		kfree(evt_ctx);
+		evt_ctx = NULL;
+
+		printk(KERN_ERR "[%s] cb is not registered\n", __func__);
+	}
+}
+
+
+// To be called from usb core init
+void register_cas_scsi_callback(void(*callback)(struct cas_proto_evt_ctx *))
+{
+	cas_callback = callback;
+}
+EXPORT_SYMBOL(register_cas_scsi_callback);
+
+
+// To be called from usb core exit
+void unregister_cas_scsi_callback(void)
+{
+	cas_callback = NULL;
+}
+EXPORT_SYMBOL(unregister_cas_scsi_callback);
+
+
+void hcas_probe(struct scsi_device *sdp, struct gendisk *gd)
+{
+	struct Scsi_Host *host = NULL;
+	struct cas_proto_evt_ctx *evt_ctx = NULL;
+	int buf_len = 0;
+	int cas_serial;
+	int cas_vid, cas_pid;
+	struct cas_port_info port_info;
+
+	host = sdp->host;
+	cas_serial = 0x0;
+	if(host && cas_device_filter && cas_device_filter(host, &cas_vid, &cas_pid, &cas_serial, &port_info))
+	{
+		// Create probe event
+		evt_ctx = kmalloc(sizeof(struct cas_proto_evt_ctx), GFP_KERNEL);
+		if(!evt_ctx)
+		{
+			printk(KERN_ERR "[%s] not enough memory. so can not probe(serial=%x)\n", __func__, cas_serial);
+			return;
+		}
+
+		evt_ctx->ctx.cas_evt	= CNC_NOTIFY_DEVICE_CONNECT;
+		evt_ctx->ctx.dongle_id	= find_next_dongle(cas_serial, port_info.dev_path, port_info.dev_path_len);
+		printk(KERN_ERR "[%s] tvkey dongle probe, id=%d, serial=%d, dev_path=%s event=%d\n", __func__, evt_ctx->ctx.dongle_id, cas_serial, port_info.dev_path, evt_ctx->ctx.cas_evt);
+
+		dongle_ctx[evt_ctx->ctx.dongle_id].idVendor		= cas_vid;
+		dongle_ctx[evt_ctx->ctx.dongle_id].idProduct	= cas_pid;
+		printk(KERN_DEBUG "[%s] tvkey dongle probe event, ctx=%p, msc device name=%s\n", __func__, evt_ctx, gd->disk_name);
+
+		buf_len = snprintf(evt_ctx->ctx.buf, CNC_EVENT_BUFFER_MAX_SIZE, "/dev/%s", gd->disk_name);
+		printk(KERN_DEBUG "[%s] tvkey msc modified device name=%s\n", __func__, evt_ctx->ctx.buf);
+		evt_ctx->ctx.data_len = buf_len;
+		memcpy(&(evt_ctx->ctx.port_info), &port_info, sizeof(struct cas_port_info));
+
+		send_event_notification(evt_ctx);
+	}
+}
+
+
+void hcas_remove(struct device *dev)
+{
+	struct scsi_disk *sdkp = dev_get_drvdata(dev);
+	struct scsi_device *sdp = to_scsi_device(dev);
+	struct Scsi_Host *host = NULL;
+	struct cas_proto_evt_ctx *evt_ctx = NULL;
+	int dongle_id;
+	int cas_serial;
+	int cas_vid, cas_pid;
+	struct cas_port_info port_info;
+
+	if(!sdkp || !sdp)
+	{
+		return;
+	}
+
+	host = sdp->host;
+	cas_serial = 0x0;
+	if(host && cas_device_filter && cas_device_filter(host, &cas_vid, &cas_pid, &cas_serial, &port_info))
+	{
+		dongle_id = find_dongle_update(cas_serial, port_info.dev_path, port_info.dev_path_len);
+		printk(KERN_ERR "[%s] tvkey dongle, id=%d, serial=%d, dev_path=%s\n", __func__, dongle_id, cas_serial, port_info.dev_path);
+
+		// Create remove event
+		evt_ctx = kmalloc(sizeof(struct cas_proto_evt_ctx), GFP_KERNEL);
+		if(!evt_ctx)
+		{
+			printk(KERN_ERR "[%s] not enough memory\n", __func__);
+			return;
+		}
+
+		evt_ctx->ctx.cas_evt	= CNC_NOTIFY_DEVICE_DISCONNECT;
+		evt_ctx->ctx.dongle_id	= dongle_id;
+		dongle_ctx[dongle_id].idVendor	= 0x0;
+		dongle_ctx[dongle_id].idProduct	= 0x0;
+		printk(KERN_DEBUG "[%s] tvkey dongle remove event, ctx=%p, msc device name=%s\n", __func__, evt_ctx, sdkp->disk->disk_name);
+		evt_ctx->ctx.data_len	= 0;
+		memcpy(&(evt_ctx->ctx.port_info), &port_info, sizeof(struct cas_port_info));
+
+		send_event_notification(evt_ctx);
+	}
+}
+#endif	// CONFIG_SAMSUNG_USB_TVKEY_SUPPORT
+
 
 /**
  *	exit_sd - exit point for this driver (when it is a module).

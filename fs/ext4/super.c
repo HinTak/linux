@@ -937,6 +937,7 @@ static void init_once(void *foo)
 	INIT_LIST_HEAD(&ei->i_orphan);
 	init_rwsem(&ei->xattr_sem);
 	init_rwsem(&ei->i_data_sem);
+	init_rwsem(&ei->i_mmap_sem);
 	inode_init_once(&ei->vfs_inode);
 }
 
@@ -1134,7 +1135,7 @@ enum {
 	Opt_lazytime, Opt_nolazytime,
 	Opt_nomblk_io_submit, Opt_block_validity, Opt_noblock_validity,
 	Opt_inode_readahead_blks, Opt_journal_ioprio,
-	Opt_dioread_nolock, Opt_dioread_lock,
+	Opt_dioread_nolock, Opt_dioread_lock, Opt_insensitive,
 	Opt_discard, Opt_nodiscard, Opt_init_itable, Opt_noinit_itable,
 	Opt_max_dir_size_kb, Opt_nojournal_checksum,
 };
@@ -1222,6 +1223,7 @@ static const match_table_t tokens = {
 	{Opt_removed, "reservation"},	/* mount option from ext2/3 */
 	{Opt_removed, "noreservation"}, /* mount option from ext2/3 */
 	{Opt_removed, "journal=%u"},	/* mount option from ext2/3 */
+	{Opt_insensitive, "case_insensitive"},
 	{Opt_err, NULL},
 };
 
@@ -1419,6 +1421,7 @@ static const struct mount_opts {
 	{Opt_jqfmt_vfsv1, QFMT_VFS_V1, MOPT_QFMT},
 	{Opt_max_dir_size_kb, 0, MOPT_GTE0},
 	{Opt_test_dummy_encryption, 0, MOPT_GTE0},
+	{Opt_insensitive, 0, MOPT_SET},
 	{Opt_err, 0, 0}
 };
 
@@ -1443,6 +1446,9 @@ static int handle_mount_opt(struct super_block *sb, char *opt, int token,
 		return clear_qf_name(sb, GRPQUOTA);
 #endif
 	switch (token) {
+	case Opt_insensitive:
+		sbi->is_case_insensitive = 1;
+		break;
 	case Opt_noacl:
 	case Opt_nouser_xattr:
 		ext4_msg(sb, KERN_WARNING, deprecated_msg, opt, "3.5");
@@ -1850,6 +1856,9 @@ static int _ext4_show_options(struct seq_file *seq, struct super_block *sb,
 		SEQ_OPTS_PRINT("max_dir_size_kb=%u", sbi->s_max_dir_size_kb);
 
 	ext4_show_quota_options(seq, sb);
+	if(sbi->is_case_insensitive)
+		SEQ_OPTS_PUTS("case_insensitive");
+
 	return 0;
 }
 
@@ -2073,6 +2082,7 @@ void ext4_group_desc_csum_set(struct super_block *sb, __u32 block_group,
 
 /* Called at mount-time, super-block is locked */
 static int ext4_check_descriptors(struct super_block *sb,
+				  ext4_fsblk_t sb_block,
 				  ext4_group_t *first_not_zeroed)
 {
 	struct ext4_sb_info *sbi = EXT4_SB(sb);
@@ -2103,6 +2113,11 @@ static int ext4_check_descriptors(struct super_block *sb,
 			grp = i;
 
 		block_bitmap = ext4_block_bitmap(sb, gdp);
+		if (block_bitmap == sb_block) {
+			ext4_msg(sb, KERN_ERR, "ext4_check_descriptors: "
+				 "Block bitmap for group %u overlaps "
+				 "superblock", i);
+		}
 		if (block_bitmap < first_block || block_bitmap > last_block) {
 			ext4_msg(sb, KERN_ERR, "ext4_check_descriptors: "
 			       "Block bitmap for group %u not in group "
@@ -2110,6 +2125,11 @@ static int ext4_check_descriptors(struct super_block *sb,
 			return 0;
 		}
 		inode_bitmap = ext4_inode_bitmap(sb, gdp);
+		if (inode_bitmap == sb_block) {
+			ext4_msg(sb, KERN_ERR, "ext4_check_descriptors: "
+				 "Inode bitmap for group %u overlaps "
+				 "superblock", i);
+		}
 		if (inode_bitmap < first_block || inode_bitmap > last_block) {
 			ext4_msg(sb, KERN_ERR, "ext4_check_descriptors: "
 			       "Inode bitmap for group %u not in group "
@@ -2117,6 +2137,11 @@ static int ext4_check_descriptors(struct super_block *sb,
 			return 0;
 		}
 		inode_table = ext4_inode_table(sb, gdp);
+		if (inode_table == sb_block) {
+			ext4_msg(sb, KERN_ERR, "ext4_check_descriptors: "
+				 "Inode table for group %u overlaps "
+				 "superblock", i);
+		}
 		if (inode_table < first_block ||
 		    inode_table + sbi->s_itb_per_group - 1 > last_block) {
 			ext4_msg(sb, KERN_ERR, "ext4_check_descriptors: "
@@ -2219,6 +2244,16 @@ static void ext4_orphan_cleanup(struct super_block *sb,
 
 	while (es->s_last_orphan) {
 		struct inode *inode;
+
+		/*
+		 * We may have encountered an error during cleanup; if
+		 * so, skip the rest.
+		 */
+		if (EXT4_SB(sb)->s_mount_state & EXT4_ERROR_FS) {
+			jbd_debug(1, "Skipping orphan recovery on fs with errors.\n");
+			es->s_last_orphan = 0;
+			break;
+		}
 
 		inode = ext4_orphan_get(sb, le32_to_cpu(es->s_last_orphan));
 		if (IS_ERR(inode)) {
@@ -3702,6 +3737,13 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 		goto failed_mount;
 	}
 
+	if (le16_to_cpu(sbi->s_es->s_reserved_gdt_blocks) > (blocksize / 4)) {
+		ext4_msg(sb, KERN_ERR,
+			 "Number of reserved GDT blocks insanely large: %d",
+			 le16_to_cpu(sbi->s_es->s_reserved_gdt_blocks));
+		goto failed_mount;
+	}
+
 	if (sbi->s_mount_opt & EXT4_MOUNT_DAX) {
 		if (blocksize != PAGE_SIZE) {
 			ext4_msg(sb, KERN_ERR,
@@ -3963,7 +4005,7 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 			goto failed_mount2;
 		}
 	}
-	if (!ext4_check_descriptors(sb, &first_not_zeroed)) {
+	if (!ext4_check_descriptors(sb, logical_sb_block, &first_not_zeroed)) {
 		ext4_msg(sb, KERN_ERR, "group descriptors corrupted!");
 		goto failed_mount2;
 	}

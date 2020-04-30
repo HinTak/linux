@@ -13,7 +13,7 @@ fhci-$(CONFIG_FHCI_DEBUG) += fhci-dbg.o
 xhci-hcd-y := xhci.o xhci-mem.o
 xhci-hcd-y += xhci-ring.o xhci-hub.o xhci-dbg.o
 xhci-hcd-y += xhci-trace.o
-
+xhci-hcd-y+= xhci-plat.o
 xhci-plat-hcd-y := xhci-plat.o
 ifneq ($(CONFIG_USB_XHCI_MVEBU), )
 	xhci-plat-hcd-y		+= xhci-mvebu.o
@@ -30,6 +30,18 @@ obj-$(CONFIG_USB_XHCI_PCI)	+= xhci-pci.o
 obj-$(CONFIG_USB_XHCI_PLATFORM) += xhci-plat-hcd.o
 
 obj-$(CONFIG_USB_EHCI_HCD)	+= ehci-hcd.o
+
+ifeq ($(CONFIG_SAMSUNG_USB_TV_PRODUCT),y)
+ifeq ($(CONFIG_ARCH_SDP),y)
+usb_enable-y    := usb_enable_int.o
+else
+usb_enable-y    := usb_enable_ext.o
+endif
+else
+usb_enable-y    := usb_enable_etc.o
+endif
+
+obj-$(CONFIG_USB_ENABLE)	+= usb_enable.o
 obj-$(CONFIG_USB_EHCI_PCI)	+= ehci-pci.o
 obj-$(CONFIG_USB_EHCI_HCD_PLATFORM)	+= ehci-platform.o
 obj-$(CONFIG_USB_EHCI_MXC)	+= ehci-mxc.o

@@ -1,0 +1,98 @@
+#
+# Samsung VD SOC drivers
+#
+config SOC_SDP
+	bool "Samsung VD SoC(SDP) drivers support"
+	default y if ARCH_SDP
+
+if SOC_SDP
+
+##************** SDP UNZIP ****************##
+config SDP_UNZIP
+	bool "SDP UNZIP decompressor driver"
+	default y
+
+config SDP_UNZIP_HWDCOMP_VDFS
+	bool "Use H/W decompresser for VDFS"
+	depends on SDP_UNZIP
+	select HW_DECOMPRESSOR
+
+config SDP_UNZIP_AUTH
+	bool "Use H/W Auth(AES-CTR, SHA256)"
+	depends on SDP_UNZIP && (ARCH_SDP1501||ARCH_SDP1601)
+	select SDP_UNZIP_AUTH_STANDALONE if (ARCH_SDP1601)
+	default y
+
+config SDP_UNZIP_AUTH_STANDALONE
+	depends on SDP_UNZIP
+	bool
+
+config SDP_UNZIP_SELFTEST
+	bool "Use SDP UNZIP Driver Selftest sysfs"
+	depends on SDP_UNZIP
+	select CRYPTO
+	select CRYPTO_CTR
+	select CRYPTO_SHA256
+	select CRYPTO_DEFLATE
+	select CRYPTO_ZLIB
+	default n
+
+config SDP_UNZIP_TEST
+	bool "SDP UNZIP Test Module"
+	depends on SDP_UNZIP
+	default n
+
+
+
+
+config SDP_SPI
+		tristate "SDP SPI Master Controller Driver"
+		default n
+		depends on ARCH_SDP
+		select SPI
+		select SPI_MASTER
+		help
+		  SDP SPI Master Controller Driver.
+
+config SDP_SPI_NUM_OF_CS
+		int "Number of chip select."
+		default 1
+		depends on SDP_SPI
+		help
+		  Default CS is 1, but if you used the GPIO CS, CS can be larger than 1.
+
+config SDP_SPIDEV
+		tristate "User Level SPI Device Driver for SDP SPI"
+		depends on SDP_SPI
+
+config SDP_SPI_DEBUG
+		bool "Print Debug Msg for SDP SPI"
+		depends on SDP_SPI
+
+
+config SDP_THERMAL
+	depends on ARCH_SDP && CPU_FREQ
+	bool "Thermal Management"
+	default y
+
+config SDP_BUS_ERR_LOGGER
+	bool "SDP bus err logger"
+	default y
+
+config SDP_IOTMODE_HOT_SWITCH
+	depends on POWER_SAVING_MODE
+	bool "Support IOT power on/off in running state"
+	default y
+	help
+		If enable this, tztv-media driver will enter power off state directly in iot mode.
+
+config SDP_MICOM_PINCTRL
+	bool "SDP Micom Pin control by Main"
+	depends on PINCTRL
+	default y
+
+config SDP_DEV_PM
+    bool "SDP device power manage helper"
+    default y
+
+endif#SOC_SDP

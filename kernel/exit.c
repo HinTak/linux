@@ -58,6 +58,9 @@
 #include <asm/unistd.h>
 #include <asm/pgtable.h>
 #include <asm/mmu_context.h>
+#ifdef CONFIG_MINCORE_RLIMIT_NOFILE
+#include <linux/mincore.h>
+#endif
 
 static void exit_mm(struct task_struct *tsk);
 
@@ -204,6 +207,15 @@ repeat:
 
 	write_unlock_irq(&tasklist_lock);
 	release_thread(p);
+
+#ifdef CONFIG_MINCORE_RLIMIT_NOFILE
+	/* Cleanup only if main thread exits */
+	rcu_read_lock();
+	if (get_nr_threads(current) == 0)
+		free_open_file_task_list();
+	rcu_read_unlock();
+#endif
+
 	call_rcu(&p->rcu, delayed_put_task_struct);
 
 	p = leader;
@@ -753,6 +765,7 @@ void do_exit(long code)
 	 * because of cgroup mode, must be called before cgroup_exit()
 	 */
 	perf_event_exit_task(tsk);
+
 
 	cgroup_exit(tsk);
 

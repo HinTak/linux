@@ -84,3 +84,39 @@ config USB_OTG_FSM
 	  Implements OTG Finite State Machine as specified in On-The-Go
 	  and Embedded Host Supplement to the USB Revision 2.0 Specification.
 
+config SAMSUNG_USB_PARALLEL_RESUME
+	bool "Parallel Resume of Samsung Priority Device List"
+	depends on USB && PM
+	default y if USB && PM
+	help
+      if you say y here, it will Enable Fast and Parallel Resume
+      of Samsung Priority Device List.
+
+config SAMSUNG_USB_SHORT_DEBOUNCE
+	bool "Enable short debounce feature for BT hub and wifi"
+	depends on USB && PM
+	default y if USB && PM
+	help
+      if you say y here, it will reduce the debounce time from 100ms
+      to 10ms for BT hub and hub on which wifi is present.
+
+config SAMSUNG_USB_TVKEY_SUPPORT
+    bool "Support TVKey dongle"
+    help
+      If you say Y here, it will support the tvkey dongle connection.
+      It supports C&C framework in kernel level.
+
+config SAMSUNG_USB_TV_PRODUCT
+    bool "Indicate whether it is TV product"
+    help
+      If you say Y here, this is for TV product.
+
+config SAMSUNG_USB_SERDES_LOCK_CHECK
+    bool "Enable serdes lock check for KantM OC Model"
+    depends on SAMSUNG_USB_PARALLEL_RESUME
+    default n
+    help
+        KantM-(Built in, OCM or OC) => Y
+        Kant AV => N
+        Kant S => N
+

@@ -22,6 +22,10 @@
 #include <linux/mutex.h>	/* for struct mutex */
 #include <linux/pm_runtime.h>	/* for runtime PM */
 
+#if defined(SAMSUNG_USB_BTWIFI_RESET_WAIT)
+#include <soc/sdp/soc.h>
+#endif
+
 struct usb_device;
 struct usb_driver;
 struct wusb_dev;
@@ -539,6 +543,9 @@ struct usb3_lpm_parameters {
 struct usb_device {
 	int		devnum;
 	char		devpath[16];
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+        char  devbusportpath [16];      /* Use in messages: /bus/port/... */    // 080507
+#endif
 	u32		route;
 	enum usb_device_state	state;
 	enum usb_device_speed	speed;
@@ -610,6 +617,23 @@ struct usb_device {
 	struct usb3_lpm_parameters u1_params;
 	struct usb3_lpm_parameters u2_params;
 	unsigned lpm_disable_count;
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+        struct resume_devnode   *devnode;
+        struct usb_hub          *hub;
+        unsigned int            priority;
+        unsigned int            is_scanned:1;
+        unsigned int            skip_resume:1;
+        unsigned                is_hub:1;
+        struct usb_device       *child[16];
+        unsigned int            connected_ports;
+        unsigned int            usb_family;
+#ifdef PARALLEL_RESET_RESUME_USER_PORT_DEVICES
+        struct list_head        other_dev_list;
+#endif
+#endif
+#ifdef CONFIG_SAMSUNG_USB_SHORT_DEBOUNCE
+	bool short_debounce;
+#endif
 };
 #define	to_usb_device(d) container_of(d, struct usb_device, dev)
 
@@ -1162,6 +1186,9 @@ struct usb_class_driver {
 	int minor_base;
 };
 
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+#include "priority_devconfig.h"
+#endif
 /*
  * use these in module_init()/module_exit()
  * and don't forget MODULE_DEVICE_TABLE(usb, ...)

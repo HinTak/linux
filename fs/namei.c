@@ -40,6 +40,11 @@
 #include "internal.h"
 #include "mount.h"
 
+// The following header file is included to support secure container.
+
+#include <linux/sf_security.h>
+
+
 /* [Feb-1997 T. Schoebel-Theuer]
  * Fundamental changes in the pathname lookup mechanisms (namei)
  * were necessary because of omirr.  The reason is that omirr needs
@@ -1590,10 +1595,10 @@ static inline int walk_component(struct nameidata *nd, struct path *path,
 		if (err < 0)
 			goto out_err;
 
-		inode = path->dentry->d_inode;
 		err = -ENOENT;
 		if (d_is_negative(path->dentry))
 			goto out_path_put;
+		inode = path->dentry->d_inode;
 	}
 
 	if (should_follow_link(path->dentry, follow)) {
@@ -2090,8 +2095,15 @@ int kern_path(const char *name, unsigned int flags, struct path *path)
 	if (!IS_ERR(filename)) {
 		res = filename_lookup(AT_FDCWD, filename, flags, &nd);
 		putname(filename);
-		if (!res)
+		// 
+		// if (!res)
+		// 	*path = nd.path;
+		// 
+		// SfdPathFilter function call added.
+		if (!res) {
 			*path = nd.path;
+			res = SfdPathFilter(name, path, "kern_path");
+		}
 	}
 	return res;
 }
@@ -2211,7 +2223,14 @@ int user_path_at_empty(int dfd, const char __user *name, unsigned flags,
 int user_path_at(int dfd, const char __user *name, unsigned flags,
 		 struct path *path)
 {
-	return user_path_at_empty(dfd, name, flags, path, NULL);
+	int res = user_path_at_empty(dfd, name, flags, path, NULL);
+
+	if( 0 == res )
+	{
+		res = SfdPathFilter(name, path, "user_path_at");
+	}
+
+	return res;
 }
 EXPORT_SYMBOL(user_path_at);
 
@@ -2435,6 +2454,10 @@ int __check_sticky(struct inode *dir, struct inode *inode)
 }
 EXPORT_SYMBOL(__check_sticky);
 
+#ifdef CONFIG_NOTIFY_FILE_WRITE
+void notify_write_access(struct super_block *sb, struct dentry *dentry);
+#endif
+
 /*
  *	Check whether we can remove a link victim from directory dir, check
  *  whether the type of victim is right.
@@ -2462,6 +2485,10 @@ static int may_delete(struct inode *dir, struct dentry *victim, bool isdir)
 	if (d_is_negative(victim))
 		return -ENOENT;
 	BUG_ON(!inode);
+
+#ifdef CONFIG_NOTIFY_FILE_WRITE
+	notify_write_access(inode->i_sb, victim);
+#endif
 
 	BUG_ON(victim->d_parent->d_inode != dir);
 	audit_inode_child(dir, victim, AUDIT_TYPE_CHILD_DELETE);
@@ -2499,6 +2526,10 @@ static int may_delete(struct inode *dir, struct dentry *victim, bool isdir)
  */
 static inline int may_create(struct inode *dir, struct dentry *child)
 {
+#ifdef CONFIG_NOTIFY_FILE_WRITE
+	notify_write_access(dir->i_sb, child);
+#endif
+
 	audit_inode_child(dir, child, AUDIT_TYPE_CHILD_CREATE);
 	if (child->d_inode)
 		return -EEXIST;
@@ -3049,6 +3080,7 @@ retry_lookup:
 		path_to_nameidata(path, nd);
 		goto out;
 	}
+	inode = path->dentry->d_inode;
 finish_lookup:
 	/* we _can_ be in RCU mode here */
 	if (should_follow_link(path->dentry, !symlink_ok)) {
@@ -3123,6 +3155,10 @@ opened:
 			goto exit_fput;
 	}
 out:
+	if (unlikely(error > 0)) {
+		WARN_ON(1);
+		error = -EINVAL;
+	}
 	if (got_write)
 		mnt_drop_write(nd->path.mnt);
 	path_put(&save_parent);

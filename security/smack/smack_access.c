@@ -206,10 +206,14 @@ out_audit:
 
 #ifdef CONFIG_AUDIT
 	if (a)
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+		smack_log(subject->smk_known, object->smk_known,
+			  request, rc, a, smack_mode);
+#else
 		smack_log(subject->smk_known, object->smk_known,
 			  request, rc, a);
 #endif
-
+#endif
 	return rc;
 }
 
@@ -260,8 +264,21 @@ int smk_tskacc(struct task_smack *tsp, struct smack_known *obj_known,
 out_audit:
 #ifdef CONFIG_AUDIT
 	if (a)
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+		smack_log(sbj_known->smk_known, obj_known->smk_known,
+			mode, rc, a, smack_mode);
+#else
 		smack_log(sbj_known->smk_known, obj_known->smk_known,
 			  mode, rc, a);
+#endif
+
+#endif
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+		/*	
+		 * Allow access when SMACK module is set for
+		 * permissive mode (1), unconfound mode(3)
+		 */
+		rc = check_system_mode(rc, sbj_known->smk_known, obj_known->smk_known);
 #endif
 	return rc;
 }
@@ -311,6 +328,94 @@ static inline void smack_str_from_perm(char *string, int access)
 		string[i++] = 'l';
 	string[i] = '\0';
 }
+
+/**
+ *  smk_print_socket_type - Print the socket type
+ *  @ab: a pointer to the audit buffer
+ *  @sad: a pointer to the SMACK specific audit data
+ *
+ *  This function checks the the type of a socket and
+ *  prints the socket type as part of SMACK audit log.
+ */
+
+static inline void smk_print_socket_type(struct audit_buffer *ab,
+					struct smack_audit_data *sad)
+{
+	switch (sad->sock_type) {
+	case SOCK_DGRAM:
+		audit_log_format(ab, " socket-type=%s", "SOCK_DGRAM");
+		break;
+	case SOCK_STREAM:
+		audit_log_format(ab, " socket-type=%s", "SOCK_STREAM");
+		break;
+	case SOCK_RAW:
+		audit_log_format(ab, " socket-type=%s", "SOCK_RAW");
+		break;
+	case SOCK_RDM:
+		audit_log_format(ab, " socket-type=%s", "SOCK_RDM");
+		break;
+	case SOCK_SEQPACKET:
+		audit_log_format(ab, " socket-type=%s", "SOCK_SEQPACKET");
+		break;
+	case SOCK_DCCP:
+		audit_log_format(ab, " socket-type=%s", "SOCK_DCCP");
+		break;
+	case SOCK_PACKET:
+		audit_log_format(ab, " socket-type=%s", "SOCK_PACKET");
+		break;
+	default:
+		audit_log_format(ab, " socket-type=%s %d", "INVALID:",
+				sad->sock_type);
+		break;
+	}
+	return;
+}
+
+/**
+ *  smk_print_socket_protocol - Print the socket protocol
+ *  @ab: a pointer to the audit buffer
+ *  @sad: a pointer to the SMACK specific audit data
+ *
+ *  This function checks the the protocol of a socket and
+ *  prints the socket protocol as part of SMACK audit log.
+ */
+
+static inline void smk_print_socket_protocol(struct audit_buffer *ab,
+						struct smack_audit_data *sad)
+{
+	switch (sad->sock_proto) {
+	case IPPROTO_IP:
+		audit_log_format(ab, " socket-protocol=%s", "IPPROTO_IP");
+		break;
+	case IPPROTO_TCP:
+		audit_log_format(ab, " socket-protocol=%s", "IPPROTO_TCP");
+		break;
+	case IPPROTO_UDP:
+		audit_log_format(ab, " socket-protocol=%s", "IPPROTO_UDP");
+		break;
+	case IPPROTO_RAW:
+		audit_log_format(ab, " socket-protocol=%s", "IPPROTO_RAW");
+		break;
+	case IPPROTO_ICMP:
+		audit_log_format(ab, " socket-protocol=%s", "IPPROTO_ICMP");
+		break;
+	case IPPROTO_SCTP:
+		audit_log_format(ab, " socket-protocol=%s", "IPPROTO_SCTP");
+		break;
+	case IPPROTO_UDPLITE:
+		audit_log_format(ab, " socket-protocol=%s", "IPPROTO_UDPLITE");
+		break;
+	case IPPROTO_DCCP:
+		audit_log_format(ab, " socket-protocol=%s", "IPPROTO_DCCP");
+		break;
+	default:
+		audit_log_format(ab, " socket-protocol=%s %d", "INVALID:",
+				sad->sock_proto);
+		break;
+	}
+	return;
+}
+
 /**
  * smack_log_callback - SMACK specific information
  * will be called by generic audit code
@@ -322,17 +427,57 @@ static void smack_log_callback(struct audit_buffer *ab, void *a)
 {
 	struct common_audit_data *ad = a;
 	struct smack_audit_data *sad = ad->smack_audit_data;
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+	int unconfined_subject = 0;
+	int unconfined_object = 0;
+	if( sad->mode == 3 ) {
+		unconfined_subject = smk_exist_unconfined_label(sad->subject);
+		unconfined_object = smk_exist_unconfined_label(sad->object);
+	}
+#endif
 	audit_log_format(ab, "lsm=SMACK fn=%s action=%s",
 			 ad->smack_audit_data->function,
 			 sad->result ? "denied" : "granted");
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+	if( unconfined_subject || unconfined_object )
+		audit_log_format(ab, " mode=%s", "unconfined");
+	else
+		audit_log_format(ab, " mode=%s",
+				(sad->mode == 1) ? "permissive" : "enforcing");
+#endif
+#ifdef CONFIG_SECURITY_SMACK_BOOTMODE_FOR_DEV_NODE
+	audit_log_format(ab, " wait=%s",
+			(sad->wait_permission == 1) ? "yes" : "no");
+#endif
 	audit_log_format(ab, " subject=");
 	audit_log_untrustedstring(ab, sad->subject);
 	audit_log_format(ab, " object=");
 	audit_log_untrustedstring(ab, sad->object);
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+	audit_log_format(ab, " requested=%s%s%s", sad->request,
+			unconfined_subject ? "(US)" : "",
+				 unconfined_object ? "(UO)" : "");
+#else
 	if (sad->request[0] == '\0')
 		audit_log_format(ab, " labels_differ");
 	else
 		audit_log_format(ab, " requested=%s", sad->request);
+#endif
+	if (sad->d_instantiated != -1)
+		audit_log_format(ab, " d_inst=%d", sad->d_instantiated);
+	if(sad->last_process != NULL && sad->last_process[0] != '\0') 
+		audit_log_format(ab, " last_process = %s", sad->last_process);
+	if (ad->type == LSM_AUDIT_DATA_NET) {
+		smk_print_socket_type(ab, sad);
+		smk_print_socket_protocol(ab, sad);
+		if (sad->sock_reuseaddr)
+			audit_log_format(ab, " socket-option=%s",
+						"SO_REUSEADDR");
+		if (sad->sock_reuseport)
+			audit_log_format(ab, " socket-option=%s",
+						"SO_REUSEPORT");
+	}
+
 }
 
 /**
@@ -346,8 +491,13 @@ static void smack_log_callback(struct audit_buffer *ab, void *a)
  * Audit the granting or denial of permissions in accordance
  * with the policy.
  */
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+void smack_log(char *subject_label, char *object_label, int request,
+	       int result, struct smk_audit_info *ad, int mode)
+#else
 void smack_log(char *subject_label, char *object_label, int request,
 	       int result, struct smk_audit_info *ad)
+#endif
 {
 #ifdef CONFIG_SECURITY_SMACK_BRINGUP
 	char request_buffer[SMK_NUM_ACCESS_TYPE + 5];
@@ -389,14 +539,24 @@ void smack_log(char *subject_label, char *object_label, int request,
 #endif
 	sad->request = request_buffer;
 	sad->result  = result;
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+	sad->mode    = mode;
+#endif
 
 	common_lsm_audit(a, smack_log_callback, NULL);
 }
 #else /* #ifdef CONFIG_AUDIT */
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+void smack_log(char *subject_label, char *object_label, int request,
+               int result, struct smk_audit_info *ad, int mode)
+{
+}
+#else
 void smack_log(char *subject_label, char *object_label, int request,
                int result, struct smk_audit_info *ad)
 {
 }
+#endif
 #endif
 
 DEFINE_MUTEX(smack_known_lock);

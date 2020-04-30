@@ -39,7 +39,7 @@
  * TASK_SIZE - the maximum size of a user space task.
  * TASK_UNMAPPED_BASE - the lower boundary of the mmap VM area
  */
-#define TASK_SIZE		(UL(CONFIG_PAGE_OFFSET) - UL(SZ_16M))
+#define TASK_SIZE		(UL(CONFIG_PAGE_OFFSET) - UL(SZ_24M))
 #define TASK_UNMAPPED_BASE	ALIGN(TASK_SIZE / 3, SZ_16M)
 
 /*
@@ -52,7 +52,7 @@
  * and PAGE_OFFSET - it must be within 32MB of the kernel text.
  */
 #ifndef CONFIG_THUMB2_KERNEL
-#define MODULES_VADDR		(PAGE_OFFSET - SZ_16M)
+#define MODULES_VADDR		(PAGE_OFFSET - SZ_24M)
 #else
 /* smaller range for Thumb-2 symbols relocation (2^24)*/
 #define MODULES_VADDR		(PAGE_OFFSET - SZ_8M)
@@ -165,8 +165,12 @@
  * PFN 0 == physical address 0.
  */
 #if defined(__virt_to_phys)
+#ifndef PHYS_OFFSET
 #define PHYS_OFFSET	PLAT_PHYS_OFFSET
+#endif
+#ifndef PHYS_PFN_OFFSET
 #define PHYS_PFN_OFFSET	((unsigned long)(PHYS_OFFSET >> PAGE_SHIFT))
+#endif
 
 #define virt_to_pfn(kaddr) (__pa(kaddr) >> PAGE_SHIFT)
 

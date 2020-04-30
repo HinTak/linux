@@ -61,6 +61,12 @@
 #include <asm/io.h>
 #include <asm/unistd.h>
 
+#ifdef CONFIG_USE_HW_CLOCK_FOR_USERTRACE
+#define CREATE_TRACE_POINTS
+#include <trace/events/user.h>
+#define MAX_USER_TRACE_SIZE 512
+#endif
+
 #ifndef SET_UNALIGN_CTL
 # define SET_UNALIGN_CTL(a, b)	(-EINVAL)
 #endif
@@ -2145,6 +2151,23 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 	case PR_TASK_PERF_EVENTS_ENABLE:
 		error = perf_event_task_enable();
 		break;
+#ifdef CONFIG_USE_HW_CLOCK_FOR_USERTRACE
+	case PR_TASK_PERF_USER_TRACE:
+	{
+		void __user *uevent_ptr = (void *)arg2;
+		char kstring[MAX_USER_TRACE_SIZE+1];
+		unsigned long uevent_len = arg3;
+
+		if (uevent_len > MAX_USER_TRACE_SIZE)
+			return -EINVAL;
+		if (copy_from_user(kstring, uevent_ptr, uevent_len))
+			return -EFAULT;
+		kstring[uevent_len] = 0;
+
+		trace_user(kstring);
+		return 0;
+	}
+#endif
 	case PR_GET_TIMERSLACK:
 		error = current->timer_slack_ns;
 		break;

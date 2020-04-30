@@ -46,6 +46,13 @@
 #include "sd_ops.h"
 #include "sdio_ops.h"
 
+#if defined(CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM)
+#include <linux/blkdev.h>
+#include "../card/queue.h"
+#endif
+
+#include "mmc_trace.h"
+
 /* If the device is not responding */
 #define MMC_CORE_TIMEOUT_MS	(10 * 60 * 1000) /* 10 minute timeout */
 
@@ -186,6 +193,38 @@ void mmc_request_done(struct mmc_host *host, struct mmc_request *mrq)
 
 EXPORT_SYMBOL(mmc_request_done);
 
+#if  defined(CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM)
+/**
+ * Yeah, I know, everything here looks more than ugly.
+ * But we have to make this special "hole" and inform
+ * upper layer about our special decompression request
+ * just before going down and dma setup.
+ */
+static void prepare_special_req(struct mmc_request *mrq)
+{
+	struct mmc_blk_request *brq;
+	struct mmc_queue_req *mq_mrq;
+	struct request *req;
+	typedef void (*ready_cb_t)(struct request *);
+
+	if (!mrq->data || !(mrq->data->flags & MMC_DATA_NOMAP))
+		return;
+
+	brq = container_of(mrq, struct mmc_blk_request, mrq);
+	mq_mrq = container_of(brq, struct mmc_queue_req, brq);
+	req = mq_mrq->req;
+
+	BUG_ON(!req || req->cmd_type != REQ_TYPE_SPECIAL);
+
+	if (req->special)
+		((ready_cb_t)req->special)(req);
+}
+#else
+static inline void prepare_special_req(struct mmc_request *mrq)
+{}
+#endif
+
+
 static int mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
 {
 #ifdef CONFIG_MMC_DEBUG
@@ -194,6 +233,9 @@ static int mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
 #endif
 	if (mmc_card_removed(host->card))
 		return -ENOMEDIUM;
+
+	/* Prepare for special request */
+	prepare_special_req(mrq);
 
 	if (mrq->sbc) {
 		pr_debug("<%s: starting CMD%u arg %08x flags %08x>\n",
@@ -252,6 +294,7 @@ static int mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
 	}
 	mmc_host_clk_hold(host);
 	led_trigger_event(host->led, LED_FULL);
+	mmc_cmd_start_trace(mrq);	/* FlashFS : mmc_trace */
 	host->ops->request(host, mrq);
 
 	return 0;
@@ -332,12 +375,14 @@ static void mmc_wait_data_done(struct mmc_request *mrq)
 {
 	struct mmc_context_info *context_info = &mrq->host->context_info;
 
+	mmc_cmd_finish_trace(mrq);	/* FlashFS : mmc_trace */
 	context_info->is_done_rcv = true;
 	wake_up_interruptible(&context_info->wait);
 }
 
 static void mmc_wait_done(struct mmc_request *mrq)
 {
+	mmc_cmd_finish_trace(mrq);	/* FlashFS : mmc_trace */
 	complete(&mrq->completion);
 }
 
@@ -438,12 +483,39 @@ static int mmc_wait_for_data_req_done(struct mmc_host *host,
 	return err;
 }
 
+#ifdef CONFIG_MMC_TIMEOUT
+int g_irq_print = 0;
+#endif
+
 static void mmc_wait_for_req_done(struct mmc_host *host,
 				  struct mmc_request *mrq)
 {
 	struct mmc_command *cmd;
 
 	while (1) {
+#ifdef CONFIG_MMC_TIMEOUT
+		unsigned long rc;
+		rc = wait_for_completion_timeout(&mrq->completion, HZ<<2);
+		if(rc){
+			cmd = mrq->cmd;
+			if (!cmd->error || !cmd->retries ||
+			    mmc_card_removed(host->card))
+				break;
+
+			pr_debug("%s: req failed (CMD%u): %d, retrying...\n",
+				 mmc_hostname(host), cmd->opcode, cmd->error);
+			cmd->retries--;
+			cmd->error = 0;
+			host->ops->request(host, mrq);
+		} else {
+			printk(KERN_ERR"\n[%s] timeout\n",__FUNCTION__);
+			g_irq_print=1;
+#ifdef CONFIG_SMP
+			smp_send_stop();
+#endif
+			while(1);
+		}
+#else
 		wait_for_completion(&mrq->completion);
 
 		cmd = mrq->cmd;
@@ -474,6 +546,7 @@ static void mmc_wait_for_req_done(struct mmc_host *host,
 		cmd->retries--;
 		cmd->error = 0;
 		host->ops->request(host, mrq);
+#endif
 	}
 }
 
@@ -1149,6 +1222,15 @@ void mmc_set_initial_state(struct mmc_host *host)
 	host->ios.bus_mode = MMC_BUSMODE_PUSHPULL;
 	host->ios.bus_width = MMC_BUS_WIDTH_1;
 	host->ios.timing = MMC_TIMING_LEGACY;
+	host->ios.enhanced_strobe = false;
+
+	/*
+	 * Make sure we are in non-enhanced strobe mode before we
+	 * actually enable it in ext_csd.
+	 */
+	if ((host->caps2 & MMC_CAP2_HS400_ES) &&
+	    host->ops->hs400_enhanced_strobe)
+		host->ops->hs400_enhanced_strobe(host, &host->ios);
 
 	mmc_set_ios(host);
 }
@@ -1458,7 +1540,9 @@ u32 mmc_select_voltage(struct mmc_host *host, u32 ocr)
 	if (host->caps2 & MMC_CAP2_FULL_PWR_CYCLE) {
 		bit = ffs(ocr) - 1;
 		ocr &= 3 << bit;
+#ifndef CONFIG_DISABLE_UNNECESSARY_MMC_CODE
 		mmc_power_cycle(host, ocr);
+#endif
 	} else {
 		bit = fls(ocr) - 1;
 		ocr &= 3 << bit;
@@ -1640,7 +1724,11 @@ void mmc_power_up(struct mmc_host *host, u32 ocr)
 	 * This delay should be sufficient to allow the power supply
 	 * to reach the minimum voltage.
 	 */
+#ifndef CONFIG_DISABLE_UNNECESSARY_MMC_CODE
 	mmc_delay(10);
+#else
+	mmc_delay(1);
+#endif
 
 	mmc_pwrseq_post_power_on(host);
 
@@ -1653,7 +1741,11 @@ void mmc_power_up(struct mmc_host *host, u32 ocr)
 	 * This delay must be at least 74 clock sizes, or 1 ms, or the
 	 * time required to reach a stable voltage.
 	 */
+#ifndef CONFIG_DISABLE_UNNECESSARY_MMC_CODE
 	mmc_delay(10);
+#else
+	mmc_delay(1);
+#endif
 
 	mmc_host_clk_release(host);
 }
@@ -2349,20 +2441,29 @@ static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
 #endif
 	mmc_power_up(host, host->ocr_avail);
 
+#ifndef CONFIG_DISABLE_UNNECESSARY_MMC_CODE
 	/*
 	 * Some eMMCs (with VCCQ always on) may not be reset after power up, so
 	 * do a hardware reset if possible.
 	 */
 	mmc_hw_reset_for_init(host);
+#endif
 
+#ifndef CONFIG_DISABLE_UNNECESSARY_MMC_CODE /* not neccesary on DTV system */
 	/*
 	 * sdio_reset sends CMD52 to reset card.  Since we do not know
 	 * if the card is being re-initialized, just send it.  CMD52
 	 * should be ignored by SD/eMMC cards.
 	 */
 	sdio_reset(host);
+#endif
 	mmc_go_idle(host);
 
+#ifndef CONFIG_DISABLE_UNNECESSARY_MMC_CODE
+	/*
+	 * not neccesary on DTV system
+	 * skip it for booting time
+	 */
 	mmc_send_if_cond(host, host->ocr_avail);
 
 	/* Order's important: probe SDIO, then SD, then MMC */
@@ -2370,6 +2471,7 @@ static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
 		return 0;
 	if (!mmc_attach_sd(host))
 		return 0;
+#endif
 	if (!mmc_attach_mmc(host))
 		return 0;
 

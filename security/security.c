@@ -27,6 +27,8 @@
 #include <linux/backing-dev.h>
 #include <net/flow.h>
 
+#include <linux/sf_security.h>
+
 #define MAX_LSM_EVM_XATTR	2
 
 /* Boot-time LSM user choice */
@@ -347,6 +349,8 @@ int security_inode_alloc(struct inode *inode)
 
 void security_inode_free(struct inode *inode)
 {
+	sf_security_inode_free( inode );
+	
 	integrity_inode_free(inode);
 	security_ops->inode_free_security(inode);
 }
@@ -520,8 +524,15 @@ int security_inode_link(struct dentry *old_dentry, struct inode *dir,
 
 int security_inode_unlink(struct inode *dir, struct dentry *dentry)
 {
+	int result = 0;
+	
 	if (unlikely(IS_PRIVATE(d_backing_inode(dentry))))
 		return 0;
+
+	result = sf_security_inode_unlink( dir, dentry );
+	if(unlikely(result))
+		return result;
+
 	return security_ops->inode_unlink(dir, dentry);
 }
 
@@ -590,8 +601,15 @@ int security_inode_follow_link(struct dentry *dentry, struct nameidata *nd)
 
 int security_inode_permission(struct inode *inode, int mask)
 {
+	int result = 0;
+
 	if (unlikely(IS_PRIVATE(inode)))
 		return 0;
+
+	result = sf_security_inode_permission( inode, mask );
+	if(unlikely(result))
+		return result;
+	
 	return security_ops->inode_permission(inode, mask);
 }
 

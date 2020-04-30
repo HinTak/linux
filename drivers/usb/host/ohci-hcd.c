@@ -67,6 +67,10 @@
 #define	IR_DISABLE
 #endif
 
+#ifdef CONFIG_SDP_BUS_ERR_LOGGER
+int sdp_bus_err_logger(void);
+#endif
+
 /*-------------------------------------------------------------------------*/
 
 static const char	hcd_name [] = "ohci_hcd";
@@ -77,6 +81,7 @@ static const char	hcd_name [] = "ohci_hcd";
 #include "ohci.h"
 #include "pci-quirks.h"
 
+static void ohci_host_dump(struct ohci_hcd *ohci);
 static void ohci_dump(struct ohci_hcd *ohci);
 static void ohci_stop(struct usb_hcd *hcd);
 static void io_watchdog_func(unsigned long _ohci);
@@ -315,6 +320,11 @@ static int ohci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 	urb_priv_t		*urb_priv;
 
 	spin_lock_irqsave (&ohci->lock, flags);
+#ifdef SAMSUNG_PATCH_RMB_WMB_AT_UNLINK
+        /* Making sure that all data of urb are proper and used only for full speed devices.*/
+        if ((urb != NULL) && (urb->dev != NULL) && (urb->dev->speed <= USB_SPEED_FULL))
+                 rmb();
+#endif
 	rc = usb_hcd_check_unlink_urb(hcd, urb, status);
 	if (rc == 0) {
 
@@ -745,7 +755,11 @@ static void io_watchdog_func(unsigned long _ohci)
 	if (!(status & OHCI_INTR_WDH) && ohci->wdh_cnt == ohci->prev_wdh_cnt) {
 		if (ohci->prev_donehead) {
 			ohci_err(ohci, "HcDoneHead not written back; disabled\n");
- died:
+died:
+#ifdef CONFIG_ARCH_SDP1601
+			ohci_err(ohci, "watchdog : died\n");
+			ohci_host_dump(ohci);
+#endif			
 			usb_hc_died(ohci_to_hcd(ohci));
 			ohci_dump(ohci);
 			ohci_shutdown(ohci_to_hcd(ohci));
@@ -755,7 +769,7 @@ static void io_watchdog_func(unsigned long _ohci)
 			takeback_all_pending = true;
 		}
 	}
-
+	
 	/* Check every ED which might have pending TDs */
 	list_for_each_entry(ed, &ohci->eds_in_use, in_use_list) {
 		if (ed->pending_td) {
@@ -806,7 +820,6 @@ static void io_watchdog_func(unsigned long _ohci)
 	ohci_work(ohci);
 
 	if (ohci->rh_state == OHCI_RH_RUNNING) {
-
 		/*
 		 * Sometimes a controller just stops working.  We can tell
 		 * by checking that the frame counter has advanced since
@@ -815,7 +828,7 @@ static void io_watchdog_func(unsigned long _ohci)
 		 * But be careful: Some controllers violate the spec by
 		 * stopping their frame counter when no ports are active.
 		 */
-		frame_no = ohci_frame_no(ohci);
+		frame_no = (unsigned)ohci_frame_no(ohci);
 		if (frame_no == ohci->prev_frame_no) {
 			int		active_cnt = 0;
 			int		i;
@@ -829,8 +842,55 @@ static void io_watchdog_func(unsigned long _ohci)
 			}
 
 			if (active_cnt > 0) {
-				ohci_err(ohci, "frame counter not updating; disabled\n");
+#ifdef CONFIG_ARCH_SDP1601
+				const int MAX_CHK = 150;
+				const int WAITTIME_MSEC = 2;
+				
+				struct ohci_regs __iomem *regs = ohci->regs;
+
+				ohci_err (ohci,"control 0x%08x\n"
+					,ohci_readl(ohci,&regs->control));
+				ohci_err (ohci,	"cmdstatus 0x%8x\n"
+					,ohci_readl(ohci,&regs->cmdstatus));
+				ohci_err (ohci,	"rhstatus 0x%8x\n"
+					,ohci_readl(ohci
+						,&regs->roothub.status));
+				ohci_err (ohci,	"portstatus 0x%8x\n"
+					,ohci_readl(ohci
+						,&regs->roothub.portstatus[0]));
+					
+				ohci_err(ohci,"frm cnt :: check again\n");
+				
+				i = 0;
+				do {
+					mdelay(WAITTIME_MSEC);
+					
+					frame_no = (unsigned)ohci_frame_no(ohci);
+					if( ohci->prev_frame_no != frame_no) {
+						break;
+					}
+					
+					if( (i%50) == 0 && i != 0 ) {
+						ohci_err(ohci,"[0x%X][0x%X]\n"
+						,ohci->prev_frame_no,frame_no);
+					}
+					
+				} while( i++ <= MAX_CHK );
+
+				if( ohci->prev_frame_no == frame_no ) {
+					ohci_err(ohci
+						,"frame counter not updating; "
+						"disabled\n");
+					goto died;
+				}
+				else {
+					frame_no = (unsigned)ohci_frame_no(ohci);
+				}
+#else
+				ohci_err(ohci,"frame counter not updating; disabled\n");
 				goto died;
+#endif
+				
 			}
 		}
 		if (!list_empty(&ohci->eds_in_use)) {
@@ -891,6 +951,9 @@ static irqreturn_t ohci_irq (struct usb_hcd *hcd)
 			schedule_work (&ohci->nec_work);
 		} else {
 			ohci_err (ohci, "OHCI Unrecoverable Error, disabled\n");
+
+			ohci_host_dump(ohci);
+
 			ohci->rh_state = OHCI_RH_HALTED;
 			usb_hc_died(hcd);
 		}
@@ -1213,6 +1276,11 @@ EXPORT_SYMBOL_GPL(ohci_init_driver);
 MODULE_AUTHOR (DRIVER_AUTHOR);
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE ("GPL");
+
+#if defined(CONFIG_ARCH_SDP) && (defined(CONFIG_OF)||defined(CONFIG_ARCH_SDP1207))
+#include "ohci-sdp.c"
+#define PLATFORM_DRIVER		sdp_ohci_driver
+#endif
 
 #if defined(CONFIG_ARCH_SA1100) && defined(CONFIG_SA1111)
 #include "ohci-sa1111.c"

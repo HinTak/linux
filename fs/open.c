@@ -27,10 +27,15 @@
 #include <linux/rcupdate.h>
 #include <linux/audit.h>
 #include <linux/falloc.h>
+#ifdef CONFIG_FS_SEL_READAHEAD
+extern bool disk_name_from_dev(dev_t dev);
+#endif
 #include <linux/fs_struct.h>
 #include <linux/ima.h>
 #include <linux/dnotify.h>
 #include <linux/compat.h>
+
+#include <linux/sf_security.h>
 
 #include "internal.h"
 
@@ -503,6 +508,9 @@ static int chmod_common(struct path *path, umode_t mode)
 	struct inode *delegated_inode = NULL;
 	struct iattr newattrs;
 	int error;
+#ifndef CONFIG_VD_RELEASE
+	const unsigned char *_name_;
+#endif
 
 	error = mnt_want_write(path->mnt);
 	if (error)
@@ -515,6 +523,15 @@ retry_deleg:
 	newattrs.ia_mode = (mode & S_IALLUGO) | (inode->i_mode & ~S_IALLUGO);
 	newattrs.ia_valid = ATTR_MODE | ATTR_CTIME;
 	error = notify_change(path->dentry, &newattrs, &delegated_inode);
+
+#ifndef CONFIG_VD_RELEASE
+	_name_ = path->dentry->d_name.name;
+	if (!strncmp(_name_, "umplock", 7))
+		pr_alert("[%s][%d],parent[%s][%d]:change permission of [%s] with[%o],"
+		" UID[%d], GID[%d]\n", current->comm, current->pid, current->real_parent->comm,
+		current->real_parent->pid, _name_, mode, inode->i_uid.val, inode->i_gid.val);
+#endif
+
 out_unlock:
 	mutex_unlock(&inode->i_mutex);
 	if (delegated_inode) {
@@ -724,6 +741,10 @@ static int do_dentry_open(struct file *f,
 	if (error)
 		goto cleanup_all;
 
+	error = sf_security_file_open(f, cred);
+	if (error)
+		goto cleanup_all;
+
 	error = break_lease(inode, f->f_flags);
 	if (error)
 		goto cleanup_all;
@@ -746,7 +767,30 @@ static int do_dentry_open(struct file *f,
 
 	f->f_flags &= ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC);
 
+#ifdef CONFIG_VDFS4_SQUEEZE
+	if (!(f->f_flags & O_PROFILED))
+#endif
 	file_ra_state_init(&f->f_ra, f->f_mapping->host->i_mapping);
+
+#ifdef CONFIG_BD_CACHE_ENABLED
+	if(f->f_flags & O_BDCACHE) {
+		printk(KERN_DEBUG "setting ra to 128 pages\n");
+		f->f_ra.ra_pages = BD_VM_MAX_READAHEAD_PAGES;
+	}
+#endif
+
+#ifdef CONFIG_FS_SEL_READAHEAD
+	if (S_ISCHR(f->f_path.dentry->d_inode->i_mode) ||
+		S_ISFIFO(f->f_path.dentry->d_inode->i_mode)) {
+			f->f_ra.state = NULL;
+	} else if (S_ISBLK(f->f_path.dentry->d_inode->i_mode)) {
+		f->f_ra.state =
+			disk_name_from_dev(f->f_path.dentry->d_inode->i_rdev);
+	} else {
+		f->f_ra.state =
+			disk_name_from_dev(f->f_path.mnt->mnt_sb->s_dev);
+	}
+#endif
 
 	return 0;
 
@@ -1018,6 +1062,10 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 		} else {
 			fsnotify_open(f);
 			fd_install(fd, f);
+#ifdef CONFIG_BD_CACHE_ENABLED
+			if(f->f_flags & O_BDCACHE)
+				set_bit(AS_DIRECT, &f->f_mapping->flags);
+#endif
 		}
 	}
 	putname(tmp);

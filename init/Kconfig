@@ -34,7 +34,7 @@ config BROKEN
 config BROKEN_ON_SMP
 	bool
 	depends on BROKEN || !SMP
-	default y
+	default n
 
 config INIT_ENV_ARG_LIMIT
 	int
@@ -44,6 +44,30 @@ config INIT_ENV_ARG_LIMIT
 	  Maximum of each of the number of arguments and environment
 	  variables passed to init from the kernel command line.
 
+
+config FASTBOOT_RCU
+	bool "Expedited grace-period primitive to accelerate boot time"
+	default y
+	help
+	RCU(read-copy-update) subsystem supports two syncrhonizaton mechanism
+	such as synchronize_rcu_expedited() and synchronize_rcu(). We suggest
+	that you enable expedited grace-period primitives if you want to reduce
+	latency. However, this method can 1) increase CPU utilization, 2) degrade
+	real-time latency, and 3) degrade energy efficiency.
+	If you want to avoid the three side-effects, please set it back after boot
+	time. For example, #> echo 0 > /sys/kernel/rcu_expedited
+	The meaning of 'rcu_expedited' kernel parameter value is as follows.
+	#> echo 0 > /sys/kernel/rcu_expedited means synchronize_rcu_expedited().
+	#> echo 1 > /sys/kernel/rcu_expedited means synchronize_rcu().
+
+	This feature automatically tunes  default value for delays from grace-period
+	initialization to first attempt to force quiescent states(FQS). In this case,
+	units are 'jiffies', minimum value is 'zero', and maximum value is 'HZ'.
+
+	This feature will reduce time gap (e.g. from 40msec to 7msec on Golf.P board)
+	between the services that are starget by Systemd. In other words, we can
+	dramatically reduce the dealy time of services by systemd daemon
+	(e.g. /usr/lib/systemd/system/*.service) at boot time for embedded devices.
 
 config CROSS_COMPILE
 	string "Cross-compiler tool prefix"
@@ -1772,7 +1796,7 @@ config TRACEPOINTS
 	bool
 
 source "arch/Kconfig"
-
+source "ipc/kdbus/Kconfig"
 endmenu		# General setup
 
 config HAVE_GENERIC_DMA_COHERENT

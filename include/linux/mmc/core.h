@@ -115,12 +115,19 @@ struct mmc_data {
 #define MMC_DATA_READ	(1 << 9)
 #define MMC_DATA_STREAM	(1 << 10)
 
+#if defined( CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM)
+#define MMC_DATA_NOMAP  (1 << 11)
+#endif
+
 	unsigned int		bytes_xfered;
 
 	struct mmc_command	*stop;		/* stop command */
 	struct mmc_request	*mrq;		/* associated request */
 
 	unsigned int		sg_len;		/* size of scatter list */
+#if defined(CONFIG_MMC_SDHCI_NVT)
+	int			sg_count;	/* mapped sg entries */
+#endif
 	struct scatterlist	*sg;		/* I/O scatter list */
 	s32			host_cookie;	/* host private data */
 };

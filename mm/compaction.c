@@ -853,16 +853,8 @@ isolate_migratepages_range(struct compact_control *cc, unsigned long start_pfn,
 		pfn = isolate_migratepages_block(cc, pfn, block_end_pfn,
 							ISOLATE_UNEVICTABLE);
 
-		/*
-		 * In case of fatal failure, release everything that might
-		 * have been isolated in the previous iteration, and signal
-		 * the failure back to caller.
-		 */
-		if (!pfn) {
-			putback_movable_pages(&cc->migratepages);
-			cc->nr_migratepages = 0;
+		if (!pfn)
 			break;
-		}
 
 		if (cc->nr_migratepages == COMPACT_CLUSTER_MAX)
 			break;
@@ -1500,6 +1492,8 @@ unsigned long try_to_compact_pages(gfp_t gfp_mask, unsigned int order,
 	/* Check if the GFP flags allow compaction */
 	if (!order || !may_enter_fs || !may_perform_io)
 		return COMPACT_SKIPPED;
+
+	alloc_flags |= alloc_cma(gfp_mask);
 
 	trace_mm_compaction_try_to_compact_pages(order, gfp_mask, mode);
 

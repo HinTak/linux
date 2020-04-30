@@ -10,11 +10,25 @@ config DCACHE_WORD_ACCESS
 
 if BLOCK
 
+config FS_SEL_READAHEAD
+	bool "Selective Readahead"
+	default n
+	help
+	 If you say Y here, you will be able to selectively enable/ disable readahead
+	 for each block device using proc entries at /proc/fs/readahead.
+	 By default, the readahead is disabled for all block devices.
+	 It can be enabled/disabled any time by writing 1/0 to /proc/fs/readahead/xxx.
+	 Where xxx refer's to block device name, ex: sda1 refer's to /dev/sda1.
+
+	 If unsure, say N.
+
 source "fs/ext2/Kconfig"
 source "fs/ext3/Kconfig"
 source "fs/ext4/Kconfig"
 source "fs/jbd/Kconfig"
 source "fs/jbd2/Kconfig"
+source "fs/vdfs4/Kconfig"
+source "fs/vdfs3/Kconfig"
 
 config FS_MBCACHE
 # Meta block cache for Extended Attributes (ext2/ext3/ext4)
@@ -277,5 +291,14 @@ endif # NETWORK_FILESYSTEMS
 
 source "fs/nls/Kconfig"
 source "fs/dlm/Kconfig"
+
+config BD_CACHE_ENABLED
+	bool "BD Cache Enable"
+	default n
+	help
+	  Blu-ray cache enable/disable.If BD_CACHE is enable it :-
+	  Implements readpages address space operation for UDF,
+	  Increased VM_MAX_READAHEAD to 512K from 128K
+	  Increased ATA_MAX_SECTORS to 1024 from 256
 
 endmenu

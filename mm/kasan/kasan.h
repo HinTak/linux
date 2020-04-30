@@ -12,6 +12,9 @@
 #define KASAN_KMALLOC_REDZONE   0xFC  /* redzone inside slub object */
 #define KASAN_KMALLOC_FREE      0xFB  /* object was freed (kmem_cache_free/kfree) */
 #define KASAN_GLOBAL_REDZONE    0xFA  /* redzone for global variable */
+#define KASAN_SHADOW_GAP        0xF9  /* address belongs to shadow memory */
+#define KASAN_VMALLOC_REDZONE   0xF8  /* address belongs to vmalloc guard page */
+#define KASAN_VMALLOC_FREE      0xF7  /* memory was freed by vfree call */
 
 /*
  * Stack redzone shadow values
@@ -50,9 +53,11 @@ struct kasan_global {
 	const void *name;
 	const void *module_name;	/* Name of the module where the global variable is declared. */
 	unsigned long has_dynamic_init;	/* This needed for C++ */
-#if KASAN_ABI_VERSION >= 4
+
+/* Commented out because Tizen compiler seems to insert this field although it's gcc 4.9.2 */
+/* #if KASAN_ABI_VERSION >= 4*/
 	struct kasan_source_location *location;
-#endif
+/* #endif*/
 };
 
 void kasan_report_error(struct kasan_access_info *info);
@@ -60,6 +65,12 @@ void kasan_report_user_access(struct kasan_access_info *info);
 
 static inline const void *kasan_shadow_to_mem(const void *shadow_addr)
 {
+#ifdef CONFIG_KASAN_VMALLOC
+	if ((unsigned long)shadow_addr >= kasan_vmalloc_shadow_start)
+		return (void *)((((unsigned long)shadow_addr - kasan_vmalloc_shadow_start)
+			<< PAGE_SHIFT) + VMALLOC_START);
+#endif
+
 	return (void *)(((unsigned long)shadow_addr - KASAN_SHADOW_OFFSET)
 		<< KASAN_SHADOW_SCALE_SHIFT);
 }

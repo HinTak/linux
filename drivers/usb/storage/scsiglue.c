@@ -287,6 +287,14 @@ static int slave_configure(struct scsi_device *sdev)
 	if (us->fflags & US_FL_NOT_LOCKABLE)
 		sdev->lockable = 0;
 
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+        // add for usb serial number
+        sdev->serial = (char *)(us->serial);
+
+        // add for usb device path
+        //if(us->pusb_dev)
+        sdev->usbdevpath = (char *)(us->pusb_dev->devbusportpath);
+#endif
 	/* this is to satisfy the compiler, tho I don't think the 
 	 * return code is ever checked anywhere. */
 	return 0;

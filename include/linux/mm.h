@@ -682,6 +682,17 @@ void do_set_pte(struct vm_area_struct *vma, unsigned long address,
  * The zone field is never updated after free_area_init_core()
  * sets it, so none of the operations on it need to be atomic.
  */
+/* functions related to RSS quota */
+int _get_group_idx(struct mm_struct *mm, unsigned long flags,
+			struct file *file, unsigned long start, unsigned long end);
+int get_group_idx(struct vm_area_struct *vma);
+void inc_rss_counter(struct vm_area_struct *vma, unsigned long value);
+void dec_rss_counter(struct vm_area_struct *vma, unsigned long value);
+int get_rss_cnt(struct mm_struct *mm, int group, unsigned long *cur, unsigned long *max);
+int vmg_enough_memory(struct mm_struct *mm, int group, long pages);
+int check_enough_pages(unsigned long required);
+int is_page_present(struct mm_struct *mm, unsigned long address);
+int get_vma_rss(struct vm_area_struct *vma);
 
 /* Page flags: | [SECTION] | [NODE] | ZONE | [LAST_CPUPID] | ... | FLAGS | */
 #define SECTIONS_PGOFF		((sizeof(unsigned long)*8) - SECTIONS_WIDTH)
@@ -1943,7 +1954,8 @@ int write_one_page(struct page *page, int wait);
 void task_dirty_inc(struct task_struct *tsk);
 
 /* readahead.c */
-#define VM_MAX_READAHEAD	128	/* kbytes */
+#define VM_MAX_READAHEAD	128     /* kbytes */
+#define BD_VM_MAX_READAHEAD_PAGES	128 /* nr of pages for BDCACHE */
 #define VM_MIN_READAHEAD	16	/* kbytes (includes current page) */
 
 int force_page_cache_readahead(struct address_space *mapping, struct file *filp,
@@ -2063,6 +2075,7 @@ static inline struct page *follow_page(struct vm_area_struct *vma,
 #define FOLL_NUMA	0x200	/* force NUMA hinting page fault */
 #define FOLL_MIGRATION	0x400	/* wait for page to replace migration entry */
 #define FOLL_TRIED	0x800	/* a retry, previous pass started an IO */
+#define FOLL_COW	0x4000	/* internal GUP flag */
 
 typedef int (*pte_fn_t)(pte_t *pte, pgtable_t token, unsigned long addr,
 			void *data);
@@ -2227,6 +2240,39 @@ void __init setup_nr_node_ids(void);
 #else
 static inline void setup_nr_node_ids(void) {}
 #endif
+
+struct kernel_mem_usage {
+	unsigned long total_mem_size;	/* total memory */
+	unsigned long free_mem_size;	/* free memory */
+	unsigned long slab_size;	/* slab size */
+	unsigned long vmallocused_size;	/* vmalloc used size (incl. ioremap) */
+	unsigned long ioremap_size;	/* ioremap size */
+	unsigned long pagetable_size;	/* pagetable size */
+	unsigned long kernelstack_size;	/* kernel stack size */
+	unsigned long zram_size;	/* zram used memory size */
+	unsigned long buddy_size;	/* size of calling alloc_page directly*/
+
+	unsigned long sum_kernel_size;	/* total memory used by kernel */
+};
+
+struct user_mem_usage {
+	unsigned long page_cache_size;		/* NR_FILE_PAGE */
+	unsigned long active_anon_size;		/* Active Anon */
+	unsigned long inactive_anon_size;	/* Inactive Anon */
+	unsigned long active_file_size;		/* Active File */
+	unsigned long inactive_file_size;	/* inactive file */
+	unsigned long unevictable_size;		/* unevictable pages */
+
+	unsigned long anon_pages_size;	/* Anon Pages */
+	unsigned long mapped_size;	/* mapped File */
+	unsigned long shmem_size;	/* shmem  size */
+
+	unsigned long sum_user_size;	/* total user memory size */
+};
+
+extern void get_kernel_mem_usage(struct kernel_mem_usage *usage);
+extern void get_user_mem_usage(struct user_mem_usage *usage);
+extern size_t get_zram_info(void);
 
 #endif /* __KERNEL__ */
 #endif /* _LINUX_MM_H */

@@ -427,6 +427,33 @@ int seq_printf(struct seq_file *m, const char *f, ...)
 EXPORT_SYMBOL(seq_printf);
 
 /**
+ *	seq_printk -	output to printk/seq_printf
+ *	@m: seq_file where to print
+ *	@f: format
+ *
+ *	Generalize your output to seq_file(s) and to console with seq_printk.
+ *	If seq_file parameter is NULL, print using printk,
+ *	print with seq_print otherwise.
+ */
+int seq_printk(struct seq_file *m, const char *f, ...)
+{
+	int ret;
+	va_list args;
+
+	if (NULL == m) {
+		va_start(args, f);
+		ret = vprintk(f, args);
+		va_end(args);
+	} else {
+		va_start(args, f);
+		ret = seq_vprintf(m, f, args);
+		va_end(args);
+	}
+
+	return ret;
+}
+
+/**
  *	mangle_path -	mangle and copy path to buffer beginning
  *	@s: buffer start
  *	@p: beginning of path in above buffer

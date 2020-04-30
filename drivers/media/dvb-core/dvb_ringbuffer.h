@@ -37,6 +37,10 @@ struct dvb_ringbuffer {
 	ssize_t           pwrite;
 	int               error;
 
+	struct	list_head	buf_list;	/* list head */
+	int		is_initialized;
+	int		is_shared_llbuf;	/* 0 : legacy, 1 : shared buffer */
+
 	wait_queue_head_t queue;
 	spinlock_t        lock;
 };

@@ -229,6 +229,7 @@ extern int coresight_enable(struct coresight_device *csdev);
 extern void coresight_disable(struct coresight_device *csdev);
 extern int coresight_timeout(void __iomem *addr, u32 offset,
 			     int position, int value);
+extern int coresight_timeout_word(void __iomem *addr, u32 mask, u32 value);
 #else
 static inline struct coresight_device *
 coresight_register(struct coresight_desc *desc) { return NULL; }

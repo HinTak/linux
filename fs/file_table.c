@@ -51,6 +51,9 @@ static void file_free_rcu(struct rcu_head *head)
 
 static inline void file_free(struct file *f)
 {
+#ifdef CONFIG_FD_PID
+	put_pid(f->f_pid);
+#endif
 	percpu_counter_dec(&nr_files);
 	call_rcu(&f->f_u.fu_rcuhead, file_free_rcu);
 }
@@ -137,6 +140,10 @@ struct file *get_empty_filp(void)
 	mutex_init(&f->f_pos_lock);
 	eventpoll_init_file(f);
 	/* f->f_version: 0 */
+#ifdef CONFIG_FD_PID
+	if (current)
+		f->f_pid = get_task_pid(current, PIDTYPE_PID);
+#endif
 	return f;
 
 over:

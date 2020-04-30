@@ -1,0 +1,517 @@
+menu "Core System options"
+comment "VDLinux Core System patch"
+
+menu "Core System Debug Option"
+
+config KPI_SYSTEM_SUPPORT
+	bool "KPI (BP error check) system support"
+	default n
+	depends on SHOW_FAULT_TRACE_INFO
+	help
+	  It write error information(Tick, thread name, PC) when user fault is occured 
+
+config UNHANDLED_IRQ_TRACE_DEBUGGING
+	bool "trace unhandled irq tracing"
+	depends on VD_RELEASE=n
+	default n
+
+config IRQ_TIME
+	bool "IRQ_TIME"
+	default n
+	depends on VD_RELEASE=n
+	depends on UNHANDLED_IRQ_TRACE_DEBUGGING
+	help
+	  It prints the time of irqs
+
+config PRINT_MODULENAME_PM_FAIL
+	bool "PRINT_MODULENAME_PM_FAIL"
+	default y
+	help
+	  It prints module name when pm fail(suspend/resume).
+
+config SCHEDULE_INFO
+	bool "SCHEDULE_INFO"
+	default n
+	depends on VD_RELEASE=n
+	depends on UNHANDLED_IRQ_TRACE_DEBUGGING
+	help
+	  It prints scheduling info for task while dumpstack
+
+config FCOUNT_DEBUG
+	bool "print f_count when umount fail(task info also is printed when CONFIG_FD_PID is enable) "
+	depends on VD_RELEASE=n
+	default n
+
+config OPEN_FILE_CHECKER
+	bool "In case of too many open files, It prints open file information"
+	default y
+	help
+	  It prints open file information.
+	  also if the FD_PID is enabled, open thread information is supported.
+
+config MMC_TIMEOUT
+	bool "MMC_TIMEOUT"
+	default n
+	help
+	  This config stops current mmc request.
+
+config TRACE_SYS_SYNC_FSYNC
+	default n
+	bool "Trace sync/fsync call (access file,thread)"
+	depends on VD_RELEASE=n
+	help
+	  Print file access information and thread name
+	  While sync/fsync is called.
+
+config PM_CRC_CHECK
+	default y
+	bool "CRC checking to check DDR status easily (without PM_CRC_CHECK_AREA_SELECT : Kernel text section)"
+	depends on VD_RELEASE=n
+	depends on PM=y
+
+config PM_CRC_CHECK_AREA_SELECT
+	default n
+	bool "Select CRC check area related with PM_CRC_CHECK function"
+	depends on PM_CRC_CHECK=y
+
+config PM_CRC_CHECK_AREA_START
+	hex "PM CRC check start address (hex)"
+	depends on PM_CRC_CHECK_AREA_SELECT
+
+config PM_CRC_CHECK_AREA_SIZE
+	hex "PM CRC check size (hex)"
+	depends on PM_CRC_CHECK_AREA_SELECT
+
+config MMC_CATCH_STUCK_PROBLEM
+	default n
+	bool "Debug option, trying to do something to catch mmc stuck problem"
+
+config USE_HW_CLOCK_FOR_TRACE
+	bool "Replaces original trace clock with Main chip HW clock"
+	depends on SDP_HW_CLOCK || NVT_HW_CLOCK || NVT_CA53_HW_CLOCK
+	default y
+	help
+	  Originally shed_clock() routine is used for getting clock for tracing.
+	  We replace it with Chip HW clock, which ticks since board is on.
+
+config USE_HW_CLOCK_FOR_USERTRACE
+	bool "Provide trace for user"
+	depends on USE_HW_CLOCK_FOR_TRACE
+	default y
+	help
+	  It provides hw clock for user
+
+config EARLY_TRACING
+	bool "Very early tracing"
+	depends on TRACING_SUPPORT && FTRACE
+	help
+	  Allow early tracing. Originally we can do tracing only when kernel
+	  inits all the memory and devices. This 'early tracing' feature
+	  allows you to trace kernel since first entry point 'start_kernel'.
+	  NOTE: do not forget to enable early event in booting params:
+	  'trace_event=early_event'
+
+config PRINT_GROUP_LEADER_DUMPSTACK
+	bool "print Group Leader Comm on Dumpstack"
+	help
+	  Add print for group leader's comm, if there is different name of thread
+	  between thread group leader and current
+
+config EMRG_SAVE_KLOG
+	bool "Save dmesg to raw partition on OOPs"
+	default y
+	help
+	  Preform dmesg saving in raw-data format to specified partition.
+	  Special low-level function are used to write the data, which are
+	  supposed to be independent from kernel, and supposed to work at
+	  any conditions.
+
+config EMRG_SAVE_KLOG_PARTITION_N
+	int "Which partition should be used for saving emrg dmesg"
+	default 16
+	depends on EMRG_SAVE_KLOG
+	help
+	  Partition /dev/mmcblk0p<this number> will be used to save the dmesg
+	  However, if kernel boot command line includes "KDUMP=(num)" (ex: KDUMP=16),
+	  this number is used for saving emrg dmesg. this config is only used when dtb.bin doesn't include KDUMP option
+
+config PM_PRINT_DRIVER_CALLBACK_START_END
+        bool "Print pm driver callback start and end information"
+        default n
+        help
+         Print pm driver callback start and end information
+	 WARN)
+          it disables ftrace event for device_pm_callback_start/device_pm_callback_end
+	  So, it should be disabled if you need ftrace with this event
+
+config CHECK_SMALL_SOFTLOCKUP
+	default n
+	bool "Print informations before reach softlockup threshold"
+	help
+	 Print information for soft lockup candidates by small threshold(1/4 threshold than softlockup)
+
+config INFO_TASK_FREEZE_FAIL
+	default n
+	bool "Print task and workqueue if freeze is failed"
+	depends on FREEZER
+	help
+	 Print task name and workqueue name if freeze is failed
+
+endmenu # end of "Samsung Core System Debug option" menu
+
+config VD_RELEASE
+	default n
+	bool "Turn on Release mode"
+	help
+	  Set Debug/Release mode (n : Debug / y : Release)
+
+config POWER_SAVING_MODE
+	bool "Power Saving mode"
+	default n
+	help
+	  It supports power saving mode.
+
+config ALWAYS_INSTANT_ON
+	bool "Support Always instant ON"
+	default n
+	help
+	 It supports Always Instant ON
+
+config VD_DEFAULT_LOGLEVEL
+	bool "Set VD default loglevel"
+	default y
+	help
+	 Set default loglevel 5
+
+config BLOCK_STOP_TTY
+	bool "block stop_tty (Ctrl + S)"
+	default y
+	help
+	  Noise from UART can make stop signal. This option blocks stop_tty
+
+config PREVENT_MIN_FREE_BYTES
+	bool "prevent min_free_kbytes setting"
+	default y
+	help
+	  prevent min_free_kbytes setting from user (sysctl)
+
+config MODULE_VER_CHECK_SKIP
+	bool "Module version check skip"
+	default n
+	depends on MODVERSIONS=n
+	help
+	  'PRINT_MODULE_ADDR' option change VERMAGIC_STRING value. (e.g. 1003_192 DEBUG)
+	  so, If you are using different version name, insmod will be failed
+	  even while 'MODVERSION' option is off.
+	  This option skip the checking the VERMAGIC_STRING.
+
+config SQUASHFS_DEBUGGER
+	bool "squashfs debugger v3.0"
+	default y
+	help
+	  Tool for debugging squashfs error.
+	  It is useful even to debug Flash I/O and memory un-safe problem.
+
+config SQUASHFS_DEBUGGER_AUTO_DIAGNOSE
+	bool "squashfs debugger auto diagnose"
+	default y
+	depends on SQUASHFS_DEBUGGER
+	help
+	  Diagnose the cause of squashfs error.
+
+config BUSYLOOP_WHILE_OOPS
+	bool "busyloop while oops"
+	default y
+	help
+	  In case of oops, This option is useful for attach JTAG device.
+
+config MMC_CACHE_OFF
+	bool "Disable mmc cache"
+	default n
+	help
+	  From 3.10 kernel, if mmc has internal cache, set use mmc cache as default.
+	  Therefore, this config can help to turn on/off mmc cache.
+	  If this config has set, mmc *DON'T* use cache which is located inside.
+
+config NOTIFY_FILE_WRITE
+	bool "Enable notify file write"
+	default n
+	help
+	  To verify vdfs authentication feature, we have to know which process really write in Read-Only partition.
+
+config REDUCE_ROOTWAIT_TIME
+	bool "Reduce msleep to rapid responsibility"
+	default n
+	help
+	  Change msleep(100) -> msleep(5)
+	  It provides improved responsibility for waitting root device
+
+config REDUCE_ETH_LINKUP_TIME
+	bool "Reduce delay to rapid ethernet linkup"
+	default n
+	help
+	  Change delay HZ -> HZ / 10 
+	  It provides improved ethernet linkup time
+
+config MMC_CHECK_ENDURANCE
+	bool "Check endurance of mmc by ext_csd[267~269]"
+	default n
+	help
+	  Enable to read ext_csd[267~269] and check endurance.
+	  If it is approached limitation, it will show warn message and make Panic.
+
+config MMC_LIFE_TIME_ESTIMATION
+	bool "Create the file inside the mmc subsystem device"
+	depends on MMC_CHECK_ENDURANCE
+	default y
+	help
+	  This will create a file using sysfs to see the mmc life time estimation register type A.
+	  The code is existed at mmc subsystem, "mmc/card/block.c".
+	  This value can be used to check mmc estimation life time.
+
+config MMC_DEVICE_UNIQUE_ID
+	bool "Provide eMMC unique id through sysfs"
+	default y
+	help
+	  This will create a file using sysfs to see the mmc unique id.
+	  The unique id is created by combination MID/PNM/PSN/MDT in CID Register.
+
+config PRINT_SMC_HISTORY_PRINT
+	bool "print debugging message related SMC info"
+	depends on LOCKUP_DETECTOR
+	default n
+	help
+	  print debugging message related SMC info.
+
+config PROHIBIT_SIG
+	int "Prohibit SIGNAL"
+	default "99"
+	depends on VD_RELEASE=n
+	help
+	  It makes coredump
+
+config CRYPTO_WRAPPER
+	bool "Crypto wrapper (VD hash and RSA)"
+	default y
+	select MPILIB
+	help
+	  This options enables crypto wrapper provides simple hash and rsa
+	  verification function. MPILIB should be enabled for this option.
+
+config BOOTLOADER_ERASE
+	bool "erase bootloader in memory"
+	default n
+	help
+	  During kernel initialization, onboot will be erased in memory
+	  Bootloader have to give TEXT_BASE
+
+config BOOTLOADER_SIZE
+	hex "bootloader size"
+	default 0x20000
+	depends on BOOTLOADER_ERASE
+	help
+	  erase bootloader size
+
+config PRETTY_SHELL
+	bool "Pretty and clean shell output by Ctrl-P"
+	default n
+	depends on TTY
+	help
+	  Usually all VD applications dump their output to common serial
+	  and it is really hell to use shell.
+	  - Pressing Ctrl-P you stop userland flood from all applications,
+	    which do not belong to session which controls the tty.
+	  - Pressing Ctrl-P-P you disable userland flood and kernel printk.
+	  - Pressing Ctrl-P once more time will enable everything again.
+
+config DISABLE_UNNECESSARY_MMC_CODE
+	bool "Disable unnecessary code in mmc rescan for DTV system"
+	default n
+	help
+	  There is unnecessary code in mmc for DTV system
+	  But, it is actually needed for virtual environment (eg. QEMU)
+	  So, need to set it by config
+
+config MMC_TRACE
+	bool "MMC cmd trace"
+	default n
+	depends on (MMC != n && VD_RELEASE = n)
+	help
+	  This is an option for use by developer. This record each MMC cmd
+	  and dump each cmd information.
+	  How to dump : Ctrl+break & a
+
+config MMC_PON_SHORT_ALWAYS
+	bool "Set SHORT Power Off Notification Always to eMMC"
+	default n
+	depends on MMC_BLOCK
+	help
+	  Send Short PON to card
+
+config MINIMAL_CORE
+	bool "Enable Small core dumps"
+	default y
+	depends on (COREDUMP=y && BINFMT_ELF=y)
+	select RSA_API
+	select ZLIB_DEFLATE
+	help
+	  coredump only current task for tracing crashes in Market with security
+	  Will dump only crashed thread info, register context,
+	  File info, stack of crashed thread,
+	  and the areas in heap pointed by registers from r0-r12
+
+ config MINIMAL_CORE_RETAIN
+	bool "Retain first 10 mincore files"
+	default y
+	depends on (MINIMAL_CORE=y)
+	help
+	  When this configuration is enabled, mincore will retain the first
+	  10 files. If 10 files are already created, then this will print
+	  an info to kernel log. This can be turned off, when latest
+	  crash mincore are required
+
+config MINCORE_RLIMIT_NOFILE
+	bool "Enable creating mincore when RLIMIT_NOFILE is exceeded"
+	default n
+	depends on (MINIMAL_CORE=y && FD_PID=y)
+	help
+	  create a mincore when a process crosses RLIMIT_NOFILE
+	  This will create a mincore file which includes context & stack of
+	  all owners (threads) of all file opened.
+	  Mincore with all threads that opened file will be included.
+
+config MINCORE_ANON_VMA
+	bool "Enable recording VMA for anonymous"
+	default n
+	depends on (MINIMAL_CORE=y)
+	help
+	  As mincore does not record heap and stack of thread's,
+	  VMA information are not present, If we need this info, then
+	  we will have to add this information (except contents) to mincore file
+
+config GUESS_VDFS_TYPE
+	bool "guess vdfs fs type: check in the order 4->3->2->1"
+	depends on VDFS1_FS || VDFS2_FS || VDFS3_FS || VDFS4_FS
+	default y
+	help
+	  Try to mount vdfs fs automaticaly. In case if user calls the mount
+	  command with "-t vdfs" option
+
+config DT10_PROFILER
+	bool "DT10 profiler with annotation"
+	default y
+	help
+	  Japan Heartland's annotation profiler DT10 replcing SMT
+
+config SDP_MMC_RDQS_FIXUP
+	bool "sdp mmc needs to be set rdqs value in driver code, differently"
+	default n
+	help
+	  In sdp_mmc driver code, host cannot detect the card.
+	  Hence, this config make the host can detect mmc card in driver code.
+
+config SDP_MMC_EXECUTE_HS400_RDQS_TUNING
+	bool "If sdp mmc uses HS400 mode, it needs to be tuned rdqs value after mmc reset"
+	default n
+	help
+	  In sdp_mmc driver code, if host uses HS400 mode, execute rdqs tuning after the mmc reset.
+	  Hence, this one should be skipped in first boot.
+
+config AARCH32_CACHE_DUMPER
+	bool "Dump cache buffer(AArch32) for debugging purpose"
+	depends on VD_RELEASE=n
+	default n
+	help
+	  It dumps cache buffer of I/D L1 cache and TLB buffer.
+
+config DPM_SHOW_TIME_IN_HWTRACING
+	bool "show coldboot base point and dpm completion time using hw clock log"
+	depends on PM_SLEEP && EARLY_TRACING
+	default n
+	help
+	  It's to show boot baseline and suspend/resume completion time at each stage.
+
+config KEXEC_CSYSTEM
+	bool "Kexec system call for vdlp (EXPERIMENTAL)"
+	depends on (KEXEC && ARM)
+	default y if KEXEC
+	help
+	  kexec on vdlinux platform. Purpose of this is to act same as KEXEC,
+	  but slightly modified for vdlinux, tizen kernel.
+
+config CRASH_DUMP_CSYSTEM
+	bool "Crashdump for vdlp"
+	depends on (CRASH_DUMP && ARM)
+	default y if CRASH_DUMP
+	help
+	  CRASH_DUMP config for vdlinux platform.
+
+config CORESIGHT_AUTO_ENABLE
+	bool "Enable CORESIGHT drivers on boot-up time"
+	depends on CORESIGHT
+	default y if CORESIGHT
+	help
+	  Enable Coresight driverss(ETMv4/TMC) on boot-up time
+
+config CORESIGHT_DUMP_TMC
+	bool "Dump TMC buffer to memory"
+	depends on CORESIGHT
+	default n
+	help
+	  Dump TMC buffer to memory
+
+config FIX_HWCLOCK_VA
+	bool "fix HW_CLOCK_VA when ARM LPAE for alignment issue"
+	depends on ARM_LPAE && SDP_HW_CLOCK
+	default n
+	help
+	  This config resolve the issue when HW_CLOCK_VA is misaligned 
+	  and HW_CLOCK_PA is aligned with 2MB. Note that in LPAE, 
+	  SECTION align unit is 2MB and this config should only be used
+	  before the setup_arch, when the real page table is not made.
+
+config ENABLE_DEBUG_PAGEALLOC_WITHOUT_KERNEL_PARAM
+	bool "set _debug_pagealloc_enabled = true by default if this config set"
+	depends on DEBUG_PAGEALLOC
+	default y if DEBUG_PAGEALLOC
+	help
+          we can enable pagealloc debug feature without setting kernel paramerter 'debug_pagealloc=on'
+
+config PRINTK_REDUCE_CPUID_TIME_CHAR
+        bool " reduce printk cpuid and time character to lighten the burden of uart"
+        depends on PRINTK_CPUID && PRINTK_TIME
+        default y
+        help
+          basically printk include some extra character to print cpuid and time.
+          this make uart busy. so we decide to remove redundent characters like belows
+          old format  : [ <CPU_ID>][   XX.XXXXXX]
+          new format  : [<CPU_ID>-XX.XXXXX]
+
+config PRINT_MODULE_SIZE_WHEN_INSMOD_FAILED
+	bool "print active module's size when insmod is failed because module area is out of space"
+	default y
+        depends on VD_RELEASE=n	
+	help
+	 sometimes we face the below warning message. 
+	 [module allocation for size xxxxxx with align 1 failed: change MODULES_VADDR to increase size.]
+	 to optimze the module size we need to know the module size of 
+	 already installed. 
+	 so when we meet this message this feature will show print_modules() and current mod's name and size.
+
+config PRINTK_PROCESS
+        bool "Show process information on printks"
+        depends on PRINTK
+        help
+          Selecting this option causes process to be
+          included in printk output. Or add printk.process=1 at boot-time.
+
+config DO_RAMDUMP_WHEN_STUCKED_AT_EXCEPTION
+        bool "do ramdump for dubug when stucked at exception routine as crashed cpu sp,fp register"
+        depends on VD_RELEASE=n
+        default n
+        help
+          we often face latch-up haning on exception vector.
+          in this case we are difficult to know where fault is started.
+          this will be helpful to debug in this case like stack corruption,untrusted ddr working issue.
+
+endmenu # end of "Samsung Core System options" menu

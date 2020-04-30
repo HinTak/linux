@@ -88,13 +88,13 @@ int __ext4_journal_stop(const char *where, unsigned int line, handle_t *handle)
 		return 0;
 	}
 
+	err = handle->h_err;
 	if (!handle->h_transaction) {
-		err = jbd2_journal_stop(handle);
-		return handle->h_err ? handle->h_err : err;
+		rc = jbd2_journal_stop(handle);
+		return err ? err : rc;
 	}
 
 	sb = handle->h_transaction->t_journal->j_private;
-	err = handle->h_err;
 	rc = jbd2_journal_stop(handle);
 
 	if (!err)
@@ -128,7 +128,7 @@ handle_t *__ext4_journal_start_reserved(handle_t *handle, unsigned int line,
 	return handle;
 }
 
-static void ext4_journal_abort_handle(const char *caller, unsigned int line,
+void ext4_journal_abort_handle(const char *caller, unsigned int line,
 				      const char *err_fn,
 				      struct buffer_head *bh,
 				      handle_t *handle, int err)

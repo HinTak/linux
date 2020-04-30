@@ -30,6 +30,9 @@
 #include <asm/uaccess.h>
 #include "internal.h"
 
+#define BD_DISK_MAJOR 0xb
+#define CAP_BITS 9
+
 struct bdev_inode {
 	struct block_device bdev;
 	struct inode vfs_inode;
@@ -48,12 +51,21 @@ inline struct block_device *I_BDEV(struct inode *inode)
 }
 EXPORT_SYMBOL(I_BDEV);
 
-static void bdev_write_inode(struct inode *inode)
+static void bdev_write_inode(struct block_device *bdev)
 {
+	struct inode *inode = bdev->bd_inode;
+	int ret;
+
 	spin_lock(&inode->i_lock);
 	while (inode->i_state & I_DIRTY) {
 		spin_unlock(&inode->i_lock);
-		WARN_ON_ONCE(write_inode_now(inode, true));
+		ret = write_inode_now(inode, true);
+		if (ret) {
+			char name[BDEVNAME_SIZE];
+			pr_warn_ratelimited("VFS: Dirty inode writeback failed "
+					    "for block device %s (err=%d).\n",
+					    bdevname(bdev, name), ret);
+		}
 		spin_lock(&inode->i_lock);
 	}
 	spin_unlock(&inode->i_lock);
@@ -729,7 +741,7 @@ static bool bd_may_claim(struct block_device *bdev, struct block_device *whole,
 		return true;	 /* already a holder */
 	else if (bdev->bd_holder != NULL)
 		return false; 	 /* held by someone else */
-	else if (bdev->bd_contains == bdev)
+	else if (whole == bdev)
 		return true;  	 /* is a whole device which isn't held */
 
 	else if (whole->bd_holder == bd_may_claim)
@@ -1240,6 +1252,11 @@ static int __blkdev_get(struct block_device *bdev, fmode_t mode, int for_part)
 			ret = 0;
 			if (bdev->bd_disk->fops->open)
 				ret = bdev->bd_disk->fops->open(bdev, mode);
+
+			if(bdev->bd_disk->major == BD_DISK_MAJOR)
+				bdev->bd_inode->i_size =
+					(loff_t)get_capacity(disk) << CAP_BITS;
+
 			/* the same as first opener case, read comment there */
 			if (bdev->bd_invalidated) {
 				if (!ret)
@@ -1489,7 +1506,7 @@ static void __blkdev_put(struct block_device *bdev, fmode_t mode, int for_part)
 		 * ->release can cause the queue to disappear, so flush all
 		 * dirty data before.
 		 */
-		bdev_write_inode(bdev->bd_inode);
+		bdev_write_inode(bdev);
 	}
 	if (bdev->bd_contains == bdev) {
 		if (disk->fops->release)
@@ -1761,6 +1778,7 @@ EXPORT_SYMBOL(__invalidate_device);
 void iterate_bdevs(void (*func)(struct block_device *, void *), void *arg)
 {
 	struct inode *inode, *old_inode = NULL;
+	struct block_device *bdev;
 
 	spin_lock(&inode_sb_list_lock);
 	list_for_each_entry(inode, &blockdev_superblock->s_inodes, i_sb_list) {
@@ -1785,8 +1803,12 @@ void iterate_bdevs(void (*func)(struct block_device *, void *), void *arg)
 		 */
 		iput(old_inode);
 		old_inode = inode;
+		bdev = I_BDEV(inode);
 
-		func(I_BDEV(inode), arg);
+		mutex_lock(&bdev->bd_mutex);
+		if (bdev->bd_openers)
+			func(bdev, arg);
+		mutex_unlock(&bdev->bd_mutex);
 
 		spin_lock(&inode_sb_list_lock);
 	}

@@ -23,6 +23,50 @@ void __attribute__((weak)) arch_report_meminfo(struct seq_file *m)
 {
 }
 
+typedef void (*print_zram_info_t)(struct seq_file *);
+typedef size_t (*get_zram_used_t)(void);
+
+struct _pt_zram_struct {
+	print_zram_info_t pt_zram_info;
+	spinlock_t pt_zram_lock;
+	get_zram_used_t get_zram_used;
+} pt_zram_struct;
+EXPORT_SYMBOL(pt_zram_struct);
+
+void _pt_zram_info(struct seq_file *m)
+{
+	spin_lock(&pt_zram_struct.pt_zram_lock);
+	if (pt_zram_struct.pt_zram_info)
+		pt_zram_struct.pt_zram_info(m);
+	spin_unlock(&pt_zram_struct.pt_zram_lock);
+}
+
+size_t get_zram_info(void)
+{
+	size_t zram_used = 0;
+
+	spin_lock(&pt_zram_struct.pt_zram_lock);
+	if (pt_zram_struct.get_zram_used)
+		zram_used = pt_zram_struct.get_zram_used();
+	spin_unlock(&pt_zram_struct.pt_zram_lock);
+	return zram_used >> 10;
+}
+
+#ifdef CONFIG_VMALLOCUSED_PLUS
+extern void seq_printk_vmalloc_statistics(struct seq_file *m,
+	struct vmalloc_info *vm_info, struct vmalloc_usedinfo *vm_used);
+
+extern void seq_printk_module_statistics(struct seq_file *m,
+	struct vmalloc_info *vm_info, struct vmalloc_usedinfo *vm_used);
+#else
+extern void seq_printk_vmalloc_statistics(struct seq_file *m,
+	struct vmalloc_info *vm_info, void *vm_used);
+
+extern void seq_printk_module_statistics(struct seq_file *m,
+	struct vmalloc_info *vm_info, void *vm_used);
+#endif
+
+
 static int meminfo_proc_show(struct seq_file *m, void *v)
 {
 	struct sysinfo i;
@@ -131,21 +175,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		"Bounce:         %8lu kB\n"
 		"WritebackTmp:   %8lu kB\n"
 		"CommitLimit:    %8lu kB\n"
-		"Committed_AS:   %8lu kB\n"
-		"VmallocTotal:   %8lu kB\n"
-		"VmallocUsed:    %8lu kB\n"
-		"VmallocChunk:   %8lu kB\n"
-#ifdef CONFIG_MEMORY_FAILURE
-		"HardwareCorrupted: %5lu kB\n"
-#endif
-#ifdef CONFIG_TRANSPARENT_HUGEPAGE
-		"AnonHugePages:  %8lu kB\n"
-#endif
-#ifdef CONFIG_CMA
-		"CmaTotal:       %8lu kB\n"
-		"CmaFree:        %8lu kB\n"
-#endif
-		,
+		"Committed_AS:   %8lu kB\n",
 		K(i.totalram),
 		K(i.freeram),
 		K(available),
@@ -189,10 +219,24 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		K(global_page_state(NR_BOUNCE)),
 		K(global_page_state(NR_WRITEBACK_TEMP)),
 		K(vm_commit_limit()),
-		K(committed),
-		(unsigned long)VMALLOC_TOTAL >> 10,
-		vmi.used >> 10,
-		vmi.largest_chunk >> 10
+		K(committed));
+
+	seq_printk_vmalloc_statistics(m, &vmi, NULL);
+
+	seq_printk_module_statistics(m, &vmi, NULL);
+
+	seq_printf(m,
+		""
+#ifdef CONFIG_MEMORY_FAILURE
+		"HardwareCorrupted: %5lu kB\n"
+#endif
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+		"AnonHugePages:  %8lu kB\n"
+#endif
+#ifdef CONFIG_CMA
+		"CMATotal:  %8lu kB\n"
+		"CMAFree:   %8lu kB\n"
+#endif
 #ifdef CONFIG_MEMORY_FAILURE
 		, atomic_long_read(&num_poisoned_pages) << (PAGE_SHIFT - 10)
 #endif
@@ -207,6 +251,8 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		);
 
 	hugetlb_report_meminfo(m);
+
+	_pt_zram_info(m);
 
 	arch_report_meminfo(m);
 
@@ -229,6 +275,93 @@ static const struct file_operations meminfo_proc_fops = {
 static int __init proc_meminfo_init(void)
 {
 	proc_create("meminfo", 0, NULL, &meminfo_proc_fops);
+	spin_lock_init(&pt_zram_struct.pt_zram_lock);
 	return 0;
 }
 fs_initcall(proc_meminfo_init);
+
+#ifdef CONFIG_VD_MEMINFO
+#include <linux/shmem_fs.h>
+extern void dump_tasks_plus(struct mem_cgroup *mem, struct seq_file *s);
+static void show_kernel_memory(struct seq_file *m)
+{
+	struct sysinfo i;
+	struct vmalloc_usedinfo vmallocused;
+	struct vmalloc_info vmi;
+	long cached;
+
+	si_meminfo(&i);
+
+	cached = global_page_state(NR_FILE_PAGES) -
+		 total_swapcache_pages() - i.bufferram;
+	if (cached < 0)
+		cached = 0;
+
+	memset(&vmallocused, 0, sizeof(struct vmalloc_usedinfo));
+	get_vmallocused(&vmallocused);
+
+	get_vmalloc_info(&vmi);
+
+#define K(x) ((x) << (PAGE_SHIFT - 10))
+	seq_printf(m, "\nKERNEL MEMORY INFO\n");
+	seq_printf(m, "=================\n");
+	seq_printf(m, "Buffers\t\t\t: %7luK\n", K(i.bufferram));
+	seq_printf(m, "Cached\t\t\t: %7luK\n", K(cached));
+	seq_printf(m, "SwapCached\t\t: %7luK\n", K(total_swapcache_pages()));
+	seq_printf(m, "Anonymous Memory\t: %7luK\n",
+		   K(global_page_state(NR_ANON_PAGES)));
+	seq_printf(m, "Slab\t\t\t: %7luK (Unreclaimable : %luK)\n",
+		   K(global_page_state(NR_SLAB_RECLAIMABLE) +
+		     global_page_state(NR_SLAB_UNRECLAIMABLE)),
+		   K(global_page_state(NR_SLAB_UNRECLAIMABLE)));
+	seq_printf(m, "PageTable\t\t: %7luK\n",
+		   K(global_page_state(NR_PAGETABLE)));
+	seq_printf(m, "VmallocUsed\t\t: %7luK (ioremap : %luK)\n",
+		   vmi.used >> 10, vmallocused.ioremapsize >> 10);
+	seq_printf(m, "Kernel Stack\t\t: %7luK\n",
+		   global_page_state(NR_KERNEL_STACK)*(THREAD_SIZE/1024));
+	seq_printf(m, "kernel Total\t\t: %7luK\n", K(i.bufferram) + K(cached)
+		   + K(total_swapcache_pages())
+		   + K(global_page_state(NR_ANON_PAGES))
+		   + K(global_page_state(NR_SLAB_RECLAIMABLE) +
+		       global_page_state(NR_SLAB_UNRECLAIMABLE))
+		   + K(global_page_state(NR_PAGETABLE))
+		   + ((vmi.used>>10) - (vmallocused.ioremapsize>>10))
+		   + global_page_state(NR_KERNEL_STACK)*(THREAD_SIZE/1024));
+
+	seq_printf(m, "MemTotal\t\t: %7luK\n", K(i.totalram));
+	seq_printf(m, "MemTotal-MemFree\t: %7luK\n", K(i.totalram-i.freeram));
+	seq_printf(m, "Unevictable\t\t: %7luK\n",
+		   K(global_page_state(NR_UNEVICTABLE)));
+	seq_printf(m, "Unmapped PageCache\t: %7luK\n",
+		   K(cached-global_page_state(NR_FILE_MAPPED)));
+#undef K
+}
+
+static int vd_meminfo_proc_show(struct seq_file *m, void *v)
+{
+	dump_tasks_plus(NULL, m);
+	show_kernel_memory(m);
+
+	return 0;
+}
+
+static int vd_meminfo_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, vd_meminfo_proc_show, NULL);
+}
+
+static const struct file_operations vd_meminfo_proc_fops = {
+	.open           = vd_meminfo_proc_open,
+	.read           = seq_read,
+	.llseek         = seq_lseek,
+	.release        = single_release,
+};
+
+static int __init proc_vd_meminfo_init(void)
+{
+	proc_create("vd_meminfo", 0, NULL, &vd_meminfo_proc_fops);
+	return 0;
+}
+module_init(proc_vd_meminfo_init);
+#endif

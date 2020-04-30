@@ -315,6 +315,14 @@ static int usb_stor_control_thread(void * __us)
 		/* lock the device pointers */
 		mutex_lock(&(us->dev_mutex));
 
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+                //patch JAN-27-2007 for inhancement disconnect speed
+                 if (test_bit(US_FLIDX_CONNRESET, &us->dflags)) {
+                        US_DEBUGPX("-- exiting\n");
+                        mutex_unlock(&us->dev_mutex);
+                        break;
+                }
+#endif
 		/* lock access to the state */
 		scsi_lock(host);
 
@@ -576,6 +584,9 @@ static int get_device_info(struct us_data *us, const struct usb_device_id *id,
 		&us->pusb_intf->cur_altsetting->desc;
 	struct device *pdev = &us->pusb_intf->dev;
 
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+        int retval = 0;  //patch JAN-25-2007
+#endif
 	/* Store the entries */
 	us->unusual_dev = unusual_dev;
 	us->subclass = (unusual_dev->useProtocol == USB_SC_DEVICE) ?
@@ -611,11 +622,13 @@ static int get_device_info(struct us_data *us, const struct usb_device_id *id,
 	 * from the unusual_devs.h table.
 	 */
 	if (id->idVendor || id->idProduct) {
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 		static const char *msgs[3] = {
 			"an unneeded SubClass entry",
 			"an unneeded Protocol entry",
 			"unneeded SubClass and Protocol entries"};
 		struct usb_device_descriptor *ddesc = &dev->descriptor;
+#endif
 		int msg = -1;
 
 		if (unusual_dev->useProtocol != USB_SC_DEVICE &&
@@ -624,6 +637,7 @@ static int get_device_info(struct us_data *us, const struct usb_device_id *id,
 		if (unusual_dev->useTransport != USB_PR_DEVICE &&
 			us->protocol == idesc->bInterfaceProtocol)
 			msg += 2;
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 		if (msg >= 0 && !(us->fflags & US_FL_NEED_OVERRIDE))
 			dev_notice(pdev, "This device "
 					"(%04x,%04x,%04x S %02x P %02x)"
@@ -639,8 +653,50 @@ static int get_device_info(struct us_data *us, const struct usb_device_id *id,
 					idesc->bInterfaceProtocol,
 					msgs[msg],
 					utsname()->release);
+#endif
 	}
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+                 /* Read the device's string descriptors */
+                 //patch JAN-25-2007
+                 if (dev->descriptor.iManufacturer)
+                        retval = usb_string(dev, dev->descriptor.iManufacturer,
+                                   us->vendor, sizeof(us->vendor));
+                // patch JAN-25-2007 for disconnect speed inhancement
+                 if(retval == -ECONNRESET)
+                        goto readDesEnd;
+                if (dev->descriptor.iProduct)
+                        retval = usb_string(dev, dev->descriptor.iProduct,
+                                   us->product, sizeof(us->product));
+                // patch JAN-25-2007 for disconnect speed inhancement
+                if(retval == -ECONNRESET)
+                        goto readDesEnd;
+                if (dev->descriptor.iSerialNumber)
+                        retval = usb_string(dev, dev->descriptor.iSerialNumber,
+                                   us->serial, sizeof(us->serial));
 
+readDesEnd:
+                /* Use the unusual_dev strings if the device didn't provide them */
+		 if (strlen(us->vendor) == 0) {
+                        if (unusual_dev->vendorName)
+                                strlcpy(us->vendor, unusual_dev->vendorName,
+                                        sizeof(us->vendor));
+                        else
+                                strlcpy(us->vendor, "Unknown",
+                                        sizeof(us->vendor));
+                }
+                if (strlen(us->product) == 0) {
+                        if (unusual_dev->productName)
+                                strlcpy(us->product, unusual_dev->productName,
+                                        sizeof(us->product));
+                        else
+                                strlcpy(us->product, "Unknown",
+                                        sizeof(us->product));
+                }
+                if (strlen(us->serial) == 0)
+                        strlcpy(us->serial, "None",
+                                sizeof(us->serial));
+                US_DEBUGPX("Vendor: %s,  Product: %s\n", us->vendor, us->product);
+#endif
 	return 0;
 }
 

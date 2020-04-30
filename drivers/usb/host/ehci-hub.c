@@ -29,6 +29,10 @@
 /*-------------------------------------------------------------------------*/
 #include <linux/usb/otg.h>
 
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+#include "NT72668.h"
+#include <linux/usb/nvt_usb_phy.h>
+#endif
 #define	PORT_WAKE_BITS	(PORT_WKOC_E|PORT_WKDISC_E|PORT_WKCONN_E)
 
 #ifdef	CONFIG_PM
@@ -564,10 +568,16 @@ static int check_reset_complete (
 	int		port_status
 ) {
 	if (!(port_status & PORT_CONNECT))
+	{
+		ehci->phy_device_detect_fail++;
+#if defined(CONFIG_USB_EW_FEATURE)
+		COUNT(ehci->stats.device_detect_fails);
+#endif
 		return port_status;
-
+	}
 	/* if reset finished and it's still not enabled -- handoff */
 	if (!(port_status & PORT_PE)) {
+		ehci->handshake_fail_cnt++;	/* ij.jang, just for monitoring */
 
 		/* with integrated TT, there's nobody to hand it to! */
 		if (ehci_is_TDI(ehci)) {
@@ -671,6 +681,16 @@ ehci_hub_status_data (struct usb_hcd *hcd, char *buf)
 			    buf [1] |= 1 << (i - 7);
 			status = STS_PCD;
 		}
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+		if ((temp & mask) == 0 && test_bit(i+1, &hcd->porcd)
+				&& status != STS_PCD){
+			if (i < 7)
+				buf[0] |= 1 << (i + 1);
+			else
+				buf[1] |= 1 << (i - 7);
+			status = STS_PCD;
+		}
+#endif
 	}
 
 	/* If a resume is in progress, make sure it can finish */
@@ -874,6 +894,11 @@ int ehci_hub_control(
 	unsigned long	flags;
 	int		retval = 0;
 	unsigned	selector;
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+	struct nvt_u2_phy *pphy;
+
+	pphy = container_of(hcd->usb_phy, struct nvt_u2_phy, u_phy);
+#endif
 
 	/*
 	 * FIXME:  support SetPortFeatures USB_PORT_FEAT_INDICATOR.
@@ -1058,14 +1083,29 @@ int ehci_hub_control(
 			status |= USB_PORT_STAT_C_RESET << 16;
 			ehci->reset_done [wIndex] = 0;
 
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+			pphy->set_phy_reg(pphy, 0x34,
+				pphy->get_phy_reg(pphy, 0x34) & (~0x7f));
+			pphy->get_phy_reg(pphy, 0x34);
+#endif
 			/* force reset to complete */
 			ehci_writel(ehci, temp & ~(PORT_RWC_BITS | PORT_RESET),
 					status_reg);
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+			/* for SAMUX BT issue, we leave phy status as normal */
+			pphy->set_phy_reg(pphy, 0xc8, 0x0);
+			pphy->get_phy_reg(pphy, 0xc8);
+#endif
 			/* REVISIT:  some hardware needs 550+ usec to clear
 			 * this bit; seems too long to spin routinely...
 			 */
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+			retval = ehci_handshake(ehci, status_reg,
+					PORT_RESET, 0, 3000);
+#else
 			retval = ehci_handshake(ehci, status_reg,
 					PORT_RESET, 0, 1000);
+#endif
 			if (retval != 0) {
 				ehci_err (ehci, "port %d reset error %d\n",
 					wIndex + 1, retval);
@@ -1096,11 +1136,16 @@ int ehci_hub_control(
 		if (temp & PORT_CONNECT) {
 			status |= USB_PORT_STAT_CONNECTION;
 			// status may be from integrated TT
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+			status |= ehci_port_speed(ehci, ehci_readl(ehci,
+				(__u32 __iomem *) ((hcd->regs)+0x80)));
+#else
 			if (ehci->has_hostpc) {
 				temp1 = ehci_readl(ehci, hostpc_reg);
 				status |= ehci_port_speed(ehci, temp1);
 			} else
 				status |= ehci_port_speed(ehci, temp);
+#endif
 		}
 		if (temp & PORT_PE)
 			status |= USB_PORT_STAT_ENABLE;
@@ -1116,16 +1161,29 @@ int ehci_hub_control(
 				set_bit(wIndex, &ehci->port_c_suspend);
 			usb_hcd_end_port_resume(&hcd->self, wIndex);
 		}
-
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+		if (temp & PORT_OC && !ignore_oc)
+#else
 		if (temp & PORT_OC)
+#endif
 			status |= USB_PORT_STAT_OVERCURRENT;
 		if (temp & PORT_RESET)
 			status |= USB_PORT_STAT_RESET;
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 		if (temp & PORT_POWER)
+#endif
 			status |= USB_PORT_STAT_POWER;
 		if (test_bit(wIndex, &ehci->port_c_suspend))
 			status |= USB_PORT_STAT_C_SUSPEND << 16;
 
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+		/* clear flag for SAMUX BT issue */
+		if (!(temp & PORT_CONNECT) && (hcd->nvt_flag != 0)) {
+			pphy->set_phy_reg(pphy, 0xc8, 0x0);
+			pphy->get_phy_reg(pphy, 0xc8);
+			hcd->nvt_flag = 0;
+		}
+#endif
 		if (status & ~0xffff)	/* only if wPortChange is interesting */
 			dbg_port(ehci, "GetStatus", wIndex + 1, temp);
 		put_unaligned_le32(status, buf);
@@ -1199,6 +1257,10 @@ int ehci_hub_control(
 		case USB_PORT_FEAT_RESET:
 			if (temp & (PORT_SUSPEND|PORT_RESUME))
 				goto error;
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+			if (!(temp & PORT_CONNECT))
+				goto disconnect;
+#endif
 			/* line status bits may report this as low speed,
 			 * which can be fine if this root hub has a
 			 * transaction translator built in.
@@ -1206,13 +1268,22 @@ int ehci_hub_control(
 			if ((temp & (PORT_PE|PORT_CONNECT)) == PORT_CONNECT
 					&& !ehci_is_TDI(ehci)
 					&& PORT_USB11 (temp)) {
+				ehci->handshake_fail_cnt++;
 				ehci_dbg (ehci,
 					"port %d low speed --> companion\n",
 					wIndex + 1);
 				temp |= PORT_OWNER;
 			} else {
+
+				ehci_dbg(ehci, "port %d reset\n", wIndex + 1);
+				if (ehci->has_synopsys_reset_bug) {
+					temp &= ~PORT_PE;
+					ehci_writel(ehci, temp, status_reg);
+					temp |= PORT_RESET;
+				} else {
 				temp |= PORT_RESET;
 				temp &= ~PORT_PE;
+				}
 
 				/*
 				 * caller must wait, then call GetPortStatus
@@ -1221,7 +1292,29 @@ int ehci_hub_control(
 				ehci->reset_done [wIndex] = jiffies
 						+ msecs_to_jiffies (50);
 			}
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+		pphy->set_phy_reg(pphy, 0x34,
+			pphy->get_phy_reg(pphy, 0x34) | 0x8);
+		/* for SAMUX BT issue, we fix phy status */
+		if (hcd->nvt_flag != 0) {
+			if (hcd->nvt_flag == USB_SPEED_LOW) {
+				pphy->set_phy_reg(pphy, 0xcc, 0x80);
+				if (pphy->low_speed_high_temp_wk) {
+					/* LS high temperature  workaround */
+					pphy->set_phy_reg(pphy, 0xd4, 0xf8);
+					pphy->set_phy_reg(pphy, 0xd0, 0xff);
+				}
+			} else
+				pphy->set_phy_reg(pphy, 0xcc, 0x40);
+			pphy->set_phy_reg(pphy, 0xc8, 0xc0);
+			pphy->get_phy_reg(pphy, 0xc8);
+		}
+#endif
 			ehci_writel(ehci, temp, status_reg);
+#if defined(CONFIG_USB_NVT_EHCI_HCD)
+			if (hcd->nvt_flag != 0)
+				pphy->set_phy_reg(pphy, 0xcc, 0x0);
+#endif
 			break;
 
 		/* For downstream facing ports (these):  one hub port is put
@@ -1276,6 +1369,10 @@ int ehci_hub_control(
 error:
 		/* "stall" on error */
 		retval = -EPIPE;
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+disconnect:
+		retval = -ENOTCONN;
+#endif
 	}
 error_exit:
 	spin_unlock_irqrestore (&ehci->lock, flags);
@@ -1286,10 +1383,27 @@ EXPORT_SYMBOL_GPL(ehci_hub_control);
 static void ehci_relinquish_port(struct usb_hcd *hcd, int portnum)
 {
 	struct ehci_hcd		*ehci = hcd_to_ehci(hcd);
-
+#if	defined(CONFIG_ARCH_SDP1404)
+	u32 	temp = 0;
+	enum sdp_board bd_type;
+#endif
 	if (ehci_is_TDI(ehci))
 		return;
+#if	defined(CONFIG_ARCH_SDP1404)
+
+	bd_type = get_sdp_board_type();
+	if (bd_type == SDP_BOARD_AV) set_owner(ehci, --portnum, PORT_OWNER);
+	else
+	{
+		temp = ehci_readl(ehci, &ehci->regs->port_status[portnum - 1]);
+		temp &=~PORT_OWNER;
+		ehci_writel(ehci, temp,&ehci->regs->port_status[portnum - 1]);
+		ehci_err (ehci, "PORT_OWNER set pass 0x%x\n",ehci_readl(ehci, &ehci->regs->port_status[portnum - 1]));
+	}
+
+#else
 	set_owner(ehci, --portnum, PORT_OWNER);
+#endif
 }
 
 static int ehci_port_handed_over(struct usb_hcd *hcd, int portnum)

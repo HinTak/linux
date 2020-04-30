@@ -431,6 +431,37 @@ unsigned long reclaim_clean_pages_from_list(struct zone *zone,
 #define ALLOC_HIGH		0x20 /* __GFP_HIGH set */
 #define ALLOC_CPUSET		0x40 /* check for correct cpuset */
 #define ALLOC_CMA		0x80 /* allow allocations from CMA areas */
-#define ALLOC_FAIR		0x100 /* fair zone allocation */
 
+#ifdef CONFIG_CMA
+# ifdef CONFIG_CMA_APP_ALLOC
+#include <linux/sched.h>
+/* Returns true if current task can allocate from CMA areas */
+static inline bool cma_alloc_allowed(void)
+{
+	if (current->cma_alloc)
+		return true;
+
+	return false;
+}
+# else
+static inline bool cma_alloc_allowed(void)
+{
+	return true;
+}
+# endif /* CONFIG_CMA_APP_ALLOC */
+/* Used for proper zone watermarks calculation */
+static inline int alloc_cma(gfp_t gfp_mask)
+{
+	if (cma_alloc_allowed() &&
+			gfpflags_to_migratetype(gfp_mask) == MIGRATE_MOVABLE)
+		return ALLOC_CMA;
+
+	return 0;
+}
+#else
+static inline int alloc_cma(gfp_t gfp_mask)
+{
+	return 0;
+}
+#endif /* CONFIG_CMA */
 #endif	/* __MM_INTERNAL_H */

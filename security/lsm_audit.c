@@ -31,6 +31,8 @@
 #include <linux/sctp.h>
 #include <linux/lsm_audit.h>
 
+#define MOUNT_POINT "/<mount_point>"
+
 /**
  * ipv4_skb_to_auditdata : fill auditdata from skb
  * @skb : the skb
@@ -211,7 +213,19 @@ static inline void print_ipv4_addr(struct audit_buffer *ab, __be32 addr,
 static void dump_common_audit_data(struct audit_buffer *ab,
 				   struct common_audit_data *a)
 {
+	struct task_struct *tsk = current;
 	char comm[sizeof(current->comm)];
+	int p_pid = 0;
+	char p_comm[TASK_COMM_LEN+1] = "_";
+
+	rcu_read_lock();
+	if (tsk->real_parent != NULL) {
+		p_pid = tsk->real_parent->group_leader->pid;
+		strncpy(p_comm,
+				tsk->real_parent->group_leader->comm,
+				TASK_COMM_LEN);
+	}
+	rcu_read_unlock();
 
 	/*
 	 * To keep stack sizes in check force programers to notice if they
@@ -219,6 +233,9 @@ static void dump_common_audit_data(struct audit_buffer *ab,
 	 * as an example of how to deal with large data.
 	 */
 	BUILD_BUG_ON(sizeof(a->u) > sizeof(void *)*2);
+
+	audit_log_format(ab, " ppid=%d ppid_comm=", p_pid);
+	audit_log_untrustedstring(ab, p_comm);
 
 	audit_log_format(ab, " pid=%d comm=", task_pid_nr(current));
 	audit_log_untrustedstring(ab, memcpy(comm, current->comm, sizeof(comm)));
@@ -247,9 +264,24 @@ static void dump_common_audit_data(struct audit_buffer *ab,
 	}
 	case LSM_AUDIT_DATA_DENTRY: {
 		struct inode *inode;
+		char *tmp, *fpath;
 
 		audit_log_format(ab, " name=");
 		audit_log_untrustedstring(ab, a->u.dentry->d_name.name);
+
+		tmp = kmalloc(PATH_MAX, GFP_KERNEL);
+		if (tmp) {
+			fpath = dentry_path(a->u.dentry, tmp, PAGE_SIZE);
+			if (IS_ERR(fpath))
+				fpath = (char *)a->u.dentry->d_name.name;
+			else if (fpath-tmp >= 14) {
+				fpath -= 14;
+				strncpy(fpath, MOUNT_POINT, 14);
+			}
+			audit_log_format(ab, " path=");
+			audit_log_untrustedstring(ab, fpath);
+			kfree(tmp);
+		}
 
 		inode = d_backing_inode(a->u.dentry);
 		if (inode) {
@@ -262,15 +294,31 @@ static void dump_common_audit_data(struct audit_buffer *ab,
 	case LSM_AUDIT_DATA_INODE: {
 		struct dentry *dentry;
 		struct inode *inode;
+		char *tmp, *fpath;
 
 		inode = a->u.inode;
 		dentry = d_find_alias(inode);
 		if (dentry) {
 			audit_log_format(ab, " name=");
 			audit_log_untrustedstring(ab,
-					 dentry->d_name.name);
+					dentry->d_name.name);
+
+			tmp = kmalloc(PATH_MAX, GFP_KERNEL);
+			if (tmp) {
+				fpath = dentry_path(dentry, tmp, PAGE_SIZE);
+				if (IS_ERR(fpath))
+					fpath = (char *)dentry->d_name.name;
+				else if (fpath-tmp >= 14) {
+					fpath -= 14;
+					strncpy(fpath, MOUNT_POINT, 14);
+				}
+				audit_log_format(ab, " path=");
+				audit_log_untrustedstring(ab, fpath);
+				kfree(tmp);
+			}
 			dput(dentry);
 		}
+
 		audit_log_format(ab, " dev=");
 		audit_log_untrustedstring(ab, inode->i_sb->s_id);
 		audit_log_format(ab, " ino=%lu", inode->i_ino);

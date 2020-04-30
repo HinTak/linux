@@ -520,9 +520,80 @@ ssize_t __kernel_write(struct file *file, const char *buf, size_t count, loff_t 
 
 EXPORT_SYMBOL(__kernel_write);
 
+#ifdef CONFIG_NOTIFY_FILE_WRITE
+#include <linux/genhd.h>
+#include <linux/root_dev.h>
+struct dentry *notify_write_prev_dentry = NULL;
+
+#ifdef CONFIG_DEBUG_FS
+#include <linux/debugfs.h>
+static u32 is_notify_wr_access = 1;
+
+static int __init init_notify_wr_acc_debugfs(void)
+{
+        debugfs_create_bool("notify_write_access", 0644, NULL,
+                        &is_notify_wr_access);
+        return 0;
+}
+late_initcall(init_notify_wr_acc_debugfs);
+#endif
+
+void notify_write_access(struct super_block *sb, struct dentry *dentry)
+{
+        const char *blk_name = sb->s_id;
+        char *tmp;
+        const char *fpath;
+        struct inode *inode = dentry->d_inode;
+
+#ifdef CONFIG_DEBUG_FS
+        if (!is_notify_wr_access)
+                return;
+#endif
+
+	if (!sb->s_bdev || (sb->s_bdev->bd_dev != ROOT_DEV) || !(sb->s_flags & MS_RDONLY))
+                return;
+
+        if (notify_write_prev_dentry == dentry)
+                return;
+
+        // if FIFO mode, No error
+        if( inode && S_ISFIFO(inode->i_mode) )
+                return;
+
+        notify_write_prev_dentry = dentry;
+
+        tmp = (char *) __get_free_page(GFP_TEMPORARY);
+        if (!tmp) {
+                pr_err("%s:%d Not enough memory to print full path",
+                                __FILE__, __LINE__);
+                fpath = dentry->d_name.name;
+        } else {
+                fpath = dentry_path(dentry, tmp, PAGE_SIZE);
+                if (IS_ERR(fpath)) {
+                        pr_err("%s:%d Can not print full path due to err %ld",
+                                        __FILE__, __LINE__, PTR_ERR(fpath));
+                        fpath = dentry->d_name.name;
+                }
+        }
+
+        pr_err("Prohibited-write: file \"%s\" <%s> is modified by "
+                        "%s PID=%d; parent is %s PID=%d\n",
+                        fpath, blk_name,
+                        current->comm, task_pid_nr(current),
+                        current->parent->comm, task_pid_nr(current->parent));
+
+        if (tmp)
+                free_page((unsigned long)tmp);
+}
+#endif
+
 ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_t *pos)
 {
 	ssize_t ret;
+
+#ifdef CONFIG_NOTIFY_FILE_WRITE
+	notify_write_access(file->f_mapping->host->i_sb, file->f_path.dentry);
+#endif
 
 	if (!(file->f_mode & FMODE_WRITE))
 		return -EBADF;

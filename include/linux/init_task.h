@@ -156,6 +156,13 @@ extern struct task_group root_task_group;
 # define INIT_VTIME(tsk)
 #endif
 
+#ifdef CONFIG_CMA_APP_ALLOC
+# define INIT_CMA_ALLOC						\
+	.cma_alloc = false,
+#else
+# define INIT_CMA_ALLOC
+#endif
+
 #define INIT_TASK_COMM "swapper"
 
 #ifdef CONFIG_RT_MUTEXES
@@ -254,6 +261,7 @@ extern struct task_group root_task_group;
 	INIT_TASK_RCU_PREEMPT(tsk)					\
 	INIT_TASK_RCU_TASKS(tsk)					\
 	INIT_CPUSET_SEQ(tsk)						\
+	INIT_CMA_ALLOC							\
 	INIT_RT_MUTEXES(tsk)						\
 	INIT_VTIME(tsk)							\
 	INIT_NUMA_BALANCING(tsk)					\

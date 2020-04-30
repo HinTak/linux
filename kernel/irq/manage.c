@@ -180,7 +180,7 @@ irq_get_pending(struct cpumask *mask, struct irq_desc *desc) { }
 #endif
 
 int irq_do_set_affinity(struct irq_data *data, const struct cpumask *mask,
-			bool force)
+			bool force, bool backup)
 {
 	struct irq_desc *desc = irq_data_to_desc(data);
 	struct irq_chip *chip = irq_data_get_irq_chip(data);
@@ -193,6 +193,8 @@ int irq_do_set_affinity(struct irq_data *data, const struct cpumask *mask,
 		cpumask_copy(data->affinity, mask);
 	case IRQ_SET_MASK_OK_NOCOPY:
 		irq_set_thread_affinity(desc);
+		if (backup)
+			backup_irq_affinity(data->irq, mask);
 		ret = 0;
 	}
 
@@ -210,7 +212,7 @@ int irq_set_affinity_locked(struct irq_data *data, const struct cpumask *mask,
 		return -EINVAL;
 
 	if (irq_can_move_pcntxt(data)) {
-		ret = irq_do_set_affinity(data, mask, force);
+		ret = irq_do_set_affinity(data, mask, force, true);
 	} else {
 		irqd_set_move_pending(data);
 		irq_copy_pending(desc, mask);
@@ -358,7 +360,7 @@ setup_affinity(unsigned int irq, struct irq_desc *desc, struct cpumask *mask)
 		if (cpumask_intersects(mask, nodemask))
 			cpumask_and(mask, mask, nodemask);
 	}
-	irq_do_set_affinity(&desc->irq_data, mask, false);
+	irq_do_set_affinity(&desc->irq_data, mask, false, true);
 	return 0;
 }
 #else

@@ -19,8 +19,15 @@
 #include <linux/idr.h>
 #include <linux/log2.h>
 #include <linux/pm_runtime.h>
+#include <linux/freezer.h>
 
 #include "blk.h"
+
+#ifdef CONFIG_FS_SEL_READAHEAD
+extern bool create_readahead_proc(const char *name);
+extern void remove_readahead_proc(const char *name);
+extern bool get_readahead_entry(const char *name);
+#endif
 
 static DEFINE_MUTEX(block_class_lock);
 struct kobject *block_depr;
@@ -530,6 +537,10 @@ static void register_disk(struct gendisk *disk)
 		}
 	}
 
+#ifdef CONFIG_FS_SEL_READAHEAD
+	create_readahead_proc(dev_name(ddev));
+#endif
+
 	/*
 	 * avoid probable deadlock caused by allocating memory with
 	 * GFP_KERNEL in runtime_resume callback of its all ancestor
@@ -648,6 +659,10 @@ void del_gendisk(struct gendisk *disk)
 	}
 	disk_part_iter_exit(&piter);
 
+#ifdef CONFIG_FS_SEL_READAHEAD
+	remove_readahead_proc(dev_name(disk_to_dev(disk)));
+#endif
+
 	invalidate_partition(disk, 0);
 	set_capacity(disk, 0);
 	disk->flags &= ~GENHD_FL_UP;
@@ -668,6 +683,24 @@ void del_gendisk(struct gendisk *disk)
 	device_del(disk_to_dev(disk));
 }
 EXPORT_SYMBOL(del_gendisk);
+
+#ifdef CONFIG_FS_SEL_READAHEAD
+bool disk_name_from_dev(dev_t dev)
+{
+	struct block_device *bdev = bdget(dev);
+	char buff[BDEVNAME_SIZE] = {0};
+	bool pstate = false;
+	if (bdev) {
+		if (MAJOR(dev)) {
+			bdevname(bdev, buff);
+			pstate = get_readahead_entry(buff);
+		}
+		bdput(bdev);
+	}
+        return pstate;
+}
+EXPORT_SYMBOL(disk_name_from_dev);
+#endif
 
 /**
  * get_gendisk - get partitioning information for a given device
@@ -1374,7 +1407,20 @@ int invalidate_partition(struct gendisk *disk, int partno)
 	int res = 0;
 	struct block_device *bdev = bdget_disk(disk, partno);
 	if (bdev) {
-		fsync_bdev(bdev);
+		if (MAJOR(bdev->bd_dev) == SCSI_DISK0_MAJOR) {
+			if (!check_freezing()) {
+				if (partno)
+					mutex_lock(&bdev->bd_mutex);
+
+				if (bdev->bd_openers)
+					fsync_bdev(bdev);
+
+				if (partno)
+					mutex_unlock(&bdev->bd_mutex);
+			}
+		} else
+			fsync_bdev(bdev);
+
 		res = __invalidate_device(bdev, true);
 		bdput(bdev);
 	}

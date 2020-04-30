@@ -614,7 +614,7 @@ KBUILD_CFLAGS	+= $(call cc-option,-fno-delete-null-pointer-checks,)
 ifdef CONFIG_CC_OPTIMIZE_FOR_SIZE
 KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,maybe-uninitialized,)
 else
-KBUILD_CFLAGS	+= -O2
+KBUILD_CFLAGS	+= -O2 $(call cc-disable-warning,maybe-uninitialized,)
 endif
 
 # Tell gcc to never replace conditional load with a non-conditional one
@@ -713,6 +713,8 @@ else
 KBUILD_CFLAGS	+= -g
 endif
 KBUILD_AFLAGS	+= -Wa,-gdwarf-2
+else
+KBUILD_CFLAGS	+= -g
 endif
 ifdef CONFIG_DEBUG_INFO_DWARF4
 KBUILD_CFLAGS	+= $(call cc-option, -gdwarf-4,)
@@ -761,6 +763,11 @@ KBUILD_CFLAGS	+= $(call cc-option,-fno-strict-overflow)
 
 # conserve stack if available
 KBUILD_CFLAGS   += $(call cc-option,-fconserve-stack)
+
+# disallow warnings
+KBUILD_CFLAGS   += $(call cc-option,-Wno-unused-function)
+KBUILD_CFLAGS   += $(call cc-option,-Wno-unused-variable)
+KBUILD_CFLAGS   += $(call cc-option,-Werror)
 
 # disallow errors like 'EXPORT_GPL(foo);' with missing header
 KBUILD_CFLAGS   += $(call cc-option,-Werror=implicit-int)
@@ -885,6 +892,15 @@ export mod_sign_cmd
 
 ifeq ($(KBUILD_EXTMOD),)
 core-y		+= kernel/ mm/ fs/ ipc/ security/ crypto/ block/
+
+
+#for t2ddebugd
+T2DDBGINCLUDE     := -Ikernel/t2ddebugd\
+		-Ikernel/t2ddebugd/include \
+		-Ikernel/t2ddebugd/include/t2ddebugd
+
+LINUXINCLUDE    += $(T2DDBGINCLUDE)
+export LINUXINCLUDE
 
 vmlinux-dirs	:= $(patsubst %/,%,$(filter %/, $(init-y) $(init-m) \
 		     $(core-y) $(core-m) $(drivers-y) $(drivers-m) \

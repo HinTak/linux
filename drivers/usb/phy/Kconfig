@@ -213,4 +213,13 @@ config USB_ULPI_VIEWPORT
 	  Provides read/write operations to the ULPI phy register set for
 	  controllers with a viewport register (e.g. Chipidea/ARC controllers).
 
+config NVT_USB2PHY
+	tristate "NVT USB 2.0 PHY controller Driver"
+	depends on PLAT_NOVATEK && USB_NVT_EHCI_HCD
+	select USB_PHY
+	default y
+	help
+	  Enable this to support NVT USB 2.0 (High Speed) PHY controller
+	  driver for NVT SoCs.
+
 endmenu

@@ -28,6 +28,7 @@
 #include <linux/slab.h>
 #include <linux/dmi.h>
 #include <linux/dma-mapping.h>
+#include <soc/sdp/soc.h>
 
 #include "xhci.h"
 #include "xhci-trace.h"
@@ -3889,6 +3890,45 @@ static int xhci_setup_device(struct usb_hcd *hcd, struct usb_device *udev,
 	case COMP_TX_ERR:
 		dev_warn(&udev->dev, "Device not responding to setup %s.\n", act);
 		ret = -EPROTO;
+
+#ifdef CONFIG_ARCH_SDP
+		if( udev->speed <= USB_SPEED_HIGH 
+			&& soc_is_jazzm() 
+			&& ++xhci->cnt_txerr_setaddr_usb2 > SET_ADDR_MAXCHK_CONT )
+		{	
+			struct usb_device *par = udev->parent;
+
+			/* except root-hub */
+			if( par != NULL && par->parent != NULL ) {
+				int ctrl_ret = 0;
+				dev_warn(&udev->dev
+					,"Send CTRL. SUSPEND to Device.\n");
+				
+				ctrl_ret = usb_control_msg(
+					par,usb_sndctrlpipe(par, 0),
+					USB_REQ_SET_FEATURE,USB_RT_PORT
+					,USB_PORT_FEAT_SUSPEND,udev->portnum,
+					NULL, 0, 1000);
+				if( ctrl_ret < 0 ) {
+					dev_warn(&udev->dev,"Failed SUSPEND.\n");
+				}
+				
+				msleep(30);
+
+				ctrl_ret = usb_control_msg(
+					par, usb_sndctrlpipe(par, 0),
+					USB_REQ_CLEAR_FEATURE, USB_RT_PORT
+					,USB_PORT_FEAT_SUSPEND, udev->portnum,
+				NULL, 0, 1000);
+				if( ctrl_ret < 0 ) {
+					dev_warn(&udev->dev
+						,"Failed Clear-SUSPEND.\n");
+				}
+			}
+
+			xhci->cnt_txerr_setaddr_usb2 = 0;
+		}
+#endif		
 		break;
 	case COMP_DEV_ERR:
 		dev_warn(&udev->dev,
@@ -5006,6 +5046,14 @@ MODULE_LICENSE("GPL");
 
 static int __init xhci_hcd_init(void)
 {
+	int retval;
+	
+	retval = xhci_plat_init();
+	if (retval < 0) {
+		printk(KERN_DEBUG "Problem registering platform driver.");
+		goto unreg_pci;
+	}
+
 	/*
 	 * Check the compiler generated sizes of structures that must be laid
 	 * out in specific ways for hardware access.
@@ -5024,13 +5072,17 @@ static int __init xhci_hcd_init(void)
 	/* xhci_run_regs has eight fields and embeds 128 xhci_intr_regs */
 	BUILD_BUG_ON(sizeof(struct xhci_run_regs) != (8+8*128)*32/8);
 	return 0;
+unreg_pci:
+	return retval;
 }
 
 /*
  * If an init function is provided, an exit function must also be provided
  * to allow module unload.
  */
-static void __exit xhci_hcd_fini(void) { }
+static void __exit xhci_hcd_fini(void) {
+	xhci_plat_exit(); 
+}
 
 module_init(xhci_hcd_init);
 module_exit(xhci_hcd_fini);

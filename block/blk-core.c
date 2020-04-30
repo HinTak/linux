@@ -111,6 +111,9 @@ void blk_rq_init(struct request_queue *q, struct request *rq)
 	rq->start_time = jiffies;
 	set_start_time_ns(rq);
 	rq->part = NULL;
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	rq->cmd_flags &= ~REQ_DIRECTIO;
+#endif
 }
 EXPORT_SYMBOL(blk_rq_init);
 
@@ -552,7 +555,7 @@ void blk_cleanup_queue(struct request_queue *q)
 		q->queue_lock = &q->__queue_lock;
 	spin_unlock_irq(lock);
 
-	bdi_destroy(&q->backing_dev_info);
+	bdi_unregister(&q->backing_dev_info);
 
 	/* @q is and will stay empty, shutdown and put */
 	blk_put_queue(q);
@@ -1478,6 +1481,13 @@ bool bio_attempt_back_merge(struct request_queue *q, struct request *req,
 	req->ioprio = ioprio_best(req->ioprio, bio_prio(bio));
 
 	blk_account_io_start(req, false);
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	if (test_bit(BIO_DIRECT, (unsigned long *)&bio->bi_flags)) {
+		/* printk(KERN_DEBUG "%s: ELEVATOR_BACK_MERGE,
+		  BIO_DIRECT->__REQ_DIRECTIO\n", __FUNCTION__);*/
+		req->cmd_flags |= REQ_DIRECTIO;
+	}
+#endif
 	return true;
 }
 
@@ -1502,6 +1512,13 @@ bool bio_attempt_front_merge(struct request_queue *q, struct request *req,
 	req->ioprio = ioprio_best(req->ioprio, bio_prio(bio));
 
 	blk_account_io_start(req, false);
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	if (test_bit(BIO_DIRECT, (unsigned long *)&bio->bi_flags)) {
+		/* printk(KERN_DEBUG "%s: ELEVATOR_FRONT_MERGE,
+		   BIO_DIRECT->__REQ_DIRECTIO\n", __FUNCTION__); */
+		req->cmd_flags |= REQ_DIRECTIO;
+	}
+#endif
 	return true;
 }
 
@@ -1663,6 +1680,11 @@ get_rq:
 
 	if (test_bit(QUEUE_FLAG_SAME_COMP, &q->queue_flags))
 		req->cpu = raw_smp_processor_id();
+
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	if (test_bit(BIO_DIRECT, (unsigned long *)&bio->bi_flags))
+		req->cmd_flags |= REQ_DIRECTIO;
+#endif
 
 	plug = current->plug;
 	if (plug) {

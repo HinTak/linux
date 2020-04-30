@@ -1,0 +1,215 @@
+######################################################################
+#
+# 	Kconfig for machine about Samsung DTV Platform 
+# 	
+# 	created seungjun.heo@samsung.com
+#
+######################################################################
+#
+# Dec,16,2013	created by seungjun.heo
+# 
+
+if ARCH_SDP
+
+config MACH_SDP_DT
+	bool "Samsung DTV Machine using device tree"
+	select USE_OF
+	select ARM_GIC
+	select GIC_NON_BANKED
+	select USB_ARCH_HAS_EHCI if USB_SUPPORT
+	select USB_ARCH_HAS_OHCI if USB_SUPPORT
+	select USB_ARCH_HAS_XHCI if USB_SUPPORT
+	select PINCTRL
+	select PINCTRL_SDP
+	select ARCH_REQUIRE_GPIOLIB
+	select ARCH_DMA_ADDR_T_64BIT if ARM_LPAE
+	select ARM_HAS_SG_CHAIN
+	select CLKSRC_OF
+ 	help
+	  Say 'Y' here if you want your kernel to support the
+	  Samsung DTV using flattened device tree.
+
+choice
+	prompt "select SDP chip name"
+	default ARCH_SDP1501
+
+config ARCH_SDP1501
+	bool "SDP1501 : Jazz-M"
+	select SDP_HW_CLOCK
+
+config ARCH_SDP1601
+	bool "SDP1601 : Kant-M"
+	select SDP_HW_CLOCK
+
+config ARCH_SDP1412
+	bool "SDP1412 : Hawk-A"
+	select SDP_HW_CLOCK
+endchoice
+
+config ARCH_SDP_BL
+	bool "SDP bigLittle cluster management"
+	depends on MCPM
+	select ARM_CCI
+	help
+	  Support for CPU and cluster power management on SDP bigLittle.
+
+#config ARM_TRUSTZONE
+#	bool "Support TrustZone-enabled Trusted Execution Environment"
+#	default n
+#	help
+#	  Select if you want a kernel to be executed at non-secure world.
+#	  This option should be used with related secure bootloader and
+#	  TrustZone software.
+#
+#	  If you don't know about TrustZone, say 'N'.
+
+
+config SDP_HW_CLOCK
+	bool
+
+menu "Samsung SDP Implementation"
+
+#config SDP_DEBUG_OSSR_V7_1
+#	bool "Support Debug OS Save and Restore"
+#	default y
+#	depends on CPU_IDLE || HOTPLUG_CPU
+
+#config 	SDP_TIMER
+#	bool
+#	default n
+#	select GENERIC_TIME
+#	select GENERIC_CLOCKEVENTS
+
+
+#config SDP_SPI
+#	tristate "SDP SPI Master Controller Driver"
+#	default n
+#	depends on ARCH_SDP
+#	select SPI
+#	select SPI_MASTER
+#	help
+#	  SDP SPI Master Controller Driver.
+
+#config SDP_SPI_NUM_OF_CS
+#	int "Number of chip select."
+#	default 1
+#	depends on SDP_SPI
+#	help
+#	  Default CS is 1, but if you used the GPIO CS, CS can be larger than 1.
+
+#config SDP_SPIDEV
+#	tristate "User Level SPI Device Driver for SDP SPI"
+#	depends on SDP_SPI
+
+#config SDP_SPI_DEBUG
+#	bool "Print Debug Msg for SDP SPI"
+#	depends on SDP_SPI
+
+
+
+#config SDP_DMA330
+#	tristate "SDP DMA330 Controller Driver"
+#	default n
+#	depends on (ARCH_SDP1202 || ARCH_SDP1207 || ARCH_SDP1302 || ARCH_SDP)
+#	select DMADEVICES
+#	select DMA_ENGINE
+
+#config SDP_DMA330_DEBUG
+#	bool "Print Debug Msg for SDP DMA330"
+#	depends on SDP_DMA330
+
+#config SDP_GADMA
+#	tristate "SDP GADMA Controller Driver"
+#	default n
+#	depends on (ARCH_SDP)
+#	select DMADEVICES
+#	select DMA_ENGINE
+
+
+#config SDP_GDMA
+#	tristate "SDP General DMA Controller Driver"
+#	default n
+#	depends on (ARCH_SDP1207 || ARCH_SDP1307 || ARCH_SDP)
+#	select DMADEVICES
+#	select DMA_ENGINE
+
+
+#config SDP_DMADEV
+#	tristate "SDP DMADEV : Using user mode DMA"
+#	default n
+#	depends on DMA_ENGINE
+
+#config SDP_DMATEST
+#	tristate "SDP DMATEST : Simple DMA test client."
+#	default n
+#	depends on DMA_ENGINE
+
+
+#config SDP_UNZIP
+#	bool "SDP GZIP decompressor for Squashfs"
+#	default y
+#	select HW_DECOMPRESSOR
+
+#config SDP_UNZIP_AUTH
+#	bool "SDP GZIP decompressor using auth(AES-CTR, SHA256)"
+#	depends on SDP_UNZIP && (ARCH_SDP1501)
+#	default y
+
+#config SDP_UNZIP_TEST
+#	bool "SDP GZIP Test Module"
+#	depends on SDP_UNZIP
+#	select CRYPTO
+#	select CRYPTO_CTR
+#	select CRYPTO_SHA256
+#	select CRYPTO_DEFLATE
+#	select CRYPTO_ZLIB
+#	select CRYPTO_AES_ARM
+#	default n
+
+
+#config SDP_THERMAL
+#	depends on ARCH_SDP && CPU_FREQ
+#	bool "Thermal Management"
+#	default y
+
+#config SDP_TEMPSENSOR
+#	depends on ARCH_SDP
+#	bool "Simple temperature sensor"
+#	default y
+
+#config SDP_MICOM
+#	bool "Use SDP Internal Micom"
+#	default y
+#	depends on (ARCH_SDP1501)
+
+#config SDP_MICOM_CTRL
+#	bool "Use SDP Micom Controler"
+#	default y
+#	depends on SDP_MICOM
+
+#config SDP_BUS_ERR_LOGGER
+#	bool "SDP bus err logger"
+#	default y
+
+#config SDP_MICOM_DBG_PRINT
+#	bool "Micom Debug print"
+#	depends on SDP_MICOM_CTRL
+
+#config SDP_HW_CLOCK
+#	depends on ARCH_SDP
+#	bool "HW clock, which ticks from power on of the board"
+#	default n
+#	help
+#		Usually HW clock is enabled by onboot, so kernel can access
+#		it by default.  But enabling this configuration makes HW
+#		physicall address being mapped to virtual address space
+#		on very early kernel setup.
+
+endmenu #Samsung SDP implements 
+
+#menu "Select ARM Errata Patch"
+#
+#endmenu
+
+endif # ARCH_SDP	
+

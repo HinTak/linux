@@ -15,6 +15,18 @@
 #include <asm/page.h>
 #include <asm/mmu.h>
 
+#ifdef CONFIG_RSS_INFO
+/* define VMA group */
+#define VMAG_CNT        7
+#define VMAG_CODE       0       /* exclude so */
+#define VMAG_DATA       1       /* exclude so */
+#define VMAG_LIBCODE    2       /* lib so */
+#define VMAG_LIBDATA    3       /* lib so */
+#define VMAG_HEAP       4       /* process heap */
+#define VMAG_STACK      5       /* process stack */
+#define VMAG_OTHER      6       /* mmap, shm, ... */
+#endif  /* CONFIG_RSS_INFO */
+
 #ifndef AT_VECTOR_SIZE_ARCH
 #define AT_VECTOR_SIZE_ARCH 0
 #endif
@@ -384,6 +396,11 @@ struct mm_struct {
 	unsigned long arg_start, arg_end, env_start, env_end;
 
 	unsigned long saved_auxv[AT_VECTOR_SIZE]; /* for /proc/PID/auxv */
+#ifdef CONFIG_RSS_INFO
+	unsigned long curr_rss[VMAG_CNT];
+	unsigned long max_rss[VMAG_CNT];
+#endif  /* CONFIG_RSS_INFO */
+
 
 	/*
 	 * Special counters, in some configurations protected by the

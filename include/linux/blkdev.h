@@ -862,7 +862,12 @@ extern void blk_execute_rq_nowait(struct request_queue *, struct gendisk *,
 
 static inline struct request_queue *bdev_get_queue(struct block_device *bdev)
 {
-	return bdev->bd_disk->queue;	/* this is never NULL */
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+        // FEB-01-2007
+        if(bdev->bd_disk == NULL)
+                return NULL;
+#endif
+	return bdev->bd_disk->queue; /* this is never NULL */
 }
 
 /*
@@ -1596,6 +1601,146 @@ static inline bool blk_integrity_is_initialized(struct gendisk *g)
 
 #endif /* CONFIG_BLK_DEV_INTEGRITY */
 
+#if defined(CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM)
+
+enum hw_iovec_comp_type {
+           HW_IOVEC_COMP_UNCOMPRESSED=1<<1,
+           HW_IOVEC_COMP_GZIP=1<<2,
+           HW_IOVEC_COMP_ZLIB=1<<3,
+           HW_IOVEC_COMP_LZO=1<<4,
+           HW_IOVEC_COMP_MAX=1<<5,
+};
+
+enum hw_iovec_encrypt_type {
+           HW_IOVEC_ENCRYPT_NONE=1<<1,
+		   HW_IOVEC_ENCRYPT_AES128_CTR=1<<2,
+};
+
+enum hw_iovec_hash_type {
+           HW_IOVEC_HASH_NONE=1<<1,
+           HW_IOVEC_HASH_SHA1=1<<2,
+           HW_IOVEC_HASH_SHA256=1<<3,
+           HW_IOVEC_HASH_MD5=1<<4,
+};
+
+#define HW_IOVEC_IVEC_SIZE 16
+
+struct req_hw {
+	enum hw_iovec_comp_type compr_type;
+	enum hw_iovec_hash_type hash_type;
+	enum hw_iovec_encrypt_type enc_type;
+	u8 *enc_key;	// it's reserved for a possibliity of passing user key instead of using ROM embedded key.
+	u8 enc_ivec[HW_IOVEC_IVEC_SIZE];// /* bits 0-63: random nonce; 64:127: counter value */
+	u8 *hashdata;	// calculated hash data is saved
+};
+
+/*
+ * We decompress physically contiguous buffer, thus scattered
+ * hw IO vector has special requirements:
+ * 1. offset of the first element of hw IO vec must be at least
+ *    aligned on 8 bytes
+ * 2. all other offsets must be aligned on sector size
+ * 3. only length of last hw IO vec element can be equal to any size
+ *
+ * e.g.
+ *
+ * |===|===|===|===|===|===|===| physical disk (sectors)
+ *   ^-----|   ^-------|   ^-|   hw IO vec 3 elements
+ *  /  1   |   /   2   /   /3 \
+ * /       |  /       /   /   /
+ * |       | /       /   /   /
+ * |       |/       /   /   /
+ * |       |       /   /   /     mapping
+ * |       |       |  /   /
+ * |       |       | /   /
+ * |       |       |/   /
+ * |  1    |   2   | 3 |
+ * |...........|...........|.... physical pages of contigous buffer
+ *
+ */
+struct hw_iovec {
+	unsigned long long  phys_off;
+	unsigned int        len;
+};
+
+/**
+ * hw_decrypt_fn()
+ *
+ * @brief           Function decrypts data according to given encryption type.
+ *                         Remarks:
+ *                         - might block
+ *                         - must be synchronous
+ *
+ * @param [in/out]      src
+ *                         Array of page pointers describing source encrypted data.
+ *                         Minimum number of elements in array must be equal to
+ *                         DIV_ROUND_UP(length+src_offset, PAGE_SIZE).
+ *                         Any array index beyond minimum number of elements must not be accessed.
+ *                         Pages might be locked by caller and must not be unlocked.
+ *                         Any of page flags bits must not be changed by this function.
+ *
+ * @param [in]      src_offset
+ *                         Offset on which encrypted data starts in source pages.
+ *                         Maximum value is PAGE_SIZE-1. minimum is 0.
+ *
+ * @param [in]      dst
+ *                         Array of page pointers describing destination
+ *                         memory for decrypted data.
+ *                         Minimum number of elements in array must be equal to
+ *                         DIV_ROUND_UP(length+dst_offset, PAGE_SIZE).
+ *                         Any array index beyond minimum number of elements must not be accessed.
+ *                         Pages might be locked by caller and must not be unlocked.
+ *                         Any of page flags bits must not be changed by this function.
+ *
+ * @param [in]      dst_offset
+ *                         Offset on which decrypted data will be placed in destination pages.
+ *                         Maximum value is PAGE_SIZE-1 and minimum is 0.
+ * @param [in]      length
+ *                         Length of encrypted data present on source pages.
+ *
+ * @param [in]      enc_type
+ *                         Encryption type of source data.
+ *                         Must be one of enum hw_iovec_encrypt_type.
+ *
+ * @param [in]      enc_key
+ 							it's used for user key usage instead of using ROM embedded. (optional)
+ * @param [in]      enc_ivec
+ *                         Pointer to data containing initialization vector for AES decryption.
+ *                         It is 16 bytes long and consist of:
+ *                         bits 0-63: random nonce
+ *                         bits 64:127: counter value
+ *
+ * @return          0 on success. Negative on error.
+ */
+
+/**
+ * hw_hash_fn()
+ * @brief           Function calculated hash with input buffer
+ * @param [in]		buf
+ 							input buffer to calculate hash
+ * @param [in]		buf_len
+ *							buffer length
+ * @param [out]		hash
+ *							calculated hash value is saved
+ *
+ * @return          0 on success. Negative on error.
+ */
+
+struct hw_capability {
+	unsigned int comp_type;
+	unsigned int enc_type;
+	unsigned int hash_type;
+	int min_size;		// (1 << min_size) compressed size support
+	int max_size;		// (1 << max_size) compressed size support
+	int (*hw_decrypt_fn) ( struct page **src, int src_offset,
+						struct page **dst, int dst_offset,
+						int length, enum hw_iovec_encrypt_type enc_type,
+						const u8 *enc_key, const u8 *enc_ivec);
+	int (*hw_hash_fn) ( unsigned char *buf, size_t buf_len, char *hash);
+};
+#endif
+
+
 struct block_device_operations {
 	int (*open) (struct block_device *, fmode_t);
 	void (*release) (struct gendisk *, fmode_t);
@@ -1604,6 +1749,13 @@ struct block_device_operations {
 	int (*compat_ioctl) (struct block_device *, fmode_t, unsigned, unsigned long);
 	long (*direct_access)(struct block_device *, sector_t,
 					void **, unsigned long *pfn, long size);
+#if defined(CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM)
+	int (*hw_decompress_vec)(struct block_device *bdev,
+			const struct hw_iovec *vec,
+			unsigned int vec_cnt,
+			struct page **out_pages,
+			unsigned int out_cnt, struct req_hw *rq_hw);
+#endif
 	unsigned int (*check_events) (struct gendisk *disk,
 				      unsigned int clearing);
 	/* ->media_changed() is DEPRECATED, use ->check_events() instead */

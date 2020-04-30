@@ -42,5 +42,10 @@ config DRM_PANEL_SHARP_LQ101R1SX01
 
 	  To compile this driver as a module, choose M here: the module
 	  will be called panel-sharp-lq101r1sx01.
-
+	  
+config DRM_PANEL_SDP
+	tristate "support for SDP panels"
+	depends on OF && ARCH_SDP
+	help
+	  DRM panel driver for SDP SoCs with panels.
 endmenu

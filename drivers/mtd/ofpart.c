@@ -32,6 +32,7 @@ static int parse_ofpart_partitions(struct mtd_info *master,
 	struct device_node *node;
 	const char *partname;
 	struct device_node *pp;
+	struct device_node *ofpart_node;
 	int nr_parts, i;
 
 
@@ -42,6 +43,31 @@ static int parse_ofpart_partitions(struct mtd_info *master,
 	if (!node)
 		return 0;
 
+	/* Additional parsing code for dynamic partition for device */
+	if (!node->name)
+		goto normal;
+
+	if (of_node_cmp(node->name, "m25p80") != 0)
+		goto normal;
+
+	if (master && (master->size >> 10 == 16384))        /* w25q128 */
+	{
+		ofpart_node = of_get_child_by_name(node, "partitions_128");
+		if (ofpart_node) {
+			pr_debug("found partitions for w25q128\n");
+			node = ofpart_node;
+		}
+	}
+	else if (master && (master->size >> 10 == 8192))    /* w25q64 */
+	{
+		ofpart_node = of_get_child_by_name(node, "partitions_64");
+		if (ofpart_node) {
+			pr_debug("found partitions for w25q64\n");
+			node = ofpart_node;
+		}
+	}
+
+normal:
 	/* First count the subnodes */
 	nr_parts = 0;
 	for_each_child_of_node(node,  pp) {

@@ -104,6 +104,12 @@ extern unsigned int core_pipe_limit;
 #endif
 extern int pid_max;
 extern int pid_max_min, pid_max_max;
+#ifdef CONFIG_PROFILE_MEMORY_USAGE
+extern int sysctl_profile_memory_usage;
+extern int profile_memory_usage_sysctl_handler(struct ctl_table*, int,
+						void __user *,
+						size_t *, loff_t *);
+#endif
 extern int percpu_pagelist_fraction;
 extern int compat_log;
 extern int latencytop_enabled;
@@ -274,6 +280,9 @@ static int max_sched_tunable_scaling = SCHED_TUNABLESCALING_END-1;
 static int min_extfrag_threshold;
 static int max_extfrag_threshold = 1000;
 #endif
+
+int proc_dointvec_debug(struct ctl_table *table, int write,
+        void __user *buffer, size_t *lenp, loff_t *ppos);
 
 static struct ctl_table kern_table[] = {
 	{
@@ -781,7 +790,7 @@ static struct ctl_table kern_table[] = {
 		.data		= &console_loglevel,
 		.maxlen		= 4*sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec,
+		.proc_handler	= proc_dointvec_debug,
 	},
 	{
 		.procname	= "printk_ratelimit",
@@ -1316,6 +1325,15 @@ static struct ctl_table vm_table[] = {
 		.extra1		= &one,
 		.extra2		= &four,
 	},
+#ifdef CONFIG_PROFILE_MEMORY_USAGE
+	{
+		.procname       = "profile_memory_usage",
+		.data           = &sysctl_profile_memory_usage,
+		.maxlen         = sizeof(int),
+		.mode           = 0644,
+		.proc_handler   = profile_memory_usage_sysctl_handler,
+	},
+#endif
 #ifdef CONFIG_COMPACTION
 	{
 		.procname	= "compact_memory",
@@ -2126,6 +2144,47 @@ int proc_dointvec(struct ctl_table *table, int write,
 {
     return do_proc_dointvec(table,write,buffer,lenp,ppos,
 		    	    NULL,NULL);
+}
+
+/* debug for set printk level */
+int proc_dointvec_debug(struct ctl_table *table, int write,
+		void __user *buffer, size_t *lenp, loff_t *ppos)
+{
+
+	if(write)
+	{
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] trying loglevel : %s \n",(char*)buffer);
+		printk(KERN_EMERG "[CORESYS] PID : %d %s \n",current->pid, current->comm);
+		printk(KERN_EMERG "[CORESYS] PPID : %d %s \n",
+				current->real_parent->pid, current->real_parent->comm);
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		return -EINVAL;
+	}
+	else
+	{
+		return do_proc_dointvec(table,write,buffer,lenp,ppos,
+				NULL,NULL);
+	}
 }
 
 /*

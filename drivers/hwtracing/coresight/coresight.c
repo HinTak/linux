@@ -570,6 +570,45 @@ static void coresight_fixup_device_conns(struct coresight_device *csdev)
 	}
 }
 
+#ifdef CONFIG_CORESIGHT_DUMP_TMC
+static int coresight_match(struct device *dev, void *data)
+{
+	enum coresight_dev_subtype_sink *to_match;
+	struct coresight_device *i_csdev;
+
+	to_match = data;
+	i_csdev = to_coresight_device(dev);
+
+	if (i_csdev->subtype.sink_subtype == *to_match)
+	{
+		if(tmc_is_enabled(i_csdev))
+		{
+			printk("[%s] coresight buffer sink !!\n", dev_name(&i_csdev->dev));
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static void coresight_dump_sink(void)
+{
+	struct device *dev_sink = NULL;
+	struct coresight_device *csdev = NULL;
+	enum coresight_dev_subtype_sink sink_subtype = CORESIGHT_DEV_SUBTYPE_SINK_BUFFER;
+
+	dev_sink = bus_find_device(&coresight_bustype, NULL, &sink_subtype, coresight_match);
+	csdev = to_coresight_device(dev_sink);
+
+	tmc_savebuf(csdev);
+}
+
+void coresight_save_tmc_buffer(void)
+{
+	coresight_dump_sink();
+}
+EXPORT_SYMBOL_GPL(coresight_save_tmc_buffer);
+#endif
+
 /**
  * coresight_timeout - loop until a bit has changed to a specific state.
  * @addr: base address of the area of interest.
@@ -608,6 +647,27 @@ int coresight_timeout(void __iomem *addr, u32 offset, int position, int value)
 	}
 
 	return -EAGAIN;
+}
+
+int coresight_timeout_word(void __iomem *addr, u32 mask, u32 value)
+{
+	int i;
+	u32 val;
+
+	for (i = TIMEOUT_US; i > 0; i--) {
+		val = __raw_readl(addr) & mask;
+
+		if (val == value)
+			return 0;
+		/*
+		 * Delay is arbitrary - the specification doesn't say how long
+		 * we are expected to wait.  Extra check required to make sure
+		 * we don't wait needlessly on the last iteration.
+		 */
+		if (i - 1)
+			udelay(1);
+	}
+	return -ETIMEDOUT;
 }
 
 struct bus_type coresight_bustype = {

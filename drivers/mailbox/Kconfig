@@ -60,4 +60,19 @@ config ALTERA_MBOX
 	  An implementation of the Altera Mailbox soft core. It is used
 	  to send message between processors. Say Y here if you want to use the
 	  Altera mailbox support.
+
+config SDP_MICOM_MSGBOX
+	tristate "SDP Micom Messagebox(Mailbox)"
+	depends on ARCH_SDP
+	default y
+	help
+	  This driver communicate with SDP Internal Micom
+
+config SDP_MICOM_CONTROLLER
+	tristate "SDP Micom Controller(Mailbox)"
+	depends on ARCH_SDP
+	default y
+	help
+	  This driver communicate with SDP Internal Micom
+
 endif

@@ -501,6 +501,7 @@ static void blk_release_queue(struct kobject *kobj)
 	struct request_queue *q =
 		container_of(kobj, struct request_queue, kobj);
 
+	bdi_destroy(&q->backing_dev_info);
 	blkcg_exit_queue(q);
 
 	if (q->elevator) {

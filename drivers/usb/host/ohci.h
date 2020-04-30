@@ -660,6 +660,12 @@ static inline u32 hc32_to_cpup (const struct ohci_hcd *ohci, const __hc32 *x)
 static inline u16 ohci_frame_no(const struct ohci_hcd *ohci)
 {
 	u32 tmp;
+
+#ifdef CONFIG_ARCH_SDP1601
+	volatile u32 frmno;
+	frmno = ACCESS_ONCE(ohci->hcca->frame_no);
+#endif
+
 	if (big_endian_desc(ohci)) {
 		tmp = be32_to_cpup((__force __be32 *)&ohci->hcca->frame_no);
 		if (!(ohci->flags & OHCI_QUIRK_FRAME_NO))
@@ -667,6 +673,9 @@ static inline u16 ohci_frame_no(const struct ohci_hcd *ohci)
 	} else
 		tmp = le32_to_cpup((__force __le32 *)&ohci->hcca->frame_no);
 
+#ifdef CONFIG_ARCH_SDP1601		
+	rmb();
+#endif
 	return (u16)tmp;
 }
 

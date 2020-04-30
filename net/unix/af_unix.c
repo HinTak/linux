@@ -124,6 +124,10 @@ DEFINE_SPINLOCK(unix_table_lock);
 EXPORT_SYMBOL_GPL(unix_table_lock);
 static atomic_long_t unix_nr_socks;
 
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+extern void hook_smart_deadlock_unix_wait_for_peer_enter(struct pid *peer_pid);
+extern void hook_smart_deadlock_unix_wait_for_peer_leave(void);
+#endif
 
 static struct hlist_head *unix_sockets_unbound(void *addr)
 {
@@ -931,6 +935,10 @@ out_unlock:
 out_up:
 	mutex_unlock(&u->readlock);
 out:
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+   if (err == 0)
+       init_peercred(sock->sk);
+#endif
 	return err;
 }
 
@@ -1120,6 +1128,9 @@ restart:
 		goto out_unlock;
 
 	if (unix_recvq_full(other)) {
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+		hook_smart_deadlock_unix_wait_for_peer_enter(other->sk_peer_pid);
+#endif
 		err = -EAGAIN;
 		if (!timeo)
 			goto out_unlock;
@@ -1130,6 +1141,9 @@ restart:
 		if (signal_pending(current))
 			goto out;
 		sock_put(other);
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+		hook_smart_deadlock_unix_wait_for_peer_leave();
+#endif
 		goto restart;
 	}
 
@@ -1221,6 +1235,9 @@ out_unlock:
 		unix_state_unlock(other);
 
 out:
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	hook_smart_deadlock_unix_wait_for_peer_leave();
+#endif
 	kfree_skb(skb);
 	if (newsk)
 		unix_release_sock(newsk, 0);
@@ -1575,6 +1592,9 @@ restart:
 	}
 
 	if (unix_peer(other) != sk && unix_recvq_full(other)) {
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+		hook_smart_deadlock_unix_wait_for_peer_enter(other->sk_peer_pid);
+#endif
 		if (!timeo) {
 			err = -EAGAIN;
 			goto out_unlock;
@@ -1586,9 +1606,11 @@ restart:
 		if (signal_pending(current))
 			goto out_free;
 
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+		hook_smart_deadlock_unix_wait_for_peer_leave();
+#endif
 		goto restart;
 	}
-
 	if (sock_flag(other, SOCK_RCVTSTAMP))
 		__net_timestamp(skb);
 	maybe_add_creds(skb, sock, other);
@@ -1606,6 +1628,9 @@ out_unlock:
 out_free:
 	kfree_skb(skb);
 out:
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	hook_smart_deadlock_unix_wait_for_peer_leave();
+#endif
 	if (other)
 		sock_put(other);
 	scm_destroy(&scm);

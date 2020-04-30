@@ -3410,7 +3410,22 @@ void kfree(const void *x)
 
 	page = virt_to_head_page(x);
 	if (unlikely(!PageSlab(page))) {
-		BUG_ON(!PageCompound(page));
+		if (!PageCompound(page)) {
+			pr_crit("Before BUG ON: Kfree failure : Page Address : 0x%p\n",
+					page_address(page));
+			pr_crit("Page Flags: %lu\n", page->flags);
+#ifndef CONFIG_VD_RELEASE
+			if (page_mapping(page) &&
+					page->mapping->host &&
+					page->mapping->host->i_sb &&
+					page->mapping->host->i_sb->s_type &&
+					page->mapping->host->i_sb->s_type->name)
+				pr_crit("Page Address Mapping ->  Host Inode ->"
+						"Super Block -> File System Type ->Name %s\n",
+						page->mapping->host->i_sb->s_type->name);
+#endif
+			BUG_ON(1);
+		}
 		kfree_hook(x);
 		__free_kmem_pages(page, compound_order(page));
 		return;
@@ -3955,6 +3970,109 @@ static long validate_slab_cache(struct kmem_cache *s)
 	kfree(map);
 	return count;
 }
+
+#ifndef CONFIG_VD_RELEASE
+extern void check_bh(struct buffer_head *bh);
+unsigned long long bh_cnt;
+
+static int bh_validate_slab(struct kmem_cache *s, struct page *page,
+						unsigned long *map)
+{
+	void *p;
+	void *addr = page_address(page);
+
+	if (!check_slab(s, page) ||
+			!on_freelist(s, page, NULL))
+		return 0;
+
+	/* Now we know that a valid freelist exists */
+	bitmap_zero(map, page->objects);
+
+	get_map(s, page, map);
+
+#if 0
+	/* inactive objects */
+	for_each_object(p, s, addr, page->objects) {
+		if (test_bit(slab_index(p, s, addr), map))
+			if (check_object(s, page, p, SLUB_RED_INACTIVE))
+				bh_cnt++;
+	}
+#endif
+
+	/* active objects */
+	for_each_object(p, s, addr, page->objects)
+		if (!test_bit(slab_index(p, s, addr), map))
+			if (check_object(s, page, p, SLUB_RED_ACTIVE)) {
+				check_bh((struct buffer_head *)p);
+				bh_cnt++;
+			}
+	return 1;
+}
+
+static void bh_validate_slab_slab(struct kmem_cache *s, struct page *page,
+						unsigned long *map)
+{
+	slab_lock(page);
+	bh_validate_slab(s, page, map);
+	slab_unlock(page);
+}
+
+static int bh_validate_slab_node(struct kmem_cache *s,
+		struct kmem_cache_node *n, unsigned long *map)
+{
+	unsigned long count = 0;
+	struct page *page;
+	unsigned long flags;
+
+	spin_lock_irqsave(&n->list_lock, flags);
+
+	list_for_each_entry(page, &n->partial, lru) {
+		bh_validate_slab_slab(s, page, map);
+		count++;
+	}
+	if (count != n->nr_partial)
+		pr_err("SLUB %s: %ld partial slabs counted but counter=%ld\n",
+		       s->name, count, n->nr_partial);
+
+	if (!(s->flags & SLAB_STORE_USER))
+		goto out;
+
+	list_for_each_entry(page, &n->full, lru) {
+		bh_validate_slab_slab(s, page, map);
+		count++;
+	}
+	if (count != atomic_long_read(&n->nr_slabs))
+		pr_err("SLUB: %s %ld slabs counted but counter=%ld\n",
+		       s->name, count, atomic_long_read(&n->nr_slabs));
+
+out:
+	spin_unlock_irqrestore(&n->list_lock, flags);
+	return count;
+}
+
+long bh_validate_slab_cache(struct kmem_cache *s)
+{
+	struct kmem_cache_node *n;
+	unsigned long count = 0;
+	int node;
+	unsigned long map;
+	int map_size = BITS_TO_LONGS(oo_objects(s->max)) *
+		sizeof(unsigned long);
+	bh_cnt = 0;
+
+	if (map_size > sizeof(unsigned long)) {
+		pr_err("map size too big %d\n", map_size);
+		return -ENOMEM;
+	}
+
+	flush_all(s);
+	for_each_kmem_cache_node(s, node, n)
+		count += bh_validate_slab_node(s, n, &map);
+	return count;
+}
+
+#endif
+
 /*
  * Generate lists of code addresses where slabcache objects are allocated
  * and freed.

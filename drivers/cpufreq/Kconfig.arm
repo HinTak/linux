@@ -272,3 +272,40 @@ config ARM_PXA2xx_CPUFREQ
 	  This add the CPUFreq driver support for Intel PXA2xx SOCs.
 
 	  If in doubt, say N.
+
+config ARM_SDP_CPUFREQ
+    bool "Samsung DTV Processor"
+    depends on ARCH_SDP
+    default n
+    help
+      This adds the CPUFreq driver common part for SDP SoCs.
+      If in doubt, say N
+
+config ARM_SDP1501_CPUFREQ
+    bool "SDP1501(Jazz-M) CPUFreq support"
+    depends on ARM_SDP_CPUFREQ
+    help
+      This adds the CPUFreq driver for SDP1501(Jazz-M) SoC.
+
+config ARM_SDP1501_CPUFREQ_DEBUG
+    bool "SDP1501 CPUFreq debug print support"
+    depends on ARM_SDP1501_CPUFREQ
+
+
+config ARM_SDP1601_CPUFREQ
+    bool "SDP1601(Kant-M) CPUFreq support"
+    depends on ARM_SDP_CPUFREQ
+    help
+      This adds the CPUFreq driver for SDP1601(Kant-M) SoC.
+
+config ARM_SDP1601_CPUFREQ_DEBUG
+    bool "SDP1601 CPUFreq debug print support"
+    depends on ARM_SDP1601_CPUFREQ
+if PLAT_NOVATEK
+config ARM_NVT_CPUFREQ
+	bool "Novatek CPUFreq support"
+	depends on ARCH_NVT_V7
+	default y
+	help
+	  This adds the CPUFreq driver support for Novatek SOCs.
+endif

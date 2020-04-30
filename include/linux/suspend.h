@@ -23,11 +23,13 @@ extern void pm_restore_console(void);
 #else
 static inline int pm_prepare_console(void)
 {
+	console_forbid_async_printk();
 	return 0;
 }
 
 static inline void pm_restore_console(void)
 {
+	console_permit_async_printk();
 }
 #endif
 

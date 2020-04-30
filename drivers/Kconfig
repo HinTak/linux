@@ -40,6 +40,8 @@ source "drivers/macintosh/Kconfig"
 
 source "drivers/net/Kconfig"
 
+source "drivers/cpe/Kconfig"
+
 source "drivers/isdn/Kconfig"
 
 # input before char - char/joystick depends on it. As does USB.
@@ -181,5 +183,10 @@ source "drivers/ras/Kconfig"
 source "drivers/thunderbolt/Kconfig"
 
 source "drivers/android/Kconfig"
+
+# VD-Time feature driver
+source "drivers/vd_time/Kconfig"
+
+source "drivers/samsung/Kconfig"
 
 endmenu

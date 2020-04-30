@@ -71,6 +71,11 @@
 
 #include "internal.h"
 
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+void show_kernel_patch_version(void);
+#endif
+
 #ifdef LAST_CPUPID_NOT_IN_PAGE_FLAGS
 #warning Unfortunate NUMA and NUMA Balancing config, growing page-frame for last_cpupid.
 #endif
@@ -682,6 +687,9 @@ static void print_bad_pte(struct vm_area_struct *vma, unsigned long addr,
 		"BUG: Bad page map in process %s  pte:%08llx pmd:%08llx\n",
 		current->comm,
 		(long long)pte_val(pte), (long long)pmd_val(*pmd));
+#ifdef CONFIG_VDLP_VERSION_INFO
+	show_kernel_patch_version();
+#endif
 	if (page)
 		dump_page(page, "bad pte");
 	printk(KERN_ALERT
@@ -780,9 +788,9 @@ struct page *vm_normal_page(struct vm_area_struct *vma, unsigned long addr,
 		}
 	}
 
+check_pfn:
 	if (is_zero_pfn(pfn))
 		return NULL;
-check_pfn:
 	if (unlikely(pfn > highest_memmap_pfn)) {
 		print_bad_pte(vma, addr, pte, NULL);
 		return NULL;
@@ -934,6 +942,7 @@ again:
 	spin_unlock(src_ptl);
 	pte_unmap(orig_src_pte);
 	add_mm_rss_vec(dst_mm, rss);
+	inc_rss_counter(vma, rss[0] + rss[1]); /* VD_SP */
 	pte_unmap_unlock(orig_dst_pte, dst_ptl);
 	cond_resched();
 
@@ -1157,6 +1166,7 @@ again:
 	} while (pte++, addr += PAGE_SIZE, addr != end);
 
 	add_mm_rss_vec(mm, rss);
+	inc_rss_counter(vma, (rss[MM_FILEPAGES]+rss[MM_ANONPAGES]));      /* VD_SP */
 	arch_leave_lazy_mmu_mode();
 
 	/* Do the actual TLB flush before dropping ptl */
@@ -1462,6 +1472,7 @@ static int insert_page(struct vm_area_struct *vma, unsigned long addr,
 	inc_mm_counter_fast(mm, MM_FILEPAGES);
 	page_add_file_rmap(page);
 	set_pte_at(mm, addr, pte, mk_pte(page, prot));
+	inc_rss_counter(vma, 1);
 
 	retval = 0;
 	pte_unmap_unlock(pte, ptl);
@@ -2100,6 +2111,7 @@ static int wp_page_copy(struct mm_struct *mm, struct vm_area_struct *vma,
 			}
 		} else {
 			inc_mm_counter_fast(mm, MM_ANONPAGES);
+			inc_rss_counter(vma, 1); /* VD_SP */
 		}
 		flush_cache_page(vma, address, pte_pfn(orig_pte));
 		entry = mk_pte(new_page, vma->vm_page_prot);
@@ -2555,6 +2567,7 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
 
 	inc_mm_counter_fast(mm, MM_ANONPAGES);
 	dec_mm_counter_fast(mm, MM_SWAPENTS);
+	inc_rss_counter(vma, 1); /* VD_SP */
 	pte = mk_pte(page, vma->vm_page_prot);
 	if ((flags & FAULT_FLAG_WRITE) && reuse_swap_page(page)) {
 		pte = maybe_mkwrite(pte_mkdirty(pte), vma);
@@ -2712,6 +2725,7 @@ static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		goto release;
 
 	inc_mm_counter_fast(mm, MM_ANONPAGES);
+	inc_rss_counter(vma, 1); /* VD_SP */
 	page_add_new_anon_rmap(page, vma, address);
 	mem_cgroup_commit_charge(page, memcg, false);
 	lru_cache_add_active_or_unevictable(page, vma);
@@ -2800,9 +2814,11 @@ void do_set_pte(struct vm_area_struct *vma, unsigned long address,
 		entry = maybe_mkwrite(pte_mkdirty(entry), vma);
 	if (anon) {
 		inc_mm_counter_fast(vma->vm_mm, MM_ANONPAGES);
+		inc_rss_counter(vma, 1); /* VD_SP */
 		page_add_new_anon_rmap(page, vma, address);
 	} else {
 		inc_mm_counter_fast(vma->vm_mm, MM_FILEPAGES);
+		inc_rss_counter(vma, 1); /* VD_SP */
 		page_add_file_rmap(page);
 	}
 	set_pte_at(vma->vm_mm, address, pte, entry);
@@ -2812,7 +2828,11 @@ void do_set_pte(struct vm_area_struct *vma, unsigned long address,
 }
 
 static unsigned long fault_around_bytes __read_mostly =
+#ifdef CONFIG_DO_NOT_FAULT_AROUND_BYTES
+	PAGE_SIZE;
+#else
 	rounddown_pow_of_two(65536);
+#endif
 
 #ifdef CONFIG_DEBUG_FS
 static int fault_around_bytes_get(void *data, u64 *val)

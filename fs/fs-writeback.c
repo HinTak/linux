@@ -81,14 +81,23 @@ EXPORT_SYMBOL(writeback_in_progress);
 struct backing_dev_info *inode_to_bdi(struct inode *inode)
 {
 	struct super_block *sb;
+	struct request_queue *q;
 
 	if (!inode)
 		return &noop_backing_dev_info;
 
 	sb = inode->i_sb;
 #ifdef CONFIG_BLOCK
-	if (sb_is_blkdev_sb(sb))
-		return blk_get_backing_dev_info(I_BDEV(inode));
+	if (sb_is_blkdev_sb(sb)) {
+		q = bdev_get_queue(I_BDEV(inode));
+		if ((MAJOR(I_BDEV(inode)->bd_dev) ==
+						SCSI_DISK0_MAJOR) &&
+					(q == NULL ||
+					 (size_t)q == (size_t)0x6b6b6b6b))
+			return &noop_backing_dev_info;
+
+		return &q->backing_dev_info;
+	}
 #endif
 	return sb->s_bdi;
 }
@@ -1323,9 +1332,9 @@ void __mark_inode_dirty(struct inode *inode, int flags)
 			spin_unlock(&inode->i_lock);
 			spin_lock(&bdi->wb.list_lock);
 			if (bdi_cap_writeback_dirty(bdi)) {
-				WARN(!test_bit(BDI_registered, &bdi->state),
-				     "bdi-%s not registered\n", bdi->name);
-
+				if (!test_bit(BDI_registered, &bdi->state))
+					pr_err("bdi-%s not registered\n",
+							bdi->name);
 				/*
 				 * If this is the first dirty inode for this
 				 * bdi, we have to wake-up the corresponding

@@ -118,7 +118,7 @@ config CRC32_SELFTEST
 choice
 	prompt "CRC32 implementation"
 	depends on CRC32
-	default CRC32_SLICEBY8
+	default CRC32_SLICEBY4
 	help
 	  This option allows a kernel builder to override the default choice
 	  of CRC32 algorithm.  Choose the default ("slice by 8") unless you
@@ -219,19 +219,23 @@ config ZLIB_DEFLATE
 	tristate
 
 config LZO_COMPRESS
-	tristate
+	bool
+	default y
 
 config LZO_DECOMPRESS
-	tristate
+	bool
+	default y
 
 config LZ4_COMPRESS
-	tristate
+	bool
+	default y
 
 config LZ4HC_COMPRESS
 	tristate
 
 config LZ4_DECOMPRESS
-	tristate
+	bool
+	default y
 
 source "lib/xz/Kconfig"
 
@@ -521,5 +525,8 @@ source "lib/fonts/Kconfig"
 
 config ARCH_HAS_SG_CHAIN
 	def_bool n
+
+
+source lib/sf/Kconfig
 
 endmenu

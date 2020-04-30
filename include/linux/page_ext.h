@@ -39,6 +39,7 @@ struct page_ext {
 	unsigned long flags;
 #ifdef CONFIG_PAGE_OWNER
 	unsigned int order;
+	pid_t pid;
 	gfp_t gfp_mask;
 	unsigned int nr_entries;
 	unsigned long trace_entries[8];

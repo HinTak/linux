@@ -39,9 +39,13 @@ enum {
 	MIGRATE_UNMOVABLE,
 	MIGRATE_RECLAIMABLE,
 	MIGRATE_MOVABLE,
+#ifdef CONFIG_CMA_APP_ALLOC
+	/* New type of pcp lists to cache CMA pages for selected processes */
+	MIGRATE_CMA,
+#endif
 	MIGRATE_PCPTYPES,	/* the number of types on the pcp lists */
 	MIGRATE_RESERVE = MIGRATE_PCPTYPES,
-#ifdef CONFIG_CMA
+#if	defined(CONFIG_CMA) && !(defined(CONFIG_CMA_APP_ALLOC))
 	/*
 	 * MIGRATE_CMA migration type is designed to mimic the way
 	 * ZONE_MOVABLE works.  Only movable pages can be allocated
@@ -114,7 +118,6 @@ struct zone_padding {
 enum zone_stat_item {
 	/* First 128 byte cacheline (assuming 64 bit words) */
 	NR_FREE_PAGES,
-	NR_ALLOC_BATCH,
 	NR_LRU_BASE,
 	NR_INACTIVE_ANON = NR_LRU_BASE, /* must match order of LRU_[IN]ACTIVE */
 	NR_ACTIVE_ANON,		/*  "     "     "   "       "         */
@@ -542,7 +545,6 @@ enum zone_flags {
 	ZONE_WRITEBACK,			/* reclaim scanning has recently found
 					 * many pages under writeback
 					 */
-	ZONE_FAIR_DEPLETED,		/* fair zone policy batch depleted */
 };
 
 static inline unsigned long zone_end_pfn(const struct zone *zone)

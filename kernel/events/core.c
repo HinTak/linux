@@ -8683,6 +8683,21 @@ inherit_event(struct perf_event *parent_event,
 	add_event_to_ctx(child_event, child_ctx);
 	raw_spin_unlock_irqrestore(&child_ctx->lock, flags);
 
+#ifdef CONFIG_CACHE_ANALYZER
+	/* TODO: Need to check if reference count is decremented correctly in
+	 * sync_child_event(), perf_free_event() (previously, checks were there for parent->filp
+	 * before fput().
+	 * Also check if we need to add put_task_struct() somewhere.
+	 */
+	if (parent_event->attr.inherit_indep) {
+		child_event->owner = child;
+		get_task_struct(child);
+		list_add_tail(
+			&child_event->owner_entry, &child->perf_event_list);
+		return child_event;
+	}
+#endif
+
 	/*
 	 * Link this into the parent event's child list
 	 */
@@ -8750,7 +8765,11 @@ inherit_task_group(struct perf_event *event, struct task_struct *parent,
 	ret = inherit_group(event, parent, parent_ctx,
 			    child, child_ctx);
 
+#ifdef CONFIG_CACHE_ANALYZER
+	if (ret || event->attr.inherit_indep)
+#else
 	if (ret)
+#endif
 		*inherited_all = 0;
 
 	return ret;

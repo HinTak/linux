@@ -60,6 +60,9 @@ struct sched_param {
 #include <linux/magic.h>
 
 #include <asm/processor.h>
+#ifdef CONFIG_SMART_DEADLOCK
+#include <linux/smart-deadlock.h>
+#endif
 
 #define SCHED_ATTR_SIZE_VER0	48	/* sizeof first published struct */
 
@@ -363,6 +366,23 @@ extern void show_regs(struct pt_regs *);
  * trace (or NULL if the entire call-chain of the task should be shown).
  */
 extern void show_stack(struct task_struct *task, unsigned long *sp);
+
+extern int find_match_elf_name(struct task_struct *t, char *name,
+		unsigned long addr);
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+extern void show_pid_maps(struct task_struct *task);
+extern void show_user_stack(struct task_struct *task, struct pt_regs *regs);
+#if defined(CONFIG_ARM) || defined(CONFIG_ARM64)
+extern void dump_info(struct task_struct *task, struct pt_regs *regs,
+		unsigned long addr);
+#endif
+extern void dump_mem_kernel(const char *str, unsigned long bottom,
+		unsigned long top);
+#endif
+#ifdef CONFIG_SHOW_THREAD_GROUP_STACK
+	void __show_user_stack_tg(struct task_struct *task);
+#endif
+
 
 extern void cpu_init (void);
 extern void trap_init(void);
@@ -773,6 +793,15 @@ struct signal_struct {
 
 #define SIGNAL_UNKILLABLE	0x00000040 /* for init: ignore fatal signals */
 
+#ifdef CONFIG_COREDUMP_SIGKILL_BLOCKED
+#define SIGNAL_GROUP_BLOCK_SIGKILL 0x00000080 /*Block SIGKILL*/
+#else
+#define SIGNAL_GROUP_BLOCK_SIGKILL 0x00000000 /*Block SIGKILL*/
+#endif
+
+#define signal_block_sigkill(tsk) \
+		(tsk->signal->flags & \
+		(SIGNAL_GROUP_BLOCK_SIGKILL | SIGNAL_GROUP_COREDUMP))
 /* If true, all threads except ->group_exit_task have pending SIGKILL */
 static inline int signal_group_exit(const struct signal_struct *sig)
 {
@@ -1299,9 +1328,9 @@ struct task_struct {
 #ifdef CONFIG_SMP
 	struct llist_node wake_entry;
 	int on_cpu;
-	struct task_struct *last_wakee;
-	unsigned long wakee_flips;
+	unsigned int wakee_flips;
 	unsigned long wakee_flip_decay_ts;
+	struct task_struct *last_wakee;
 
 	int wake_cpu;
 #endif
@@ -1502,8 +1531,8 @@ struct task_struct {
 	struct seccomp seccomp;
 
 /* Thread group tracking */
-   	u32 parent_exec_id;
-   	u32 self_exec_id;
+	u32 parent_exec_id;
+	u32 self_exec_id;
 /* Protection of (de-)allocation: mm, files, fs, tty, keyrings, mems_allowed,
  * mempolicy */
 	spinlock_t alloc_lock;
@@ -1724,6 +1753,20 @@ struct task_struct {
 #ifdef CONFIG_DEBUG_ATOMIC_SLEEP
 	unsigned long	task_state_change;
 #endif
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+	unsigned long user_ssp;  /* user mode start sp */
+#endif
+#ifdef CONFIG_SMART_DEADLOCK
+	struct smart_deadlock_task sm_tsk;
+#endif
+#ifdef CONFIG_CMA_APP_ALLOC
+	bool cma_alloc;
+#endif
+
+#ifdef CONFIG_SECURITY_SFD_SECURECONTAINER
+	int uepLevel;
+#endif // CONFIG_SECURITY_SFD_SECURECONTAINER
+
 };
 
 /* Future-safe accessor for struct task_struct's cpus_allowed. */
@@ -2833,12 +2876,6 @@ extern int _cond_resched(void);
 })
 
 extern int __cond_resched_lock(spinlock_t *lock);
-
-#ifdef CONFIG_PREEMPT_COUNT
-#define PREEMPT_LOCK_OFFSET	PREEMPT_OFFSET
-#else
-#define PREEMPT_LOCK_OFFSET	0
-#endif
 
 #define cond_resched_lock(lock) ({				\
 	___might_sleep(__FILE__, __LINE__, PREEMPT_LOCK_OFFSET);\

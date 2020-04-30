@@ -1338,6 +1338,7 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 			continue;
 
 		default:
+			dump_page(page, "Invalid page on LRU list");
 			BUG();
 		}
 	}
@@ -1523,9 +1524,15 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 	int file = is_file_lru(lru);
 	struct zone *zone = lruvec_zone(lruvec);
 	struct zone_reclaim_stat *reclaim_stat = &lruvec->reclaim_stat;
+	bool stalled = false;
 
 	while (unlikely(too_many_isolated(zone, file, sc))) {
-		congestion_wait(BLK_RW_ASYNC, HZ/10);
+		if (stalled)
+			return 0;
+
+		/* wait a bit for the reclaimer. */
+		schedule_timeout_interruptible(HZ/10);
+		stalled = true;
 
 		/* We are about to die and free our memory. Return now. */
 		if (fatal_signal_pending(current))
@@ -2470,7 +2477,7 @@ static bool shrink_zones(struct zonelist *zonelist, struct scan_control *sc)
 		sc->gfp_mask |= __GFP_HIGHMEM;
 
 	for_each_zone_zonelist_nodemask(zone, z, zonelist,
-					requested_highidx, sc->nodemask) {
+					gfp_zone(sc->gfp_mask), sc->nodemask) {
 		enum zone_type classzone_idx;
 
 		if (!populated_zone(zone))

@@ -642,6 +642,7 @@ void thread_group_cputime_adjusted(struct task_struct *p, cputime_t *ut, cputime
 	cputime_adjust(&cputime, &p->signal->prev_cputime, ut, st);
 }
 #endif /* !CONFIG_VIRT_CPU_ACCOUNTING_NATIVE */
+EXPORT_SYMBOL_GPL(thread_group_cputime_adjusted);
 
 #ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN
 static unsigned long long vtime_delta(struct task_struct *tsk)

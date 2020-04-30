@@ -88,6 +88,10 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/task.h>
 
+#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+#include <linux/sf_security.h>
+#endif
+
 /*
  * Minimum number of threads to boot the kernel
  */
@@ -245,11 +249,20 @@ static inline void put_signal_struct(struct signal_struct *sig)
 		free_signal_struct(sig);
 }
 
+#ifdef CONFIG_SMART_DEADLOCK
+extern void hook_smart_deadlock_put_task(struct task_struct * released_tsk);
+#endif
+
 void __put_task_struct(struct task_struct *tsk)
 {
 	WARN_ON(!tsk->exit_state);
 	WARN_ON(atomic_read(&tsk->usage));
 	WARN_ON(tsk == current);
+
+#ifdef CONFIG_SMART_DEADLOCK
+	if( tsk->sm_tsk.tsk )
+		hook_smart_deadlock_put_task(tsk);
+#endif
 
 	task_numa_free(tsk);
 	security_task_free(tsk);
@@ -434,8 +447,15 @@ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 		if (mpnt->vm_flags & VM_ACCOUNT) {
 			unsigned long len = vma_pages(mpnt);
 
+#ifdef CONFIG_SKIP_CHECKING_MEMORY_WHILE_FORK
+			/* VDLinux,system() syscall patch, skip jump
+				to fail_nomem routine,2010-10-21 */
+			security_vm_enough_memory_mm(oldmm, len); /* sic */
+#else
+			/* Original vanilla kernel codes */
 			if (security_vm_enough_memory_mm(oldmm, len)) /* sic */
 				goto fail_nomem;
+#endif
 			charge = len;
 		}
 		tmp = kmem_cache_alloc(vm_area_cachep, GFP_KERNEL);
@@ -491,7 +511,13 @@ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 		rb_parent = &tmp->vm_rb;
 
 		mm->map_count++;
+#ifdef CONFIG_RSS_INFO
+		/* use tmp as 3rd arg for RSS counting */
+		/* orig code : retval = copy_page_range(mm, oldmm, mpnt); */
+		retval = copy_page_range(mm, oldmm, tmp);
+#else
 		retval = copy_page_range(mm, oldmm, mpnt);
+#endif
 
 		if (tmp->vm_ops && tmp->vm_ops->open)
 			tmp->vm_ops->open(tmp);
@@ -601,7 +627,10 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p)
 #if defined(CONFIG_TRANSPARENT_HUGEPAGE) && !USE_SPLIT_PMD_PTLOCKS
 	mm->pmd_huge_pte = NULL;
 #endif
-
+#ifdef CONFIG_RSS_INFO
+	memset(mm->curr_rss, 0, sizeof(unsigned long) * VMAG_CNT);
+	memset(mm->max_rss, 0, sizeof(unsigned long) * VMAG_CNT);
+#endif
 	if (current->mm) {
 		mm->flags = current->mm->flags & MMF_INIT_MASK;
 		mm->def_flags = current->mm->def_flags & VM_INIT_DEF_MASK;
@@ -967,6 +996,11 @@ static int copy_mm(unsigned long clone_flags, struct task_struct *tsk)
 		mm = oldmm;
 		goto good_mm;
 	}
+#ifdef CONFIG_CMA_APP_ALLOC
+	/* Prevent children from using CMA pages */
+	if (!(clone_flags & CLONE_VM))
+		tsk->cma_alloc = false;
+#endif
 
 	retval = -ENOMEM;
 	mm = dup_mm(tsk);
@@ -1725,7 +1759,15 @@ long do_fork(unsigned long clone_flags,
 			init_completion(&vfork);
 			get_task_struct(p);
 		}
-
+#ifdef CONFIG_SMART_DEADLOCK
+		p->sm_tsk.tsk = NULL;
+		p->sm_tsk.w_syscall_time = 0;
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+		p->sm_tsk.profile = NULL;
+		spin_lock_init(&p->sm_tsk.lock);
+		set_tsk_thread_flag(p, TIF_SMART_DEADLOCK); 
+#endif
+#endif
 		wake_up_new_task(p);
 
 		/* forking complete and child started to run, tell ptracer */
@@ -1797,6 +1839,13 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 		 int, tls_val)
 #endif
 {
+	#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+	if((CLONE_CONTAINER_SECURE & clone_flags) && (!sf_syscall_task_authorized(current,"clone")))
+	{
+		return -EPERM;
+	}
+	#endif
+	
 	return do_fork(clone_flags, newsp, 0, parent_tidptr, child_tidptr);
 }
 #endif
@@ -1930,6 +1979,13 @@ SYSCALL_DEFINE1(unshare, unsigned long, unshare_flags)
 	struct nsproxy *new_nsproxy = NULL;
 	int do_sysvsem = 0;
 	int err;
+
+	#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)	
+	if(!sf_syscall_ns_authorized(current,"unshare",NS_TYPE_ISOLATE))
+	{
+		return -EPERM;
+	}
+	#endif
 
 	/*
 	 * If unsharing a user namespace must also unshare the thread.

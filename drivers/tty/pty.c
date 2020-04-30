@@ -403,7 +403,7 @@ static int pty_common_install(struct tty_driver *driver, struct tty_struct *tty,
 		   the easy way .. */
 		retval = tty_init_termios(tty);
 		if (retval)
-			goto err_deinit_tty;
+			goto err_free_tty;
 
 		retval = tty_init_termios(o_tty);
 		if (retval)
@@ -442,8 +442,7 @@ static int pty_common_install(struct tty_driver *driver, struct tty_struct *tty,
 err_free_termios:
 	if (legacy)
 		tty_free_termios(tty);
-err_deinit_tty:
-	deinitialize_tty_struct(o_tty);
+err_free_tty:
 	free_tty_struct(o_tty);
 err_put_module:
 	module_put(driver->other->owner);

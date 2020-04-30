@@ -15,6 +15,8 @@
 #include <linux/file.h>
 #include <linux/random.h>
 #include <asm/uaccess.h>
+#include <linux/sort.h>
+#include <linux/vmalloc.h>
 #include "ext4_jbd2.h"
 #include "ext4.h"
 
@@ -412,6 +414,114 @@ group_extend_out:
 		return err;
 	}
 
+#ifdef CONFIG_EXT4_FS_SPLIT_FILE
+	case EXT4_IOC_SPLIT_FILE: {
+		PVR_INFO pe;
+		int err;
+		struct kstat stat;
+		void __user *args = (void __user *)arg;
+		mm_segment_t old_fs = get_fs();
+
+		if (!EXT4_HAS_INCOMPAT_FEATURE(inode->i_sb,
+					  EXT4_FEATURE_INCOMPAT_EXTENTS))
+			  return -ENOTSUPP;
+
+		if (!(filp->f_mode & FMODE_READ) ||
+				  !(filp->f_mode & FMODE_WRITE))
+			  return -EBADF;
+
+	 	if (copy_from_user(&pe,
+				  args, sizeof(PVR_INFO)))
+			  return -EFAULT;
+
+		if (do_mod(pe.offset, inode->i_sb->s_blocksize)) {
+			  printk(KERN_ERR "unaligned offset %llu\n", pe.offset);
+			  return -EINVAL;
+		}
+
+		if (atomic_read(&(inode->i_mutex.count)) == 0) {
+			  printk(KERN_ERR "File is already being used. Try Again!!\n");
+			  return -EAGAIN;
+		}
+
+		mutex_lock(&inode->i_mutex);
+
+		set_fs(get_ds());
+		err = vfs_lstat(pe.filename, &stat);
+		set_fs(old_fs);
+
+		if (!err) {
+			mutex_unlock(&inode->i_mutex);
+			return -EEXIST;
+		}
+
+		err = mnt_want_write(filp->f_path.mnt);
+		if (err)
+			goto split_out;
+
+		err = ext4_split_file(filp, pe.filename, pe.offset);
+					  mnt_drop_write(filp->f_path.mnt);
+
+split_out:
+		 mutex_unlock(&inode->i_mutex);
+		 return err;
+	 }
+#endif /* CONFIG_EXT4_FS_SPLIT_FILE */
+
+#ifdef CONFIG_EXT4_FS_MERGE_FILE
+	case EXT4_IOC_MERGE_FILE: {
+		PVR_INFO pe;
+		int err;
+		struct kstat stat;
+		void __user *args = (void __user *)arg;
+		mm_segment_t old_fs = get_fs();
+
+		if (!EXT4_HAS_INCOMPAT_FEATURE(inode->i_sb,
+				  EXT4_FEATURE_INCOMPAT_EXTENTS))
+			return -ENOTSUPP;
+
+		if (!(filp->f_mode & FMODE_READ) ||
+				  !(filp->f_mode & FMODE_WRITE))
+			return -EBADF;
+
+		if (copy_from_user(&pe,
+				args, sizeof(PVR_INFO)))
+			return -EFAULT;
+
+		if (do_mod(pe.offset, inode->i_sb->s_blocksize)) {
+			printk(KERN_ERR "unaligned offset %llu\n", pe.offset);
+			return -EINVAL;
+		}
+
+		if (atomic_read(&(inode->i_mutex.count)) == 0) {
+			printk(KERN_ERR "File is already being used. Try Again!!\n");
+			return -EAGAIN;
+		}
+
+		mutex_lock(&inode->i_mutex);
+
+		set_fs(get_ds());
+		err = vfs_lstat(pe.filename, &stat);
+		set_fs(old_fs);
+
+		if (err) {
+			mutex_unlock(&inode->i_mutex);
+			return -ENOENT;
+		}
+
+		err = mnt_want_write(filp->f_path.mnt);
+		if (err)
+			goto merge_out;
+
+		err = ext4_merge_file(filp, pe.filename);
+		mnt_drop_write(filp->f_path.mnt);
+
+merge_out:
+		mutex_unlock(&inode->i_mutex);
+		return err;
+	}
+#endif /* CONFIG_EXT4_FS_MERGE_FILE */
+
 	case EXT4_IOC_MOVE_EXT: {
 		struct move_extent me;
 		struct fd donor;
@@ -594,6 +704,107 @@ resizefs_out:
 		ext4_resize_end(sb);
 		return err;
 	}
+#ifdef CONFIG_EXT4_FS_TRUNCATE_RANGE
+	case EXT4_IOC_TRUNCATE_RANGE:
+	{
+		PVR_INFO tr;
+		struct mutex *lock = &inode->i_mutex;
+		int error = 0;
+		if (copy_from_user(&tr, (const void *) arg, sizeof(PVR_INFO)))
+			return -EFAULT;
+
+		if (tr.offset < 0 || tr.end < 0)
+			return -EINVAL;
+
+		if (do_mod(tr.offset, inode->i_sb->s_blocksize) ||
+		    do_mod(tr.end, inode->i_sb->s_blocksize))
+			return -EINVAL;
+
+		if ((tr.offset >= tr.end) || (tr.offset >= inode->i_size))
+			return -EINVAL;
+
+		if (!(filp->f_mode & FMODE_WRITE))
+			return -EBADF;
+
+		if (tr.end > inode->i_size)
+			tr.end = inode->i_size;
+
+		if (!ext4_test_inode_flag(inode, EXT4_INODE_EXTENTS))
+			return -ENOTSUPP;
+
+		if (atomic_read(&lock->count) == 0) {
+			pr_err("Truncate Range is already being used. Try Again!!\n");
+			return -EAGAIN;
+		}
+		mutex_lock(&inode->i_mutex);
+		error = ext4_ext_truncate_range(filp, tr.offset, tr.end);
+		mutex_unlock(&inode->i_mutex);
+		return error;
+	}
+	case EXT4_IOC_TRUNCATE_ARRAY_RANGE:
+	{
+		int error = 0, count = 0;
+		trange_array_t tarray;
+		trange_t *ptr;
+		struct mutex *lock = &inode->i_mutex;
+
+		if (copy_from_user(&tarray, (const void *) arg,
+					sizeof(trange_array_t)))
+			return -EFAULT;
+
+		ptr = tarray.trange;
+
+		tarray.trange = vmalloc(tarray.elements * sizeof(trange_t));
+		if (!tarray.trange)
+			return -ENOMEM;
+
+		if (copy_from_user((tarray.trange), (const void *) (ptr),
+					(tarray.elements) * sizeof(trange_t))) {
+			error = -EFAULT;
+			goto out;
+		}
+
+		/* Check for validity of truncate range offsets provided */
+		for (count = 0; count < tarray.elements ; count++) {
+			ptr = tarray.trange + count;
+			if (do_mod(ptr->start_off, inode->i_sb->s_blocksize) ||
+					do_mod(ptr->end_off,inode->i_sb->s_blocksize)) {
+				error = -EINVAL;
+				goto out;
+			}
+			if ((ptr->start_off >= ptr->end_off) ||
+					(ptr->start_off >= inode->i_size)) {
+				error = -EINVAL;
+				goto out;
+			}
+			if (ptr->end_off > inode->i_size)
+				ptr->end_off = inode->i_size;
+		}
+
+		/* Sort the truncate range offsets in descending orders */
+		sort(tarray.trange, tarray.elements, sizeof(trange_t),
+				ext4_cmp_offsets, NULL);
+
+		for (count = 0; count < tarray.elements ; count++) {
+			ptr = tarray.trange + count;
+			if (atomic_read(&lock->count) == 0) {
+				printk(KERN_ERR "Truncate Range is already"
+						"being used. Try Again!!\n");
+				error = -EAGAIN;
+				goto out;
+			}
+			mutex_lock(&inode->i_mutex);
+			error = ext4_ext_truncate_range(filp, ptr->start_off,
+					ptr->end_off);
+			mutex_unlock(&inode->i_mutex);
+			if (error)
+				goto out;
+		}
+out:
+		vfree(tarray.trange);
+		return error;
+	}
+#endif
 
 	case FITRIM:
 	{

@@ -400,6 +400,11 @@ static struct dma_contig_early_reserve dma_mmu_remap[MAX_CMA_AREAS] __initdata;
 
 static int dma_mmu_remap_num __initdata;
 
+#ifdef CONFIG_VMALLOCUSED_PLUS
+unsigned long cma_remap_vaddr[MAX_CMA_AREAS];
+unsigned int cma_remap_num;
+#endif
+
 void __init dma_contiguous_early_fixup(phys_addr_t base, unsigned long size)
 {
 	dma_mmu_remap[dma_mmu_remap_num].base = base;
@@ -421,6 +426,10 @@ void __init dma_contiguous_remap(void)
 		if (start >= end)
 			continue;
 
+#ifdef CONFIG_VMALLOCUSED_PLUS
+		cma_remap_vaddr[cma_remap_num] = __phys_to_virt(start);
+		cma_remap_num++;
+#endif
 		map.pfn = __phys_to_pfn(start);
 		map.virtual = __phys_to_virt(start);
 		map.length = end - start;
@@ -435,7 +444,7 @@ void __init dma_contiguous_remap(void)
 		 * (even though they may be rare) can not cause any problems,
 		 * and ensures that this code is architecturally compliant.
 		 */
-		for (addr = __phys_to_virt(start); addr < __phys_to_virt(end);
+		for (addr = __phys_to_virt(start); addr < __phys_to_virt(end - 1) + 1;
 		     addr += PMD_SIZE)
 			pmd_clear(pmd_off_k(addr));
 
@@ -649,7 +658,7 @@ static void *__dma_alloc(struct device *dev, size_t size, dma_addr_t *handle,
 		addr = __alloc_simple_buffer(dev, size, gfp, &page);
 	else if (!(gfp & __GFP_WAIT))
 		addr = __alloc_from_pool(size, &page);
-	else if (!dev_get_cma_area(dev))
+	else if (size == PAGE_SIZE || !dev_get_cma_area(dev))
 		addr = __alloc_remap_buffer(dev, size, gfp, prot, &page, caller, want_vaddr);
 	else
 		addr = __alloc_from_contiguous(dev, size, prot, &page, caller, want_vaddr);
@@ -739,7 +748,7 @@ static void __arm_dma_free(struct device *dev, size_t size, void *cpu_addr,
 		__dma_free_buffer(page, size);
 	} else if (__free_from_pool(cpu_addr, size)) {
 		return;
-	} else if (!dev_get_cma_area(dev)) {
+	} else if (size == PAGE_SIZE || !dev_get_cma_area(dev)) {
 		if (want_vaddr)
 			__dma_free_remap(cpu_addr, size);
 		__dma_free_buffer(page, size);

@@ -6,7 +6,7 @@ if HAS_IOMEM
 menu "Multifunction device drivers"
 
 config MFD_CORE
-	tristate
+	tristate "MFD_CORE"
 	select IRQ_DOMAIN
 	default n
 
@@ -1419,6 +1419,12 @@ config MFD_WM8994
 	  supported via the relevant subsystems.  This driver provides
 	  core support for the WM8994, in order to use the actual
 	  functionaltiy of the device other drivers must be enabled.
+
+config MFD_SDP_MICOM
+        bool "Support for SDP MICOM"
+        select MFD_CORE
+        help 
+          Support for the SDP MICOM
 
 config MFD_STW481X
 	tristate "Support for ST Microelectronics STw481x"

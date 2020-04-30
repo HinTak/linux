@@ -258,6 +258,34 @@ static unsigned long __read_mostly futex_hashsize;
 
 static struct futex_hash_bucket *futex_queues;
 
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+int is_futex_wait(int pid)
+{
+	int i;
+	int ret = -1;
+	struct futex_hash_bucket *hb;
+	struct futex_q *this, *next;
+	struct plist_head *head;
+
+	for (i = 0; i < futex_hashsize; i++) {
+		hb = &futex_queues[i];
+		spin_lock(&hb->lock);
+		head = &hb->chain;
+		plist_for_each_entry_safe(this, next, head, list) {
+			if(this->task->pid == pid) {
+				ret = 1;
+				spin_unlock(&hb->lock);
+				return ret;
+			}
+		}
+		spin_unlock(&hb->lock);
+		this = NULL;
+	}
+	return ret;
+}
+EXPORT_SYMBOL(is_futex_wait);
+#endif
+
 static inline void futex_get_mm(union futex_key *key)
 {
 	atomic_inc(&key->private.mm->mm_count);
@@ -1088,6 +1116,7 @@ static void __unqueue_futex(struct futex_q *q)
 	hb_waiters_dec(hb);
 }
 
+
 /*
  * The hash bucket lock must be held when this is called.
  * Afterwards, the futex_q must not be accessed.
@@ -1157,10 +1186,20 @@ static int wake_futex_pi(u32 __user *uaddr, u32 uval, struct futex_q *this)
 	 */
 	newval = FUTEX_WAITERS | task_pid_vnr(new_owner);
 
-	if (cmpxchg_futex_value_locked(&curval, uaddr, uval, newval))
+	if (cmpxchg_futex_value_locked(&curval, uaddr, uval, newval)) {
 		ret = -EFAULT;
-	else if (curval != uval)
-		ret = -EINVAL;
+	} else if (curval != uval) {
+		/*
+		 * If a unconditional UNLOCK_PI operation (user space did not
+		 * try the TID->0 transition) raced with a waiter setting the
+		 * FUTEX_WAITERS flag between get_user() and locking the hash
+		 * bucket lock, retry the operation.
+		 */
+		if ((FUTEX_TID_MASK & curval) == uval)
+			ret = -EAGAIN;
+		else
+			ret = -EINVAL;
+	}
 	if (ret) {
 		raw_spin_unlock(&pi_state->pi_mutex.wait_lock);
 		return ret;
@@ -2199,6 +2238,7 @@ retry:
 
 	/* If we were woken (and unqueued), we succeeded, whatever. */
 	ret = 0;
+
 	/* unqueue_me() drops q.key ref */
 	if (!unqueue_me(&q))
 		goto out;
@@ -2419,6 +2459,15 @@ retry:
 		 */
 		if (ret == -EFAULT)
 			goto pi_faulted;
+		/*
+		 * A unconditional UNLOCK_PI op raced against a waiter
+		 * setting the FUTEX_WAITERS bit. Try again.
+		 */
+		if (ret == -EAGAIN) {
+			spin_unlock(&hb->lock);
+			put_futex_key(&key);
+			goto retry;
+		}
 		goto out_unlock;
 	}
 
@@ -2632,6 +2681,11 @@ static int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
 		if (q.pi_state && (q.pi_state->owner != current)) {
 			spin_lock(q.lock_ptr);
 			ret = fixup_pi_state_owner(uaddr2, &q, current);
+			/*
+			 * Drop the reference to the pi state which
+			 * the requeue_pi() code acquired for us.
+			 */
+			free_pi_state(q.pi_state);
 			spin_unlock(q.lock_ptr);
 		}
 	} else {

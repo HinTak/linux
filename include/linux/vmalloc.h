@@ -185,6 +185,8 @@ pcpu_free_vm_areas(struct vm_struct **vms, int nr_vms)
 struct vmalloc_info {
 	unsigned long   used;
 	unsigned long   largest_chunk;
+	unsigned long	largest_chunk_addr;
+	unsigned long   largest_modules_chunk;
 };
 
 #ifdef CONFIG_MMU

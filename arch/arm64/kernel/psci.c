@@ -33,6 +33,7 @@
 #include <asm/smp_plat.h>
 #include <asm/suspend.h>
 #include <asm/system_misc.h>
+#include <asm/io.h>
 
 #define PSCI_POWER_STATE_TYPE_STANDBY		0
 #define PSCI_POWER_STATE_TYPE_POWER_DOWN	1
@@ -508,6 +509,16 @@ static int cpu_psci_cpu_kill(unsigned int cpu)
 	for (i = 0; i < 10; i++) {
 		err = psci_ops.affinity_info(cpu_logical_map(cpu), 0);
 		if (err == PSCI_0_2_AFFINITY_LEVEL_OFF) {
+#ifdef CONFIG_ARCH_SDP1601
+			u32 val;
+			void __iomem *sdp_bootram_power;
+			sdp_bootram_power = ioremap(0x00400000, 0x400); 
+			while(!(readl(sdp_bootram_power) & (1 << (cpu + 24))));		//wait for CPU wfi
+			val = readl(sdp_bootram_power + 0x0C);
+			val &= (~(1 << (cpu + 4)));
+			writel(val, sdp_bootram_power + 0x0C);
+			iounmap(sdp_bootram_power);
+#endif
 			pr_info("CPU%d killed.\n", cpu);
 			return 1;
 		}

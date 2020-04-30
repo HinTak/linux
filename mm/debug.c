@@ -95,6 +95,15 @@ void dump_page_badflags(struct page *page, const char *reason,
 		dump_flags(page->flags & badflags,
 				pageflag_names, ARRAY_SIZE(pageflag_names));
 	}
+#ifndef CONFIG_VD_RELEASE
+	if (page->mapping &&
+			page->mapping->host &&
+			page->mapping->host->i_sb &&
+			page->mapping->host->i_sb->s_type &&
+			page->mapping->host->i_sb->s_type->name)
+		pr_alert("File System Type -> Name %s\n",
+				page->mapping->host->i_sb->s_type->name);
+#endif
 #ifdef CONFIG_MEMCG
 	if (page->mem_cgroup)
 		pr_alert("page->mem_cgroup:%p\n", page->mem_cgroup);

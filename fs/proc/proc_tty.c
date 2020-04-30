@@ -136,6 +136,27 @@ static const struct file_operations proc_tty_drivers_operations = {
 	.release	= seq_release,
 };
 
+#ifdef CONFIG_UART_BROADCAST
+static ssize_t tty_broadcast_write(struct file *file, const char __user *buf,
+		size_t count, loff_t *ppos)
+{
+	size_t i;
+
+	if (count > 0) {
+		for (i = 0; i < count; i++)
+			tty_broadcast_push_char(buf[i]);
+
+		tty_broadcast_flip_buffer_push();
+	}
+
+	return (ssize_t)count;
+}
+
+static const struct file_operations proc_tty_broadcast_operations = {
+	.write = tty_broadcast_write,
+};
+#endif
+
 /*
  * This function is called by tty_register_driver() to handle
  * registering the driver's /proc handler into /proc/tty/driver/<foo>
@@ -186,4 +207,7 @@ void __init proc_tty_init(void)
 	proc_tty_driver = proc_mkdir_mode("tty/driver", S_IRUSR|S_IXUSR, NULL);
 	proc_create("tty/ldiscs", 0, NULL, &tty_ldiscs_proc_fops);
 	proc_create("tty/drivers", 0, NULL, &proc_tty_drivers_operations);
+#ifdef CONFIG_UART_BROADCAST
+	proc_create("tty/broadcast", S_IRUGO | S_IWUGO, NULL, &proc_tty_broadcast_operations);
+#endif
 }

@@ -52,8 +52,13 @@ extern void machine_halt(void);
 extern void machine_power_off(void);
 
 extern void machine_shutdown(void);
+#ifdef CONFIG_KEXEC_CSYSTEM
+struct arm_regs_t;
+extern void machine_crash_shutdown(struct arm_regs_t *);
+#else
 struct pt_regs;
 extern void machine_crash_shutdown(struct pt_regs *);
+#endif
 
 /*
  * Architecture independent implemenations of sys_reboot commands.

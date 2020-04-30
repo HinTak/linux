@@ -30,6 +30,12 @@
 #define CLONE_NEWNET		0x40000000	/* New network namespace */
 #define CLONE_IO		0x80000000	/* Clone io context */
 
+#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+#define CLONE_CONTAINER_ISOLATE		0x00000040
+#define CLONE_CONTAINER_SECURE		0x00000080
+#endif
+
+
 /*
  * Scheduling policies
  */

@@ -688,6 +688,29 @@ static u32 xhci_get_port_status(struct usb_hcd *hcd,
 		else
 			status |= USB_PORT_STAT_POWER;
 	}
+
+#if defined(CONFIG_ARCH_SDP) && defined(CONFIG_USB_DEBUG)
+	if( hcd->speed != HCD_USB3 
+		&& CHK_STATE(temp,PORT_CONNECT)
+		&& !CHK_STATE(temp,PORT_RESET) 
+		&& CHK_STATE(temp,PORT_RC) ) {
+		/* If USB2, check speed and enable on reset-done */
+		if( !CHK_STATE(temp,PORT_PE)
+			|| !DEV_HIGHSPEED(temp)) {
+			xhci->handshake_fail_cnt_usb2++;
+			
+			xhci_dbg(xhci,
+				"handshake fail[usb2]:port idx[%d] "
+				"conn[%d] Reset[%d] HS[%d] PE[%d]\n"
+				,wIndex + 1
+				,CHK_STATE(temp,PORT_CONNECT)
+				,CHK_STATE(temp,PORT_RESET)
+				,DEV_HIGHSPEED(temp)
+				,CHK_STATE(temp,PORT_PE));
+		}
+	}
+#endif
+
 	/* Update Port Link State */
 	if (hcd->speed == HCD_USB3) {
 		xhci_hub_report_usb3_link_state(xhci, &status, raw_port_status);

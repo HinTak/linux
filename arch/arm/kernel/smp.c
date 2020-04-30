@@ -21,6 +21,7 @@
 #include <linux/cpu.h>
 #include <linux/seq_file.h>
 #include <linux/irq.h>
+#include <linux/nmi.h>
 #include <linux/percpu.h>
 #include <linux/clockchips.h>
 #include <linux/completion.h>
@@ -50,6 +51,10 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/ipi.h>
 
+#ifdef CONFIG_KEXEC_CSYSTEM
+#include <linux/kexec.h>
+#endif
+
 /*
  * as from 2.5, kernels no longer have an init_tasks structure
  * so we need some other way of telling a new secondary core
@@ -68,17 +73,28 @@ enum ipi_msg_type {
 	IPI_TIMER,
 	IPI_RESCHEDULE,
 	IPI_CALL_FUNC,
-	IPI_CALL_FUNC_SINGLE,
 	IPI_CPU_STOP,
 	IPI_IRQ_WORK,
 	IPI_COMPLETION,
+	/*
+	* CPU_BACKTRACE is special and not included in NR_IPI
+	* or tracable with trace_ipi_*
+	*/
+	IPI_CPU_BACKTRACE,
+	/*
+	* SGI8-15 can be reserved by secure firmware, and thus may
+	* not be usable by the kernel. Please keep the above limited
+	* to at most 8 entries.
+	*/
+
+	IPI_TZ_SS = 0xb,
 };
 
 static DECLARE_COMPLETION(cpu_running);
 
 static struct smp_operations smp_ops;
 
-void __init smp_set_ops(struct smp_operations *ops)
+void __init smp_set_ops(const struct smp_operations *ops)
 {
 	if (ops)
 		smp_ops = *ops;
@@ -381,6 +397,8 @@ asmlinkage void secondary_start_kernel(void)
 	set_cpu_online(cpu, true);
 	complete(&cpu_running);
 
+	local_restore_irq_affinities();
+
 	local_irq_enable();
 	local_fiq_enable();
 
@@ -457,7 +475,6 @@ static const char *ipi_types[NR_IPI] __tracepoint_string = {
 	S(IPI_TIMER, "Timer broadcast interrupts"),
 	S(IPI_RESCHEDULE, "Rescheduling interrupts"),
 	S(IPI_CALL_FUNC, "Function call interrupts"),
-	S(IPI_CALL_FUNC_SINGLE, "Single function call interrupts"),
 	S(IPI_CPU_STOP, "CPU stop interrupts"),
 	S(IPI_IRQ_WORK, "IRQ work interrupts"),
 	S(IPI_COMPLETION, "completion interrupts"),
@@ -484,6 +501,24 @@ void show_ipi_list(struct seq_file *p, int prec)
 	}
 }
 
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+void print_ipi_list(void)
+{
+    unsigned int cpu, i;
+    static int prec = 0;
+
+    for (i = 0; i < NR_IPI; i++) {
+        printk("%*s%u: ", prec - 1, "IPI", i);
+
+        for_each_online_cpu(cpu)
+            printk( "%10u ",
+                    __get_irq_stat(cpu, ipi_irqs[i]));
+
+        printk(" %s\n", ipi_types[i]);
+    }
+}
+#endif
+
 u64 smp_irq_stat_cpu(unsigned int cpu)
 {
 	u64 sum = 0;
@@ -507,7 +542,7 @@ void arch_send_wakeup_ipi_mask(const struct cpumask *mask)
 
 void arch_send_call_function_single_ipi(int cpu)
 {
-	smp_cross_call(cpumask_of(cpu), IPI_CALL_FUNC_SINGLE);
+	smp_cross_call(cpumask_of(cpu), IPI_CALL_FUNC);
 }
 
 #ifdef CONFIG_IRQ_WORK
@@ -530,12 +565,28 @@ static DEFINE_RAW_SPINLOCK(stop_lock);
 /*
  * ipi_cpu_stop - handle IPI from smp_send_stop()
  */
-static void ipi_cpu_stop(unsigned int cpu)
+static void ipi_cpu_stop(unsigned int cpu, struct pt_regs *regs)
 {
+	struct thread_info *thread = current_thread_info();
+
 	if (system_state == SYSTEM_BOOTING ||
 	    system_state == SYSTEM_RUNNING) {
+
+#ifdef CONFIG_KEXEC_CSYSTEM
+		struct arm_regs_t arm_regs;
+		memset(&arm_regs, 0, sizeof(arm_regs));
+		if (kexec_crash_image) {
+			crash_setup_regs(&arm_regs);
+			crash_save_cpu(&arm_regs, cpu);
+			flush_cache_all();
+		}
+#endif
 		raw_spin_lock(&stop_lock);
 		pr_crit("CPU%u: stopping\n", cpu);
+		printk(KERN_CRIT "Process %.*s (pid: %d, stack limit = 0x%p)\n",
+				TASK_COMM_LEN, thread->task->comm, task_pid_nr(thread->task), thread + 1);
+
+		__show_regs(regs);
 		dump_stack();
 		raw_spin_unlock(&stop_lock);
 	}
@@ -545,8 +596,9 @@ static void ipi_cpu_stop(unsigned int cpu)
 	local_fiq_disable();
 	local_irq_disable();
 
-	while (1)
+	while (1) {
 		cpu_relax();
+	}
 }
 
 static DEFINE_PER_CPU(struct completion *, cpu_completion);
@@ -569,6 +621,8 @@ asmlinkage void __exception_irq_entry do_IPI(int ipinr, struct pt_regs *regs)
 {
 	handle_IPI(ipinr, regs);
 }
+irqreturn_t (*secos_hook)(int irq, void *unused) = NULL;
+EXPORT_SYMBOL(secos_hook);
 
 void handle_IPI(int ipinr, struct pt_regs *regs)
 {
@@ -602,15 +656,10 @@ void handle_IPI(int ipinr, struct pt_regs *regs)
 		irq_exit();
 		break;
 
-	case IPI_CALL_FUNC_SINGLE:
-		irq_enter();
-		generic_smp_call_function_single_interrupt();
-		irq_exit();
-		break;
 
 	case IPI_CPU_STOP:
 		irq_enter();
-		ipi_cpu_stop(cpu);
+		ipi_cpu_stop(cpu, regs);
 		irq_exit();
 		break;
 
@@ -628,6 +677,17 @@ void handle_IPI(int ipinr, struct pt_regs *regs)
 		irq_exit();
 		break;
 
+	case IPI_CPU_BACKTRACE:
+		irq_enter();
+		nmi_cpu_backtrace(regs);
+		irq_exit();
+		break;
+
+
+	case IPI_TZ_SS:
+		if(secos_hook)
+			secos_hook( IPI_TZ_SS,NULL);
+		break;
 	default:
 		pr_crit("CPU%u: Unknown IPI message 0x%x\n",
 		        cpu, ipinr);
@@ -649,13 +709,17 @@ void smp_send_stop(void)
 	unsigned long timeout;
 	struct cpumask mask;
 
+	printk(KERN_ERR"================================================================================\n");
+	printk(KERN_ERR" SMP Send Stop Other CPU!\n");
+	printk(KERN_ERR"================================================================================\n");
+
 	cpumask_copy(&mask, cpu_online_mask);
 	cpumask_clear_cpu(smp_processor_id(), &mask);
 	if (!cpumask_empty(&mask))
 		smp_cross_call(&mask, IPI_CPU_STOP);
 
 	/* Wait up to one second for other CPUs to stop */
-	timeout = USEC_PER_SEC;
+	timeout = 2 * USEC_PER_SEC;
 	while (num_online_cpus() > 1 && timeout--)
 		udelay(1);
 
@@ -722,3 +786,23 @@ static int __init register_cpufreq_notifier(void)
 core_initcall(register_cpufreq_notifier);
 
 #endif
+
+static void raise_nmi(cpumask_t *mask)
+{
+	/*
+	 * Generate the backtrace directly if we are running in a calling
+	 * context that is not preemptible by the backtrace IPI. Note
+	 * that nmi_cpu_backtrace() automatically removes the current cpu
+	 * from mask.
+	 */
+	if (cpumask_test_cpu(smp_processor_id(), mask) && irqs_disabled())
+		nmi_cpu_backtrace(NULL);
+
+	__smp_cross_call(mask, IPI_CPU_BACKTRACE);
+}
+
+void arch_trigger_all_cpu_backtrace(bool include_self)
+{
+	nmi_trigger_all_cpu_backtrace(include_self, raise_nmi);
+}
+

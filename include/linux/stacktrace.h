@@ -35,6 +35,7 @@ extern void save_stack_trace_user(struct stack_trace *trace);
 # define save_stack_trace_user(trace)			do { } while (0)
 # define print_stack_trace(trace, spaces)		do { } while (0)
 # define snprint_stack_trace(buf, size, trace, spaces)	do { } while (0)
+# define seq_print_stack_trace(m, trace, spaces)	do { } while (0)
 #endif
 
 #endif

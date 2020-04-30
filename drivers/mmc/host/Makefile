@@ -2,6 +2,7 @@
 # Makefile for MMC/SD host controller drivers
 #
 
+obj-$(CONFIG_SDP_MMC)		+= sdp_mmc.o
 obj-$(CONFIG_MMC_ARMMMCI)	+= mmci.o
 obj-$(CONFIG_MMC_QCOM_DML)	+= mmci_qcom_dml.o
 obj-$(CONFIG_MMC_PXA)		+= pxamci.o
@@ -56,7 +57,6 @@ obj-$(CONFIG_MMC_MOXART)	+= moxart-mmc.o
 obj-$(CONFIG_MMC_SUNXI)		+= sunxi-mmc.o
 obj-$(CONFIG_MMC_USDHI6ROL0)	+= usdhi6rol0.o
 obj-$(CONFIG_MMC_TOSHIBA_PCI)	+= toshsd.o
-
 obj-$(CONFIG_MMC_REALTEK_PCI)	+= rtsx_pci_sdmmc.o
 obj-$(CONFIG_MMC_REALTEK_USB)	+= rtsx_usb_sdmmc.o
 
@@ -64,6 +64,7 @@ obj-$(CONFIG_MMC_SDHCI_PLTFM)		+= sdhci-pltfm.o
 obj-$(CONFIG_MMC_SDHCI_CNS3XXX)		+= sdhci-cns3xxx.o
 obj-$(CONFIG_MMC_SDHCI_ESDHC_IMX)	+= sdhci-esdhc-imx.o
 obj-$(CONFIG_MMC_SDHCI_DOVE)		+= sdhci-dove.o
+obj-$(CONFIG_MMC_SDHCI_NVT)		+= sdhci-nvt.o
 obj-$(CONFIG_MMC_SDHCI_TEGRA)		+= sdhci-tegra.o
 obj-$(CONFIG_MMC_SDHCI_OF_ARASAN)	+= sdhci-of-arasan.o
 obj-$(CONFIG_MMC_SDHCI_OF_ESDHC)	+= sdhci-of-esdhc.o

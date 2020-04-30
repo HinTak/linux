@@ -46,6 +46,10 @@
 
 #include "queue.h"
 
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+#include "hw_decompress.h"
+#endif
+
 MODULE_ALIAS("mmc:block");
 #ifdef MODULE_PARAM_PREFIX
 #undef MODULE_PARAM_PREFIX
@@ -121,6 +125,13 @@ struct mmc_blk_data {
 	unsigned int	part_curr;
 	struct device_attribute force_ro;
 	struct device_attribute power_ro_lock;
+
+#ifdef CONFIG_MMC_LIFE_TIME_ESTIMATION
+	struct device_attribute life_time;
+#endif
+#ifdef CONFIG_MMC_DEVICE_UNIQUE_ID
+	struct device_attribute unique_id;
+#endif
 	int	area_type;
 };
 
@@ -191,6 +202,40 @@ static void mmc_blk_put(struct mmc_blk_data *md)
 		kfree(md);
 	}
 	mutex_unlock(&open_lock);
+}
+
+static int mmc_boot_wp(struct block_device *bdev)
+{
+	unsigned int timeout;
+	int err;
+
+	struct mmc_blk_data *md;
+	struct mmc_card *ioctl_card;
+
+	md = mmc_blk_get(bdev->bd_disk);
+	if (!md) {
+		return -EFAULT;
+	}
+
+	ioctl_card = md->queue.card;
+	if (IS_ERR(ioctl_card)) {
+		err = -EFAULT;
+		goto err;
+	}
+	timeout = ioctl_card->ext_csd.generic_cmd6_time;
+
+	err = __mmc_switch(ioctl_card, EXT_CSD_CMD_SET_NORMAL
+		,EXT_CSD_BOOT_WP,EXT_CSD_BOOT_WP_B_PERM_WP_EN
+		,timeout,true,true,true);
+	if (err)
+		pr_err("%s: Boot WP timed out, %u\n",
+		       mmc_hostname(ioctl_card->host), timeout);
+
+	return err;
+
+err:
+	mmc_blk_put(md);
+	return err;
 }
 
 static ssize_t power_ro_lock_show(struct device *dev,
@@ -291,6 +336,50 @@ out:
 	return ret;
 }
 
+#ifdef CONFIG_MMC_LIFE_TIME_ESTIMATION
+static ssize_t life_time_show(struct device *dev, struct device_attribute *attr,
+		char *buf)
+{
+	int ret;
+	struct mmc_blk_data *md = mmc_blk_get(dev_to_disk(dev));
+	struct mmc_card *card = md->queue.card;
+
+	ret = snprintf(buf, PAGE_SIZE, "%#x", card->ext_csd.device_life_typ_a);
+	mmc_blk_put(md);
+	return ret;
+}
+#endif
+
+#ifdef CONFIG_MMC_DEVICE_UNIQUE_ID
+
+#define LEN_MANFID  2
+#define LEN_PNM            12
+#define LEN_PSN            8
+#define LEN_MDT            6
+static ssize_t unique_id_show(struct device *dev, struct device_attribute *attr,
+		char *buf)
+{
+	int ret;
+	struct mmc_blk_data *md = mmc_blk_get(dev_to_disk(dev));
+	struct mmc_card *card = md->queue.card;
+	struct mmc_cid *cid = &card->cid;
+
+	ret = snprintf(buf, LEN_MANFID + LEN_PNM + LEN_PSN + LEN_MDT + 1,
+			"%02x%02x%02x%02x%02x%02x%02x%08x%04d%02d",
+			/* ManufactureID(2B)/ProductName(12B)/SerialNumber(8B)/ManufacturingDate(6B) */
+			cid->manfid,
+			cid->prod_name[0],
+			cid->prod_name[1],
+			cid->prod_name[2],
+			cid->prod_name[3],
+			cid->prod_name[4],
+			cid->prod_name[5],
+			cid->serial, cid->year, cid->month);
+	mmc_blk_put(md);
+	return ret;
+}
+#endif
+
 static int mmc_blk_open(struct block_device *bdev, fmode_t mode)
 {
 	struct mmc_blk_data *md = mmc_blk_get(bdev->bd_disk);
@@ -375,13 +464,30 @@ static struct mmc_blk_ioc_data *mmc_blk_ioctl_copy_from_user(
 	}
 
 	return idata;
-
 copy_err:
 	kfree(idata->buf);
 idata_err:
 	kfree(idata);
 out:
 	return ERR_PTR(err);
+}
+
+static int mmc_blk_ioctl_copy_to_user(struct mmc_ioc_cmd __user *ic_ptr,
+				      struct mmc_blk_ioc_data *idata)
+{
+	struct mmc_ioc_cmd *ic = &idata->ic;
+
+	if (copy_to_user(&(ic_ptr->response), ic->response,
+			 sizeof(ic->response)))
+		return -EFAULT;
+
+	if (!idata->ic.write_flag) {
+		if (copy_to_user((void __user *)(unsigned long)ic->data_ptr,
+				 idata->buf, idata->buf_bytes))
+			return -EFAULT;
+	}
+
+	return 0;
 }
 
 static int ioctl_rpmb_card_status_poll(struct mmc_card *card, u32 *status,
@@ -444,12 +550,9 @@ out:
 	return err;
 }
 
-static int mmc_blk_ioctl_cmd(struct block_device *bdev,
-	struct mmc_ioc_cmd __user *ic_ptr)
+static int __mmc_blk_ioctl_cmd(struct mmc_card *card, struct mmc_blk_data *md,
+			       struct mmc_blk_ioc_data *idata)
 {
-	struct mmc_blk_ioc_data *idata;
-	struct mmc_blk_data *md;
-	struct mmc_card *card;
 	struct mmc_command cmd = {0};
 	struct mmc_data data = {0};
 	struct mmc_request mrq = {NULL};
@@ -458,32 +561,31 @@ static int mmc_blk_ioctl_cmd(struct block_device *bdev,
 	int is_rpmb = false;
 	u32 status = 0;
 
-	/*
-	 * The caller must have CAP_SYS_RAWIO, and must be calling this on the
-	 * whole block device, not on a partition.  This prevents overspray
-	 * between sibling partitions.
-	 */
-	if ((!capable(CAP_SYS_RAWIO)) || (bdev != bdev->bd_contains))
-		return -EPERM;
-
-	idata = mmc_blk_ioctl_copy_from_user(ic_ptr);
-	if (IS_ERR(idata))
-		return PTR_ERR(idata);
-
-	md = mmc_blk_get(bdev->bd_disk);
-	if (!md) {
-		err = -EINVAL;
-		goto cmd_err;
-	}
+	if (!card || !md || !idata)
+		return -EINVAL;
 
 	if (md->area_type & MMC_BLK_DATA_AREA_RPMB)
 		is_rpmb = true;
 
-	card = md->queue.card;
-	if (IS_ERR(card)) {
-		err = PTR_ERR(card);
-		goto cmd_done;
+	/* XXX After mmc power off, we have to be sure that nobody use mmc anymore.
+	 * XXX In some applications, try to use RPMB area after mmc power off.
+	 * XXX Hence, we protect ioctl cmd after mmc power off, especially, RPMB area.
+	 * XXX This one should be very rear case, so using "unlikely" sentense for performance.
+	 * XXX -- Written by Jungwoo Lee(jungwoo0.lee@samsung.com) --
+	 * XXX -- Reviewed by ROMAN PENYAEV(roman.pen@samsung.com) --
+	 */
+	if(is_rpmb) {
+		if (unlikely(card->host->ios.power_mode == MMC_POWER_OFF)) {
+			return -EINVAL;
+		}
 	}
+
+#if defined(CONFIG_MMC_SDHCI_NVT)
+	/* FlashFS Set : remove busy flag */
+	if( is_rpmb && (idata->ic.opcode == MMC_WRITE_MULTIPLE_BLOCK) ) {
+		idata->ic.flags &= ~(MMC_RSP_BUSY);
+	}
+#endif
 
 	cmd.opcode = idata->ic.opcode;
 	cmd.arg = idata->ic.arg;
@@ -521,29 +623,26 @@ static int mmc_blk_ioctl_cmd(struct block_device *bdev,
 			 */
 			data.timeout_ns = idata->ic.cmd_timeout_ms * 1000000;
 		}
-
 		mrq.data = &data;
 	}
 
 	mrq.cmd = &cmd;
 
-	mmc_get_card(card);
-
 	err = mmc_blk_part_switch(card, md);
 	if (err)
-		goto cmd_rel_host;
+		return err;
 
 	if (idata->ic.is_acmd) {
 		err = mmc_app_cmd(card->host, card);
 		if (err)
-			goto cmd_rel_host;
+			return err;
 	}
 
 	if (is_rpmb) {
 		err = mmc_set_blockcount(card, data.blocks,
 			idata->ic.write_flag & (1 << 31));
 		if (err)
-			goto cmd_rel_host;
+			return err;
 	}
 
 	if ((MMC_EXTRACT_INDEX_FROM_ARG(cmd.arg) == EXT_CSD_SANITIZE_START) &&
@@ -554,7 +653,7 @@ static int mmc_blk_ioctl_cmd(struct block_device *bdev,
 			pr_err("%s: ioctl_do_sanitize() failed. err = %d",
 			       __func__, err);
 
-		goto cmd_rel_host;
+		return err;
 	}
 
 	mmc_wait_for_req(card->host, &mrq);
@@ -562,14 +661,12 @@ static int mmc_blk_ioctl_cmd(struct block_device *bdev,
 	if (cmd.error) {
 		dev_err(mmc_dev(card->host), "%s: cmd error %d\n",
 						__func__, cmd.error);
-		err = cmd.error;
-		goto cmd_rel_host;
+		return cmd.error;
 	}
 	if (data.error) {
 		dev_err(mmc_dev(card->host), "%s: data error %d\n",
 						__func__, data.error);
-		err = data.error;
-		goto cmd_rel_host;
+		return data.error;
 	}
 
 	/*
@@ -579,49 +676,156 @@ static int mmc_blk_ioctl_cmd(struct block_device *bdev,
 	if (idata->ic.postsleep_min_us)
 		usleep_range(idata->ic.postsleep_min_us, idata->ic.postsleep_max_us);
 
-	if (copy_to_user(&(ic_ptr->response), cmd.resp, sizeof(cmd.resp))) {
-		err = -EFAULT;
-		goto cmd_rel_host;
-	}
-
-	if (!idata->ic.write_flag) {
-		if (copy_to_user((void __user *)(unsigned long) idata->ic.data_ptr,
-						idata->buf, idata->buf_bytes)) {
-			err = -EFAULT;
-			goto cmd_rel_host;
-		}
-	}
+	memcpy(&(idata->ic.response), cmd.resp, sizeof(cmd.resp));
 
 	if (is_rpmb) {
 		/*
 		 * Ensure RPMB command has completed by polling CMD13
 		 * "Send Status".
 		 */
-		err = ioctl_rpmb_card_status_poll(card, &status, 5);
+		err = ioctl_rpmb_card_status_poll(card, &status, 50);	/* FlashFS set : increase retry times */
 		if (err)
 			dev_err(mmc_dev(card->host),
 					"%s: Card Status=0x%08X, error %d\n",
 					__func__, status, err);
 	}
 
-cmd_rel_host:
+	return err;
+}
+
+static int mmc_blk_ioctl_cmd(struct block_device *bdev,
+			     struct mmc_ioc_cmd __user *ic_ptr)
+{
+	struct mmc_blk_ioc_data *idata;
+	struct mmc_blk_data *md;
+	struct mmc_card *card;
+	int err = 0, ioc_err = 0;
+
+	/*
+	 * The caller must have CAP_SYS_RAWIO, and must be calling this on the
+	 * whole block device, not on a partition.  This prevents overspray
+	 * between sibling partitions.
+	 */
+	if ((!capable(CAP_SYS_RAWIO)) || (bdev != bdev->bd_contains))
+		return -EPERM;
+
+	idata = mmc_blk_ioctl_copy_from_user(ic_ptr);
+	if (IS_ERR(idata))
+		return PTR_ERR(idata);
+
+	md = mmc_blk_get(bdev->bd_disk);
+	if (!md) {
+		err = -EINVAL;
+		goto cmd_err;
+	}
+
+	card = md->queue.card;
+	if (IS_ERR(card)) {
+		err = PTR_ERR(card);
+		goto cmd_done;
+	}
+
+	mmc_get_card(card);
+
+	ioc_err = __mmc_blk_ioctl_cmd(card, md, idata);
+
 	mmc_put_card(card);
+
+	err = mmc_blk_ioctl_copy_to_user(ic_ptr, idata);
 
 cmd_done:
 	mmc_blk_put(md);
 cmd_err:
 	kfree(idata->buf);
 	kfree(idata);
-	return err;
+	return ioc_err ? ioc_err : err;
+}
+
+static int mmc_blk_ioctl_multi_cmd(struct block_device *bdev,
+				   struct mmc_ioc_multi_cmd __user *user)
+{
+	struct mmc_blk_ioc_data **idata = NULL;
+	struct mmc_ioc_cmd __user *cmds = user->cmds;
+	struct mmc_card *card;
+	struct mmc_blk_data *md;
+	int i, err = 0, ioc_err = 0;
+	__u64 num_of_cmds;
+
+	/*
+	 * The caller must have CAP_SYS_RAWIO, and must be calling this on the
+	 * whole block device, not on a partition.  This prevents overspray
+	 * between sibling partitions.
+	 */
+	if ((!capable(CAP_SYS_RAWIO)) || (bdev != bdev->bd_contains))
+		return -EPERM;
+
+	if (copy_from_user(&num_of_cmds, &user->num_of_cmds,
+			   sizeof(num_of_cmds)))
+		return -EFAULT;
+
+	if (num_of_cmds > MMC_IOC_MAX_CMDS)
+		return -EINVAL;
+
+	idata = kcalloc(num_of_cmds, sizeof(*idata), GFP_KERNEL);
+	if (!idata)
+		return -ENOMEM;
+
+	for (i = 0; i < num_of_cmds; i++) {
+		idata[i] = mmc_blk_ioctl_copy_from_user(&cmds[i]);
+		if (IS_ERR(idata[i])) {
+			err = PTR_ERR(idata[i]);
+			num_of_cmds = i;
+			goto cmd_err;
+		}
+	}
+
+	md = mmc_blk_get(bdev->bd_disk);
+	if (!md)
+		goto cmd_err;
+
+	card = md->queue.card;
+	if (IS_ERR(card)) {
+		err = PTR_ERR(card);
+		goto cmd_done;
+	}
+
+	mmc_get_card(card);
+
+	for (i = 0; i < num_of_cmds && !ioc_err; i++)
+		ioc_err = __mmc_blk_ioctl_cmd(card, md, idata[i]);
+
+	mmc_put_card(card);
+
+	/* copy to user if data and response */
+	for (i = 0; i < num_of_cmds && !err; i++)
+		err = mmc_blk_ioctl_copy_to_user(&cmds[i], idata[i]);
+
+cmd_done:
+	mmc_blk_put(md);
+cmd_err:
+	for (i = 0; i < num_of_cmds; i++) {
+		kfree(idata[i]->buf);
+		kfree(idata[i]);
+	}
+	kfree(idata);
+	return ioc_err ? ioc_err : err;
 }
 
 static int mmc_blk_ioctl(struct block_device *bdev, fmode_t mode,
 	unsigned int cmd, unsigned long arg)
 {
-	int ret = -EINVAL;
-	if (cmd == MMC_IOC_CMD)
-		ret = mmc_blk_ioctl_cmd(bdev, (struct mmc_ioc_cmd __user *)arg);
-	return ret;
+	switch (cmd) {
+	case MMC_IOC_CMD:
+		return mmc_blk_ioctl_cmd(bdev,
+				(struct mmc_ioc_cmd __user *)arg);
+	case MMC_IOC_MULTI_CMD:
+		return mmc_blk_ioctl_multi_cmd(bdev,
+				(struct mmc_ioc_multi_cmd __user *)arg);
+	case MMC_IOC_CMD_BOOT_PERM_WP:
+		return mmc_boot_wp(bdev);
+	default:
+		return -EINVAL;
+	}
 }
 
 #ifdef CONFIG_COMPAT
@@ -641,7 +845,24 @@ static const struct block_device_operations mmc_bdops = {
 #ifdef CONFIG_COMPAT
 	.compat_ioctl		= mmc_blk_compat_ioctl,
 #endif
+#if defined(CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM)
+	.hw_decompress_vec      = hw_decompress_fn,
+#endif
 };
+
+#define FLUSH_DEVICE_LIST_NUM 1
+#define PROD_NAME_LEN 8
+char flush_device_list[FLUSH_DEVICE_LIST_NUM][PROD_NAME_LEN] = { "4FPD3R"/*KLM4G1FEPD-B031*/ };
+int need_cache_flush(struct mmc_card *card)
+{
+	int i;
+
+	for(i=0; i<FLUSH_DEVICE_LIST_NUM; i++)
+		if( !strcmp(flush_device_list[i], mmc_card_name(card)) )
+			return 1;
+
+	return 0;
+}
 
 static inline int mmc_blk_part_switch(struct mmc_card *card,
 				      struct mmc_blk_data *md)
@@ -657,6 +878,19 @@ static inline int mmc_blk_part_switch(struct mmc_card *card,
 
 		part_config &= ~EXT_CSD_PART_CONFIG_ACC_MASK;
 		part_config |= md->part_type;
+
+		/*
+			[FlashFS] 
+			For KLM4G1FEPD-B031, We need cache flush for RPMB hang issue as workaround
+			(Originally, this workaround comes from KLM8G1GEME-B041 case)
+			EXT_CSD_PART_CONFIG_ACC_RPMB flag means RPMB partition access - mmc_access_rpmb()
+		*/
+		if( md->part_type == EXT_CSD_PART_CONFIG_ACC_RPMB && need_cache_flush(card) )
+		{
+			ret = mmc_flush_cache(card);
+			if (ret)
+				return ret;
+		}
 
 		ret = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
 				 EXT_CSD_PART_CONFIG, part_config,
@@ -1432,6 +1666,14 @@ static void mmc_blk_rw_rq_prep(struct mmc_queue_req *mqrq,
 		readcmd = MMC_READ_SINGLE_BLOCK;
 		writecmd = MMC_WRITE_BLOCK;
 	}
+
+#if defined(CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM )
+	/* In case of special request we can avoid dma mapping, thus have
+	   some performance gain, because we do not touch CPU cache */
+	if (req->cmd_type == REQ_TYPE_SPECIAL)
+		brq->data.flags |= MMC_DATA_NOMAP;
+#endif
+
 	if (rq_data_dir(req) == READ) {
 		brq->cmd.opcode = readcmd;
 		brq->data.flags |= MMC_DATA_READ;
@@ -2298,6 +2540,12 @@ static void mmc_blk_remove_req(struct mmc_blk_data *md)
 		if (md->flags & MMC_BLK_PACKED_CMD)
 			mmc_packed_clean(&md->queue);
 		if (md->disk->flags & GENHD_FL_UP) {
+#ifdef CONFIG_MMC_LIFE_TIME_ESTIMATION
+			device_remove_file(disk_to_dev(md->disk), &md->life_time);
+#endif
+#ifdef CONFIG_MMC_DEVICE_UNIQUE_ID
+			device_remove_file(disk_to_dev(md->disk), &md->unique_id);
+#endif
 			device_remove_file(disk_to_dev(md->disk), &md->force_ro);
 			if ((md->area_type & MMC_BLK_DATA_AREA_BOOT) &&
 					card->ext_csd.boot_ro_lockable)
@@ -2339,6 +2587,26 @@ static int mmc_add_disk(struct mmc_blk_data *md)
 	if (ret)
 		goto force_ro_fail;
 
+#ifdef CONFIG_MMC_LIFE_TIME_ESTIMATION
+       md->life_time.show = life_time_show;
+       sysfs_attr_init(&md->life_time.attr);
+       md->life_time.attr.name = "life_time";
+       md->life_time.attr.mode = S_IRUSR | S_IRGRP | S_IROTH;
+       ret = device_create_file(disk_to_dev(md->disk), &md->life_time);
+       if (ret)
+               goto life_time_fail;
+#endif
+
+#ifdef CONFIG_MMC_DEVICE_UNIQUE_ID
+	md->unique_id.show = unique_id_show;
+	sysfs_attr_init(&md->unique_id.attr);
+	md->unique_id.attr.name = "unique_id";
+	md->unique_id.attr.mode = S_IRUSR | S_IRGRP | S_IROTH;
+	ret = device_create_file(disk_to_dev(md->disk), &md->unique_id);
+	if (ret)
+		goto unique_id_fail;
+#endif
+
 	if ((md->area_type & MMC_BLK_DATA_AREA_BOOT) &&
 	     card->ext_csd.boot_ro_lockable) {
 		umode_t mode;
@@ -2365,6 +2633,14 @@ power_ro_lock_fail:
 	device_remove_file(disk_to_dev(md->disk), &md->force_ro);
 force_ro_fail:
 	del_gendisk(md->disk);
+#ifdef CONFIG_MMC_LIFE_TIME_ESTIMATION
+life_time_fail:
+       device_remove_file(disk_to_dev(md->disk), &md->life_time);
+#endif
+#ifdef CONFIG_MMC_DEVICE_UNIQUE_ID
+unique_id_fail:
+	device_remove_file(disk_to_dev(md->disk), &md->unique_id);
+#endif
 
 	return ret;
 }

@@ -99,7 +99,6 @@ struct msdos_sb_info {
 	spinlock_t dir_hash_lock;
 	struct hlist_head dir_hashtable[FAT_HASH_SIZE];
 
-	unsigned int dirty;           /* fs state before mount */
 	struct rcu_head rcu;
 };
 

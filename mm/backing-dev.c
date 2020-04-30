@@ -164,6 +164,8 @@ static ssize_t name##_show(struct device *dev,				\
 {									\
 	struct backing_dev_info *bdi = dev_get_drvdata(dev);		\
 									\
+	if(!bdi) return 0;						\
+									\
 	return snprintf(page, PAGE_SIZE-1, "%lld\n", (long long)expr);	\
 }									\
 static DEVICE_ATTR_RW(name);
@@ -350,6 +352,11 @@ static void bdi_wb_shutdown(struct backing_dev_info *bdi)
 	 */
 	bdi_remove_from_list(bdi);
 
+	if (check_freezing()) {
+		cancel_delayed_work(&bdi->wb.dwork);
+		return;
+	}
+
 	/*
 	 * Drain work list and shutdown the delayed_work.  At this point,
 	 * @bdi->bdi_list is empty telling bdi_Writeback_workfn() that @bdi
@@ -421,21 +428,25 @@ err:
 }
 EXPORT_SYMBOL(bdi_init);
 
-void bdi_destroy(struct backing_dev_info *bdi)
+void bdi_unregister(struct backing_dev_info *bdi)
 {
-	int i;
-
 	bdi_wb_shutdown(bdi);
 	bdi_set_min_ratio(bdi, 0);
-
-	WARN_ON(!list_empty(&bdi->work_list));
-	WARN_ON(delayed_work_pending(&bdi->wb.dwork));
 
 	if (bdi->dev) {
 		bdi_debug_unregister(bdi);
 		device_unregister(bdi->dev);
 		bdi->dev = NULL;
 	}
+}
+
+void bdi_destroy(struct backing_dev_info *bdi)
+{
+	int i;
+
+	bdi_unregister(bdi);
+	WARN_ON(!list_empty(&bdi->work_list));
+	WARN_ON(delayed_work_pending(&bdi->wb.dwork));
 
 	for (i = 0; i < NR_BDI_STAT_ITEMS; i++)
 		percpu_counter_destroy(&bdi->bdi_stat[i]);
@@ -536,8 +547,9 @@ EXPORT_SYMBOL(congestion_wait);
  * jiffies for either a BDI to exit congestion of the given @sync queue
  * or a write to complete.
  *
- * In the absence of zone congestion, cond_resched() is called to yield
- * the processor if necessary but otherwise does not sleep.
+ * In the absence of zone congestion, a short sleep or a cond_resched is
+ * performed to yield the processor and to allow other subsystems to make
+ * a forward progress.
  *
  * The return value is 0 if the sleep is for the full timeout. Otherwise,
  * it is the number of jiffies that were still remaining when the function
@@ -557,7 +569,19 @@ long wait_iff_congested(struct zone *zone, int sync, long timeout)
 	 */
 	if (atomic_read(&nr_bdi_congested[sync]) == 0 ||
 	    !test_bit(ZONE_CONGESTED, &zone->flags)) {
-		cond_resched();
+
+		/*
+		 * Memory allocation/reclaim might be called from a WQ
+		 * context and the current implementation of the WQ
+		 * concurrency control doesn't recognize that a particular
+		 * WQ is congested if the worker thread is looping without
+		 * ever sleeping. Therefore we have to do a short sleep
+		 * here rather than calling cond_resched().
+		 */
+		if (current->flags & PF_WQ_WORKER)
+			schedule_timeout_uninterruptible(1);
+		else
+			cond_resched();
 
 		/* In case we scheduled, work out time remaining */
 		ret = timeout - (jiffies - start);

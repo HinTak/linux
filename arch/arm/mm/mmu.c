@@ -1178,7 +1178,7 @@ static inline void prepare_page_table(void)
 	 * Clear out all the kernel space mappings, except for the first
 	 * memory bank, up to the vmalloc region.
 	 */
-	for (addr = __phys_to_virt(end);
+	for (addr = __phys_to_virt(end - 1) + 1;
 	     addr < VMALLOC_START; addr += PMD_SIZE)
 		pmd_clear(pmd_off_k(addr));
 }

@@ -264,6 +264,10 @@ mprotect_fixup(struct vm_area_struct *vma, struct vm_area_struct **pprev,
 	int error;
 	int dirty_accountable = 0;
 
+#ifdef CONFIG_RSS_INFO  /* VD_SP */
+	int rss_cnt = 0;
+#endif
+
 	if (newflags == oldflags) {
 		*pprev = vma;
 		return 0;
@@ -311,10 +315,10 @@ mprotect_fixup(struct vm_area_struct *vma, struct vm_area_struct **pprev,
 	}
 
 success:
-	/*
-	 * vm_flags and vm_page_prot are protected by the mmap_sem
-	 * held in write mode.
-	 */
+#ifdef CONFIG_RSS_INFO  /* VD_SP */
+	rss_cnt = get_vma_rss(vma);
+	dec_rss_counter(vma, rss_cnt);
+#endif
 	vma->vm_flags = newflags;
 	dirty_accountable = vma_wants_writenotify(vma);
 	vma_set_page_prot(vma);
@@ -322,6 +326,9 @@ success:
 	change_protection(vma, start, end, vma->vm_page_prot,
 			  dirty_accountable, 0);
 
+#ifdef CONFIG_RSS_INFO  /* VD_SP */
+	inc_rss_counter(vma, rss_cnt);
+#endif
 	vm_stat_account(mm, oldflags, vma->vm_file, -nrpages);
 	vm_stat_account(mm, newflags, vma->vm_file, nrpages);
 	perf_event_mmap(vma);

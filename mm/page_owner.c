@@ -7,7 +7,7 @@
 #include <linux/page_owner.h>
 #include "internal.h"
 
-static bool page_owner_disabled = true;
+static bool page_owner_disabled;
 bool page_owner_inited __read_mostly;
 
 static void init_early_allocated_pages(void);
@@ -71,6 +71,7 @@ void __set_page_owner(struct page *page, unsigned int order, gfp_t gfp_mask)
 
 	page_ext->order = order;
 	page_ext->gfp_mask = gfp_mask;
+	page_ext->pid = current->pid;
 	page_ext->nr_entries = trace.nr_entries;
 
 	__set_bit(PAGE_EXT_OWNER, &page_ext->flags);
@@ -103,7 +104,8 @@ print_page_owner(char __user *buf, size_t count, unsigned long pfn,
 	pageblock_mt = get_pfnblock_migratetype(page, pfn);
 	page_mt  = gfpflags_to_migratetype(page_ext->gfp_mask);
 	ret += snprintf(kbuf + ret, count - ret,
-			"PFN %lu Block %lu type %d %s Flags %s%s%s%s%s%s%s%s%s%s%s%s\n",
+			"PFN %lu Block %lu type %d %s Flags %s%s%s%s%s%s%s%s%s%s%s%s\n"
+			"PID %d\n",
 			pfn,
 			pfn >> pageblock_order,
 			pageblock_mt,
@@ -119,7 +121,8 @@ print_page_owner(char __user *buf, size_t count, unsigned long pfn,
 			PageWriteback(page)	? "W" : " ",
 			PageCompound(page)	? "C" : " ",
 			PageSwapCache(page)	? "B" : " ",
-			PageMappedToDisk(page)	? "M" : " ");
+			PageMappedToDisk(page)	? "M" : " ",
+			page_ext->pid);
 
 	if (ret >= count)
 		goto err;

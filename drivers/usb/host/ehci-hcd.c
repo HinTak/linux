@@ -74,7 +74,13 @@ static const char	hcd_name [] = "ehci_hcd";
 #undef EHCI_URB_TRACE
 
 /* magic numbers that can affect system performance */
+#if defined(CONFIG_USB_EW_FEATURE)
+#define	EHCI_TUNE_CERR_DEF	3	/* 0-3 qtd retries; 0 == don't stop */
+/* tune CERR at run-time */
+int EHCI_TUNE_CERR = EHCI_TUNE_CERR_DEF;
+#else
 #define	EHCI_TUNE_CERR		3	/* 0-3 qtd retries; 0 == don't stop */
+#endif
 #define	EHCI_TUNE_RL_HS		4	/* nak throttle; see 4.9 */
 #define	EHCI_TUNE_RL_TT		0
 #define	EHCI_TUNE_MULT_HS	1	/* 1-3 transactions/uframe; 4.10.3 */
@@ -85,8 +91,12 @@ static const char	hcd_name [] = "ehci_hcd";
  * code).  In an attempt to avoid trouble, we will use a minimum scheduling
  * length of 512 frames instead of 256.
  */
+//hongyabi patch for enlarge async frame list length
+#if defined(SAMSUNG_PATCH_WITH_USB_ENHANCEMENT)
+#define         EHCI_TUNE_FLS   0       /* 1024 frame schedule */
+#else
 #define	EHCI_TUNE_FLS		1	/* (medium) 512-frame schedule */
-
+#endif
 /* Initial IRQ latency:  faster than hw default */
 static int log2_irq_thresh = 0;		// 0 to 6
 module_param (log2_irq_thresh, int, S_IRUGO);
@@ -98,11 +108,19 @@ module_param (park, uint, S_IRUGO);
 MODULE_PARM_DESC (park, "park setting; 1-3 back-to-back async packets");
 
 /* for flakey hardware, ignore overcurrent indicators */
+#if defined(CONFIG_USB_NVT_EHCI_HCD)
+static bool ignore_oc = 1;
+#else
 static bool ignore_oc = 0;
+#endif
 module_param (ignore_oc, bool, S_IRUGO);
 MODULE_PARM_DESC (ignore_oc, "ignore bogus hardware overcurrent indications");
 
 #define	INTR_MASK (STS_IAA | STS_FATAL | STS_PCD | STS_ERR | STS_INT)
+
+#ifdef CONFIG_SDP_BUS_ERR_LOGGER
+int sdp_bus_err_logger(void);
+#endif
 
 /*-------------------------------------------------------------------------*/
 
@@ -176,6 +194,7 @@ int ehci_handshake(struct ehci_hcd *ehci, void __iomem *ptr,
 }
 EXPORT_SYMBOL_GPL(ehci_handshake);
 
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 /* check TDI/ARC silicon is in host mode */
 static int tdi_in_host_mode (struct ehci_hcd *ehci)
 {
@@ -184,6 +203,7 @@ static int tdi_in_host_mode (struct ehci_hcd *ehci)
 	tmp = ehci_readl(ehci, &ehci->regs->usbmode);
 	return (tmp & 3) == USBMODE_CM_HC;
 }
+#endif
 
 /*
  * Force HC to halt state from unknown (EHCI spec section 2.3).
@@ -198,10 +218,12 @@ static int ehci_halt (struct ehci_hcd *ehci)
 	/* disable any irqs left enabled by previous code */
 	ehci_writel(ehci, 0, &ehci->regs->intr_enable);
 
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 	if (ehci_is_TDI(ehci) && !tdi_in_host_mode(ehci)) {
 		spin_unlock_irq(&ehci->lock);
 		return 0;
 	}
+#endif
 
 	/*
 	 * This routine gets called during probe before ehci->command
@@ -351,11 +373,13 @@ static void ehci_silence_controller(struct ehci_hcd *ehci)
 	ehci->rh_state = EHCI_RH_HALTED;
 	ehci_turn_off_all_ports(ehci);
 
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 	/* make BIOS/etc use companion controller during reboot */
 	ehci_writel(ehci, 0, &ehci->regs->configured_flag);
 
 	/* unblock posted writes */
 	ehci_readl(ehci, &ehci->regs->configured_flag);
+#endif
 	spin_unlock_irq(&ehci->lock);
 }
 
@@ -451,6 +475,7 @@ static void ehci_stop (struct usb_hcd *hcd)
 		    ehci_readl(ehci, &ehci->regs->status));
 }
 
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 /* one-time init, only for memory state */
 static int ehci_init(struct usb_hcd *hcd)
 {
@@ -566,6 +591,7 @@ static int ehci_init(struct usb_hcd *hcd)
 		hcd->self.sg_tablesize = ~0;
 	return 0;
 }
+#endif
 
 /* start HC running; it's halted, ehci_init() has been run (once) */
 static int ehci_run (struct usb_hcd *hcd)
@@ -627,7 +653,9 @@ static int ehci_run (struct usb_hcd *hcd)
 	 */
 	down_write(&ehci_cf_port_reset_rwsem);
 	ehci->rh_state = EHCI_RH_RUNNING;
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 	ehci_writel(ehci, FLAG_CF, &ehci->regs->configured_flag);
+#endif
 	ehci_readl(ehci, &ehci->regs->command);	/* unblock posted writes */
 	msleep(5);
 	up_write(&ehci_cf_port_reset_rwsem);
@@ -653,6 +681,7 @@ static int ehci_run (struct usb_hcd *hcd)
 	return 0;
 }
 
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 int ehci_setup(struct usb_hcd *hcd)
 {
 	struct ehci_hcd *ehci = hcd_to_ehci(hcd);
@@ -682,9 +711,56 @@ int ehci_setup(struct usb_hcd *hcd)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(ehci_setup);
+#endif
 
 /*-------------------------------------------------------------------------*/
+#ifdef CONFIG_USB_DEBUG
 
+#if defined(CONFIG_ARCH_SDP1404)
+static void __iomem * bus_base = NULL;
+#define BUS_MON_ADDR 0x11740000
+
+#elif defined(CONFIG_ARCH_SDP1406)
+static void __iomem * bus_base = NULL;
+#define BUS_MON_ADDR 0x00E06000 
+
+#elif defined(CONFIG_ARCH_SDP1501)
+static void __iomem * bus_base = NULL;
+#define BUS_MON_ADDR 0x00560200 
+
+#endif
+
+static void host_dump(struct ehci_hcd*ehci)
+{
+	/**/
+	struct ehci_regs __iomem *regs = ehci->regs;
+	void __iomem *base = &regs->command;
+	struct ehci_qh		*qh_scan_next = ehci->qh_scan_next;
+	struct ehci_qh		*async = ehci->async;
+	struct ehci_qh		*dummy = ehci->dummy;
+	int i;
+	
+	if(qh_scan_next!=NULL)	dbg_qh ("qh_scan_next",ehci,qh_scan_next);
+	if(async!=NULL) dbg_qh ("async",ehci,async);
+	if(dummy!=NULL) dbg_qh ("dummy",ehci,dummy);
+
+	ehci_err(ehci, "EHCI HOST DUMP.....\n");
+	for(i = 0 ; i < 15 ; i++)
+	{
+		ehci_err(ehci, "0x%02x: 0x%08x 0x%08x 0x%08x 0x%08x",0x10*i,readl(base + 0x10*i),readl(base + 0x10*i +0x4),readl(base +0x10*i +0x8),readl(base + 0x10*i +0xc));
+	}
+#ifdef BUS_MON_ADDR
+	if(bus_base !=NULL)
+	{
+		ehci_err(ehci,"BUS_MON reg DUMP\n");
+		for(i = 0 ; i < 16 ; i++)
+		{
+			ehci_err(ehci, "0x%02x: 0x%08x 0x%08x 0x%08x 0x%08x",0x10*i,readl(bus_base + 0x10*i),readl(bus_base + 0x10*i +0x4),readl(bus_base +0x10*i +0x8),readl(bus_base + 0x10*i +0xc));
+		}
+	}
+#endif
+}
+#endif
 static irqreturn_t ehci_irq (struct usb_hcd *hcd)
 {
 	struct ehci_hcd		*ehci = hcd_to_ehci (hcd);
@@ -761,11 +837,15 @@ static irqreturn_t ehci_irq (struct usb_hcd *hcd)
 	/* remote wakeup [4.3.1] */
 	if (status & STS_PCD) {
 		unsigned	i = HCS_N_PORTS (ehci->hcs_params);
+#if defined(CONFIG_USB_NVT_EHCI_HCD)
+		u32 port_status = readl(&ehci->regs->port_status[0]);
+#endif
 		u32		ppcd = ~0;
 
 		/* kick root hub later */
 		pcd_status = status;
 
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 		/* resume root hub? */
 		if (ehci->rh_state == EHCI_RH_SUSPENDED)
 			usb_hcd_resume_root_hub(hcd);
@@ -773,6 +853,41 @@ static irqreturn_t ehci_irq (struct usb_hcd *hcd)
 		/* get per-port change detect bits */
 		if (ehci->has_ppcd)
 			ppcd = status >> 16;
+#else
+		/* resume root hub? */
+		if (!(cmd & CMD_RUN) || test_bit(1, &hcd->porcd2)
+			|| (!(port_status & PORT_CONNECT))) {
+			usb_hcd_resume_root_hub(hcd);
+			/* get per-port change detect bits */
+			if (ehci->has_ppcd)
+				ppcd = status >> 16;
+			set_bit(1, &hcd->porcd2);
+			if ((port_status & PORT_CONNECT) != 0) {
+				writel(cmd | CMD_RUN, &ehci->regs->command);
+				clear_bit(1, &hcd->porcd2);
+			} else {
+				hcd->driver->port_nc(hcd);
+			}
+			set_bit(HCD_FLAG_NRY, &hcd->flags);
+			bh = 1;
+		}
+		if ((port_status & PORT_CONNECT) == 0
+			&& test_bit(1, &hcd->modem_dongle)) {
+			hcd->driver->port_nc(hcd);
+			clear_bit(1, &hcd->modem_dongle);
+			set_bit(HCD_FLAG_NRY, &hcd->flags);
+			bh = 1;
+		}
+		if ((port_status & PORT_CONNECT) == 0) {
+			{
+				struct nvt_u2_phy *pphy;
+				pphy = container_of(hcd->usb_phy, struct nvt_u2_phy, u_phy);
+				if (pphy->low_speed_high_temp_wk) {
+					pphy->set_phy_reg(pphy, 0xd0, 0x0);
+				}
+			}
+		}
+#endif
 
 		while (i--) {
 			int pstatus;
@@ -808,6 +923,14 @@ static irqreturn_t ehci_irq (struct usb_hcd *hcd)
 	/* PCI errors [4.15.2.4] */
 	if (unlikely ((status & STS_FATAL) != 0)) {
 		ehci_err(ehci, "fatal error\n");
+#ifdef CONFIG_USB_DEBUG
+	/*	HC died dump for HawkM /P	*/	
+		host_dump(ehci);
+#endif
+#ifdef CONFIG_SDP_BUS_ERR_LOGGER
+		sdp_bus_err_logger();
+#endif
+
 		dbg_cmd(ehci, "fatal", cmd);
 		dbg_status(ehci, "fatal", status);
 dead:
@@ -827,6 +950,11 @@ dead:
 
 	if (bh)
 		ehci_work (ehci);
+
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+	if (unlikely(test_bit(1, &hcd->porcd2)))
+		clear_bit(1, &hcd->porcd2);
+#endif
 	spin_unlock_irqrestore(&ehci->lock, flags);
 	if (pcd_status)
 		usb_hcd_poll_rh_status(hcd);
@@ -877,10 +1005,19 @@ static int ehci_urb_enqueue (
 		return intr_submit(ehci, urb, &qtd_list, mem_flags);
 
 	case PIPE_ISOCHRONOUS:
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 		if (urb->dev->speed == USB_SPEED_HIGH)
 			return itd_submit (ehci, urb, mem_flags);
 		else
 			return sitd_submit (ehci, urb, mem_flags);
+#else
+		if ((urb->dev->speed == USB_SPEED_HIGH)
+			|| ((urb->dev->speed == USB_SPEED_FULL)
+			&& (urb->dev->parent->devpath[0] == '0'))) {
+			return itd_submit(ehci, urb, mem_flags);
+		} else
+			return sitd_submit(ehci, urb, mem_flags);
+#endif
 	}
 }
 
@@ -896,6 +1033,13 @@ static int ehci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 	int			rc;
 
 	spin_lock_irqsave (&ehci->lock, flags);
+	if(unlikely(urb == NULL))
+		goto done;
+#ifdef SAMSUNG_PATCH_RMB_WMB_AT_UNLINK	
+  	 /* Making sure that all data of urb are proper and used only for full speed devices.*/ 
+	if ((urb->dev != NULL) && (urb->dev->speed <= USB_SPEED_FULL))
+		rmb();
+#endif	 
 	rc = usb_hcd_check_unlink_urb(hcd, urb, status);
 	if (rc)
 		goto done;
@@ -908,6 +1052,8 @@ static int ehci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 		 */
 	} else {
 		qh = (struct ehci_qh *) urb->hcpriv;
+		if(unlikely(qh == NULL))
+			goto done;
 		qh->exception = 1;
 		switch (qh->qh_state) {
 		case QH_STATE_LINKED:
@@ -1128,6 +1274,7 @@ int ehci_resume(struct usb_hcd *hcd, bool force_reset)
 	 * then we maintained suspend power.
 	 * Just undo the effect of ehci_suspend().
 	 */
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 	if (ehci_readl(ehci, &ehci->regs->configured_flag) == FLAG_CF &&
 			!force_reset) {
 		int	mask = INTR_MASK;
@@ -1146,7 +1293,7 @@ int ehci_resume(struct usb_hcd *hcd, bool force_reset)
 		spin_unlock_irq(&ehci->lock);
 		return 0;
 	}
-
+#endif
 	/*
 	 * Else reset, to cope with power loss or resume from hibernation
 	 * having let the firmware kick in during reboot.
@@ -1156,11 +1303,21 @@ int ehci_resume(struct usb_hcd *hcd, bool force_reset)
 	(void) ehci_reset(ehci);
 
 	spin_lock_irq(&ehci->lock);
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 	if (ehci->shutdown)
 		goto skip;
+#else
+	if (ehci->shutdown) {
+		spin_unlock_irq(&ehci->lock);
+		return 0;
+	}
+
+#endif
 
 	ehci_writel(ehci, ehci->command, &ehci->regs->command);
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 	ehci_writel(ehci, FLAG_CF, &ehci->regs->configured_flag);
+#endif
 	ehci_readl(ehci, &ehci->regs->command);	/* unblock posted writes */
 
 	ehci->rh_state = EHCI_RH_SUSPENDED;
@@ -1193,7 +1350,9 @@ static const struct hc_driver ehci_hc_driver = {
 	/*
 	 * basic lifecycle operations
 	 */
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 	.reset =		ehci_setup,
+#endif
 	.start =		ehci_run,
 	.stop =			ehci_stop,
 	.shutdown =		ehci_shutdown,
@@ -1250,6 +1409,11 @@ MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_AUTHOR (DRIVER_AUTHOR);
 MODULE_LICENSE ("GPL");
 
+#if defined(CONFIG_ARCH_SDP) && (defined(CONFIG_OF)||defined(CONFIG_ARCH_SDP1207))
+#include "ehci-sdp.c"
+#define PLATFORM_DRIVER		sdp_ehci_driver
+#endif
+
 #ifdef CONFIG_USB_EHCI_FSL
 #include "ehci-fsl.c"
 #define	PLATFORM_DRIVER		ehci_fsl_driver
@@ -1275,6 +1439,10 @@ MODULE_LICENSE ("GPL");
 #define XILINX_OF_PLATFORM_DRIVER	ehci_hcd_xilinx_of_driver
 #endif
 
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+#include "ehci-nvt.c"
+#define PLATFORM_DRIVER					ehci_hcd_NT72668_driver
+#endif
 #ifdef CONFIG_TILE_USB
 #include "ehci-tilegx.c"
 #define	PLATFORM_DRIVER		ehci_hcd_tilegx_driver
@@ -1307,6 +1475,12 @@ static int __init ehci_hcd_init(void)
 	if (usb_disabled())
 		return -ENODEV;
 
+#ifdef CONFIG_USB_DEBUG
+#ifdef BUS_MON_ADDR
+	bus_base = ioremap(BUS_MON_ADDR,0x100);
+#endif
+#endif
+
 	printk(KERN_INFO "%s: " DRIVER_DESC "\n", hcd_name);
 	set_bit(USB_EHCI_LOADED, &usb_hcds_loaded);
 	if (test_bit(USB_UHCI_LOADED, &usb_hcds_loaded) ||
@@ -1319,7 +1493,7 @@ static int __init ehci_hcd_init(void)
 		 sizeof(struct ehci_qh), sizeof(struct ehci_qtd),
 		 sizeof(struct ehci_itd), sizeof(struct ehci_sitd));
 
-#ifdef CONFIG_DYNAMIC_DEBUG
+#if defined(CONFIG_DYNAMIC_DEBUG) || defined(CONFIG_USB_EW_FEATURE)
 	ehci_debug_root = debugfs_create_dir("ehci", usb_debug_root);
 	if (!ehci_debug_root) {
 		retval = -ENOENT;
@@ -1368,7 +1542,7 @@ clean2:
 	platform_driver_unregister(&PLATFORM_DRIVER);
 clean0:
 #endif
-#ifdef CONFIG_DYNAMIC_DEBUG
+#if defined(CONFIG_DYNAMIC_DEBUG) || defined(CONFIG_USB_EW_FEATURE)
 	debugfs_remove(ehci_debug_root);
 	ehci_debug_root = NULL;
 err_debug:
@@ -1380,6 +1554,12 @@ module_init(ehci_hcd_init);
 
 static void __exit ehci_hcd_cleanup(void)
 {
+#ifdef CONFIG_USB_DEBUG
+#ifdef BUS_MON_ADDR
+		if(bus_base != NULL) iounmap(bus_base);
+#endif
+#endif
+
 #ifdef XILINX_OF_PLATFORM_DRIVER
 	platform_driver_unregister(&XILINX_OF_PLATFORM_DRIVER);
 #endif
@@ -1392,7 +1572,7 @@ static void __exit ehci_hcd_cleanup(void)
 #ifdef PS3_SYSTEM_BUS_DRIVER
 	ps3_ehci_driver_unregister(&PS3_SYSTEM_BUS_DRIVER);
 #endif
-#ifdef CONFIG_DYNAMIC_DEBUG
+#if defined(CONFIG_DYNAMIC_DEBUG) || defined(CONFIG_USB_EW_FEATURE)
 	debugfs_remove(ehci_debug_root);
 #endif
 	clear_bit(USB_EHCI_LOADED, &usb_hcds_loaded);

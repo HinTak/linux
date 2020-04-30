@@ -54,6 +54,7 @@ endif # USB_XHCI_HCD
 
 config USB_EHCI_HCD
 	tristate "EHCI HCD (USB 2.0) support"
+	depends on USB_ARCH_HAS_EHCI
 	---help---
 	  The Enhanced Host Controller Interface (EHCI) is standard for USB 2.0
 	  "high speed" (480 Mbit/sec, 60 Mbyte/sec) host controller hardware.
@@ -72,6 +73,16 @@ config USB_EHCI_HCD
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called ehci-hcd.
+
+config USB_ENABLE
+	tristate "USB Enable"
+	depends on USB && USB_ARCH_HAS_EHCI
+	default M
+	---help---
+	  Module to control USB Enable GPIO
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called usb_enable.ko.]
 
 config USB_EHCI_ROOT_HUB_TT
 	bool "Root Hub Transaction Translators"
@@ -109,6 +120,16 @@ config USB_FSL_MPH_DR_OF
 	tristate
 
 if USB_EHCI_HCD
+if PLAT_NOVATEK
+config USB_NVT_EHCI_HCD
+	bool "NVT EHCI support"
+	depends on USB_EHCI_HCD
+	default y
+	---help---
+		Support for NVT on-chip EHCI USB controller. This driver works with
+		NVT PHY driver. If chip is NVT archecture and has USB controller,
+		you can enable this config and CONFIG_NVT_USB2PHY.
+endif
 
 config USB_EHCI_PCI
 	tristate
@@ -375,6 +396,7 @@ config USB_MAX3421_HCD
 
 config USB_OHCI_HCD
 	tristate "OHCI HCD (USB 1.1) support"
+	depends on USB_ARCH_HAS_OHCI
 	---help---
 	  The Open Host Controller Interface (OHCI) is a standard for accessing
 	  USB 1.1 host controller hardware.  It does more in hardware than Intel's

@@ -11,10 +11,17 @@ struct cma {
 	struct hlist_head mem_head;
 	spinlock_t mem_head_lock;
 #endif
+#ifdef CONFIG_CMA_DEBUG
+	struct list_head buffers_list;
+	struct mutex	list_lock;
+#endif
 };
 
 extern struct cma cma_areas[MAX_CMA_AREAS];
 extern unsigned cma_area_count;
+#ifdef CONFIG_CMA_DEBUG
+extern struct cma *dma_contiguous_default_area;
+#endif
 
 static unsigned long cma_bitmap_maxno(struct cma *cma)
 {

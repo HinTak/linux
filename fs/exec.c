@@ -66,6 +66,8 @@
 
 #include <trace/events/sched.h>
 
+#include <linux/sf_security.h>
+
 int suid_dumpable = 0;
 
 static LIST_HEAD(formats);
@@ -1408,6 +1410,10 @@ int search_binary_handler(struct linux_binprm *bprm)
 		return -ELOOP;
 
 	retval = security_bprm_check(bprm);
+	if (retval)
+		return retval;
+
+	retval = sf_security_bprm_check(bprm);
 	if (retval)
 		return retval;
 

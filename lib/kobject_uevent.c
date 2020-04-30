@@ -50,6 +50,11 @@ static const char *kobject_actions[] = {
 	[KOBJ_MOVE] =		"move",
 	[KOBJ_ONLINE] =		"online",
 	[KOBJ_OFFLINE] =	"offline",
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+        //kks
+        [KOBJ_MOUNT] = "mount",
+        [KOBJ_UMOUNT] = "umount",
+#endif
 };
 
 /**
@@ -371,6 +376,12 @@ EXPORT_SYMBOL_GPL(kobject_uevent_env);
  */
 int kobject_uevent(struct kobject *kobj, enum kobject_action action)
 {
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+        if (!kobj){
+                printk(KERN_ERR "Unable to get kobject pointer\n");
+                return -EINVAL;
+        }
+#endif
 	return kobject_uevent_env(kobj, action, NULL);
 }
 EXPORT_SYMBOL_GPL(kobject_uevent);

@@ -36,13 +36,189 @@
 #include <linux/ftrace.h>
 #include <linux/ratelimit.h>
 
+#if defined(CONFIG_SLP_LOWMEM_NOTIFY) && !defined(CONFIG_VD_RELEASE)
+#include <linux/sort.h>
+#endif
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/oom.h>
+
+#ifdef CONFIG_KPI_SYSTEM_SUPPORT
+#include <linux/coredump.h>
+#endif
+
+#include <linux/oom_graphic_memory.h>
 
 int sysctl_panic_on_oom;
 int sysctl_oom_kill_allocating_task;
 int sysctl_oom_dump_tasks = 1;
 static DEFINE_SPINLOCK(zone_scan_lock);
+
+static LIST_HEAD(graphic_module_list);
+static DEFINE_MUTEX(graphic_module_mutex);
+static DEFINE_MUTEX(oom_owner_mutex);
+static int oom_processing_pid = -1;
+
+struct graphic_func_item {
+	struct list_head entry;
+	int graphic_type;
+	void (*graphic_func)(int type, void *send_data);
+	void (*graphic_data_func)(pid_t graphic_pid, int graphic_memory);
+};
+
+void graphic_get_pid_memory(pid_t graphic_pid, int graphic_memory)
+{
+	/*
+	 * Once We only consider maximum 50 process.
+	 * But we need to think more how to handle it.
+	 */
+	struct task_struct *tsk = NULL;
+
+	rcu_read_lock();
+	tsk = find_task_by_pid_ns(graphic_pid, &init_pid_ns);
+	if (tsk)
+		get_task_struct(tsk);
+	rcu_read_unlock();
+
+	if (tsk) {
+		pr_err("%22s(%5d) : %9d(Byte)\n",
+			tsk->group_leader->comm, graphic_pid, graphic_memory);
+			put_task_struct(tsk);
+	} else
+		pr_err("Task is not existed for the pid(%d)\n",	graphic_pid);
+}
+
+int graphic_memory_func_register(int type, void *func)
+{
+	struct graphic_func_item *new_item = NULL;
+	struct list_head *tmp;
+	struct graphic_func_item *regi_item;
+
+	pr_info("Graphic func. is register with type %d\n", type);
+
+	if (!func) {
+		pr_err("[FAIL] There is no function to register\n");
+		return -EINVAL;
+	}
+
+	if (type >= MAX_GRAPHIC_TYPE) {
+		pr_err("[FAIL] Undefined type(%d) is used\n", type);
+		return -EINVAL;
+	}
+
+	mutex_lock(&graphic_module_mutex);
+	list_for_each(tmp, &graphic_module_list) {
+		regi_item = list_entry(tmp, struct graphic_func_item, entry);
+
+		if (regi_item->graphic_type == type) {
+			pr_err("[FAIL] This type(%d). is already registered\n"
+						, type);
+			mutex_unlock(&graphic_module_mutex);
+			return -EBUSY;
+		}
+	}
+	mutex_unlock(&graphic_module_mutex);
+
+	new_item = kzalloc(sizeof(*new_item), GFP_KERNEL);
+	if (!new_item) {
+		pr_err("[FAIL] Fail to allocate memory\n");
+		return -ENOMEM;
+	}
+
+	INIT_LIST_HEAD(&new_item->entry);
+	new_item->graphic_type = type;
+	new_item->graphic_func = func;
+	new_item->graphic_data_func = graphic_get_pid_memory;
+
+	mutex_lock(&graphic_module_mutex);
+	list_add_tail(&new_item->entry, &graphic_module_list);
+	mutex_unlock(&graphic_module_mutex);
+
+	return 0;
+}
+EXPORT_SYMBOL(graphic_memory_func_register);
+
+int graphic_memory_func_unregister(int type)
+{
+	struct list_head *tmp;
+	struct graphic_func_item *regi_item;
+	int ret = -ENODATA;
+
+	pr_info("Graphic func. is unregistered with type %d\n", type);
+
+	if (type >= MAX_GRAPHIC_TYPE) {
+		pr_err("[FAIL] Undefined type(%d) is used\n", type);
+		return -EINVAL;
+	}
+
+	mutex_lock(&graphic_module_mutex);
+	list_for_each(tmp, &graphic_module_list) {
+		regi_item = list_entry(tmp, struct graphic_func_item, entry);
+
+		if (regi_item->graphic_type == type) {
+			pr_info("Type is matched(%d:%d)\n",
+					type, regi_item->graphic_type);
+			list_del_init(&regi_item->entry);
+			kfree(regi_item);
+			ret = 0;
+			goto done;
+		}
+	}
+	pr_err("[FAIL] There is not matched type(%d)\n", type);
+done:
+	mutex_unlock(&graphic_module_mutex);
+	return ret;
+}
+EXPORT_SYMBOL(graphic_memory_func_unregister);
+
+void show_graphic_register_func(void)
+{
+	struct list_head *tmp;
+	struct graphic_func_item *regi_item;
+	int i = 0;
+
+	mutex_lock(&graphic_module_mutex);
+	list_for_each(tmp, &graphic_module_list) {
+		regi_item = list_entry(tmp, struct graphic_func_item, entry);
+		if (regi_item->graphic_func) {
+			pr_err("%s Graphics meminfo:", (regi_item->graphic_type
+			== GEM_GRAPHIC_TYPE) ? "GEM" : "Mali");
+			regi_item->graphic_func(regi_item->graphic_type,
+					regi_item->graphic_data_func);
+		}
+	}
+	mutex_unlock(&graphic_module_mutex);
+}
+
+#define K(x) ((x) << (PAGE_SHIFT-10))
+
+static bool only_one_time_call = true;
+int panic_ratelimit_interval = 120 * HZ;
+int panic_ratelimit_burst = 4;
+static DEFINE_RATELIMIT_STATE(oom_panic_rs, 120 * HZ, 4);
+
+static inline void set_ratelimit_state(struct ratelimit_state *rs)
+{
+	unsigned long flags;
+
+	if (!raw_spin_trylock_irqsave(&rs->lock, flags))
+		return;
+	rs->interval = panic_ratelimit_interval;
+	rs->burst = panic_ratelimit_burst;
+	raw_spin_unlock_irqrestore(&rs->lock, flags);
+}
+
+static inline void reset_ratelimit_state(struct ratelimit_state *rs)
+{
+	unsigned long flags;
+
+	if (!raw_spin_trylock_irqsave(&rs->lock, flags))
+		return;
+	rs->printed = 0;
+	rs->begin = 0;
+	rs->missed = 0;
+	raw_spin_unlock_irqrestore(&rs->lock, flags);
+}
 
 #ifdef CONFIG_NUMA
 /**
@@ -121,9 +297,10 @@ found:
 static bool oom_unkillable_task(struct task_struct *p,
 		struct mem_cgroup *memcg, const nodemask_t *nodemask)
 {
-	if (is_global_init(p))
-		return true;
 	if (p->flags & PF_KTHREAD)
+		return true;
+	if (p->tgid == 1 ||
+		!strncmp(p->comm, "systemd", sizeof("systemd")))
 		return true;
 
 	/* When mem_cgroup_out_of_memory() and p is not member of the group */
@@ -335,6 +512,334 @@ static struct task_struct *select_bad_process(unsigned int *ppoints,
 	return chosen;
 }
 
+#ifdef CONFIG_VD_MEMINFO
+#include <linux/seq_file.h>
+struct mem_size_stats {
+	unsigned long resident;
+	unsigned long shared_clean;
+	unsigned long shared_dirty;
+	unsigned long private_clean;
+	unsigned long private_dirty;
+	unsigned long referenced;
+	unsigned long anonymous;
+	unsigned long anonymous_thp;
+	unsigned long swap;
+	u64 pss;
+};
+
+struct smap_mem {
+	unsigned long total;
+	unsigned long vmag[VMAG_CNT];
+};
+
+extern int smaps_pte_range(pmd_t *pmd, unsigned long addr,
+			   unsigned long end, struct mm_walk *walk);
+
+#define PSS_SHIFT 12
+
+struct mm_sem_struct {
+	char task_comm[TASK_COMM_LEN];
+	pid_t tgid;
+	struct mm_struct *mm;
+	struct list_head list;
+};
+
+static unsigned long sum_of_pss;
+
+/* Update the counters with the information retrieved from the vma
+ * as well as the mem_size_stats as returned by walk_page_range(). */
+static inline void update_dtp_counters(struct vm_area_struct *vma ,
+				       struct mem_size_stats *mss,
+				       struct smap_mem *vmem,
+				       struct smap_mem *rss,
+				       struct smap_mem *pss,
+				       struct smap_mem *shared,
+				       struct smap_mem *private,
+				       struct smap_mem *swap
+				      )
+{
+	int idx = 0;
+
+	/* Add this to the process's consolidated totals. */
+	vmem->total    += (vma->vm_end - vma->vm_start) >> 10;
+	rss->total     += mss->resident >> 10;
+	pss->total     += (unsigned long)(mss->pss >> (10 + PSS_SHIFT));
+	shared->total  += (mss->shared_clean + mss->shared_dirty) >> 10;
+	private->total += (mss->private_clean + mss->private_dirty) >> 10;
+	swap->total    += mss->swap >> 10;
+
+	/* Add this to the VMA's relevant counters, i.e., Code, Data, LibCode,
+	* LibData, Stack or Other. Also classify them according to the following
+	* memory types - vmem, rss, pss, shared, private and swap. */
+	idx = get_group_idx(vma);
+	vmem->vmag[idx]    += (vma->vm_end - vma->vm_start) >> 10;
+	rss->vmag[idx]     += mss->resident >> 10;
+	pss->vmag[idx]     += (unsigned long)(mss->pss >> (10 + PSS_SHIFT));
+	shared->vmag[idx]  += (mss->shared_clean + mss->shared_dirty) >> 10;
+	private->vmag[idx] += (mss->private_clean + mss->private_dirty) >> 10;
+	swap->vmag[idx]    += mss->swap >> 10;
+}
+
+static inline void display_dtp_counters(struct seq_file *s,
+					char *comm,
+					pid_t tgid,
+					struct mm_struct *mm,
+					struct smap_mem *vmem,
+					struct smap_mem *rss,
+					struct smap_mem *pss,
+					struct smap_mem *shared,
+					struct smap_mem *private,
+					struct smap_mem *swap
+				       )
+{
+	if (s) {
+		/* Display the consolidated counters for all the VMAs for
+		 * this process. */
+		seq_printf(s, "\nComm : %s,  Pid : %d\n", comm, tgid);
+		seq_printf(s,
+			   "=========================================================================\n"
+		"                VMSize    Rss  Rss_max  Shared  Private    Pss   Swap\n"
+		"  Process Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+		"     Code Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+		"     Data Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+		"  LibCode Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+		"  LibData Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+		" Heap-BRK Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+		"    Stack Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+		"    Other Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n",
+		vmem->total, rss->total,
+		K(mm->max_rss[0]+mm->max_rss[1]+mm->max_rss[2]+
+		mm->max_rss[3]+mm->max_rss[4]+mm->max_rss[5]+mm->max_rss[6]),
+		shared->total, private->total, pss->total, swap->total,
+		vmem->vmag[0], rss->vmag[0], K(mm->max_rss[0]),
+		shared->vmag[0], private->vmag[0], pss->vmag[0], swap->vmag[0],
+		vmem->vmag[1], rss->vmag[1], K(mm->max_rss[1]),
+		shared->vmag[1], private->vmag[1], pss->vmag[1], swap->vmag[1],
+		vmem->vmag[2], rss->vmag[2], K(mm->max_rss[2]),
+		shared->vmag[2], private->vmag[2], pss->vmag[2], swap->vmag[2],
+		vmem->vmag[3], rss->vmag[3], K(mm->max_rss[3]),
+		shared->vmag[3], private->vmag[3], pss->vmag[3], swap->vmag[3],
+		vmem->vmag[4], rss->vmag[4], K(mm->max_rss[4]),
+		shared->vmag[4], private->vmag[4], pss->vmag[4], swap->vmag[4],
+		vmem->vmag[5], rss->vmag[5], K(mm->max_rss[5]),
+		shared->vmag[5], private->vmag[5], pss->vmag[5], swap->vmag[5],
+		vmem->vmag[6], rss->vmag[6], K(mm->max_rss[6]),
+		shared->vmag[6], private->vmag[6], pss->vmag[6], swap->vmag[6]
+		);
+	} else {
+		/* Display the consolidated counters for all the VMAs for
+		 * this process. */
+		pr_info("\nComm : %s,  Pid : %d\n", comm, tgid);
+		pr_info(
+		"=========================================================================\n"
+		"                VMSize    Rss  Rss_max  Shared  Private    Pss   Swap\n"
+		"  Process Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+		"     Code Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+		"     Data Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+		"  LibCode Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+		"  LibData Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+		" Heap-BRK Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+		"    Stack Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+		"    Other Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n",
+		vmem->total, rss->total,
+		K(mm->max_rss[0]+mm->max_rss[1]+mm->max_rss[2]+
+		mm->max_rss[3]+mm->max_rss[4]+mm->max_rss[5]+mm->max_rss[6]),
+		shared->total, private->total, pss->total, swap->total,
+		vmem->vmag[0], rss->vmag[0], K(mm->max_rss[0]),
+		shared->vmag[0], private->vmag[0], pss->vmag[0], swap->vmag[0],
+		vmem->vmag[1], rss->vmag[1], K(mm->max_rss[1]),
+		shared->vmag[1], private->vmag[1], pss->vmag[1], swap->vmag[1],
+		vmem->vmag[2], rss->vmag[2], K(mm->max_rss[2]),
+		shared->vmag[2], private->vmag[2], pss->vmag[2], swap->vmag[2],
+		vmem->vmag[3], rss->vmag[3], K(mm->max_rss[3]),
+		shared->vmag[3], private->vmag[3], pss->vmag[3], swap->vmag[3],
+		vmem->vmag[4], rss->vmag[4], K(mm->max_rss[4]),
+		shared->vmag[4], private->vmag[4], pss->vmag[4], swap->vmag[4],
+		vmem->vmag[5], rss->vmag[5], K(mm->max_rss[5]),
+		shared->vmag[5], private->vmag[5], pss->vmag[5], swap->vmag[5],
+		vmem->vmag[6], rss->vmag[6], K(mm->max_rss[6]),
+		shared->vmag[6], private->vmag[6], pss->vmag[6], swap->vmag[6]
+		);
+	}
+}
+
+/* Walk all VMAs to update various counters.
+ * mm->mmap_sem must be read-taken
+ */
+static void dump_task(struct seq_file *s, struct mm_struct *mm, char *comm,
+		      pid_t tgid)
+{
+	struct vm_area_struct *vma;
+	struct mem_size_stats mss;
+	struct mm_walk smaps_walk = {
+		.pmd_entry = smaps_pte_range,
+		.pte_entry = NULL,
+		.pte_hole = NULL,
+		.private = &mss,
+	};
+	struct smap_mem vmem;
+	struct smap_mem rss;
+	struct smap_mem pss;
+	struct smap_mem shared;
+	struct smap_mem private;
+	struct smap_mem swap;
+
+	smaps_walk.mm = mm;
+
+	vma = mm->mmap;
+
+	memset(&vmem    , 0, sizeof(struct smap_mem));
+	memset(&rss     , 0, sizeof(struct smap_mem));
+	memset(&shared  , 0, sizeof(struct smap_mem));
+	memset(&private , 0, sizeof(struct smap_mem));
+	memset(&pss     , 0, sizeof(struct smap_mem));
+	memset(&swap    , 0, sizeof(struct smap_mem));
+
+	while (vma) {
+		/* Ignore the huge TLB pages. */
+		if (vma->vm_mm && !(vma->vm_flags & VM_HUGETLB)) {
+			memset(&mss, 0, sizeof(struct mem_size_stats));
+
+			walk_page_range(vma->vm_start, vma->vm_end,
+					&smaps_walk);
+
+			update_dtp_counters(vma, &mss, &vmem, &rss, &pss,
+					    &shared, &private, &swap);
+		}
+		vma = vma->vm_next;
+	}
+
+	display_dtp_counters(s, comm, tgid, mm, &vmem, &rss, &pss,
+			     &shared, &private, &swap);
+
+	sum_of_pss += pss.total;
+}
+
+
+void dump_tasks(struct mem_cgroup *mem,
+		       const nodemask_t *nodemask, struct seq_file *s);
+
+/* if oom_cond == 1 then OOM condition is considered */
+static void dump_tasks_plus_oom(struct mem_cgroup *mem,
+				struct seq_file *s, int oom_cond)
+{
+	struct mm_struct *mm = NULL;
+	struct vm_area_struct *vma = NULL;
+	struct task_struct *g = NULL, *p = NULL;
+	struct mm_sem_struct *mm_sem;
+	struct list_head *pos, *q;
+	struct list_head mm_sem_list = LIST_HEAD_INIT(mm_sem_list);
+
+	/* lock current tasklist state */
+	rcu_read_lock();
+
+	/* call original dump_tasks */
+	dump_tasks(NULL, NULL, s);
+
+	sum_of_pss = 0;
+
+	/* dump tasks with additional info */
+	do_each_thread(g, p) {
+		if (mem && !task_in_mem_cgroup(p, mem))
+			continue;
+
+		if (!thread_group_leader(p))
+			continue;
+
+		task_lock(p);
+		mm = p->mm;
+		if (!mm) {
+			task_unlock(p);
+			continue;
+		}
+
+		vma = mm->mmap;
+		if (!vma) {
+			task_unlock(p);
+			continue;
+		}
+
+		if (down_read_trylock(&mm->mmap_sem)) {
+			/* If we took semaphore then dump info here */
+			dump_task(s, mm, p->comm, p->tgid);
+			up_read(&mm->mmap_sem);
+		} else {
+			/* Else add mm to dump later list */
+			mm_sem = kmalloc(sizeof(*mm_sem), GFP_ATOMIC);
+			if (mm_sem == NULL) {
+				pr_err("dump_tasks_plus: can't allocate struct mm_sem!");
+				task_unlock(p);
+				rcu_read_unlock();
+				return;
+			} else {
+				memcpy(mm_sem->task_comm, p->comm,
+					sizeof(p->comm));
+				mm_sem->tgid = p->tgid;
+				mm_sem->mm = mm;
+				INIT_LIST_HEAD(&mm_sem->list);
+				list_add(&mm_sem->list, &mm_sem_list);
+
+				/* Increase mm usage counter to ensure mm is
+				 * still valid without tasklock */
+				atomic_inc(&mm->mm_users);
+			}
+		}
+
+		task_unlock(p);
+	} while_each_thread(g, p);
+
+	/* unlock tasklist to take remaining semaphores */
+	rcu_read_unlock();
+
+	/* print remaining tasks info */
+	list_for_each(pos, &mm_sem_list) {
+		mm_sem = list_entry(pos, struct mm_sem_struct, list);
+
+		mm = mm_sem->mm;
+
+		if (oom_cond) {
+			/* Can't wait for semaphore in OOM killer context. */
+			if (down_read_trylock(&mm->mmap_sem)) {
+				dump_task(s, mm, mm_sem->task_comm,
+					  mm_sem->tgid);
+				up_read(&mm->mmap_sem);
+			} else {
+				pr_warn("Skipping task with tgid = %d and comm "
+				     "'%s'\n", mm_sem->tgid, mm_sem->task_comm);
+			}
+		} else {
+			down_read(&mm->mmap_sem);
+			dump_task(s, mm, mm_sem->task_comm, mm_sem->tgid);
+			up_read(&mm->mmap_sem);
+		}
+
+		/* release mm */
+		mmput(mm);
+	}
+
+	/* free mm_sem list */
+	list_for_each_safe(pos, q, &mm_sem_list) {
+		mm_sem = list_entry(pos, struct mm_sem_struct, list);
+		list_del(pos);
+		kfree(mm_sem);
+	}
+
+	if (s)
+		seq_printf(s, "\n* Sum of pss : %6lu (kB)\n", sum_of_pss);
+	else
+		pr_info("\n* Sum of pss : %6lu (kB)\n", sum_of_pss);
+}
+
+void dump_tasks_plus(struct mem_cgroup *mem, struct seq_file *s)
+{
+	dump_tasks_plus_oom(mem, s, 0);
+}
+#endif
+
+#ifdef CONFIG_VD_MEMINFO
+extern int oom_score_to_adj(short oom_score_adj);
+#endif
+
 /**
  * dump_tasks - dump current memory state of all system tasks
  * @memcg: current's memory controller, if constrained
@@ -346,15 +851,35 @@ static struct task_struct *select_bad_process(unsigned int *ppoints,
  * State information includes task's pid, uid, tgid, vm size, rss, nr_ptes,
  * swapents, oom_score_adj value, and name.
  */
-static void dump_tasks(struct mem_cgroup *memcg, const nodemask_t *nodemask)
+void dump_tasks(struct mem_cgroup *mem,
+			const nodemask_t *nodemask, struct seq_file *s)
 {
 	struct task_struct *p;
 	struct task_struct *task;
 
-	pr_info("[ pid ]   uid  tgid total_vm      rss nr_ptes nr_pmds swapents oom_score_adj name\n");
+#ifndef CONFIG_VD_MEMINFO
+	pr_warn("[ pid ]   uid  tgid  ppid total_vm      rss nr_ptes nr_pmds swapents oom_score_adj name\n");
+#else
+	unsigned long cur_cnt[VMAG_CNT], max_cnt[VMAG_CNT];
+	unsigned long tot_rss_cnt = 0;
+	unsigned long tot_maxrss_cnt = 0;
+	unsigned long sum_of_tot_rss_cnt = 0;
+	unsigned long sum_of_tot_maxrss_cnt = 0;
+	unsigned long sum_of_tot_swap_cnt = 0;
+	int i;
+
+	if (s)
+		seq_printf(s, "[ pid ]   uid  tgid  ppid total_vm      rss  rss_max"
+				"   swap cpu oom_score_adj "
+				"name\n");
+	else
+		pr_warn("[ pid ]   uid  tgid  ppid total_vm      rss  rss_max"
+				"   swap cpu oom_score_adj name\n");
+#endif
+
 	rcu_read_lock();
 	for_each_process(p) {
-		if (oom_unkillable_task(p, memcg, nodemask))
+		if (oom_unkillable_task(p, mem, nodemask))
 			continue;
 
 		task = find_lock_task_mm(p);
@@ -366,18 +891,190 @@ static void dump_tasks(struct mem_cgroup *memcg, const nodemask_t *nodemask)
 			 */
 			continue;
 		}
-
-		pr_info("[%5d] %5d %5d %8lu %8lu %7ld %7ld %8lu         %5hd %s\n",
+#ifndef CONFIG_VD_MEMINFO
+		pr_warn("[%5d] %5d %5d %5d %8lu %8lu %7ld %7ld %8lu         %5hd %s\n",
 			task->pid, from_kuid(&init_user_ns, task_uid(task)),
-			task->tgid, task->mm->total_vm, get_mm_rss(task->mm),
+			task->tgid,
+			task_ppid_nr(task),
+			task->mm->total_vm, get_mm_rss(task->mm),
 			atomic_long_read(&task->mm->nr_ptes),
 			mm_nr_pmds(task->mm),
 			get_mm_counter(task->mm, MM_SWAPENTS),
 			task->signal->oom_score_adj, task->comm);
+#else
+		for (i = 0; i < VMAG_CNT; i++) {
+			get_rss_cnt(task->mm, i, &cur_cnt[i], &max_cnt[i]);
+			tot_rss_cnt += cur_cnt[i];
+			tot_maxrss_cnt += max_cnt[i];
+		}
+
+		if (s)
+			seq_printf(s, "[%5d] %5u %5d %5d %8lu %8lu %8lu %6lu %3d"
+					"     %5d %s\n",
+				p->pid, __task_cred(p)->uid.val, p->tgid,
+				task_ppid_nr(p),
+				K(task->mm->total_vm), K(tot_rss_cnt),
+				K(tot_maxrss_cnt),
+				K(get_mm_counter(task->mm, MM_SWAPENTS)),
+				(int)task_cpu(p), p->signal->oom_score_adj,
+				p->comm);
+		else
+			pr_warn("[%5d] %5u %5d %5d %8lu %8lu %8lu %6lu %3d"
+				"     %5d %s\n",
+				p->pid, __task_cred(p)->uid.val, p->tgid,
+				task_ppid_nr(p),
+				K(task->mm->total_vm), K(tot_rss_cnt),
+				K(tot_maxrss_cnt),
+				K(get_mm_counter(task->mm, MM_SWAPENTS)),
+				(int)task_cpu(p), p->signal->oom_score_adj,
+				p->comm);
+
+		sum_of_tot_rss_cnt += tot_rss_cnt;
+		sum_of_tot_maxrss_cnt += tot_maxrss_cnt;
+		sum_of_tot_swap_cnt += get_mm_counter(task->mm, MM_SWAPENTS);
+		tot_rss_cnt = 0;
+		tot_maxrss_cnt = 0;
+#endif
+
 		task_unlock(task);
 	}
 	rcu_read_unlock();
+#ifdef CONFIG_VD_MEMINFO
+	if (s) {
+		seq_printf(s, "* Sum of rss    : %6lu (kB)\n",
+			K(sum_of_tot_rss_cnt));
+		seq_printf(s, "* Sum of maxrss : %6lu (kB)\n",
+			K(sum_of_tot_maxrss_cnt));
+		seq_printf(s, "* Sum of swap   : %6lu (kB)\n",
+			K(sum_of_tot_swap_cnt));
+	} else {
+		pr_warn("* Sum of rss    : %6lu (kB)\n",
+			K(sum_of_tot_rss_cnt));
+		pr_warn("* Sum of maxrss : %6lu (kB)\n",
+			K(sum_of_tot_maxrss_cnt));
+		pr_warn("* Sum of swap   : %6lu (kB)\n",
+			K(sum_of_tot_swap_cnt));
+	}
+#endif
 }
+
+#if defined(CONFIG_SLP_LOWMEM_NOTIFY) && !defined(CONFIG_VD_RELEASE)
+struct dump_tsk_arr {
+	pid_t pid;
+	unsigned long rss;
+};
+
+static int compare_rss_values(const void *a, const void *b)
+{
+	const struct dump_tsk_arr *_a = a;
+	const struct dump_tsk_arr *_b = b;
+
+	return _b->rss - _a->rss;
+}
+
+void dump_tasks_lmf(struct mem_cgroup *mem,
+		const nodemask_t *nodemask, struct seq_file *s)
+{
+	struct task_struct *p;
+	struct task_struct *task;
+	struct mm_struct *mm = NULL;
+	unsigned long cur_cnt[VMAG_CNT], max_cnt[VMAG_CNT];
+	unsigned long tot_rss_cnt = 0;
+	unsigned long tot_max_rss_cnt = 0;
+	unsigned long sum_of_total_rss = 0;
+	unsigned long sum_of_total_maxrss = 0;
+	unsigned long sum_of_total_swap = 0;
+	int count = 0;
+	int i = 0;
+	int index = 0;
+
+	const int CURRENT_MAX_PROCESS = nr_processes() + 50;
+	const int PRINT_MAX_PROCESS = 10;
+
+	struct dump_tsk_arr *tsk_db;
+
+	tsk_db = kmalloc((sizeof(struct dump_tsk_arr) * CURRENT_MAX_PROCESS),
+		GFP_KERNEL);
+	if (!tsk_db) {
+		pr_err("dump_tasks_lmf: can't allocate struct dump_tsk_arr!");
+		return;
+	}
+	pr_warn("[ pid ]   total_vm      rss  "
+		"   swap oom_score_adj   name\n");
+
+	rcu_read_lock();
+	for_each_process(p) {
+		if (oom_unkillable_task(p, mem, nodemask))
+			continue;
+
+		task = find_lock_task_mm(p);
+		if (!task) {
+			/*
+			* This is a kthread or all of p's threads have already
+			* detached their mm's.  There's no need to report
+			* them; they can't be oom killed anyway.
+			*/
+			continue;
+		}
+
+		for (i = 0; i < VMAG_CNT; i++) {
+			get_rss_cnt(task->mm, i, &cur_cnt[i], &max_cnt[i]);
+			tot_rss_cnt += cur_cnt[i];
+			tot_max_rss_cnt += max_cnt[i];
+		}
+		tsk_db[count].pid = task->pid;
+		tsk_db[count].rss = K(tot_rss_cnt);
+		sum_of_total_rss += tot_rss_cnt;
+		sum_of_total_maxrss += tot_max_rss_cnt;
+		sum_of_total_swap +=
+			get_mm_counter(task->mm, MM_SWAPENTS);
+		tot_rss_cnt = 0;
+		tot_max_rss_cnt = 0;
+		task_unlock(task);
+		if (count++ >= CURRENT_MAX_PROCESS - 1)
+			break;
+	}
+	rcu_read_unlock();
+
+	sort(tsk_db, count, sizeof(struct dump_tsk_arr),
+		compare_rss_values, NULL);
+	i = 0;
+	while (i < PRINT_MAX_PROCESS && index < count) {
+		rcu_read_lock();
+		task = find_task_by_pid_ns(tsk_db[index].pid, &init_pid_ns);
+		if (task) {
+			get_task_struct(task);
+			rcu_read_unlock();
+			mm = get_task_mm(task);
+			if (mm) {
+				pr_warn("[%5d] %8lu %10lu %6lu %13d %s\n",
+					tsk_db[index].pid,
+					K(task->mm->total_vm),
+					tsk_db[index].rss,
+					K(get_mm_counter(task->mm,
+					MM_SWAPENTS)),
+					task->signal->oom_score_adj,
+					task->comm);
+				mmput(mm);
+				mm = NULL;
+				i++;
+			}
+			put_task_struct(task);
+		} else
+			rcu_read_unlock();
+		index++;
+	}
+
+	kfree(tsk_db);
+
+	pr_warn("* Sum of rss    : %6lu (kB)\n",
+		K(sum_of_total_rss));
+	pr_warn("* Sum of maxrss : %6lu (kB)\n",
+		K(sum_of_total_maxrss));
+	pr_warn("* Sum of swap   : %6lu (kB)\n",
+		K(sum_of_total_swap));
+}
+#endif
 
 static void dump_header(struct task_struct *p, gfp_t gfp_mask, int order,
 			struct mem_cgroup *memcg, const nodemask_t *nodemask)
@@ -390,12 +1087,37 @@ static void dump_header(struct task_struct *p, gfp_t gfp_mask, int order,
 	cpuset_print_task_mems_allowed(current);
 	task_unlock(current);
 	dump_stack();
-	if (memcg)
-		mem_cgroup_print_oom_info(memcg, p);
-	else
-		show_mem(SHOW_MEM_FILTER_NODES);
-	if (sysctl_oom_dump_tasks)
-		dump_tasks(memcg, nodemask);
+	mutex_lock(&oom_owner_mutex);
+	if (oom_processing_pid == -1) {
+		oom_processing_pid = 1;
+		mutex_unlock(&oom_owner_mutex);
+	} else {
+
+		/* Already print logs on other core no need to do same
+		 * Things. So just skiping.
+		 */
+		mutex_unlock(&oom_owner_mutex);
+		return;
+	}
+	/* get panic There's no process killable if p is NULL */
+	if (p == NULL || oom_processing_pid == 1) {
+		if (memcg)
+			mem_cgroup_print_oom_info(memcg, p);
+		else
+			show_mem(SHOW_MEM_FILTER_NODES);
+		if (sysctl_oom_dump_tasks)
+#ifdef CONFIG_VD_MEMINFO
+			dump_tasks(NULL, NULL, NULL);
+#else
+		dump_tasks(memcg, nodemask, NULL);
+#endif
+		print_slabinfo_oom();
+		show_graphic_register_func();
+		/* Adding threshold delay, to change system memory
+		 * state.
+		 */
+		oom_processing_pid = -1;
+	}
 }
 
 /*
@@ -508,8 +1230,19 @@ void oom_kill_process(struct task_struct *p, gfp_t gfp_mask, int order,
 	struct task_struct *t;
 	struct mm_struct *mm;
 	unsigned int victim_points = 0;
+#ifdef CONFIG_KPI_SYSTEM_SUPPORT
+	struct task_struct *pgrp_task = NULL;
+	pid_t pgid = -1;
+	int oom_score_adj = 0;
+	struct pid_namespace *ns = NULL;
+#endif
 	static DEFINE_RATELIMIT_STATE(oom_rs, DEFAULT_RATELIMIT_INTERVAL,
 					      DEFAULT_RATELIMIT_BURST);
+#ifdef	CONFIG_ENABLE_OOM_DEBUG_LOGS
+	int ori_console_loglevel = console_loglevel;
+	/* Set console log level to default level (7). */
+	console_default();
+#endif
 
 	/*
 	 * If the task is already exiting, don't alarm the sysadmin or kill
@@ -526,6 +1259,11 @@ void oom_kill_process(struct task_struct *p, gfp_t gfp_mask, int order,
 
 	if (__ratelimit(&oom_rs))
 		dump_header(p, gfp_mask, order, memcg, nodemask);
+
+#ifdef	CONFIG_ENABLE_OOM_DEBUG_LOGS
+	/* Revert console log level to saved log level value. */
+	console_revert(ori_console_loglevel);
+#endif
 
 	task_lock(p);
 	pr_err("%s: Kill process %d (%s) score %d or sacrifice child\n",
@@ -577,6 +1315,26 @@ void oom_kill_process(struct task_struct *p, gfp_t gfp_mask, int order,
 		task_pid_nr(victim), victim->comm, K(victim->mm->total_vm),
 		K(get_mm_counter(victim->mm, MM_ANONPAGES)),
 		K(get_mm_counter(victim->mm, MM_FILEPAGES)));
+
+#ifdef CONFIG_KPI_SYSTEM_SUPPORT
+	/* kpi_fault */
+	rcu_read_lock();
+	ns = task_active_pid_ns(current);
+	if (ns) {
+		pgid = task_pgrp_vnr(victim);
+		pgrp_task = find_task_by_vpid(pgid);
+		if (pgrp_task) {
+			get_task_struct(pgrp_task);
+			oom_score_adj = pgrp_task->signal->oom_score_adj;
+			put_task_struct(pgrp_task);
+		}
+	}
+	rcu_read_unlock();
+	if (oom_score_adj >= 150 && oom_score_adj <= 200)
+		set_kpi_fault(0, 0, "OOM", "OOM", "FG", pgid);
+	else
+		set_kpi_fault(0, 0, "OOM", "OOM", "OOM", pgid);
+#endif
 	task_unlock(victim);
 
 	/*
@@ -715,6 +1473,12 @@ static void __out_of_memory(struct zonelist *zonelist, gfp_t gfp_mask,
 	enum oom_constraint constraint = CONSTRAINT_NONE;
 	int killed = 0;
 
+	if (only_one_time_call) {
+			if (panic_ratelimit_burst && panic_ratelimit_interval)
+				set_ratelimit_state(&oom_panic_rs);
+			only_one_time_call = false;
+	}
+
 	blocking_notifier_call_chain(&oom_notify_list, 0, &freed);
 	if (freed > 0)
 		/* Got some memory back in the last second. */
@@ -733,7 +1497,9 @@ static void __out_of_memory(struct zonelist *zonelist, gfp_t gfp_mask,
 		mark_tsk_oom_victim(current);
 		return;
 	}
-
+#ifdef CONFIG_SMART_DEADLOCK
+	hook_smart_deadlock_exception_case(SMART_DEADLOCK_OOM);
+#endif
 	/*
 	 * Check if there were limitations on the allocation (only relevant for
 	 * NUMA) that may require different handling.
@@ -769,8 +1535,20 @@ out:
 	 * Give the killed threads a good chance of exiting before trying to
 	 * allocate memory again.
 	 */
-	if (killed)
+	if (killed) {
 		schedule_timeout_killable(1);
+		if (__ratelimit(&oom_panic_rs)) {
+			if (oom_panic_rs.printed == panic_ratelimit_burst) {
+				dump_header(NULL, gfp_mask, order, NULL, mpol_mask);
+#ifdef CONFIG_OOM_PANIC
+				panic("Out of memory and couldn't recover lowmem by kill processes...\n");
+#else
+				pr_err("Out of memory and couldn't recover lowmem by kill processes...\n");
+#endif
+			}
+		} else
+			reset_ratelimit_state(&oom_panic_rs);
+	}
 }
 
 /**

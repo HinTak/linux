@@ -493,7 +493,11 @@ EXPORT_SYMBOL(phy_start_aneg);
  */
 void phy_start_machine(struct phy_device *phydev)
 {
+#ifdef CONFIG_REDUCE_ETH_LINKUP_TIME
+	queue_delayed_work(system_power_efficient_wq, &phydev->state_queue, HZ / 10);
+#else
 	queue_delayed_work(system_power_efficient_wq, &phydev->state_queue, HZ);
+#endif
 }
 
 /**
@@ -953,7 +957,11 @@ void phy_state_machine(struct work_struct *work)
 		phy_error(phydev);
 
 	queue_delayed_work(system_power_efficient_wq, &phydev->state_queue,
+#ifdef CONFIG_REDUCE_ETH_LINKUP_TIME
+			   PHY_STATE_TIME * HZ / 10);
+#else
 			   PHY_STATE_TIME * HZ);
+#endif
 }
 
 void phy_mac_interrupt(struct phy_device *phydev, int new_link)

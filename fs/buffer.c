@@ -983,7 +983,9 @@ grow_dev_page(struct block_device *bdev, sector_t block,
 	gfp_t gfp_mask;
 
 	gfp_mask = (mapping_gfp_mask(inode->i_mapping) & ~__GFP_FS) | gfp;
-
+#ifdef CONFIG_PREVENT_ALLOC_BUFFER_IN_CMA
+	gfp_mask &= ~__GFP_MOVABLE;
+#endif
 	/*
 	 * XXX: __getblk_slow() can not really deal with failure and
 	 * will endlessly loop on improvised global reclaim.  Prefer
@@ -3409,6 +3411,97 @@ int bh_submit_read(struct buffer_head *bh)
 	return -EIO;
 }
 EXPORT_SYMBOL(bh_submit_read);
+
+#ifndef CONFIG_VD_RELEASE
+#define DEBUG_FS_NAME_LEN 10
+extern long bh_validate_slab_cache(struct kmem_cache *s);
+extern unsigned long long bh_cnt;
+
+static char fs_name[20][DEBUG_FS_NAME_LEN];
+static unsigned int bh_alloc_stat_size;
+static unsigned long long bh_fs_cnt[20];
+
+static int dump_bh_cache(void)
+{
+	return bh_validate_slab_cache(bh_cachep);
+}
+
+void check_bh(struct buffer_head *bh)
+{
+	int i;
+	char temp[DEBUG_FS_NAME_LEN];
+
+	if (!bh)
+		return;
+
+	if (bh->b_bdev) {
+		if (bh->b_bdev->bd_super &&
+				bh->b_bdev->bd_super->s_type &&
+				bh->b_bdev->bd_super->s_type->name) {
+			strncpy(temp, bh->b_bdev->bd_super->s_type->name,
+					DEBUG_FS_NAME_LEN - 1);
+			for (i = 1; i < bh_alloc_stat_size; i++) {
+				if (!strncmp(fs_name[i], temp,
+						DEBUG_FS_NAME_LEN - 1)) {
+					++bh_fs_cnt[i];
+					return;
+				}
+			}
+			strncpy(fs_name[bh_alloc_stat_size], temp,
+					DEBUG_FS_NAME_LEN - 1);
+			bh_alloc_stat_size++;
+		}
+	} else if (bh->b_page && bh->b_page->mapping &&
+			bh->b_page->mapping->host &&
+			bh->b_page->mapping->host->i_sb &&
+			bh->b_page->mapping->host->i_sb->s_type &&
+			bh->b_page->mapping->host->i_sb->s_type->name) {
+		strncpy(temp, bh->b_page->mapping->host->i_sb->s_type->name,
+				DEBUG_FS_NAME_LEN - 1);
+		for (i = 1; i < bh_alloc_stat_size; i++) {
+			if (!strncmp(fs_name[i], temp, DEBUG_FS_NAME_LEN - 1)) {
+				++bh_fs_cnt[i];
+				return;
+			}
+		}
+		strncpy(fs_name[bh_alloc_stat_size], temp,
+				DEBUG_FS_NAME_LEN - 1);
+		bh_alloc_stat_size++;
+	} else {
+		strncpy(fs_name[0], "NULL", DEBUG_FS_NAME_LEN - 1);
+		++bh_fs_cnt[0];
+	}
+}
+
+void print_bh_cache_info(void)
+{
+	unsigned int i;
+
+	bh_alloc_stat_size = 1;
+
+	pr_err("START Dumping usage of active buffer head objects\n");
+	for (i = 1; i < 20; i++)
+		bh_fs_cnt[i] = 1;
+
+	bh_fs_cnt[0] = 0;
+	dump_bh_cache();
+
+	for (i = 0; i < bh_alloc_stat_size; i++) {
+		if (bh_fs_cnt[i] && i) {
+			pr_err("BUFFER_HEAD_ACTIVE_OBJECTS: fsname [%s] buffer_head=[%llu]\n",
+					fs_name[i], bh_fs_cnt[i]);
+			bh_fs_cnt[i] = 1;
+		} else {
+			pr_err("BUFFER_HEAD_ACTIVE_OBJECTS: fsname [%s] buffer_head=[%llu]\n",
+					fs_name[i], bh_fs_cnt[i]);
+			bh_fs_cnt[0] = 0;
+		}
+	}
+
+	if (bh_cnt)
+		pr_err("TOTAL_BUFFER_HEAD_ACTIVE_OBJECTS %lld\n", bh_cnt);
+}
+#endif
 
 void __init buffer_init(void)
 {

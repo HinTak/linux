@@ -410,6 +410,10 @@ static noinline int i2cdev_ioctl_smbus(struct i2c_client *client,
 	return res;
 }
 
+#if defined(CONFIG_ARCH_SDP)
+extern int sdp_i2c_set_clk(struct i2c_adapter *adap, unsigned long clk);
+#endif
+
 static long i2cdev_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct i2c_client *client = file->private_data;
@@ -470,6 +474,11 @@ static long i2cdev_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		 */
 		client->adapter->timeout = msecs_to_jiffies(arg * 10);
 		break;
+#if defined(CONFIG_ARCH_SDP)		
+	case I2C_SET_CLK:
+		sdp_i2c_set_clk(client->adapter, arg);
+		break;
+#endif	
 	default:
 		/* NOTE:  returning a fault code here could cause trouble
 		 * in buggy userspace code.  Some old kernel bugs returned

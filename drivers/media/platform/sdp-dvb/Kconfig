@@ -1,0 +1,8 @@
+config DVB_SDP
+	tristate "SDP DVB base driver"
+	depends on DVB_CORE
+	depends on ARCH_SDP
+	default n
+	help
+	  DVB base drivers for SDP.
+

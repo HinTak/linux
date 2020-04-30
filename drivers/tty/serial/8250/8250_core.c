@@ -3728,7 +3728,11 @@ static int serial8250_suspend(struct platform_device *dev, pm_message_t state)
 	for (i = 0; i < UART_NR; i++) {
 		struct uart_8250_port *up = &serial8250_ports[i];
 
+#ifndef CONFIG_ARCH_NVT_V7
 		if (up->port.type != PORT_UNKNOWN && up->port.dev == &dev->dev)
+#else
+		if (up->port.type != PORT_UNKNOWN)
+#endif
 			uart_suspend_port(&serial8250_reg, &up->port);
 	}
 
@@ -3742,7 +3746,11 @@ static int serial8250_resume(struct platform_device *dev)
 	for (i = 0; i < UART_NR; i++) {
 		struct uart_8250_port *up = &serial8250_ports[i];
 
+#ifndef CONFIG_ARCH_NVT_V7
 		if (up->port.type != PORT_UNKNOWN && up->port.dev == &dev->dev)
+#else
+		if (up->port.type != PORT_UNKNOWN)
+#endif
 			serial8250_resume_port(i);
 	}
 

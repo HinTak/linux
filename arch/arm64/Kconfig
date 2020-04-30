@@ -163,6 +163,19 @@ source "kernel/Kconfig.freezer"
 
 menu "Platform selection"
 
+config ARCH_SDP
+
+config ARCH_SDP1601
+	bool "Samsung DTV Platform - KantM"
+	select ARCH_HAS_HOLES_MEMORYMODEL
+	select CLKDEV_LOOKUP
+	select HAVE_CLK
+	select AUTO_ZRELADDR
+	select ARCH_SDP
+	help
+	  Support for Samsung DTV platforms based on SDP1601 - KantM
+
+
 config ARCH_EXYNOS
 	bool
 	help
@@ -258,6 +271,8 @@ config ARCH_ZYNQMP
 	bool "Xilinx ZynqMP Family"
 	help
 	  This enables support for Xilinx ZynqMP Family
+
+#source "arch/arm64/mach-sdp/Kconfig"
 
 endmenu
 
@@ -529,6 +544,16 @@ config HOTPLUG_CPU
 	  Say Y here to experiment with turning CPUs off and on.  CPUs
 	  can be controlled through /sys/devices/system/cpu.
 
+config PRESERVE_IRQ_AFFINITY
+	bool "Restore IRQ affinities when CPU comes online"
+	depends on HOTPLUG_CPU
+	default y
+	help
+	 If some CPU goes offline, manually setted IRQ affinities could change.
+	 When CPU comes online, all relevant IRQs will be re-affined to it
+	 if you will say Y here.
+
+
 source kernel/Kconfig.preempt
 
 config UP_LATE_INIT
@@ -537,7 +562,7 @@ config UP_LATE_INIT
 
 config HZ
 	int
-	default 100
+	default 250
 
 config ARCH_HAS_HOLES_MEMORYMODEL
 	def_bool y if SPARSEMEM
@@ -788,6 +813,8 @@ source "fs/Kconfig"
 source "arch/arm64/kvm/Kconfig"
 
 source "arch/arm64/Kconfig.debug"
+
+source "arch/Kconfig.VDLP"
 
 source "security/Kconfig"
 

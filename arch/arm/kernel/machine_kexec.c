@@ -19,6 +19,10 @@
 #include <asm/smp_plat.h>
 #include <asm/system_misc.h>
 
+#ifdef CONFIG_KEXEC_CSYSTEM
+#include <asm/smp.h>
+#endif
+
 extern void relocate_new_kernel(void);
 extern const unsigned int relocate_new_kernel_size;
 
@@ -75,6 +79,7 @@ void machine_kexec_cleanup(struct kimage *image)
 {
 }
 
+#ifndef CONFIG_KEXEC_CSYSTEM
 void machine_crash_nonpanic_core(void *unused)
 {
 	struct pt_regs regs;
@@ -90,6 +95,7 @@ void machine_crash_nonpanic_core(void *unused)
 	while (1)
 		cpu_relax();
 }
+#endif
 
 static void machine_kexec_mask_interrupts(void)
 {
@@ -114,6 +120,35 @@ static void machine_kexec_mask_interrupts(void)
 	}
 }
 
+#ifdef CONFIG_KEXEC_CSYSTEM
+void machine_crash_shutdown(struct arm_regs_t *regs)
+{
+	local_irq_disable();
+
+	/*
+	 * When CONFIG_KEXEC_VDLP, the cpu is stopping based on
+	 * smp_send_stop() (e.g. ipi_cpu_stop) call, from the 
+	 * oops_begin. If the cpu is not stopped, we assume 
+	 * smp_send_stop is not called, so call it manually.
+	 */
+	atomic_set(&waiting_for_crash_ipi, num_online_cpus() - 1);
+
+	if (atomic_read(&waiting_for_crash_ipi) > 0) {
+		smp_send_stop();
+	}
+	
+	if (atomic_read(&waiting_for_crash_ipi) > 0) {
+		pr_warn("Non-crashing CPUs did not react to IPI\n");
+	}
+
+	crash_save_cpu(regs, smp_processor_id());
+	flush_cache_all();
+	outer_flush_all();
+	machine_kexec_mask_interrupts();
+
+	pr_info("Loading crashdump kernel...\n");
+}
+#else
 void machine_crash_shutdown(struct pt_regs *regs)
 {
 	unsigned long msecs;
@@ -135,6 +170,7 @@ void machine_crash_shutdown(struct pt_regs *regs)
 
 	pr_info("Loading crashdump kernel...\n");
 }
+#endif
 
 /*
  * Function pointer to optional machine-specific reinitialization
@@ -162,7 +198,18 @@ void machine_kexec(struct kimage *image)
 	/* we need both effective and real address here */
 	reboot_code_buffer_phys =
 	    page_to_pfn(image->control_code_page) << PAGE_SHIFT;
+	/* 
+	 * Because the kexec-tools uses kmap to upload the crash_kernel image,
+	 * it has slight change that crash_kernel can be highmem.
+	 * if it's in highmem, there is a chance to fail if page_address use.
+	 * so we change it to kmap. Also, kunmap is not needed because
+	 * after this function, it will reboot to new kernel.
+	 */
+#ifndef CONFIG_KEXEC_CSYSTEM
 	reboot_code_buffer = page_address(image->control_code_page);
+#else
+	reboot_code_buffer = kmap_atomic(image->control_code_page);
+#endif
 
 	/* Prepare parameters for reboot_code_buffer*/
 	set_kernel_text_rw();

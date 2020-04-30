@@ -16,7 +16,15 @@
 #include <linux/bitmap.h>
 #include <linux/irqdomain.h>
 
+#ifdef CONFIG_VD_DEBUG_STACKOVERFLOW 
+#include <linux/module.h>
+#endif 
+
 #include "internals.h"
+
+#ifdef CONFIG_MMC_TIMEOUT
+extern int g_irq_print;
+#endif
 
 /*
  * lockdep: we want to handle all irq_desc locks as a single lock-class:
@@ -337,6 +345,11 @@ void irq_init_desc(unsigned int irq)
 
 #endif /* !CONFIG_SPARSE_IRQ */
 
+#ifdef CONFIG_IRQ_TIME
+struct irq_desc_debug irq_desc_last[NR_CPUS];
+EXPORT_SYMBOL(irq_desc_last);
+#endif
+
 /**
  * generic_handle_irq - Invoke the handler for a particular irq
  * @irq:	The irq number to handle
@@ -370,6 +383,13 @@ int __handle_domain_irq(struct irq_domain *domain, unsigned int hwirq,
 	unsigned int irq = hwirq;
 	int ret = 0;
 
+#ifdef CONFIG_MMC_TIMEOUT
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+	if(g_irq_print)
+		show_irq();
+#endif
+#endif
+
 	irq_enter();
 
 #ifdef CONFIG_IRQ_DOMAIN
@@ -385,9 +405,27 @@ int __handle_domain_irq(struct irq_domain *domain, unsigned int hwirq,
 		ack_bad_irq(irq);
 		ret = -EINVAL;
 	} else {
-		generic_handle_irq(irq);
+			generic_handle_irq(irq);
+#ifdef CONFIG_VD_DEBUG_STACKOVERFLOW
+#ifndef STACK_WARN
+#define STACK_WARN (THREAD_SIZE/8)
+#endif
+			/* Debugging check for stack overflow */
+			{
+					register unsigned long sp __asm__("sp");
+					unsigned long thread_info;
+					extern void print_modules(void);
+					thread_info = (sp & ~(THREAD_SIZE - 1));
+					if (unlikely(sp < thread_info + sizeof(struct thread_info)
+											+ STACK_WARN)) {
+							pr_err("stack overflow: 0x%lx\n", sp);
+							print_modules();
+							show_regs(get_irq_regs());
+							dump_stack();
+					}
+			}
+#endif
 	}
-
 	irq_exit();
 	set_irq_regs(old_regs);
 	return ret;

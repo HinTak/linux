@@ -98,6 +98,21 @@ int drm_open(struct inode *inode, struct file *filp)
 	retcode = drm_open_helper(filp, minor);
 	if (retcode)
 		goto err_undo;
+
+#define __ALLOW_MASTER_XONLY__
+#ifdef  __ALLOW_MASTER_XONLY__
+			// X can try to be a master before pre occupied process's "drop master" then X crashes
+			// therefore, allow master X only in DRM open itself.
+			if(strcmp(current->comm, "enlightenment") == 0
+			   || strcmp(current->comm, "Xorg") == 0
+			   || strcmp(current->comm, "fastboot") == 0
+			   || strcmp(current->comm, "t2dtester") == 0){
+			}else{
+					//printk("%s: drop master [pid:%d,%s]\n", __FUNCTION__, current->pid, current->comm);
+					drm_dropmaster_ioctl(dev, NULL, (struct drm_file *)filp->private_data); // rany.kwon: drop master
+			}
+#endif // __ALLOW_MASTER_XONLY__
+	
 	if (need_setup) {
 		retcode = drm_setup(dev);
 		if (retcode)
@@ -163,6 +178,7 @@ static int drm_open_helper(struct file *filp, struct drm_minor *minor)
 	/* for compatibility root is always authenticated */
 	priv->authenticated = capable(CAP_SYS_ADMIN);
 	priv->lock_count = 0;
+	priv->drm_pid = task_tgid_nr(current);
 
 	INIT_LIST_HEAD(&priv->lhead);
 	INIT_LIST_HEAD(&priv->fbs);

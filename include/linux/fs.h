@@ -814,6 +814,9 @@ struct file_ra_state {
 	unsigned int ra_pages;		/* Maximum readahead window */
 	unsigned int mmap_miss;		/* Cache miss stat for mmap accesses */
 	loff_t prev_pos;		/* Cache last read() position */
+#ifdef CONFIG_FS_SEL_READAHEAD
+	bool    state;			/* Readahead enabled or disabled */
+#endif
 };
 
 /*
@@ -861,6 +864,9 @@ struct file {
 	struct list_head	f_tfile_llink;
 #endif /* #ifdef CONFIG_EPOLL */
 	struct address_space	*f_mapping;
+#ifdef CONFIG_FD_PID
+	struct pid *f_pid;
+#endif
 } __attribute__((aligned(4)));	/* lest something weird decides that 2 is OK */
 
 struct file_handle {
@@ -1232,6 +1238,8 @@ struct mm_struct;
 #define UMOUNT_NOFOLLOW	0x00000008	/* Don't follow symlink on umount */
 #define UMOUNT_UNUSED	0x80000000	/* Flag guaranteed to be unused */
 
+extern struct list_head super_blocks;
+extern spinlock_t sb_lock;
 
 /* Possible states of 'frozen' field */
 enum {
@@ -1978,6 +1986,9 @@ extern struct vfsmount *collect_mounts(struct path *);
 extern void drop_collected_mounts(struct vfsmount *);
 extern int iterate_mounts(int (*)(struct vfsmount *, void *), void *,
 			  struct vfsmount *);
+#ifdef CONFIG_FCOUNT_DEBUG
+extern void print_mounts(void);
+#endif
 extern int vfs_statfs(struct path *, struct kstatfs *);
 extern int user_statfs(const char __user *, struct kstatfs *);
 extern int fd_statfs(int, struct kstatfs *);

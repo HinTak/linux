@@ -21,6 +21,9 @@
 
 #include <asm/psci.h>
 #include <asm/smp_plat.h>
+#include <asm/cacheflush.h>
+#include <asm/cp15.h>
+#include <asm/io.h>
 
 /*
  * psci_smp assumes that the following is true about PSCI:
@@ -84,6 +87,16 @@ int __ref psci_cpu_kill(unsigned int cpu)
 	for (i = 0; i < 10; i++) {
 		err = psci_ops.affinity_info(cpu_logical_map(cpu), 0);
 		if (err == PSCI_0_2_AFFINITY_LEVEL_OFF) {
+#ifdef CONFIG_ARCH_SDP1601
+			u32 val;
+			void __iomem *sdp_bootram_power;
+			sdp_bootram_power = ioremap(0x00400000, 0x400); 
+			while(!(readl(sdp_bootram_power) & (1 << (cpu + 24))));		//wait for CPU wfi
+			val = readl(sdp_bootram_power + 0x0C);
+			val &= (~(1 << (cpu + 4)));
+			writel(val, sdp_bootram_power + 0x0C);
+			iounmap(sdp_bootram_power);
+#endif
 			pr_info("CPU%d killed.\n", cpu);
 			return 1;
 		}

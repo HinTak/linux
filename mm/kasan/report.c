@@ -59,10 +59,12 @@ static void print_error_description(struct kasan_access_info *info)
 	switch (shadow_val) {
 	case KASAN_FREE_PAGE:
 	case KASAN_KMALLOC_FREE:
+	case KASAN_VMALLOC_FREE:
 		bug_type = "use after free";
 		break;
 	case KASAN_PAGE_REDZONE:
 	case KASAN_KMALLOC_REDZONE:
+	case KASAN_VMALLOC_REDZONE:
 	case KASAN_GLOBAL_REDZONE:
 	case 0 ... KASAN_SHADOW_SCALE_SIZE - 1:
 		bug_type = "out of bounds access";

@@ -117,6 +117,10 @@ __acquires(ohci->lock)
 		ohci->hc_control &= ~OHCI_CTRL_RWE;
 	}
 
+#ifdef CONFIG_ARCH_SDP1601 /* prevent IRQ */
+	ohci_writel(ohci, OHCI_INTR_MIE, &ohci->regs->intrdisable);
+#endif
+	
 	/* Suspend hub ... this is the "global (to this bus) suspend" mode,
 	 * which doesn't imply ports will first be individually suspended.
 	 */
