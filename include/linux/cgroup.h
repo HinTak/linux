@@ -660,7 +660,7 @@ static inline struct cgroup_subsys_state *cgroup_subsys_state(
  * as locks used during the cgroup_subsys::attach() methods.
  */
 #ifdef CONFIG_PROVE_RCU
-extern struct mutex cgroup_mutex;
+// extern struct mutex cgroup_mutex;
 #define task_css_set_check(task, __c)					\
 	rcu_dereference_check((task)->cgroups,				\
 		lockdep_is_held(&(task)->alloc_lock) ||			\
@@ -669,6 +669,9 @@ extern struct mutex cgroup_mutex;
 #define task_css_set_check(task, __c)					\
 	rcu_dereference((task)->cgroups)
 #endif
+
+//FIXME: For safe way to find cgroup path in outside, it exports cgroup mutex lock.
+extern struct mutex cgroup_mutex;
 
 /**
  * task_subsys_state_check - obtain css for (task, subsys) w/ extra access conds

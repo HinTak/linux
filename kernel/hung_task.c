@@ -68,8 +68,16 @@ static struct notifier_block panic_block = {
 	.notifier_call = hung_task_panic,
 };
 
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+extern void show_irq(void);
+static int initial_print = 0;
+#endif
+
 static void check_hung_task(struct task_struct *t, unsigned long timeout)
 {
+#ifdef CONFIG_HUNG_TASK_CHILD_PRINT
+	struct task_struct *p, *n;
+#endif
 	unsigned long switch_count = t->nvcsw + t->nivcsw;
 
 	/*
@@ -107,6 +115,26 @@ static void check_hung_task(struct task_struct *t, unsigned long timeout)
 	debug_show_held_locks(t);
 
 	touch_nmi_watchdog();
+
+#ifdef CONFIG_HUNG_TASK_CHILD_PRINT
+	printk(KERN_ERR "====================================================\n");
+	printk(KERN_ERR "INFO: show child's call stack!!\n");
+	printk(KERN_ERR "====================================================\n");
+	list_for_each_entry_safe(p, n, &t->children, sibling) {
+		printk(KERN_ERR "[CHILD] : %s [PID:%d]\n", p->comm, p->pid);
+		sched_show_task(p);
+		printk(KERN_ERR "----------------------------------------------------\n");
+	}
+	printk(KERN_ERR "====================================================\n");
+#endif
+
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+	if(!initial_print)
+	{
+		initial_print++;
+		show_irq();
+	}
+#endif
 
 	if (sysctl_hung_task_panic) {
 		trigger_all_cpu_backtrace();

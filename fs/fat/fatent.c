@@ -95,7 +95,9 @@ static int fat12_ent_bread(struct super_block *sb, struct fat_entry *fatent,
 err_brelse:
 	brelse(bhs[0]);
 err:
-	fat_msg(sb, KERN_ERR, "FAT read failed (blocknr %llu)", (llu)blocknr);
+	fat_msg_ratelimit(sb, KERN_ERR,
+			"(%s) FAT read failed (blocknr %llu)",
+				current->comm, (llu)blocknr);
 	return -EIO;
 }
 
@@ -108,8 +110,9 @@ static int fat_ent_bread(struct super_block *sb, struct fat_entry *fatent,
 	fatent->fat_inode = MSDOS_SB(sb)->fat_inode;
 	fatent->bhs[0] = sb_bread(sb, blocknr);
 	if (!fatent->bhs[0]) {
-		fat_msg(sb, KERN_ERR, "FAT read failed (blocknr %llu)",
-		       (llu)blocknr);
+		fat_msg_ratelimit(sb, KERN_ERR,
+		"(%s) FAT read failed (blocknr %llu)",
+			current->comm, (llu)blocknr);
 		return -EIO;
 	}
 	fatent->nr_bhs = 1;
@@ -348,17 +351,18 @@ static inline int fat_ent_update_ptr(struct super_block *sb,
 	return 1;
 }
 
-int fat_ent_read(struct inode *inode, struct fat_entry *fatent, int entry)
+int fat_ent_read(struct super_block *sb, struct fat_entry *fatent, int entry)
 {
-	struct super_block *sb = inode->i_sb;
-	struct msdos_sb_info *sbi = MSDOS_SB(inode->i_sb);
+	struct msdos_sb_info *sbi = MSDOS_SB(sb);
 	struct fatent_operations *ops = sbi->fatent_ops;
 	int err, offset;
 	sector_t blocknr;
 
 	if (entry < FAT_START_ENT || sbi->max_cluster <= entry) {
 		fatent_brelse(fatent);
-		fat_fs_error(sb, "invalid access to FAT (entry 0x%08x)", entry);
+		fat_msg_ratelimit(sb, KERN_ERR,
+			"(%s) invalid access to FAT (entry 0x%08x)",
+			current->comm, entry);
 		return -EIO;
 	}
 
@@ -564,7 +568,7 @@ int fat_free_clusters(struct inode *inode, int cluster)
 	fatent_init(&fatent);
 	lock_fat(sbi);
 	do {
-		cluster = fat_ent_read(inode, &fatent, cluster);
+		cluster = fat_ent_read(sb, &fatent, cluster);
 		if (cluster < 0) {
 			err = cluster;
 			goto error;

@@ -19,6 +19,13 @@
 #include "trace_stat.h"
 #include "trace_output.h"
 
+#ifdef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
+#include <linux/compiler.h>
+
+int kdbg_ftrace_br_tracer __read_mostly;
+EXPORT_SYMBOL(kdbg_ftrace_br_tracer);
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
+
 #ifdef CONFIG_BRANCH_TRACER
 
 static struct tracer branch_trace;
@@ -135,6 +142,9 @@ static void stop_branch_trace(struct trace_array *tr)
 
 static int branch_trace_init(struct trace_array *tr)
 {
+#ifdef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
+	kdbg_ftrace_br_tracer = TRACER_BRANCH;
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
 	start_branch_trace(tr);
 	return 0;
 }

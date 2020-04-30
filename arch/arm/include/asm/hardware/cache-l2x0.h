@@ -134,6 +134,11 @@ struct l2x0_regs {
 };
 
 extern struct l2x0_regs l2x0_saved_regs;
+#ifdef CONFIG_CACHE_L2X0_DISABLE_SECURE_SUPPORT
+typedef void (*l2x0_disable_sec_fn)(void);
+
+extern l2x0_disable_sec_fn l2x0_disable_sec;
+#endif // CONFIG_CACHE_L2X0_DISABLE_SECURE_SUPPORT
 
 #endif /* __ASSEMBLY__ */
 

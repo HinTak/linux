@@ -1,6 +1,8 @@
 #ifndef MMC_QUEUE_H
 #define MMC_QUEUE_H
 
+#include <linux/blk_types.h>
+
 #define MMC_REQ_SPECIAL_MASK	(REQ_DISCARD | REQ_FLUSH)
 
 struct request;
@@ -72,5 +74,7 @@ extern void mmc_queue_bounce_post(struct mmc_queue_req *);
 
 extern int mmc_packed_init(struct mmc_queue *, struct mmc_card *);
 extern void mmc_packed_clean(struct mmc_queue *);
+
+extern int mmc_access_rpmb(struct mmc_queue *);
 
 #endif

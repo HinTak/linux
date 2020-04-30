@@ -186,3 +186,5 @@ static inline int serial8250_request_dma(struct uart_8250_port *p)
 }
 static inline void serial8250_release_dma(struct uart_8250_port *p) { }
 #endif
+
+

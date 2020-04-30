@@ -332,17 +332,14 @@ static void scsi_device_dev_release_usercontext(struct work_struct *work)
 {
 	struct scsi_device *sdev;
 	struct device *parent;
-	struct scsi_target *starget;
 	struct list_head *this, *tmp;
 	unsigned long flags;
 
 	sdev = container_of(work, struct scsi_device, ew.work);
 
 	parent = sdev->sdev_gendev.parent;
-	starget = to_scsi_target(parent);
 
 	spin_lock_irqsave(sdev->host->host_lock, flags);
-	starget->reap_ref++;
 	list_del(&sdev->siblings);
 	list_del(&sdev->same_target_siblings);
 	list_del(&sdev->starved_entry);
@@ -361,8 +358,6 @@ static void scsi_device_dev_release_usercontext(struct work_struct *work)
 	blk_put_queue(sdev->request_queue);
 	/* NULL queue means the device can't be used */
 	sdev->request_queue = NULL;
-
-	scsi_target_reap(scsi_target(sdev));
 
 	kfree(sdev->inquiry);
 	kfree(sdev);
@@ -535,6 +530,11 @@ sdev_rd_attr (vendor, "%.8s\n");
 sdev_rd_attr (model, "%.16s\n");
 sdev_rd_attr (rev, "%.4s\n");
 
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+sdev_rd_attr (serial, "%.32s\n");                       //add for usb serial number
+sdev_rd_attr (logicalnumber, "%.16s\n");                //add for usb logical number
+sdev_rd_attr (usbdevpath, "%.16s\n");                   //add for usb device path
+#endif
 /*
  * TODO: can we make these symlinks to the block layer ones?
  */
@@ -718,6 +718,11 @@ static struct attribute *scsi_sdev_attrs[] = {
 	&dev_attr_scsi_level.attr,
 	&dev_attr_vendor.attr,
 	&dev_attr_model.attr,
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+        &dev_attr_serial.attr,
+        &dev_attr_logicalnumber.attr,
+        &dev_attr_usbdevpath.attr,
+#endif
 	&dev_attr_rev.attr,
 	&dev_attr_rescan.attr,
 	&dev_attr_delete.attr,
@@ -978,6 +983,13 @@ void __scsi_remove_device(struct scsi_device *sdev)
 		sdev->host->hostt->slave_destroy(sdev);
 	transport_destroy_device(dev);
 
+	/*
+	 * Paired with the kref_get() in scsi_sysfs_initialize().  We have
+	 * remoed sysfs visibility from the device, so make the target
+	 * invisible if this was the last device underneath it.
+	 */
+	scsi_target_reap(scsi_target(sdev));
+
 	put_device(dev);
 }
 
@@ -1040,7 +1052,7 @@ void scsi_remove_target(struct device *dev)
 			continue;
 		if (starget->dev.parent == dev || &starget->dev == dev) {
 			/* assuming new targets arrive at the end */
-			starget->reap_ref++;
+			kref_get(&starget->reap_ref);
 			spin_unlock_irqrestore(shost->host_lock, flags);
 			if (last)
 				scsi_target_reap(last);
@@ -1124,6 +1136,12 @@ void scsi_sysfs_device_initialize(struct scsi_device *sdev)
 	list_add_tail(&sdev->same_target_siblings, &starget->devices);
 	list_add_tail(&sdev->siblings, &shost->__devices);
 	spin_unlock_irqrestore(shost->host_lock, flags);
+	/*
+	 * device can now only be removed via __scsi_remove_device() so hold
+	 * the target.  Target will be held in CREATED state until something
+	 * beneath it becomes visible (in which case it moves to RUNNING)
+	 */
+	kref_get(&starget->reap_ref);
 }
 
 int scsi_is_sdev_device(const struct device *dev)

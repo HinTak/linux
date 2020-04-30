@@ -160,6 +160,18 @@ static inline unsigned int cpumask_first(const struct cpumask *srcp)
 	return find_first_bit(cpumask_bits(srcp), nr_cpumask_bits);
 }
 
+#ifdef CONFIG_VD_GIC_SET_AFFINITY
+static inline unsigned int cpumask_last(const struct cpumask *srcp)
+{
+	return find_last_bit(cpumask_bits(srcp), nr_cpumask_bits);
+}
+
+static inline unsigned int cpumask_prev(int n, const struct cpumask *srcp)
+{
+	return find_last_bit(cpumask_bits(srcp), (unsigned long)n);
+}
+#endif
+
 /**
  * cpumask_next - get the next cpu in a cpumask
  * @n: the cpu prior to the place to search (ie. return will be > @n)
@@ -190,6 +202,9 @@ static inline unsigned int cpumask_next_zero(int n, const struct cpumask *srcp)
 	return find_next_zero_bit(cpumask_bits(srcp), nr_cpumask_bits, n+1);
 }
 
+#ifdef CONFIG_VD_GIC_SET_AFFINITY
+int cpumask_last_and(int n, const struct cpumask *src1p, const struct cpumask *src2p);
+#endif
 int cpumask_next_and(int n, const struct cpumask *, const struct cpumask *);
 int cpumask_any_but(const struct cpumask *mask, unsigned int cpu);
 
@@ -231,9 +246,9 @@ int cpumask_any_but(const struct cpumask *mask, unsigned int cpu);
  *
  * After the loop, cpu is >= nr_cpu_ids.
  */
-#define for_each_cpu_and(cpu, mask, and)				\
+#define for_each_cpu_and(cpu, mask, _and_)				\
 	for ((cpu) = -1;						\
-		(cpu) = cpumask_next_and((cpu), (mask), (and)),		\
+		(cpu) = cpumask_next_and((cpu), (mask), (_and_)),		\
 		(cpu) < nr_cpu_ids;)
 #endif /* SMP */
 

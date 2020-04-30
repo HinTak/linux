@@ -124,6 +124,7 @@ struct getbmapx {
 #define BMV_OF_DELALLOC		0x2	/* segment = delayed allocation */
 #define BMV_OF_LAST		0x4	/* segment is the last in the file */
 
+#define FALLOC_FL_COLLAPSE_RANGE	0x08
 /*
  * Structure for XFS_IOC_FSSETDM.
  * For use by backup and restore programs to set the XFS on-disk inode
@@ -488,6 +489,7 @@ typedef struct xfs_handle {
 #define XFS_IOC_GETBMAPX	_IOWR('X', 56, struct getbmap)
 #define XFS_IOC_ZERO_RANGE	_IOW ('X', 57, struct xfs_flock64)
 #define XFS_IOC_FREE_EOFBLOCKS	_IOR ('X', 58, struct xfs_eofblocks)
+#define XFS_COLLAPSE_RANGE	_IOW('X', 59, struct xfs_flock64)
 
 /*
  * ioctl commands that replace IRIX syssgi()'s

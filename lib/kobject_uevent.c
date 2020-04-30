@@ -29,7 +29,9 @@
 
 
 u64 uevent_seqnum;
+#ifdef CONFIG_UEVENT_HELPER
 char uevent_helper[UEVENT_HELPER_PATH_LEN] = CONFIG_UEVENT_HELPER_PATH;
+#endif
 #ifdef CONFIG_NET
 struct uevent_sock {
 	struct list_head list;
@@ -49,6 +51,11 @@ static const char *kobject_actions[] = {
 	[KOBJ_MOVE] =		"move",
 	[KOBJ_ONLINE] =		"online",
 	[KOBJ_OFFLINE] =	"offline",
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+        //kks
+        [KOBJ_MOUNT] = "mount",
+        [KOBJ_UMOUNT] = "umount",
+#endif
 };
 
 /**
@@ -103,6 +110,7 @@ static int kobj_bcast_filter(struct sock *dsk, struct sk_buff *skb, void *data)
 }
 #endif
 
+#ifdef CONFIG_UEVENT_HELPER
 static int kobj_usermode_filter(struct kobject *kobj)
 {
 	const struct kobj_ns_type_operations *ops;
@@ -117,6 +125,7 @@ static int kobj_usermode_filter(struct kobject *kobj)
 
 	return 0;
 }
+#endif
 
 /**
  * kobject_uevent_env - send an uevent with environmental data
@@ -201,7 +210,55 @@ int kobject_uevent_env(struct kobject *kobj, enum kobject_action action,
 		retval = -ENOENT;
 		goto exit;
 	}
+#ifndef CONFIG_PLAT_TIZEN
+        /**********************************************************************
+ 	// SELP 20070601+
+ 	// if insmod new version of rfs filesystem then make hotplug event /block/bml* and /block/stl*+
+ 	// so string compare "block" => "block/sd" +  // "block/sd" is real USB block device path.+
+ 	 ***********************************************************************+
+	// kim won suk(VD) +  // add compare strings "bt_usb" and "csr_usb" for pass bluetooth devices +
+	**********************************************************************/
+	// 20111125 by ssu
+	 // only 3 types of devpath can be a candidates of hotplug : broadcom wifi firmware can be downloaded with hotplug event.
+	if ( !devpath ||
+                ((strstr(devpath, "block/sd") == NULL) &&
+                 (strstr(devpath, "devices/system/cpu") == NULL)) )
+	{
+                //printk("kks test :: action_string = %s, devpath = %s\n", action_string, devpath);
+                 goto exit;
+        }
+        else
+        {
+                //printk("kks test :: action_string = %s, devpath = %s go to hotplug\n", action_string, devpath);
+                 int len, total_dev, i;
+                char* temp_devpath = NULL;
+                char* tmp = NULL;
+                // 20111125 by ssu
+                // only usb flash or block device's devpath can be adjusted or modified for usb automount
+                 char support_hotplug_dev[][36] ={
+                        "/block/sd"
+                };
+		total_dev = sizeof(support_hotplug_dev)/36;
 
+                for(i=0; i <total_dev; i++)
+                {
+                        if((tmp = strstr(devpath, support_hotplug_dev[i])))
+                        {
+                                len = strlen(tmp)+1;
+                                temp_devpath = kzalloc(len, GFP_KERNEL);
+                                if (!temp_devpath)
+                                        return ENOMEM;
+
+                                strcpy(temp_devpath, tmp);
+                                //printk("kks test :action_string = %s , devpath = %s\n",action_string, temp_devpath);
+                                 kfree(devpath);
+
+                                devpath = temp_devpath;
+                                break;
+                        }
+                }
+        }
+#endif
 	/* default keys */
 	retval = add_uevent_var(env, "ACTION=%s", action_string);
 	if (retval)
@@ -293,6 +350,7 @@ int kobject_uevent_env(struct kobject *kobj, enum kobject_action action,
 #endif
 	mutex_unlock(&uevent_sock_mutex);
 
+#ifdef CONFIG_UEVENT_HELPER
 	/* call uevent_helper, usually only enabled during early boot */
 	if (uevent_helper[0] && !kobj_usermode_filter(kobj)) {
 		char *argv [3];
@@ -311,6 +369,7 @@ int kobject_uevent_env(struct kobject *kobj, enum kobject_action action,
 		retval = call_usermodehelper(argv[0], argv,
 					     env->envp, UMH_WAIT_EXEC);
 	}
+#endif
 
 exit:
 	kfree(devpath);
@@ -330,6 +389,12 @@ EXPORT_SYMBOL_GPL(kobject_uevent_env);
  */
 int kobject_uevent(struct kobject *kobj, enum kobject_action action)
 {
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+        if (!kobj){
+                printk(KERN_ERR "Unable to get kobject pointer\n");
+                return -EINVAL;
+        }
+#endif
 	return kobject_uevent_env(kobj, action, NULL);
 }
 EXPORT_SYMBOL_GPL(kobject_uevent);

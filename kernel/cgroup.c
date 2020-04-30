@@ -63,6 +63,10 @@
 
 #include <linux/atomic.h>
 
+#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+#include <linux/sf_security.h>
+#endif
+
 /* css deactivation bias, makes css->refcnt negative to deny new trygets */
 #define CSS_DEACT_BIAS		INT_MIN
 
@@ -82,11 +86,18 @@
  * B happens only through cgroup_show_options() and using cgroup_root_mutex
  * breaks it.
  */
+
+//FIXME: For safe way to find cgroup path in outside, it exports cgroup mutex lock.
+#if 0
 #ifdef CONFIG_PROVE_RCU
 DEFINE_MUTEX(cgroup_mutex);
 EXPORT_SYMBOL_GPL(cgroup_mutex);	/* only for task_subsys_state_check() */
 #else
 static DEFINE_MUTEX(cgroup_mutex);
+#endif
+#else 
+DEFINE_MUTEX(cgroup_mutex);
+EXPORT_SYMBOL_GPL(cgroup_mutex);
 #endif
 
 static DEFINE_MUTEX(cgroup_root_mutex);
@@ -3703,6 +3714,19 @@ static int cgroup_pidlist_open(struct file *file, enum cgroup_filetype type)
 	retval = pidlist_array_load(cgrp, type, &l);
 	if (retval)
 		return retval;
+
+#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+	if(l->length > 0)
+	{
+		struct task_struct *p = find_task_by_vpid(l->list[0]);
+		if((p != NULL) && (!sf_process_authorized(current,p)))
+		{
+			cgroup_release_pid_array(l);
+			return -EACCES;
+		}
+	}
+#endif
+    
 	/* configure file information */
 	file->f_op = &cgroup_pidlist_operations;
 

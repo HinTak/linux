@@ -25,6 +25,16 @@
 #include <linux/personality.h>
 #include <linux/backing-dev.h>
 #include <net/flow.h>
+#ifdef CONFIG_KDEBUGD_AGENT_SMACK_DISABLE
+#include <kdebugd/kdebugd.h>
+#endif
+
+/**
+* @brief Include Security Framework security operations
+* @author ChangWoo Lee (jason77.lee@samsung.com)
+* @date May 01, 2015
+*/
+#include <linux/sf_security.h>
 
 #define MAX_LSM_EVM_XATTR	2
 
@@ -237,6 +247,10 @@ void security_bprm_committed_creds(struct linux_binprm *bprm)
 
 int security_bprm_secureexec(struct linux_binprm *bprm)
 {
+#ifdef CONFIG_KDEBUGD_AGENT_SMACK_DISABLE
+	if (!kdbg_smack_enable)
+		return 0;
+#endif
 	return security_ops->bprm_secureexec(bprm);
 }
 
@@ -320,6 +334,8 @@ int security_inode_alloc(struct inode *inode)
 
 void security_inode_free(struct inode *inode)
 {
+	sf_security_inode_free( inode );
+	
 	integrity_inode_free(inode);
 	security_ops->inode_free_security(inode);
 }
@@ -477,8 +493,15 @@ int security_inode_link(struct dentry *old_dentry, struct inode *dir,
 
 int security_inode_unlink(struct inode *dir, struct dentry *dentry)
 {
+	int result = 0;
+
 	if (unlikely(IS_PRIVATE(dentry->d_inode)))
 		return 0;
+
+	result = sf_security_inode_unlink( dir, dentry );
+	if(unlikely(result))
+		return result;
+
 	return security_ops->inode_unlink(dir, dentry);
 }
 
@@ -538,8 +561,15 @@ int security_inode_follow_link(struct dentry *dentry, struct nameidata *nd)
 
 int security_inode_permission(struct inode *inode, int mask)
 {
+	int result = 0;
+
 	if (unlikely(IS_PRIVATE(inode)))
 		return 0;
+
+	result = sf_security_inode_permission( inode, mask );
+	if(unlikely(result))
+		return result;
+	
 	return security_ops->inode_permission(inode, mask);
 }
 
@@ -833,6 +863,15 @@ int security_kernel_module_from_file(struct file *file)
 int security_task_fix_setuid(struct cred *new, const struct cred *old,
 			     int flags)
 {
+#ifdef CONFIG_PROHIBIT_GROUP_SETUID
+	/* someone is trying to change user privilege to root(0) with group setuid syscall */
+	if((__kuid_val(new->uid) == 0 && __kuid_val(old->uid) != 0) ||
+		(__kuid_val(new->euid) == 0 && __kuid_val(old->euid) != 0 ))
+	{
+		return -EINVAL;
+	}
+#endif
+
 	return security_ops->task_fix_setuid(new, old, flags);
 }
 

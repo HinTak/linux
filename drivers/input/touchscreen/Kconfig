@@ -888,4 +888,10 @@ config TOUCHSCREEN_TPS6507X
 	  To compile this driver as a module, choose M here: the
 	  module will be called tps6507x_ts.
 
+config TOUCHSCREEN_LR388K4_I2C
+	tristate "SHARP LR388K4_I2C based touchscreens"
+	depends on I2C
+	help
+	  SHARP LR388K4 I2C driver.
+
 endif

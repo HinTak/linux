@@ -15,6 +15,7 @@
 #include <linux/freezer.h>
 #include <linux/kthread.h>
 #include <linux/scatterlist.h>
+#include <linux/dma-mapping.h>
 
 #include <linux/mmc/card.h>
 #include <linux/mmc/host.h>
@@ -32,12 +33,16 @@ static int mmc_prep_request(struct request_queue *q, struct request *req)
 	/*
 	 * We only like normal block requests and discards.
 	 */
-	if (req->cmd_type != REQ_TYPE_FS && !(req->cmd_flags & REQ_DISCARD)) {
+	if (req->cmd_type != REQ_TYPE_FS && !(req->cmd_flags & REQ_DISCARD)
+#if defined(CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM)
+	    && req->cmd_type != REQ_TYPE_SPECIAL
+#endif
+		) {
 		blk_dump_rq_flags(req, "MMC bad request");
 		return BLKPREP_KILL;
 	}
 
-	if (mq && mmc_card_removed(mq->card))
+	if (mq && (mmc_card_removed(mq->card) || mmc_access_rpmb(mq)))
 		return BLKPREP_KILL;
 
 	req->cmd_flags |= REQ_DONTPREP;
@@ -173,7 +178,7 @@ static void mmc_queue_setup_discard(struct request_queue *q,
 	/* granularity must not be greater than max. discard */
 	if (card->pref_erase > max_discard)
 		q->limits.discard_granularity = 0;
-	if (mmc_can_secure_erase_trim(card) || mmc_can_sanitize(card))
+	if (mmc_can_secure_erase_trim(card))
 		queue_flag_set_unlocked(QUEUE_FLAG_SECDISCARD, q);
 }
 
@@ -196,7 +201,7 @@ int mmc_init_queue(struct mmc_queue *mq, struct mmc_card *card,
 	struct mmc_queue_req *mqrq_prev = &mq->mqrq[1];
 
 	if (mmc_dev(host)->dma_mask && *mmc_dev(host)->dma_mask)
-		limit = *mmc_dev(host)->dma_mask;
+		limit = (u64)dma_max_pfn(mmc_dev(host)) << PAGE_SHIFT;
 
 	mq->card = card;
 	mq->queue = blk_init_queue(mmc_request_fn, lock);
@@ -552,3 +557,16 @@ void mmc_queue_bounce_post(struct mmc_queue_req *mqrq)
 	sg_copy_from_buffer(mqrq->bounce_sg, mqrq->bounce_sg_len,
 		mqrq->bounce_buf, mqrq->sg[0].length);
 }
+
+void *get_queue_host(struct block_device *bdev)
+{
+	struct mmc_queue *mq = bdev_get_queue(bdev)->queuedata;
+	struct mmc_host *host = mq->card->host;
+	return host;
+}
+
+sector_t get_bdev_mmc_offset(struct block_device *bdev)
+{
+	return bdev->bd_part->start_sect;
+}
+

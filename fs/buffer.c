@@ -370,6 +370,19 @@ void end_buffer_async_write(struct buffer_head *bh, int uptodate)
 	return;
 
 still_busy:
+#if defined(CONFIG_VDFS4_DEBUG)
+	{
+		//Temporary. For debugging page writeback issue (DF160211-00068 etc.)
+		struct address_space* addr_space = page->mapping;
+		struct inode* inode = addr_space ? addr_space->host : NULL;
+		struct super_block	*sb = inode ? inode->i_sb : NULL;
+		struct file_system_type	* fs_type = sb ? sb->s_type : NULL;
+
+		if (fs_type && fs_type->name && !strncmp(fs_type->name, "vdfs4", 5))
+			printk(KERN_ERR "Buffer write still ongoing, "
+				"end_page_writeback not called %p %ld\n", page, page->index);
+	}
+#endif
 	bit_spin_unlock(BH_Uptodate_Lock, &first->b_state);
 	local_irq_restore(flags);
 	return;
@@ -620,14 +633,16 @@ EXPORT_SYMBOL(mark_buffer_dirty_inode);
 static void __set_page_dirty(struct page *page,
 		struct address_space *mapping, int warn)
 {
-	spin_lock_irq(&mapping->tree_lock);
+	unsigned long flags;
+
+	spin_lock_irqsave(&mapping->tree_lock, flags);
 	if (page->mapping) {	/* Race with truncate? */
 		WARN_ON_ONCE(warn && !PageUptodate(page));
 		account_page_dirtied(page, mapping);
 		radix_tree_tag_set(&mapping->page_tree,
 				page_index(page), PAGECACHE_TAG_DIRTY);
 	}
-	spin_unlock_irq(&mapping->tree_lock);
+	spin_unlock_irqrestore(&mapping->tree_lock, flags);
 	__mark_inode_dirty(mapping->host, I_DIRTY_PAGES);
 }
 
@@ -971,9 +986,13 @@ grow_dev_page(struct block_device *bdev, sector_t block,
 	struct buffer_head *bh;
 	sector_t end_block;
 	int ret = 0;		/* Will call free_more_memory() */
-
+#ifndef CONFIG_PREVENT_ALLOC_BUFFER_IN_CMA
 	page = find_or_create_page(inode->i_mapping, index,
 		(mapping_gfp_mask(inode->i_mapping) & ~__GFP_FS)|__GFP_MOVABLE);
+#else
+	page = find_or_create_page(inode->i_mapping, index,
+		(mapping_gfp_mask(inode->i_mapping) & ~__GFP_FS));
+#endif
 	if (!page)
 		return ret;
 
@@ -983,7 +1002,8 @@ grow_dev_page(struct block_device *bdev, sector_t block,
 		bh = page_buffers(page);
 		if (bh->b_size == size) {
 			end_block = init_page_buffers(page, bdev,
-						index << sizebits, size);
+						(sector_t)index << sizebits,
+						size);
 			goto done;
 		}
 		if (!try_to_free_buffers(page))
@@ -1004,7 +1024,8 @@ grow_dev_page(struct block_device *bdev, sector_t block,
 	 */
 	spin_lock(&inode->i_mapping->private_lock);
 	link_dev_buffers(page, bh);
-	end_block = init_page_buffers(page, bdev, index << sizebits, size);
+	end_block = init_page_buffers(page, bdev, (sector_t)index << sizebits,
+			size);
 	spin_unlock(&inode->i_mapping->private_lock);
 done:
 	ret = (block < end_block) ? 1 : -ENXIO;

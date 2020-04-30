@@ -27,11 +27,12 @@ config DRM_USB
 	select USB
 
 config DRM_KMS_HELPER
-	tristate
+	tristate "KMS_HELPER"
 	depends on DRM
 	select FB
 	select FRAMEBUFFER_CONSOLE if !EXPERT
 	select FRAMEBUFFER_CONSOLE_DETECT_PRIMARY if FRAMEBUFFER_CONSOLE
+	default y
 	help
 	  FB and CRTC helpers for KMS drivers.
 
@@ -199,6 +200,35 @@ config DRM_SAVAGE
 	  Choose this option if you have a Savage3D/4/SuperSavage/Pro/Twister
 	  chipset. If M is selected the module will be called savage.
 
+config DRM_SDP
+	tristate "DRM Support for Samsung SDP SoCs"
+	depends on DRM
+	select DRM_KMS_HELPER
+	select DRM_KMS_CMA_HELPER
+	select DRM_PANEL
+	select VIDEOMODE_HELPERS
+	help
+	  Choose this option if you have a Samsung SDP SoC chipset.
+	  If M is selected the module will be called sdpdrm.
+
+config SDP_DMA_BUF_PATCH
+	bool "DMA BUF protection for SDP Socs"
+	depends on DRM
+	default n
+	help
+	  This patch will add dma_buf protection for SDP SOCs
+	  
+config DRM_NVT
+	tristate "DRM Support for Novatek TV SoCs"
+	depends on DRM
+	select DRM_KMS_HELPER
+	select DRM_KMS_CMA_HELPER
+	select DRM_PANEL
+	select VIDEOMODE_HELPERS
+	help
+	  Choose this option if you have a Novatek TV chipset.
+	  If M is selected the module will be called nvtdrm.
+
 source "drivers/gpu/drm/exynos/Kconfig"
 
 source "drivers/gpu/drm/vmwgfx/Kconfig"
@@ -220,3 +250,5 @@ source "drivers/gpu/drm/omapdrm/Kconfig"
 source "drivers/gpu/drm/tilcdc/Kconfig"
 
 source "drivers/gpu/drm/qxl/Kconfig"
+
+source "drivers/gpu/drm/panel/Kconfig"

@@ -1,6 +1,5 @@
 /*
  * Copyright (c) 2004-2011 Atheros Communications Inc.
- * Copyright (c) 2011 Qualcomm Atheros, Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -18,6 +17,7 @@
 #ifndef HTC_H
 #define HTC_H
 
+#include "core.h"
 #include "common.h"
 
 /* frame header flags */
@@ -116,6 +116,7 @@
 /* HTC operational parameters */
 #define HTC_TARGET_RESPONSE_TIMEOUT        2000	/* in ms */
 #define HTC_TARGET_RESPONSE_POLL_WAIT      10
+#define HTC_TARGET_RESPONSE_POLL_MS	   (HTC_TARGET_RESPONSE_POLL_WAIT)
 #define HTC_TARGET_RESPONSE_POLL_COUNT     200
 #define HTC_TARGET_DEBUG_INTR_MASK         0x01
 #define HTC_TARGET_CREDIT_INTR_MASK        0xF0
@@ -328,6 +329,12 @@ struct htc_packet {
 	 * a network buffer
 	 */
 	struct sk_buff *skb;
+
+	/* P2P flowctrl */
+	u8 connid;
+	u8 recycle_count;
+
+	struct ath6kl_vif *vif;
 };
 
 enum htc_send_full_action {
@@ -424,6 +431,9 @@ struct htc_endpoint_credit_dist {
 	 * that has non-zero credits to recover.
 	 */
 	int txq_depth;
+
+	/* maximum credits the ep can allocate */
+	int cred_alloc_max;
 };
 
 /*
@@ -522,12 +532,17 @@ struct htc_endpoint {
 	struct htc_endpoint_stats ep_st;
 	u16 tx_drop_packet_threshold;
 
-	struct {
-		u8 pipeid_ul;
-		u8 pipeid_dl;
-		struct list_head tx_lookup_queue;
-		bool tx_credit_flow_enabled;
-	} pipe;
+	u8 pipeid_ul;
+	u8 pipeid_dl;
+	struct list_head tx_lookup_queue;
+	bool tx_credit_flow_enabled;
+
+	struct timer_list timer;
+	u8 call_by_timer;
+	u8 timer_init;
+	u8 pass_th;
+	u8 starving;
+	unsigned long last_sent;
 };
 
 struct htc_control_buffer {
@@ -550,25 +565,33 @@ struct ath6kl_htc_ops {
 	int (*wait_target)(struct htc_target *target);
 	int (*start)(struct htc_target *target);
 	int (*conn_service)(struct htc_target *target,
-			    struct htc_service_connect_req *req,
-			    struct htc_service_connect_resp *resp);
+		struct htc_service_connect_req *req,
+		struct htc_service_connect_resp *resp);
 	int  (*tx)(struct htc_target *target, struct htc_packet *packet);
 	void (*stop)(struct htc_target *target);
 	void (*cleanup)(struct htc_target *target);
 	void (*flush_txep)(struct htc_target *target,
-			   enum htc_endpoint_id endpoint, u16 tag);
+		enum htc_endpoint_id endpoint, u16 tag);
 	void (*flush_rx_buf)(struct htc_target *target);
-	void (*activity_changed)(struct htc_target *target,
-				 enum htc_endpoint_id endpoint,
-				 bool active);
+	void (*indicate_activity_change)(struct htc_target *target,
+		enum htc_endpoint_id endpoint,
+		bool active);
 	int (*get_rxbuf_num)(struct htc_target *target,
-			     enum htc_endpoint_id endpoint);
+		enum htc_endpoint_id endpoint);
 	int (*add_rxbuf_multiple)(struct htc_target *target,
-				  struct list_head *pktq);
+		struct list_head *pktq);
 	int (*credit_setup)(struct htc_target *target,
-			    struct ath6kl_htc_credit_info *cred_info);
-	int (*tx_complete)(struct ath6kl *ar, struct sk_buff *skb);
-	int (*rx_complete)(struct ath6kl *ar, struct sk_buff *skb, u8 pipe);
+		struct ath6kl_htc_credit_info *cred_info);
+	int (*get_stat)(struct htc_target *target,
+						 u8 *buf, int buf_len);
+	int (*stop_netif_queue_full)(struct htc_target *target);
+	int (*indicate_wmm_schedule_change)(struct htc_target *target,
+		bool change);
+	int (*change_credit_bypass)(struct htc_target *target,
+		u8 traffic_class);
+#ifdef USB_AUTO_SUSPEND
+	bool (*skip_usb_mark_busy)(struct ath6kl *ar, struct sk_buff *skb);
+#endif
 };
 
 struct ath6kl_device;
@@ -585,16 +608,9 @@ struct htc_target {
 	struct ath6kl_htc_credit_info *credit_info;
 	int tgt_creds;
 	unsigned int tgt_cred_sz;
-
-	/* protects free_ctrl_txbuf and free_ctrl_rxbuf */
 	spinlock_t htc_lock;
-
-	/* FIXME: does this protext rx_bufq and endpoint structures or what? */
 	spinlock_t rx_lock;
-
-	/* protects endpoint->txq */
 	spinlock_t tx_lock;
-
 	struct ath6kl_device *dev;
 	u32 htc_flags;
 	u32 rx_st_flags;
@@ -620,13 +636,20 @@ struct htc_target {
 	/* counts the number of Tx without bundling continously per AC */
 	u32 ac_tx_count[WMM_NUM_AC];
 
-	struct {
-		struct htc_packet *htc_packet_pool;
-		u8 ctrl_response_buf[HTC_MAX_CTRL_MSG_LEN];
-		int ctrl_response_len;
-		bool ctrl_response_valid;
-		struct htc_pipe_txcredit_alloc txcredit_alloc[ENDPOINT_MAX];
-	} pipe;
+	struct htc_packet *htc_packet_pool;	/* pool of HTC packets */
+	u8 ctrl_response_buf[HTC_MAX_CTRL_MSG_LEN];
+	int ctrl_response_len;
+	bool ctrl_response_valid;
+	struct htc_pipe_txcredit_alloc txcredit_alloc[ENDPOINT_MAX];
+	int avail_tx_credits;
+
+	struct sk_buff_head rx_sg_q;
+	bool rx_sg_in_progress;
+	u32 rx_sg_total_len_cur; /* current total length */
+	u32 rx_sg_total_len_exp; /* expected total length */
+
+	struct timer_list ctl_ep_wd_timer;
+
 };
 
 int ath6kl_htc_rxmsg_pending_handler(struct htc_target *target,
@@ -670,8 +693,5 @@ static inline int get_queue_depth(struct list_head *queue)
 
 	return depth;
 }
-
-void ath6kl_htc_pipe_attach(struct ath6kl *ar);
-void ath6kl_htc_mbox_attach(struct ath6kl *ar);
 
 #endif

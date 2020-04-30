@@ -18,7 +18,7 @@
 #include <linux/pagevec.h>
 #include <linux/migrate.h>
 #include <linux/page_cgroup.h>
-
+#include <linux/export.h>
 #include <asm/pgtable.h>
 
 /*

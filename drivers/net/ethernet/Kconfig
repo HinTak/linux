@@ -115,6 +115,35 @@ config NET_NETX
 	  To compile this driver as a module, choose M here. The module
 	  will be called netx-eth.
 
+config NVT_FASTETH_MAC
+        tristate "Novatek Fast Ethernet Mac support"
+        help
+          Support for Novatek Mac and Micrel phy only.
+
+config NVT_FASTETH_MAC_NAPI
+		bool "Novatek Fast Ethernet NAPI Support"
+		depends on NVT_FASTETH_MAC
+		help
+			Support the NAPI function.
+
+choice
+		prompt "Ethernet Phy Type"
+		depends on NVT_FASTETH_MAC
+		default NVT_INTERNAL_PHY
+
+config NVT_MICREL_PHY_SUPPORT
+		bool "Micrel Ethernet Phy Support"
+
+config NVT_RTL_PHY_SUPPORT
+		bool "Realtek Ethernet Phy Support"
+
+config NVT_ICPLUS_PHY_SUPPORT
+		bool "IC Plus Ethernet Phy Support"
+
+config NVT_INTERNAL_PHY
+		bool "Novatek Ethernet Phy Support"
+endchoice
+
 source "drivers/net/ethernet/nuvoton/Kconfig"
 source "drivers/net/ethernet/nvidia/Kconfig"
 source "drivers/net/ethernet/nxp/Kconfig"

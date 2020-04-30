@@ -20,6 +20,17 @@
 #include <linux/sched.h>
 #include <linux/ktime.h>
 #include <linux/trace_clock.h>
+#ifdef CONFIG_KDEBUGD_FTRACE
+#include "kdbg_util.h"
+#include <trace/kdbg_ftrace_helper.h>
+#include <trace/kdbg-ftrace.h>
+#endif /* CONFIG_KDEBUGD_FTRACE */
+
+#ifdef CONFIG_SDP_HW_CLOCK_TRACE
+#include <mach/sdp_hwclock.h>
+#elif defined CONFIG_NVT_HW_CLOCK_TRACE
+#include <mach/nvt_hwclock.h>
+#endif
 
 /*
  * trace_clock_local(): the simplest and least coherent tracing clock.
@@ -31,13 +42,23 @@ u64 notrace trace_clock_local(void)
 {
 	u64 clock;
 
+	preempt_disable_notrace();
+#if defined(CONFIG_SDP_HW_CLOCK_TRACE) || defined(CONFIG_NVT_HW_CLOCK_TRACE)
+	/* SDP or NVT HW clock, starts ticking from power on of the board */
+	clock = hwclock_ns((uint32_t *)hwclock_get_va());
+#else
 	/*
 	 * sched_clock() is an architecture implemented, fast, scalable,
 	 * lockless clock. It is not guaranteed to be coherent across
 	 * CPUs, nor across CPU idle events.
 	 */
-	preempt_disable_notrace();
 	clock = sched_clock();
+#endif
+
+
+#ifdef CONFIG_KDEBUGD_FTRACE_HR_CLOCK
+	clock += (u64)kdbg_ftrace_timekeeping_get_ns_raw();
+#endif /* CONFIG_KDEBUGD_FTRACE_HR_CLOCK */
 	preempt_enable_notrace();
 
 	return clock;
@@ -59,13 +80,14 @@ u64 notrace trace_clock(void)
 
 /*
  * trace_jiffy_clock(): Simply use jiffies as a clock counter.
+ * Note that this use of jiffies_64 is not completely safe on
+ * 32-bit systems. But the window is tiny, and the effect if
+ * we are affected is that we will have an obviously bogus
+ * timestamp on a trace event - i.e. not life threatening.
  */
 u64 notrace trace_clock_jiffies(void)
 {
-	u64 jiffy = jiffies - INITIAL_JIFFIES;
-
-	/* Return nsecs */
-	return (u64)jiffies_to_usecs(jiffy) * 1000ULL;
+	return jiffies_64_to_clock_t(jiffies_64 - INITIAL_JIFFIES);
 }
 
 /*

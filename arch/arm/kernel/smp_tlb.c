@@ -73,12 +73,16 @@ static inline void ipi_flush_bp_all(void *ignored)
 #ifdef CONFIG_ARM_ERRATA_798181
 static int erratum_a15_798181(void)
 {
+#if defined(CONFIG_ARCH_SDP1404) || defined(CONFIG_ARCH_SDP1304) || defined(CONFIG_ARCH_SDP1202)
+	return 1;
+#else
 	unsigned int midr = read_cpuid_id();
 
 	/* Cortex-A15 r0p0..r3p2 affected */
 	if ((midr & 0xff0ffff0) != 0x410fc0f0 || midr > 0x413fc0f2)
 		return 0;
 	return 1;
+#endif
 }
 #else
 static int erratum_a15_798181(void)
@@ -92,13 +96,51 @@ static void ipi_flush_tlb_a15_erratum(void *arg)
 	dmb();
 }
 
+#if defined(CONFIG_ARM_ERRATA_830076)
+static void ipi_flush_tlb_a12_erratum(void* arg)
+{
+	isb();
+}
+
+/* piggyback on a15_798181 */
+static int hook_a12_830076_all(void)
+{
+	isb();
+	smp_call_function(ipi_flush_tlb_a12_erratum, NULL, 1);
+	return 1;
+}
+
+static int hook_a12_830076_mm(struct mm_struct *mm)
+{
+	int this_cpu;
+	cpumask_t mask = { CPU_BITS_NONE };
+
+	isb();
+
+	this_cpu = get_cpu();
+	a15_erratum_get_cpumask(this_cpu, mm, &mask);
+	smp_call_function_many(&mask, ipi_flush_tlb_a12_erratum, NULL, 1);
+	put_cpu();
+
+	return 1;
+}
+#else
+static int hook_a12_830076_all(void) { return 0; }
+static int hook_a12_830076_mm(struct mm_struct *mm) { return 0; }
+#endif
+
 static void broadcast_tlb_a15_erratum(void)
 {
+	if (hook_a12_830076_all())
+		return;
 	if (!erratum_a15_798181())
 		return;
 
 	dummy_flush_tlb_a15_erratum();
-	smp_call_function(ipi_flush_tlb_a15_erratum, NULL, 1);
+
+	/* Cortex-A15 r0p0..r3p2 w/o ECO fix affected */	
+//	if (!(read_cpuid(CPUID_REVIDR) & 0x10))
+		smp_call_function(ipi_flush_tlb_a15_erratum, NULL, 1);
 }
 
 static void broadcast_tlb_mm_a15_erratum(struct mm_struct *mm)
@@ -106,14 +148,20 @@ static void broadcast_tlb_mm_a15_erratum(struct mm_struct *mm)
 	int this_cpu;
 	cpumask_t mask = { CPU_BITS_NONE };
 
+	if (hook_a12_830076_mm(mm))
+		return;
 	if (!erratum_a15_798181())
 		return;
 
 	dummy_flush_tlb_a15_erratum();
-	this_cpu = get_cpu();
-	a15_erratum_get_cpumask(this_cpu, mm, &mask);
-	smp_call_function_many(&mask, ipi_flush_tlb_a15_erratum, NULL, 1);
-	put_cpu();
+	
+	/* Cortex-A15 r0p0..r3p2 w/o ECO fix affected */	
+//	if (!(read_cpuid(CPUID_REVIDR) & 0x10)) {
+		this_cpu = get_cpu();
+		a15_erratum_get_cpumask(this_cpu, mm, &mask);
+		smp_call_function_many(&mask, ipi_flush_tlb_a15_erratum, NULL, 1);
+		put_cpu();
+//	}
 }
 
 void flush_tlb_all(void)

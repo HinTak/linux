@@ -163,8 +163,14 @@ int snd_usb_endpoint_next_packet_size(struct snd_usb_endpoint *ep)
 static void retire_outbound_urb(struct snd_usb_endpoint *ep,
 				struct snd_urb_ctx *urb_ctx)
 {
-	if (ep->retire_data_urb)
+	if (ep->retire_data_urb) {
+		if (ep->data_subs == NULL) {
+			snd_printk(KERN_ERR "substream is null. use_count: %d",
+			           ep->use_count);
+			return;
+		}
 		ep->retire_data_urb(ep->data_subs, urb_ctx->urb);
+	}
 }
 
 static void retire_inbound_urb(struct snd_usb_endpoint *ep,
@@ -180,8 +186,14 @@ static void retire_inbound_urb(struct snd_usb_endpoint *ep,
 	if (ep->sync_slave)
 		snd_usb_handle_sync_urb(ep->sync_slave, ep, urb);
 
-	if (ep->retire_data_urb)
+	if (ep->retire_data_urb) {
+		if (ep->data_subs == NULL) {
+			snd_printk(KERN_ERR "substream is null. use_count: %d",
+			           ep->use_count);
+			return;
+		}
 		ep->retire_data_urb(ep->data_subs, urb);
+	}
 }
 
 /*
@@ -467,6 +479,10 @@ struct snd_usb_endpoint *snd_usb_add_endpoint(struct snd_usb_audio *chip,
 			ep->syncinterval = 3;
 
 		ep->syncmaxsize = le16_to_cpu(get_endpoint(alts, 1)->wMaxPacketSize);
+
+		if (chip->usb_id == USB_ID(0x0644, 0x8038) /* TEAC UD-H01 */ &&
+		    ep->syncmaxsize == 4)
+			ep->udh01_fb_quirk = 1;
 	}
 
 	list_add_tail(&ep->list, &chip->ep_list);
@@ -1075,7 +1091,16 @@ void snd_usb_handle_sync_urb(struct snd_usb_endpoint *ep,
 	if (f == 0)
 		return;
 
-	if (unlikely(ep->freqshift == INT_MIN)) {
+	if (unlikely(sender->udh01_fb_quirk)) {
+		/*
+		 * The TEAC UD-H01 firmware sometimes changes the feedback value
+		 * by +/- 0x1.0000.
+		 */
+		if (f < ep->freqn - 0x8000)
+			f += 0x10000;
+		else if (f > ep->freqn + 0x8000)
+			f -= 0x10000;
+	} else if (unlikely(ep->freqshift == INT_MIN)) {
 		/*
 		 * The first time we see a feedback value, determine its format
 		 * by shifting it left or right until it matches the nominal

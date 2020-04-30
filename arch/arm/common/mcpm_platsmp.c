@@ -19,18 +19,28 @@
 #include <asm/smp.h>
 #include <asm/smp_plat.h>
 
+static void cpu_to_pcpu(unsigned int cpu,
+                       unsigned int *pcpu, unsigned int *pcluster)
+{
+       unsigned int mpidr;
+
+       mpidr = cpu_logical_map(cpu);
+       *pcpu = MPIDR_AFFINITY_LEVEL(mpidr, 0);
+       *pcluster = MPIDR_AFFINITY_LEVEL(mpidr, 1);
+}
+
+
 static void __init simple_smp_init_cpus(void)
 {
 }
 
 static int __cpuinit mcpm_boot_secondary(unsigned int cpu, struct task_struct *idle)
 {
-	unsigned int mpidr, pcpu, pcluster, ret;
+	unsigned int pcpu, pcluster, ret;
 	extern void secondary_startup(void);
 
-	mpidr = cpu_logical_map(cpu);
-	pcpu = MPIDR_AFFINITY_LEVEL(mpidr, 0);
-	pcluster = MPIDR_AFFINITY_LEVEL(mpidr, 1);
+	cpu_to_pcpu(cpu, &pcpu, &pcluster);
+
 	pr_debug("%s: logical CPU %d is physical CPU %d cluster %d\n",
 		 __func__, cpu, pcpu, pcluster);
 

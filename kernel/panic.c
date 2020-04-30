@@ -22,6 +22,10 @@
 #include <linux/sysrq.h>
 #include <linux/init.h>
 #include <linux/nmi.h>
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+void show_kernel_patch_version(void);
+#endif
 
 #define PANIC_TIMER_STEP 100
 #define PANIC_BLINK_SPD 18
@@ -57,6 +61,11 @@ void __weak panic_smp_self_stop(void)
 		cpu_relax();
 }
 
+#ifdef CONFIG_PRETTY_SHELL
+/* TTY pretty mode, defined in n_tty.c */
+extern unsigned char tty_pretty_mode;
+#endif
+
 /**
  *	panic - halt the system
  *	@fmt: The text string to print
@@ -72,6 +81,16 @@ void panic(const char *fmt, ...)
 	va_list args;
 	long i, i_next = 0;
 	int state = 0;
+
+	/* Disable pretty shell. If crash happened, we want to see the log */
+#ifdef CONFIG_PRETTY_SHELL
+	tty_pretty_mode = 0;
+#endif
+
+#ifdef CONFIG_DTVLOGD
+	/* Synchronously flush the messages remaining in dlog buffer */
+	do_dtvlog(5, NULL, 0);
+#endif
 
 	/*
 	 * Disable local interrupts. This will prevent panic_smp_self_stop
@@ -104,8 +123,12 @@ void panic(const char *fmt, ...)
 	/*
 	 * Avoid nested stack-dumping if a panic occurs during oops processing
 	 */
-	if (!test_taint(TAINT_DIE) && oops_in_progress <= 1)
+	if (!test_taint(TAINT_DIE) && oops_in_progress <= 1) {
+#ifdef CONFIG_VDLP_VERSION_INFO
+		show_kernel_patch_version();
+#endif
 		dump_stack();
+	}
 #endif
 
 	/*
@@ -237,8 +260,10 @@ const char *print_tainted(void)
 		s = buf + sprintf(buf, "Tainted: ");
 		for (i = 0; i < ARRAY_SIZE(tnts); i++) {
 			const struct tnt *t = &tnts[i];
-			*s++ = test_bit(t->bit, &tainted_mask) ?
-					t->true : t->false;
+			char c = test_bit(t->bit, &tainted_mask) ?
+					  t->true : t->false;
+			if (c != ' ')
+				*s++ = c;
 		}
 		*s = 0;
 	} else

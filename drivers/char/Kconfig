@@ -581,7 +581,7 @@ config TELCLOCK
 config DEVPORT
 	bool
 	depends on !M68K
-	depends on ISA || PCI
+	depends on (ISA || PCI) && !PROHIBIT_DEVMEM
 	default y
 
 source "drivers/s390/char/Kconfig"

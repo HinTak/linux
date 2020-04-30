@@ -32,6 +32,9 @@
  *	- I2C_RDWR, takes pointer to struct i2c_rdwr_ioctl_data
  *	- I2C_SMBUS, takes pointer to struct i2c_smbus_ioctl_data
  */
+#if  defined(CONFIG_ARCH_SDP)
+#define I2C_BYTE_DELAY 0x0730
+#endif
 #define I2C_RETRIES	0x0701	/* number of times a device address should
 				   be polled when not acknowledging */
 #define I2C_TIMEOUT	0x0702	/* set timeout in units of 10 ms */

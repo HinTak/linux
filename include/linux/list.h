@@ -34,17 +34,17 @@ static inline void INIT_LIST_HEAD(struct list_head *list)
  * the prev/next entries already!
  */
 #ifndef CONFIG_DEBUG_LIST
-static inline void __list_add(struct list_head *new,
+static inline void __list_add(struct list_head *_new,
 			      struct list_head *prev,
 			      struct list_head *next)
 {
-	next->prev = new;
-	new->next = next;
-	new->prev = prev;
-	prev->next = new;
+	next->prev = _new;
+	_new->next = next;
+	_new->prev = prev;
+	prev->next = _new;
 }
 #else
-extern void __list_add(struct list_head *new,
+extern void __list_add(struct list_head *_new,
 			      struct list_head *prev,
 			      struct list_head *next);
 #endif
@@ -57,9 +57,9 @@ extern void __list_add(struct list_head *new,
  * Insert a new entry after the specified head.
  * This is good for implementing stacks.
  */
-static inline void list_add(struct list_head *new, struct list_head *head)
+static inline void list_add(struct list_head *_new, struct list_head *head)
 {
-	__list_add(new, head, head->next);
+	__list_add(_new, head, head->next);
 }
 
 
@@ -71,9 +71,9 @@ static inline void list_add(struct list_head *new, struct list_head *head)
  * Insert a new entry before the specified head.
  * This is useful for implementing queues.
  */
-static inline void list_add_tail(struct list_head *new, struct list_head *head)
+static inline void list_add_tail(struct list_head *_new, struct list_head *head)
 {
-	__list_add(new, head->prev, head);
+	__list_add(_new, head->prev, head);
 }
 
 /*
@@ -120,18 +120,18 @@ extern void list_del(struct list_head *entry);
  * If @old was empty, it will be overwritten.
  */
 static inline void list_replace(struct list_head *old,
-				struct list_head *new)
+				struct list_head *_new)
 {
-	new->next = old->next;
-	new->next->prev = new;
-	new->prev = old->prev;
-	new->prev->next = new;
+	_new->next = old->next;
+	_new->next->prev = _new;
+	_new->prev = old->prev;
+	_new->prev->next = _new;
 }
 
 static inline void list_replace_init(struct list_head *old,
-					struct list_head *new)
+					struct list_head *_new)
 {
-	list_replace(old, new);
+	list_replace(old, _new);
 	INIT_LIST_HEAD(old);
 }
 
@@ -371,6 +371,22 @@ static inline void list_splice_tail_init(struct list_head *list,
  */
 #define list_first_entry_or_null(ptr, type, member) \
 	(!list_empty(ptr) ? list_first_entry(ptr, type, member) : NULL)
+
+/**
+ * list_next_entry - get the next element in list
+ * @pos:	the type * to cursor
+ * @member:	the name of the list_struct within the struct.
+ */
+#define list_next_entry(pos, member) \
+	list_entry((pos)->member.next, typeof(*(pos)), member)
+
+/**
+ * list_prev_entry - get the prev element in list
+ * @pos:	the type * to cursor
+ * @member:	the name of the list_struct within the struct.
+ */
+#define list_prev_entry(pos, member) \
+	list_entry((pos)->member.prev, typeof(*(pos)), member)
 
 /**
  * list_for_each	-	iterate over a list
@@ -660,11 +676,11 @@ static inline void hlist_add_fake(struct hlist_node *n)
  * reference of the first entry if it exists.
  */
 static inline void hlist_move_list(struct hlist_head *old,
-				   struct hlist_head *new)
+				   struct hlist_head *_new)
 {
-	new->first = old->first;
-	if (new->first)
-		new->first->pprev = &new->first;
+	_new->first = old->first;
+	if (_new->first)
+		_new->first->pprev = &_new->first;
 	old->first = NULL;
 }
 

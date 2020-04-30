@@ -11,6 +11,9 @@ CFLAGS_REMOVE_insn.o = -pg
 CFLAGS_REMOVE_patch.o = -pg
 endif
 
+KASAN_SANITIZE_return_address.o := n
+KASAN_SANITIZE_stacktrace.o := n
+
 CFLAGS_REMOVE_return_address.o = -pg
 
 # Object file lists.
@@ -18,7 +21,9 @@ CFLAGS_REMOVE_return_address.o = -pg
 obj-y		:= elf.o entry-armv.o entry-common.o irq.o opcodes.o \
 		   process.o ptrace.o return_address.o sched_clock.o \
 		   setup.o signal.o stacktrace.o sys_arm.o time.o traps.o
-
+ifeq ($(CONFIG_ARCH_NVT72668),y)
+	        EXTRA_CFLAGS += -I$(srctree)/arch/arm/mach-nvt72668/include/
+endif
 obj-$(CONFIG_ATAGS)		+= atags_parse.o
 obj-$(CONFIG_ATAGS_PROC)	+= atags_proc.o
 obj-$(CONFIG_DEPRECATED_PARAM_STRUCT) += atags_compat.o
@@ -61,7 +66,11 @@ obj-$(CONFIG_HAVE_TCM)		+= tcm.o
 obj-$(CONFIG_OF)		+= devtree.o
 obj-$(CONFIG_CRASH_DUMP)	+= crash_dump.o
 obj-$(CONFIG_SWP_EMULATE)	+= swp_emulate.o
-CFLAGS_swp_emulate.o		:= -Wa,-march=armv7-a
+ifeq ($(CONFIG_CPU_ARM_CORTEX_A15),y)
+	CFLAGS_swp_emulate.o		:= -Wa,-mcpu=cortex-a15
+else
+	CFLAGS_swp_emulate.o		:= -Wa,-march=armv7-a
+endif
 obj-$(CONFIG_HAVE_HW_BREAKPOINT)	+= hw_breakpoint.o
 
 obj-$(CONFIG_CPU_XSCALE)	+= xscale-cp0.o
@@ -82,6 +91,9 @@ obj-$(CONFIG_DEBUG_LL)	+= debug.o
 obj-$(CONFIG_EARLY_PRINTK)	+= early_printk.o
 
 obj-$(CONFIG_ARM_VIRT_EXT)	+= hyp-stub.o
-obj-$(CONFIG_ARM_PSCI)		+= psci.o
+ifeq ($(CONFIG_ARM_PSCI),y)
+obj-y				+= psci.o
+obj-$(CONFIG_SMP)		+= psci_smp.o
+endif
 
 extra-y := $(head-y) vmlinux.lds

@@ -99,7 +99,7 @@ config CRC32_SELFTEST
 choice
 	prompt "CRC32 implementation"
 	depends on CRC32
-	default CRC32_SLICEBY8
+	default CRC32_SLICEBY4
 	help
 	  This option allows a kernel builder to override the default choice
 	  of CRC32 algorithm.  Choose the default ("slice by 8") unless you
@@ -184,9 +184,20 @@ config ZLIB_DEFLATE
 	tristate
 
 config LZO_COMPRESS
-	tristate
+	bool
+	default y
 
 config LZO_DECOMPRESS
+	bool
+	default y
+
+config LZ4_COMPRESS
+	tristate
+
+config LZ4HC_COMPRESS
+	tristate
+
+config LZ4_DECOMPRESS
 	tristate
 
 source "lib/xz/Kconfig"
@@ -236,6 +247,17 @@ config REED_SOLOMON_ENC16
 
 config REED_SOLOMON_DEC16
 	boolean
+
+#
+# LZ4 support for Compressed in-memory block device (ZRAM)
+#
+config LZ4_FOR_ZRAM
+	tristate "LZ4 support for compressed in-memory block device (ZRAM)"
+	select LZ4_COMPRESS
+	select LZ4_DECOMPRESS
+	help
+	  Enable the option to allow usage of symbols defined in LZ4
+	  compression/decompression libraries in ZRAM's LZ4 backend.
 
 #
 # BCH support is selected if needed
@@ -406,5 +428,7 @@ config OID_REGISTRY
 
 config UCS2_STRING
         tristate
+
+source lib/sf/Kconfig
 
 endmenu

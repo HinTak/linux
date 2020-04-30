@@ -111,6 +111,16 @@ static int do_blktrans_request(struct mtd_blktrans_ops *tr,
 		for (; nsect > 0; nsect--, block++, buf += tr->blksize)
 			if (tr->writesect(dev, block, buf))
 				return -EIO;
+
+		/* Always flush the cache.  The most important thing
+		   for us is data integrity, but using old school block
+		   filesystems (e.g. fat, ext2) we can not guarantee
+		   flush of this volatile cache.  So, always flush it on
+		   every write.  And yes, we do not care about perfomance
+		   now. */
+		if (tr->flush)
+			return tr->flush(dev);
+
 		return 0;
 	default:
 		printk(KERN_NOTICE "Unknown request %u\n", rq_data_dir(req));

@@ -9,10 +9,28 @@ config DCACHE_WORD_ACCESS
        bool
 
 if BLOCK
+config FS_SEL_READAHEAD
+        bool "Selective Readahead"
+        default n
+        help
+          If you say Y here, you will be able to selectively enable/ disable readahead
+          for each block device using proc entries at /proc/fs/readahead.
+          By default, the readahead is disabled for all block devices.
+          It can be enabled/disabled any time by writing 1/0 to /proc/fs/readahead/xxx.
+          Where xxx refer's to block device name, ex: sda1 refer's to /dev/sda1.
+
+          If unsure, say N.
 
 source "fs/ext2/Kconfig"
 source "fs/ext3/Kconfig"
 source "fs/ext4/Kconfig"
+if PLAT_TIZEN
+	source "fs/vdfs/Kconfig"
+endif
+if !PLAT_TIZEN
+	source "fs/vdfs/Kconfig"
+endif
+	source "fs/vdfs4/Kconfig"
 
 config FS_XIP
 # execute in place
@@ -93,6 +111,7 @@ menu "DOS/FAT/NT Filesystems"
 
 source "fs/fat/Kconfig"
 source "fs/ntfs/Kconfig"
+source "fs/exfat/Kconfig"   
 
 endmenu
 endif # BLOCK
@@ -267,5 +286,12 @@ endif # NETWORK_FILESYSTEMS
 
 source "fs/nls/Kconfig"
 source "fs/dlm/Kconfig"
+
+config OPEN_FILE_CHECKER
+	bool "In case of too many open files, It prints open file information"
+	default y
+	help
+	  It prints open file information.
+	  also if the FD_PID is enabled, open thread information is supported.
 
 endmenu

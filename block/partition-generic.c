@@ -20,6 +20,13 @@
 
 #include "partitions/check.h"
 
+#ifdef CONFIG_FS_SEL_READAHEAD
+extern bool create_readahead_proc(const char *name);
+extern void remove_readahead_proc(const char *name);
+extern bool get_readahead_entry(const char *name);
+#endif
+
+
 #ifdef CONFIG_BLK_DEV_MD
 extern void md_autodetect_dev(dev_t dev);
 #endif
@@ -45,7 +52,15 @@ char *disk_name(struct gendisk *hd, int partno, char *buf)
 
 const char *bdevname(struct block_device *bdev, char *buf)
 {
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+        // patch for rapid connect/disconnect case 20080319
+        if(bdev->bd_disk == NULL)
+ 	       return "sd";
+        else
+        	return disk_name(bdev->bd_disk, MINOR(bdev->bd_dev) - bdev->bd_disk->first_minor, buf);
+#else        
 	return disk_name(bdev->bd_disk, bdev->bd_part->partno, buf);
+#endif
 }
 
 EXPORT_SYMBOL(bdevname);
@@ -211,6 +226,7 @@ static const struct attribute_group *part_attr_groups[] = {
 static void part_release(struct device *dev)
 {
 	struct hd_struct *p = dev_to_part(dev);
+	blk_free_devt(dev->devt);
 	free_part_stats(p);
 	free_part_info(p);
 	kfree(p);
@@ -249,11 +265,14 @@ void delete_partition(struct gendisk *disk, int partno)
 	if (!part)
 		return;
 
+#ifdef CONFIG_FS_SEL_READAHEAD
+	remove_readahead_proc(dev_name(part_to_dev(part)));
+#endif
+
 	rcu_assign_pointer(ptbl->part[partno], NULL);
 	rcu_assign_pointer(ptbl->last_lookup, NULL);
 	kobject_put(part->holder_dir);
 	device_del(part_to_dev(part));
-	blk_free_devt(part_devt(part));
 
 	hd_struct_put(part);
 }
@@ -352,6 +371,9 @@ struct hd_struct *add_partition(struct gendisk *disk, int partno,
 	/* everything is up and running, commence */
 	rcu_assign_pointer(ptbl->part[partno], p);
 
+#ifdef CONFIG_FS_SEL_READAHEAD
+	create_readahead_proc(dev_name(pdev));
+#endif
 	/* suppress uevent if the disk suppresses it */
 	if (!dev_get_uevent_suppress(ddev))
 		kobject_uevent(&pdev->kobj, KOBJ_ADD);
@@ -410,6 +432,10 @@ static int drop_partitions(struct gendisk *disk, struct block_device *bdev)
 
 	return 0;
 }
+
+#ifdef CONFIG_WRITE_PROTECT
+int init_write_protect(struct parsed_partitions *state);
+#endif
 
 int rescan_partitions(struct gendisk *disk, struct block_device *bdev)
 {
@@ -525,6 +551,10 @@ rescan:
 			md_autodetect_dev(part_to_dev(part)->devt);
 #endif
 	}
+
+#ifdef CONFIG_WRITE_PROTECT
+       init_write_protect(state);
+#endif
 	free_partitions(state);
 	return 0;
 }

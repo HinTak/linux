@@ -137,6 +137,32 @@ menuconfig FTRACE
 
 if FTRACE
 
+config SDP_HW_CLOCK_TRACE
+	bool "Replaces original trace clock with SDP HW clock"
+	depends on SDP_HW_CLOCK
+	default y
+	help
+	  Originally shed_clock() routine is used for getting clock for tracing.
+	  We replace it with SDP HW clock, which ticks since board is on.
+
+config NVT_HW_CLOCK_TRACE
+	bool "Replaces original trace clock with NVT HW clock"
+	depends on NVT_HW_CLOCK
+	default y
+	help
+	  Originally shed_clock() routine is used for getting clock for tracing.
+	  We replace it with NVT HW clock, which ticks since board is on.
+
+config EARLY_TRACING
+	bool "Very early tracing"
+	depends on TRACING_SUPPORT
+	help
+	  Allow early tracing. Originally we can do tracing only when kernel
+	  inits all the memory and devices. This 'early tracing' feature
+	  allows you to trace kernel since first entry point 'start_kernel'.
+	  NOTE: do not forget to enable early event in booting params:
+		  'trace_event=early_event'
+
 config FUNCTION_TRACER
 	bool "Kernel Function Tracer"
 	depends on HAVE_FUNCTION_TRACER

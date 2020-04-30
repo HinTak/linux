@@ -1,0 +1,106 @@
+/*
+ * Copyright (C) 2014 Samsung Electronics Co.Ltd
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
+/dts-v1/;
+#include "sdp1404.dtsi"
+
+/ {
+	model = "Samsung DTV based on SDP1404 SoC";
+	compatible = "samsung,dtv", "samsung,sdp1404";
+
+	memory {
+		device_type = "memory";
+		reg =  <0x80000000 0x10000000>;
+	};
+
+	chosen {
+		bootargs = "console=ttyS0,4800N8 root=/dev/ram0 initrd=0x80800000,32M rootwait earlyprintk fpga";
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a15";
+			reg = <0>;
+//			cluster = <&cluster0>;
+//			core = <&core0>;
+			clock-frequency = <30000000>;
+//			cci-control-port = <&cci_control1>;
+		};
+		cpu@1 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a15";
+			reg = <1>;
+//			cluster = <&cluster0>;
+//			core = <&core1>;
+			clock-frequency = <30000000>;
+//			cci-control-port = <&cci_control1>;
+		};
+
+		cpu@2 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a7";
+			reg = <0x100>;
+//			cluster = <&cluster1>;
+//			core = <&core4>;
+			clock-frequency = <20000000>;
+//			cci-control-port = <&cci_control2>;
+		};
+
+		cpu@3 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a7";
+			reg = <0x101>;
+//			cluster = <&cluster1>;
+//			core = <&core5>;
+			clock-frequency = <20000000>;
+//			cci-control-port = <&cci_control2>;
+		};
+
+	};
+
+	fixed-rate-clocks {
+		fin {
+			compatible = "samsung,sdp-clock-fin";
+			clock-frequency = <70000000>;
+		};
+	};
+
+	serial@10090A00 {
+		status = "okay";
+	};
+
+	/* for FPGA TEST */
+	mmc {
+		compatible = "samsung,sdp-mmc";
+		reg = <0x10000000 0x1000>;
+		interrupts = <0 43 0>;
+		clocks = <&clock 1>;
+		clock-names = "fin_pll";
+		fifo-depth = <0x80>;
+		min-max-clock = <400000 30000000>;
+
+		initregs = <0x001000A8 0xFFFFFFFF 0x03000003>;
+
+		bus-width = <0x8>;
+//		force-pio-mode;
+		hw-reset;
+
+		/* Host Caps */
+		non-removable;
+//		bus-width-test;
+		highspeed;
+//		sdr104;
+		ddr50;
+		hs200;
+	};
+
+};

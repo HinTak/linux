@@ -113,6 +113,7 @@ static int _regulator_do_set_voltage(struct regulator_dev *rdev,
 static struct regulator *create_regulator(struct regulator_dev *rdev,
 					  struct device *dev,
 					  const char *supply_name);
+static int _regulator_enable(struct regulator_dev *rdev);
 
 static const char *rdev_get_name(struct regulator_dev *rdev)
 {
@@ -312,7 +313,38 @@ static ssize_t regulator_uV_show(struct device *dev,
 
 	return ret;
 }
+#if defined(CONFIG_ARCH_SDP)
+static ssize_t regulator_uV_store(struct device *dev,
+				struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct regulator_dev *rdev = dev_get_drvdata(dev);
+	unsigned int microvolt;
+	unsigned int ret;
+	//unsigned selector;
+	int iret;
+
+	mutex_lock(&rdev->mutex);
+
+	ret = sscanf(buf, "%u", &microvolt);
+	if (ret != 1) {
+		printk(KERN_ERR "%s invalid arg\n", __func__);
+		return -EINVAL;
+	}
+
+//	iret = rdev->desc->ops->set_voltage(rdev, microvolt, microvolt + 10000, &selector);
+	iret = _regulator_do_set_voltage(rdev, microvolt, microvolt + 10000);
+	if (iret < 0) {
+		printk("set_voltage error! ret=%d\n", iret);
+	}
+
+	mutex_unlock(&rdev->mutex);
+	
+	return count;
+}
+static DEVICE_ATTR(microvolts, 0644, regulator_uV_show, regulator_uV_store);
+#else
 static DEVICE_ATTR(microvolts, 0444, regulator_uV_show, NULL);
+#endif
 
 static ssize_t regulator_uA_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
@@ -377,7 +409,45 @@ static ssize_t regulator_state_show(struct device *dev,
 
 	return ret;
 }
+
+#if defined(CONFIG_ARCH_SDP)
+static ssize_t regulator_state_store(struct device *dev,
+				struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct regulator_dev *rdev = dev_get_drvdata(dev);
+	unsigned int enable;
+	unsigned int ret;
+	int iret;
+
+	mutex_lock(&rdev->mutex);
+
+	ret = sscanf(buf, "%u", &enable);
+	if (ret != 1) {
+		printk(KERN_ERR "%s invalid arg\n", __func__);
+		return -EINVAL;
+	}
+
+	if (enable == 1) {
+		iret = _regulator_enable(rdev);
+		if (iret < 0)
+			printk(KERN_ERR "failed to enable\n");
+	} else if (enable == 0) {
+		iret = _regulator_disable(rdev);
+		if (iret < 0)
+			printk(KERN_ERR "failed to disable\n");
+	} else {
+		printk(KERN_ERR "unknown input\n");
+	}
+
+	mutex_unlock(&rdev->mutex);
+	
+	return count;
+}
+
+static DEVICE_ATTR(state, 0644, regulator_state_show, regulator_state_store);
+#else
 static DEVICE_ATTR(state, 0444, regulator_state_show, NULL);
+#endif
 
 static ssize_t regulator_status_show(struct device *dev,
 				   struct device_attribute *attr, char *buf)
@@ -919,6 +989,8 @@ static int machine_constraints_voltage(struct regulator_dev *rdev,
 	return 0;
 }
 
+static int _regulator_do_enable(struct regulator_dev *rdev);
+
 /**
  * set_machine_constraints - sets regulator constraints
  * @rdev: regulator source
@@ -975,10 +1047,9 @@ static int set_machine_constraints(struct regulator_dev *rdev,
 	/* If the constraints say the regulator should be on at this point
 	 * and we have control then make sure it is enabled.
 	 */
-	if ((rdev->constraints->always_on || rdev->constraints->boot_on) &&
-	    ops->enable) {
-		ret = ops->enable(rdev);
-		if (ret < 0) {
+	if (rdev->constraints->always_on || rdev->constraints->boot_on) {
+		ret = _regulator_do_enable(rdev);
+		if (ret < 0 && ret != -EINVAL) {
 			rdev_err(rdev, "failed to enable\n");
 			goto out;
 		}
@@ -1711,8 +1782,6 @@ static int _regulator_do_disable(struct regulator_dev *rdev)
 
 	trace_regulator_disable_complete(rdev_get_name(rdev));
 
-	_notifier_call_chain(rdev, REGULATOR_EVENT_DISABLE,
-			     NULL);
 	return 0;
 }
 
@@ -1736,6 +1805,8 @@ static int _regulator_disable(struct regulator_dev *rdev)
 				rdev_err(rdev, "failed to disable\n");
 				return ret;
 			}
+			_notifier_call_chain(rdev, REGULATOR_EVENT_DISABLE,
+					NULL);
 		}
 
 		rdev->use_count = 0;
@@ -1788,20 +1859,16 @@ static int _regulator_force_disable(struct regulator_dev *rdev)
 {
 	int ret = 0;
 
-	/* force disable */
-	if (rdev->desc->ops->disable) {
-		/* ah well, who wants to live forever... */
-		ret = rdev->desc->ops->disable(rdev);
-		if (ret < 0) {
-			rdev_err(rdev, "failed to force disable\n");
-			return ret;
-		}
-		/* notify other consumers that power has been forced off */
-		_notifier_call_chain(rdev, REGULATOR_EVENT_FORCE_DISABLE |
-			REGULATOR_EVENT_DISABLE, NULL);
+	ret = _regulator_do_disable(rdev);
+	if (ret < 0) {
+		rdev_err(rdev, "failed to force disable\n");
+		return ret;
 	}
 
-	return ret;
+	_notifier_call_chain(rdev, REGULATOR_EVENT_FORCE_DISABLE |
+			REGULATOR_EVENT_DISABLE, NULL);
+
+	return 0;
 }
 
 /**
@@ -3787,23 +3854,18 @@ int regulator_suspend_finish(void)
 
 	mutex_lock(&regulator_list_mutex);
 	list_for_each_entry(rdev, &regulator_list, list) {
-		struct regulator_ops *ops = rdev->desc->ops;
-
 		mutex_lock(&rdev->mutex);
-		if ((rdev->use_count > 0  || rdev->constraints->always_on) &&
-				ops->enable) {
-			error = ops->enable(rdev);
+		if (rdev->use_count > 0  || rdev->constraints->always_on) {
+			error = _regulator_do_enable(rdev);
 			if (error)
 				ret = error;
 		} else {
 			if (!has_full_constraints)
 				goto unlock;
-			if (!ops->disable)
-				goto unlock;
 			if (!_regulator_is_enabled(rdev))
 				goto unlock;
 
-			error = ops->disable(rdev);
+			error = _regulator_do_disable(rdev);
 			if (error)
 				ret = error;
 		}
@@ -3993,7 +4055,7 @@ static int __init regulator_init_complete(void)
 		ops = rdev->desc->ops;
 		c = rdev->constraints;
 
-		if (!ops->disable || (c && c->always_on))
+		if (c && c->always_on)
 			continue;
 
 		mutex_lock(&rdev->mutex);
@@ -4014,7 +4076,7 @@ static int __init regulator_init_complete(void)
 			/* We log since this may kill the system if it
 			 * goes wrong. */
 			rdev_info(rdev, "disabling\n");
-			ret = ops->disable(rdev);
+			ret = _regulator_do_disable(rdev);
 			if (ret != 0) {
 				rdev_err(rdev, "couldn't disable: %d\n", ret);
 			}

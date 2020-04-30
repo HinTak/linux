@@ -19,6 +19,7 @@ config USB_ARCH_HAS_OHCI
 	default y if ARCH_CNS3XXX
 	default y if PLAT_SPEAR
 	default y if ARCH_EXYNOS
+	default y if ARCH_SDP
 	# PPC:
 	default y if STB03xxx
 	default y if PPC_MPC52xx
@@ -49,12 +50,24 @@ config USB_ARCH_HAS_EHCI
 	default y if ARCH_MMP
 	default y if MACH_LOONGSON1
 	default y if PLAT_ORION
+	default y if ARCH_SDP
+	default y if ARCH_NVT72668
 	default PCI
 
 # some non-PCI HCDs implement xHCI
 config USB_ARCH_HAS_XHCI
 	boolean
+	default y if ARCH_SDP
+	default y if ARCH_NVT72668
 	default PCI
+
+config USB_PACKAGE_SEPARATION
+	bool "USB package separation"
+	default y
+	---help---
+	  This option separate USB drivers from BSP path.
+	  Say Y here if you want to use vdlinux-usb-modules package.
+	  Say N here if you want to use usb drivers in bsp path.
 
 menuconfig USB_SUPPORT
 	bool "USB support"
@@ -70,6 +83,7 @@ config USB_COMMON
 	tristate
 	default y
 	depends on USB || USB_GADGET
+
 
 # Host-side USB depends on having a host controller
 # NOTE:  dummy_hcd is always an option, but it's ignored here ...

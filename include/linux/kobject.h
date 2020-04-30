@@ -31,8 +31,10 @@
 #define UEVENT_NUM_ENVP			32	/* number of env pointers */
 #define UEVENT_BUFFER_SIZE		2048	/* buffer for the variables */
 
+#ifdef CONFIG_UEVENT_HELPER
 /* path to the userspace helper executed on an event */
 extern char uevent_helper[];
+#endif
 
 /* counter to tag the uevent, read only except for the kobject core */
 extern u64 uevent_seqnum;
@@ -54,7 +56,15 @@ enum kobject_action {
 	KOBJ_MOVE,
 	KOBJ_ONLINE,
 	KOBJ_OFFLINE,
-	KOBJ_MAX
+	KOBJ_MAX,
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+        KOBJ_MOUNT,     /*added by kks, hotplug with MSC device*/
+        KOBJ_UMOUNT,    /*added by kks, hotplug with MSC device*/
+        //Unknown device (for USB2.0 certification)
+        //Do not use enum, 20131108, commect out by sm79.bae
+//        KOBJ_NOTSUPPORTED_DEV_ADD,	
+//	KOBJ_NOTSUPPORTED_DEV_REMOVE,
+#endif      
 };
 
 struct kobject {

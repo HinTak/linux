@@ -132,9 +132,9 @@ static int ath79_spi_setup_cs(struct spi_device *spi)
 
 		flags = GPIOF_DIR_OUT;
 		if (spi->mode & SPI_CS_HIGH)
-			flags |= GPIOF_INIT_HIGH;
-		else
 			flags |= GPIOF_INIT_LOW;
+		else
+			flags |= GPIOF_INIT_HIGH;
 
 		status = gpio_request_one(cdata->gpio, flags,
 					  dev_name(&spi->dev));
@@ -178,10 +178,11 @@ static void ath79_spi_cleanup(struct spi_device *spi)
 }
 
 static u32 ath79_spi_txrx_mode0(struct spi_device *spi, unsigned nsecs,
-			       u32 word, u8 bits)
+				unsigned flags, u32 word, u8 bits)
 {
 	struct ath79_spi *sp = ath79_spidev_to_sp(spi);
 	u32 ioc = sp->ioc_base;
+	(void)flags;
 
 	/* clock starts at inactive polarity */
 	for (word <<= (32 - bits); likely(bits); bits--) {

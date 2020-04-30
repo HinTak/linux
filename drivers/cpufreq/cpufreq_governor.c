@@ -29,14 +29,6 @@
 
 #include "cpufreq_governor.h"
 
-static struct kobject *get_governor_parent_kobj(struct cpufreq_policy *policy)
-{
-	if (have_governor_per_policy())
-		return &policy->kobj;
-	else
-		return cpufreq_global_kobject;
-}
-
 static struct attribute_group *get_sysfs_attr(struct dbs_data *dbs_data)
 {
 	if (have_governor_per_policy())
@@ -147,6 +139,9 @@ void dbs_check_cpu(struct dbs_data *dbs_data, int cpu)
 			continue;
 
 		load = 100 * (wall_time - idle_time) / wall_time;
+#if defined(CONFIG_ARCH_SDP)		
+		policy->load = load;
+#endif
 
 		if (dbs_data->cdata->governor == GOV_ONDEMAND) {
 			int freq_avg = __cpufreq_driver_getavg(policy, j);
@@ -158,6 +153,11 @@ void dbs_check_cpu(struct dbs_data *dbs_data, int cpu)
 
 		if (load > max_load)
 			max_load = load;
+		
+#if defined(CONFIG_ARCH_SDP)
+		if (load)
+		dvfs_print("[cpu%d] load=%d%%\n", j, load / policy->cur);
+#endif
 	}
 
 	dbs_data->cdata->gov_check_cpu(cpu, max_load);
@@ -177,12 +177,19 @@ void gov_queue_work(struct dbs_data *dbs_data, struct cpufreq_policy *policy,
 {
 	int i;
 
+	mutex_lock(&cpufreq_governor_lock);
+	if (!policy->governor_enabled)
+		goto out_unlock;
+
 	if (!all_cpus) {
 		__gov_queue_work(smp_processor_id(), dbs_data, delay);
 	} else {
 		for_each_cpu(i, policy->cpus)
 			__gov_queue_work(i, dbs_data, delay);
 	}
+
+out_unlock:
+	mutex_unlock(&cpufreq_governor_lock);
 }
 EXPORT_SYMBOL_GPL(gov_queue_work);
 
@@ -228,6 +235,8 @@ static void set_sampling_rate(struct dbs_data *dbs_data,
 		od_tuners->sampling_rate = sampling_rate;
 	}
 }
+
+extern struct kobject *get_governor_parent_kobj(struct cpufreq_policy *policy);
 
 int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 		struct common_dbs_data *cdata, unsigned int event)
@@ -407,6 +416,11 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 		break;
 
 	case CPUFREQ_GOV_LIMITS:
+		mutex_lock(&dbs_data->mutex);
+		if (!cpu_cdbs->cur_policy) {
+			mutex_unlock(&dbs_data->mutex);
+			break;
+		}
 		mutex_lock(&cpu_cdbs->timer_mutex);
 		if (policy->max < cpu_cdbs->cur_policy->cur)
 			__cpufreq_driver_target(cpu_cdbs->cur_policy,
@@ -416,6 +430,7 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 					policy->min, CPUFREQ_RELATION_L);
 		dbs_check_cpu(dbs_data, cpu);
 		mutex_unlock(&cpu_cdbs->timer_mutex);
+		mutex_unlock(&dbs_data->mutex);
 		break;
 	}
 	return 0;

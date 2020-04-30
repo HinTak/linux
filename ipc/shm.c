@@ -43,6 +43,13 @@
 #include <linux/mount.h>
 #include <linux/ipc_namespace.h>
 
+/**
+* @brief Include Security Framework security operations
+* @author Maksym Koshel (m.koshel@samsung.com)
+* @date Sep 20, 2014
+*/
+#include <linux/sf_security.h>
+
 #include <asm/uaccess.h>
 
 #include "util.h"
@@ -1155,6 +1162,15 @@ long do_shmat(int shmid, char __user *shmaddr, int shmflg, ulong *raddr,
 	sfd->vm_ops = NULL;
 
 	err = security_mmap_file(file, prot, flags);
+	if (err)
+		goto out_fput;
+
+	/**
+	* @brief Call of the Security Framework routine for mmap
+	* @author Maksym Koshel (m.koshel@samsung.com)
+	* @date Sep 20, 2014
+	*/
+	err = sf_security_mmap_file(file, prot, flags);
 	if (err)
 		goto out_fput;
 

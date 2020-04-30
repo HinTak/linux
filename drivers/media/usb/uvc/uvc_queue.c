@@ -55,6 +55,11 @@ static int uvc_queue_setup(struct vb2_queue *vq, const struct v4l2_format *fmt,
 
 	sizes[0] = stream->ctrl.dwMaxVideoFrameSize;
 
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+#define MAX_FRAME_SIZE	(1024*1024*2) // 2 Mbyte
+	sizes[0] = MAX_FRAME_SIZE;
+#endif
+
 	return 0;
 }
 
@@ -106,12 +111,14 @@ static void uvc_buffer_queue(struct vb2_buffer *vb)
 
 static int uvc_buffer_finish(struct vb2_buffer *vb)
 {
+#ifndef CONFIG_USB_VIDEO_TV_CAMERA
 	struct uvc_video_queue *queue = vb2_get_drv_priv(vb->vb2_queue);
 	struct uvc_streaming *stream =
 			container_of(queue, struct uvc_streaming, queue);
 	struct uvc_buffer *buf = container_of(vb, struct uvc_buffer, buf);
 
 	uvc_video_clock_update(stream, &vb->v4l2_buf, buf);
+#endif
 	return 0;
 }
 

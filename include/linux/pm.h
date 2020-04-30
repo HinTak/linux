@@ -297,6 +297,11 @@ struct dev_pm_ops {
 	int (*runtime_suspend)(struct device *dev);
 	int (*runtime_resume)(struct device *dev);
 	int (*runtime_idle)(struct device *dev);
+#ifdef CONFIG_IOTMODE
+	int magic;
+	int (*iot_resume)(struct device *dev);
+	int (*iot_resume_early)(struct device *dev);
+#endif
 };
 
 #ifdef CONFIG_PM_SLEEP
@@ -413,6 +418,10 @@ const struct dev_pm_ops name = { \
 #define PM_EVENT_USER		0x0100
 #define PM_EVENT_REMOTE		0x0200
 #define PM_EVENT_AUTO		0x0400
+#ifdef CONFIG_IOTMODE
+#define PM_EVENT_IOTPOWEROFF	0x1000
+#define PM_EVENT_IOTRESUME	0x2000
+#endif
 
 #define PM_EVENT_SLEEP		(PM_EVENT_SUSPEND | PM_EVENT_HIBERNATE)
 #define PM_EVENT_USER_SUSPEND	(PM_EVENT_USER | PM_EVENT_SUSPEND)
@@ -443,6 +452,10 @@ const struct dev_pm_ops name = { \
 					{ .event = PM_EVENT_AUTO_RESUME, })
 
 #define PMSG_IS_AUTO(msg)	(((msg).event & PM_EVENT_AUTO) != 0)
+#ifdef CONFIG_IOTMODE
+#define PMSG_IOTPOWEROFF	((struct pm_message){ .event = PM_EVENT_IOTPOWEROFF, })
+#define PMSG_IOTRESUME		((struct pm_message){ .event = PM_EVENT_IOTRESUME, })
+#endif
 
 /**
  * Device run-time power management status.
@@ -635,6 +648,14 @@ struct dev_pm_domain {
 extern void device_pm_lock(void);
 extern void dpm_resume_start(pm_message_t state);
 extern void dpm_resume_end(pm_message_t state);
+#ifdef CONFIG_IOTMODE
+extern void dpm_resume_end_iot(pm_message_t state);
+extern void dpm_poweroff_iot(pm_message_t state);
+extern void dpm_resume_iot_early(pm_message_t state);
+extern void dpm_resume_iot(pm_message_t state);
+extern void dpm_resuspend_iot(pm_message_t state);
+extern void dpm_prepare_iot(pm_message_t state);
+#endif
 extern void dpm_resume(pm_message_t state);
 extern void dpm_complete(pm_message_t state);
 

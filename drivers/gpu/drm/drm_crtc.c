@@ -1757,12 +1757,48 @@ int drm_mode_getplane(struct drm_device *dev, void *data,
 		}
 	}
 	plane_resp->count_format_types = plane->format_count;
-
+	
+	/* pass plane info for user to get */
+	plane_resp->crtc_x = plane->crtc_x;
+	plane_resp->crtc_y = plane->crtc_y;
+	plane_resp->crtc_w = plane->crtc_w;
+	plane_resp->crtc_h = plane->crtc_h;
+	
+	plane_resp->src_x = plane->src_x;
+	plane_resp->src_y = plane->src_y;
+	plane_resp->src_w = plane->src_w;
+	plane_resp->src_h = plane->src_h;
+	/* PASS THE PLANE INFO TO USER */
 out:
 	drm_modeset_unlock_all(dev);
 	return ret;
 }
-
+/**
+ * drm_mode_check_plane_flag - Check Plane Flag and Update values
+ * @plane: struct drm_plane*
+ * @data: struct drm_mode_set_plane *
+ *
+ * Set plane SRC & DEST Based on Flag passed by user.
+ */
+void drm_mode_check_plane_flag(struct drm_plane *plane,
+				struct drm_mode_set_plane *data)
+{
+	unsigned int flag = data->flags;
+	if (DRM_MODE_PLANE_REUSE_PREV_SRC == (flag & DRM_MODE_PLANE_REUSE_PREV_SRC)) {
+		/* APPLY OLD SRC VALUE */
+		data->src_x = plane->src_x;
+		data->src_y = plane->src_y;
+		data->src_w = plane->src_w;
+		data->src_h = plane->src_h;
+	} 
+	if (DRM_MODE_PLANE_REUSE_PREV_DST == (flag & DRM_MODE_PLANE_REUSE_PREV_DST)) {
+		/* APPLY OLD DEST VALUE */
+		data->crtc_x = plane->crtc_x;
+		data->crtc_y = plane->crtc_y;
+		data->crtc_w = plane->crtc_w;
+		data->crtc_h = plane->crtc_h;
+	}
+}
 /**
  * drm_mode_setplane - set up or tear down an plane
  * @dev: DRM device
@@ -1874,6 +1910,9 @@ int drm_mode_setplane(struct drm_device *dev, void *data,
 	}
 
 	drm_modeset_lock_all(dev);
+	/* CHECK SET PLANE FLAG */
+	drm_mode_check_plane_flag(plane,plane_req);
+	/* END CHECK */
 	ret = plane->funcs->update_plane(plane, crtc, fb,
 					 plane_req->crtc_x, plane_req->crtc_y,
 					 plane_req->crtc_w, plane_req->crtc_h,
@@ -1885,6 +1924,18 @@ int drm_mode_setplane(struct drm_device *dev, void *data,
 		plane->fb = fb;
 		fb = NULL;
 	}
+	/* save plane info for user to get */
+	plane->crtc_x = plane_req->crtc_x;
+	plane->crtc_y = plane_req->crtc_y;
+	plane->crtc_w = plane_req->crtc_w;
+	plane->crtc_h = plane_req->crtc_h;
+	
+	plane->src_x = plane_req->src_x;
+	plane->src_y = plane_req->src_y;
+	plane->src_w = plane_req->src_w;
+	plane->src_h = plane_req->src_h;
+	/* SET THE PLANE INFO FOR  USER */
+	
 	drm_modeset_unlock_all(dev);
 
 out:
@@ -3462,11 +3513,13 @@ int drm_mode_page_flip_ioctl(struct drm_device *dev,
 		goto out;
 	}
 
+#if 0
 	if (crtc->fb->pixel_format != fb->pixel_format) {
 		DRM_DEBUG_KMS("Page flip is not allowed to change frame buffer format.\n");
 		ret = -EINVAL;
 		goto out;
 	}
+#endif
 
 	if (page_flip->flags & DRM_MODE_PAGE_FLIP_EVENT) {
 		ret = -ENOMEM;
@@ -3513,9 +3566,11 @@ int drm_mode_page_flip_ioctl(struct drm_device *dev,
 		 * Failing to do so will screw with the reference counting
 		 * on framebuffers.
 		 */
-		WARN_ON(crtc->fb != fb);
+		/* FIX ME - SOC */
+		//WARN_ON(crtc->fb != fb); //check it
 		/* Unref only the old framebuffer. */
 		fb = NULL;
+		old_fb = NULL; //is it required?
 	}
 
 out:

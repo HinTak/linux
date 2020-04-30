@@ -22,6 +22,13 @@
 #include <asm/perf_event.h>
 #include <asm/ptrace.h>
 
+#ifdef CONFIG_ADVANCE_OPROFILE
+#include <linux/stacktrace.h>
+#include <asm/stacktrace.h>
+#include "../../../kernel/kdebugd/kdbg-trace.h"
+#include "../../../kernel/kdebugd/include/kdebugd/kdebugd.h"
+#endif
+
 #ifdef CONFIG_HW_PERF_EVENTS
 
 /*
@@ -39,6 +46,9 @@ static struct op_perf_name {
 	{ "v6mpcore",		"arm/mpcore"	},
 	{ "ARMv7 Cortex-A8",	"arm/armv7"	},
 	{ "ARMv7 Cortex-A9",	"arm/armv7-ca9"	},
+#ifdef CONFIG_CACHE_ANALYZER
+	{ "ARMv7 Cortex-A15",	"arm/armv7-ca15"},
+#endif
 };
 
 char *op_name_from_perf_id(void)
@@ -68,7 +78,7 @@ static int report_trace(struct stackframe *frame, void *d)
 
 	return *depth == 0;
 }
-
+#ifndef CONFIG_ADVANCE_OPROFILE
 /*
  * The registers we're interested in are at the end of the variable
  * length saved register structure. The fp points at the end of this
@@ -100,10 +110,13 @@ static struct frame_tail* user_backtrace(struct frame_tail *tail)
 
 	return buftail[0].fp-1;
 }
+#endif
 
 static void arm_backtrace(struct pt_regs * const regs, unsigned int depth)
 {
+#ifndef CONFIG_ADVANCE_OPROFILE
 	struct frame_tail *tail = ((struct frame_tail *) regs->ARM_fp) - 1;
+#endif
 
 	if (!user_mode(regs)) {
 		struct stackframe frame;
@@ -115,11 +128,19 @@ static void arm_backtrace(struct pt_regs * const regs, unsigned int depth)
 		return;
 	}
 
+#ifdef CONFIG_ADVANCE_OPROFILE
+	kdbg_aop_user_backtrace(regs, depth);
+#else
 	while (depth-- && tail && !((unsigned long) tail & 3))
 		tail = user_backtrace(tail);
+#endif
 }
 
+#ifdef CONFIG_CACHE_ANALYZER
+int oprofile_arch_init(struct oprofile_operations *ops)
+#else
 int __init oprofile_arch_init(struct oprofile_operations *ops)
+#endif
 {
 	/* provide backtrace support also in timer mode: */
 	ops->backtrace		= arm_backtrace;

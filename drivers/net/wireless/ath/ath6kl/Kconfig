@@ -29,21 +29,9 @@ config ATH6KL_DEBUG
 	depends on ATH6KL
 	---help---
 	  Enables debug support
-
-config ATH6KL_TRACING
-	bool "Atheros ath6kl tracing support"
+	  
+config ATH6KL_ENABLE_FW_API2
+	bool "Enable Atheros ath6kl FW API2 "
 	depends on ATH6KL
-	depends on EVENT_TRACING
 	---help---
-	  Select this to ath6kl use tracing infrastructure.
-
-	  If unsure, say Y to make it easier to debug problems.
-
-config ATH6KL_REGDOMAIN
-	bool "Atheros ath6kl regdomain support"
-	depends on ATH6KL
-	depends on CFG80211_CERTIFICATION_ONUS
-	---help---
-	  Enabling this makes it possible to change the regdomain in
-	  the firmware. This can be only enabled if regulatory requirements
-	  are taken into account.
+	  Enables Atheros ath6kl FW API2

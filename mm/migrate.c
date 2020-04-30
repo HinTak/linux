@@ -1010,6 +1010,12 @@ int migrate_pages(struct list_head *from, new_page_t get_new_page,
 	int retry = 1;
 	int nr_failed = 0;
 	int nr_succeeded = 0;
+#ifdef CONFIG_HDMA_DEVICE
+	int is_hdma;
+	int nr_hdma_failed = 0;
+	int nr_hdma_succeeded = 0;
+	extern int hdma_is_page_reserved(struct page *);
+#endif
 	int pass = 0;
 	struct page *page;
 	struct page *page2;
@@ -1025,6 +1031,9 @@ int migrate_pages(struct list_head *from, new_page_t get_new_page,
 		list_for_each_entry_safe(page, page2, from, lru) {
 			cond_resched();
 
+#ifdef CONFIG_HDMA_DEVICE
+			is_hdma = hdma_is_page_reserved(page);
+#endif
 			rc = unmap_and_move(get_new_page, private,
 						page, pass > 2, mode);
 
@@ -1036,10 +1045,16 @@ int migrate_pages(struct list_head *from, new_page_t get_new_page,
 				break;
 			case MIGRATEPAGE_SUCCESS:
 				nr_succeeded++;
+#ifdef CONFIG_HDMA_DEVICE
+				nr_hdma_succeeded += is_hdma;
+#endif
 				break;
 			default:
 				/* Permanent failure */
 				nr_failed++;
+#ifdef CONFIG_HDMA_DEVICE
+				nr_hdma_failed += is_hdma;
+#endif
 				break;
 			}
 		}
@@ -1050,6 +1065,12 @@ out:
 		count_vm_events(PGMIGRATE_SUCCESS, nr_succeeded);
 	if (nr_failed)
 		count_vm_events(PGMIGRATE_FAIL, nr_failed);
+#ifdef CONFIG_HDMA_DEVICE
+	if (nr_hdma_succeeded)
+		count_vm_events(PGMIGRATE_HDMA_SUCCESS, nr_hdma_succeeded);
+	if (nr_hdma_failed)
+		count_vm_events(PGMIGRATE_HDMA_FAIL, nr_hdma_failed);
+#endif
 	trace_mm_migrate_pages(nr_succeeded, nr_failed, mode, reason);
 
 	if (!swapwrite)

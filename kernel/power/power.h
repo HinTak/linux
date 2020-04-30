@@ -175,17 +175,20 @@ extern void swsusp_show_speed(struct timeval *, struct timeval *,
 				unsigned int, char *);
 
 #ifdef CONFIG_SUSPEND
-/* kernel/power/suspend.c */
-extern const char *const pm_states[];
+struct pm_sleep_state {
+	const char *label;
+	suspend_state_t state;
+};
 
-extern bool valid_state(suspend_state_t state);
+/* kernel/power/suspend.c */
+extern struct pm_sleep_state pm_states[];
+
 extern int suspend_devices_and_enter(suspend_state_t state);
 #else /* !CONFIG_SUSPEND */
 static inline int suspend_devices_and_enter(suspend_state_t state)
 {
 	return -ENOSYS;
 }
-static inline bool valid_state(suspend_state_t state) { return false; }
 #endif /* !CONFIG_SUSPEND */
 
 #ifdef CONFIG_PM_TEST_SUSPEND
@@ -257,6 +260,16 @@ static inline void suspend_thaw_processes(void)
 {
 	thaw_processes();
 }
+#ifdef CONFIG_IOTMODE
+static inline void suspend_thaw_processes_prepare(void)
+{
+	thaw_processes_prepare();
+}
+static inline void suspend_thaw_processes_iot(void)
+{
+	thaw_processes_iot();
+}
+#endif
 #else
 static inline int suspend_freeze_processes(void)
 {
@@ -266,6 +279,14 @@ static inline int suspend_freeze_processes(void)
 static inline void suspend_thaw_processes(void)
 {
 }
+#ifdef CONFIG_IOTMODE
+static inline void suspend_thaw_processes_prepare(void)
+{
+}
+static inline void suspend_thaw_processes_iot(void)
+{
+}
+#endif
 #endif
 
 #ifdef CONFIG_PM_AUTOSLEEP

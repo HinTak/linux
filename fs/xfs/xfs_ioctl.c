@@ -52,6 +52,46 @@
 #include <linux/slab.h>
 #include <linux/exportfs.h>
 
+#ifdef	CONFIG_XFS_FS_TRUNCATE_RANGE
+#include <linux/pvr_edit.h>
+#include <linux/fdtable.h>
+
+#define GET_INODE_FROM_FILP(x) (x->f_path.dentry->d_inode->i_ino)
+#define GET_SUPERDEV_FROM_FILP(x) (x->f_path.dentry->d_inode->i_sb->s_dev)
+
+static inline void
+update_file_offset(struct file *file, loff_t start, loff_t end)
+{
+	struct files_struct *files = current->files;
+	struct fdtable *fdt = NULL;
+	unsigned int nr_open_fds = 0;
+
+	spin_lock(&files->file_lock);
+	fdt = files_fdtable(files); /* pointer to fd array */
+	nr_open_fds = fdt->max_fds;
+
+	while (nr_open_fds > 0)	{
+	if (fdt->fd[nr_open_fds - 1]) {
+		if ((GET_INODE_FROM_FILP(file)
+			== GET_INODE_FROM_FILP(fdt->fd[nr_open_fds - 1]))
+			&& (GET_SUPERDEV_FROM_FILP(file)
+			== GET_SUPERDEV_FROM_FILP(fdt->fd[nr_open_fds - 1]))) {
+				spin_lock(&fdt->fd[nr_open_fds - 1]->f_lock);
+				if ((fdt->fd[nr_open_fds - 1]->f_pos > start)
+				 && (fdt->fd[nr_open_fds - 1]->f_pos <= end)) {
+					fdt->fd[nr_open_fds - 1]->f_pos = start;
+				} else if (fdt->fd[nr_open_fds - 1]->f_pos > end) {
+					fdt->fd[nr_open_fds - 1]->f_pos =
+					fdt->fd[nr_open_fds - 1]->f_pos - (end - start);
+				}
+				spin_unlock(&fdt->fd[nr_open_fds - 1]->f_lock);
+			}
+		}
+		nr_open_fds--;
+	}
+	spin_unlock(&files->file_lock);
+}
+#endif
 /*
  * xfs_find_handle maps from userspace xfs_fsop_handlereq structure to
  * a file or fs handle.
@@ -1636,6 +1676,33 @@ xfs_file_ioctl(
 		return -error;
 	}
 
+#ifdef CONFIG_XFS_FS_TRUNCATE_RANGE
+	case FTRUNCATERANGE:
+	{
+		PVR_INFO tr;
+		int ret;
+
+		if (copy_from_user(&tr, (const void *) arg, sizeof(PVR_INFO)))
+			return -EFAULT;
+
+		if (tr.offset < 0 || tr.end < 0)
+			return -EINVAL;
+
+		if ((tr.offset >= tr.end) || (tr.offset >= inode->i_size))
+			return -EINVAL;
+
+		if (!(filp->f_mode & FMODE_WRITE))
+			return -EBADF;
+
+		if (tr.end > inode->i_size)
+			tr.end = inode->i_size;
+
+		ret = xfs_truncate_range(filp, tr.offset, tr.end - tr.offset);
+		if (current->files && !ret)
+			update_file_offset(filp, tr.offset, tr.end);
+		return ret;
+	}
+#endif
 	default:
 		return -ENOTTY;
 	}

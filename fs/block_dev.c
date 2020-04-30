@@ -31,6 +31,9 @@
 #include <asm/uaccess.h>
 #include "internal.h"
 
+#define BD_DISK_MAJOR 0xb
+#define CAP_BITS 9
+
 struct bdev_inode {
 	struct block_device bdev;
 	struct inode vfs_inode;
@@ -1175,6 +1178,9 @@ static int __blkdev_get(struct block_device *bdev, fmode_t mode, int for_part)
 			ret = 0;
 			if (bdev->bd_disk->fops->open)
 				ret = bdev->bd_disk->fops->open(bdev, mode);
+			if(bdev->bd_disk->major == BD_DISK_MAJOR)
+				bdev->bd_inode->i_size =
+					(loff_t)get_capacity(disk)<<CAP_BITS;
 			/* the same as first opener case, read comment there */
 			if (bdev->bd_invalidated) {
 				if (!ret)

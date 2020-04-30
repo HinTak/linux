@@ -105,6 +105,13 @@
 #include <linux/sockios.h>
 #include <linux/atalk.h>
 
+/**
+* @brief Include Security Framework security operations
+* @author Maksym Koshel (m.koshel@samsung.com)
+* @date Sep 20, 2014
+*/
+#include <linux/sf_security.h>
+
 static int sock_no_open(struct inode *irrelevant, struct file *dontcare);
 static ssize_t sock_aio_read(struct kiocb *iocb, const struct iovec *iov,
 			 unsigned long nr_segs, loff_t pos);
@@ -631,6 +638,12 @@ static inline int __sock_sendmsg(struct kiocb *iocb, struct socket *sock,
 {
 	int err = security_socket_sendmsg(sock, msg, size);
 
+	//! @brief Call of the Security Framework routine for socket sendmsg()
+	//! @author Dorogovtsev Dmitriy(d.dorogovtse@samsung.com)
+	//! @date Apr 07, 2015
+	if ( !err )
+		err = sf_security_socket_sendmsg(sock, msg, size);
+
 	return err ?: __sock_sendmsg_nosec(iocb, sock, msg, size);
 }
 
@@ -781,6 +794,12 @@ static inline int __sock_recvmsg(struct kiocb *iocb, struct socket *sock,
 				 struct msghdr *msg, size_t size, int flags)
 {
 	int err = security_socket_recvmsg(sock, msg, size, flags);
+
+	//! @brief Call of the Security Framework routine for socket recvmsg()
+	//! @author Dorogovtsev Dmitriy(d.dorogovtse@samsung.com)
+	//! @date Apr 07, 2015
+	if ( !err )
+		err = sf_security_socket_recvmsg(sock, msg, size, flags);
 
 	return err ?: __sock_recvmsg_nosec(iocb, sock, msg, size, flags);
 }
@@ -1119,6 +1138,15 @@ int sock_create_lite(int family, int type, int protocol, struct socket **res)
 	if (err)
 		goto out;
 
+	/**
+	* @brief Call of the Security Framework routine for socket creation
+	* @author Maksym Koshel (m.koshel@samsung.com)
+	* @date Sep 20, 2014
+	*/
+	err = sf_security_socket_create(family, type, protocol, 1);
+	if (err)
+		goto out;
+
 	sock = sock_alloc();
 	if (!sock) {
 		err = -ENOMEM;
@@ -1264,6 +1292,15 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 	}
 
 	err = security_socket_create(family, type, protocol, kern);
+	if (err)
+		return err;
+
+	/**
+	* @brief Call of the Security Framework routine for socket creation
+	* @author Maksym Koshel (m.koshel@samsung.com)
+	* @date Sep 20, 2014
+	*/
+	err = sf_security_socket_create(family, type, protocol, 1);
 	if (err)
 		return err;
 
@@ -1509,9 +1546,20 @@ SYSCALL_DEFINE3(bind, int, fd, struct sockaddr __user *, umyaddr, int, addrlen)
 						   (struct sockaddr *)&address,
 						   addrlen);
 			if (!err)
-				err = sock->ops->bind(sock,
-						      (struct sockaddr *)
-						      &address, addrlen);
+			{
+				/**
+				* @brief Call of the Security Framework routine for socket bind
+				* @author Maksym Koshel (m.koshel@samsung.com)
+				* @date Sep 20, 2014
+				*/
+				err = sf_security_socket_bind(sock,
+					(struct sockaddr*) &address, addrlen);
+
+				if (!err)
+					err = sock->ops->bind(sock,
+						     			(struct sockaddr *)
+						      			&address, addrlen);
+			}
 		}
 		fput_light(sock->file, fput_needed);
 	}
@@ -1538,7 +1586,16 @@ SYSCALL_DEFINE2(listen, int, fd, int, backlog)
 
 		err = security_socket_listen(sock, backlog);
 		if (!err)
-			err = sock->ops->listen(sock, backlog);
+		{
+			/**
+			* @brief Call of the Security Framework routine for socket listen
+			* @author Maksym Koshel (m.koshel@samsung.com)
+			* @date Sep 20, 2014
+			*/
+			err = sf_security_socket_listen(sock, backlog);
+			if (!err)
+				err = sock->ops->listen(sock, backlog);
+		}
 
 		fput_light(sock->file, fput_needed);
 	}
@@ -1607,6 +1664,15 @@ SYSCALL_DEFINE4(accept4, int, fd, struct sockaddr __user *, upeer_sockaddr,
 	if (err)
 		goto out_fd;
 
+	/**
+	* @brief Call of the Security Framework routine for socket accept
+	* @author Maksym Koshel (m.koshel@samsung.com)
+	* @date Sep 20, 2014
+	*/
+	err = sf_security_socket_accept(sock, newsock);
+	if (err)
+		goto out_fd;
+
 	err = sock->ops->accept(sock, newsock, sock->file->f_flags);
 	if (err < 0)
 		goto out_fd;
@@ -1672,6 +1738,16 @@ SYSCALL_DEFINE3(connect, int, fd, struct sockaddr __user *, uservaddr,
 
 	err =
 	    security_socket_connect(sock, (struct sockaddr *)&address, addrlen);
+	if (err)
+		goto out_put;
+
+	/**
+	* @brief Call of the Security Framework routine for socket connect
+	* @author Maksym Koshel (m.koshel@samsung.com)
+	* @date Sep 20, 2014
+	*/
+	err = sf_security_socket_connect(sock,
+		(struct sockaddr*) &address, addrlen);
 	if (err)
 		goto out_put;
 
@@ -1964,6 +2040,10 @@ static int copy_msghdr_from_user(struct msghdr *kmsg,
 {
 	if (copy_from_user(kmsg, umsg, sizeof(struct msghdr)))
 		return -EFAULT;
+
+	if (kmsg->msg_namelen < 0)
+		return -EINVAL;
+
 	if (kmsg->msg_namelen > sizeof(struct sockaddr_storage))
 		kmsg->msg_namelen = sizeof(struct sockaddr_storage);
 	return 0;
@@ -3389,6 +3469,14 @@ EXPORT_SYMBOL(kernel_accept);
 int kernel_connect(struct socket *sock, struct sockaddr *addr, int addrlen,
 		   int flags)
 {
+#ifdef CONFIG_SECURITY_SMACK
+	int err;
+
+	err = security_socket_connect(sock, addr, addrlen);
+	if (err)
+		return err;
+	else
+#endif
 	return sock->ops->connect(sock, addr, addrlen, flags);
 }
 EXPORT_SYMBOL(kernel_connect);

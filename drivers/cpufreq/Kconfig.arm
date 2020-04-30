@@ -4,7 +4,7 @@
 
 config ARM_BIG_LITTLE_CPUFREQ
 	tristate "Generic ARM big LITTLE CPUfreq driver"
-	depends on ARM_CPU_TOPOLOGY && PM_OPP && HAVE_CLK
+	depends on ARM && BIG_LITTLE && ARM_CPU_TOPOLOGY && HAVE_CLK
 	help
 	  This enables the Generic CPUfreq driver for ARM big.LITTLE platforms.
 
@@ -150,3 +150,87 @@ config ARM_SPEAR_CPUFREQ
 	default y
 	help
 	  This adds the CPUFreq driver support for SPEAr SOCs.
+
+config ARM_SDP_CPUFREQ
+	bool "Samsung DTV Processor"
+	depends on ARCH_SDP
+	default n
+	help
+	  This adds the CPUFreq driver common part for SDP SoCs.
+
+	  If in doubt, say N
+
+config ARM_SDP_MP_CPUFREQ
+	bool "Samsung DTV MP Processor"
+	depends on ARCH_SDP
+	default n
+	help
+	  This adds the CPUFreq driver common part for SDP MP SoCs.
+
+config ARM_SDP1202_CPUFREQ
+	bool "SDP1202 CPUFreq support"
+	depends on ARM_SDP_CPUFREQ
+	help
+	  This adds the CPUFreq driver for SDP1202 SoC.
+
+config ARM_SDP1202_CPUFREQ_DEBUG
+	bool "SDP1202 CPUFreq debug print support"
+	depends on ARM_SDP1202_CPUFREQ
+
+config ARM_SDP1304_CPUFREQ
+	bool "SDP1304 CPUFreq support"
+	depends on ARM_SDP_CPUFREQ
+	help
+	  This adds the CPUFreq driver for SDP1304 SoC.
+
+config ARM_SDP1304_CPUFREQ_DEBUG
+	bool "SDP1304 CPUFreq debug print support"
+	depends on ARM_SDP1304_CPUFREQ
+
+config ARM_SDP1307_CPUFREQ
+	bool "SDP1307 CPUFreq support"
+	depends on ARM_SDP_CPUFREQ
+	help
+	  This adds the CPUFreq driver for SDP1307 SoC.
+
+config ARM_SDP1307_CPUFREQ_DEBUG
+	bool "SDP1307 CPUFreq debug print support"
+	depends on ARM_SDP1307_CPUFREQ
+
+config ARM_SDP1404_CPUFREQ
+	bool "SDP1404(Hawk-P) CPUFreq support"
+	depends on ARM_SDP_MP_CPUFREQ
+	help
+	  This adds the CPUFreq driver for SDP1404(Hawk-P) SoC.
+
+config ARM_SDP1404_CPUFREQ_DEBUG
+	bool "SDP1404 CPUFreq debug print support"
+	depends on ARM_SDP1404_CPUFREQ
+
+config ARM_SDP1404_CPUFREQ_ACLK
+	bool "SDP1404 CPUFreq ACLK scaling support"
+	depends on ARM_SDP1404_CPUFREQ
+	default n
+	help
+	  This supports adjustment for ACLK frequency in cluster.
+
+config ARM_SDP1406_CPUFREQ
+	bool "SDP1406(Hawk-M) CPUFreq support"
+	depends on ARM_SDP_CPUFREQ
+	help
+	  This adds the CPUFreq driver for SDP1406(Hawk-M) SoC.
+
+config ARM_SDP1406_CPUFREQ_DEBUG
+	bool "SDP1406 CPUFreq debug print support"
+	depends on ARM_SDP1406_CPUFREQ
+
+config ARM_SDP1501_CPUFREQ
+	bool "SDP1501(Jazz-M) CPUFreq support"
+	depends on ARM_SDP_CPUFREQ
+	help
+	  This adds the CPUFreq driver for SDP1501(Jazz-M) SoC.
+
+config ARM_SDP1501_CPUFREQ_DEBUG
+	bool "SDP1501 CPUFreq debug print support"
+	depends on ARM_SDP1501_CPUFREQ
+

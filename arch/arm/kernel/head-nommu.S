@@ -94,6 +94,9 @@ __after_proc_init:
 	bic	r0, r0, #CR_V
 #endif
 	mcr	p15, 0, r0, c1, c0, 0		@ write control reg
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 #endif /* CONFIG_CPU_CP15 */
 
 	b	__mmap_switched			@ clear the BSS and jump

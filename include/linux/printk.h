@@ -47,8 +47,24 @@ static inline void console_silent(void)
 
 static inline void console_verbose(void)
 {
+/* VDLinux, if console_loglevel is 0, this func do not work, so skip the check routine, 2010-10-21
 	if (console_loglevel)
 		console_loglevel = 15;
+*/
+	console_loglevel = 15;
+}
+
+static inline void console_default(void)
+{
+/* VDLinux, add new function revert to default loglevel, 2014-02-07
+*/
+	console_loglevel = 7;
+}
+
+static inline void console_revert(int old_lvl)
+{
+	/* VDLinux, add new function revert to old loglevel */
+	console_loglevel = old_lvl;
 }
 
 struct va_format {
@@ -97,6 +113,12 @@ int no_printk(const char *fmt, ...)
 	return 0;
 }
 
+#ifdef __cplusplus
+
+extern "C" int printk(const char *fmt, ...);
+
+#else // __cplusplus
+
 #ifdef CONFIG_EARLY_PRINTK
 extern asmlinkage __printf(1, 2)
 void early_printk(const char *fmt, ...);
@@ -124,9 +146,9 @@ asmlinkage __printf(1, 2) __cold
 int printk(const char *fmt, ...);
 
 /*
- * Special printk facility for scheduler use only, _DO_NOT_USE_ !
+ * Special printk facility for scheduler/timekeeping use only, _DO_NOT_USE_ !
  */
-__printf(1, 2) __cold int printk_sched(const char *fmt, ...);
+__printf(1, 2) __cold int printk_deferred(const char *fmt, ...);
 
 /*
  * Please don't use printk_ratelimit(), because it shares ratelimiting state
@@ -161,7 +183,7 @@ int printk(const char *s, ...)
 	return 0;
 }
 static inline __printf(1, 2) __cold
-int printk_sched(const char *s, ...)
+int printk_deferred(const char *s, ...)
 {
 	return 0;
 }
@@ -199,6 +221,8 @@ static inline void show_regs_print_info(const char *log_lvl)
 {
 }
 #endif
+
+#endif // __cplusplus
 
 extern void dump_stack(void) __cold;
 
@@ -396,5 +420,18 @@ static inline void print_hex_dump_bytes(const char *prefix_str, int prefix_type,
 	print_hex_dump(KERN_DEBUG, prefix_str, prefix_type, rowsize,	\
 		       groupsize, buf, len, ascii)
 #endif /* defined(CONFIG_DYNAMIC_DEBUG) */
+
+void console_panic_zap_locks(unsigned int this_cpu);
+
+#ifdef CONFIG_EMRG_SAVE_KLOG
+enum klog_error_type {
+	WRITE_RAW_KLOG_TYPE_PANIC = 1,
+	WRITE_RAW_KLOG_TYPE_OOPS,
+	WRITE_RAW_KLOG_TYPE_SOFTLOCKUP
+};
+void write_emrg_klog(struct pt_regs *regs, u32 type);
+#else
+#define write_emrg_klog(regs, type)
+#endif
 
 #endif

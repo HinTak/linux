@@ -9,6 +9,12 @@
 #include <linux/oprofile.h>
 #include <linux/slab.h>
 
+#ifdef CONFIG_CACHE_ANALYZER
+#include <kdebugd/kdebugd.h>
+#include <aop/aop_oprofile.h>
+#endif
+
+
 /*
  * Per performance monitor configuration as set via oprofilefs.
  */
@@ -42,9 +48,12 @@ static void op_overflow_handler(struct perf_event *event,
 		if (per_cpu(perf_events, cpu)[id] == event)
 			break;
 
-	if (id != num_counters)
+	if (id != num_counters) {
 		oprofile_add_sample(regs, id);
-	else
+#if defined(CONFIG_CACHE_ANALYZER) && defined(CONFIG_ADVANCE_OPROFILE)
+		aop_inc_pc_sample_count();
+#endif
+	} else
 		pr_warning("oprofile: ignoring spurious overflow "
 				"on cpu %u\n", cpu);
 }
@@ -70,6 +79,83 @@ static void op_perf_setup(void)
 		attr->pinned		= 1;
 	}
 }
+#if defined(CONFIG_CACHE_ANALYZER) && defined(CONFIG_ADVANCE_OPROFILE)
+/*
+ * NOTE: Before calling these functions - aop_get_counter_xxx()
+ * it should be ensured that the current mode is PERF_EVENTS_SAMPLING
+ * This can be ensured by - aop_get_sampling_mode()
+ * Returned value should be - PERF_EVENTS_SAMPLING
+ *
+ * In default kernel, counter_config is not set to NULL,
+ * so we need to handle safely.
+ */
+unsigned long aop_get_counter_config(unsigned int i)
+{
+	if (counter_config == NULL) {
+		printk(KERN_ERR "Event mode not configured\n");
+		return -EINVAL;
+	}
+
+	return counter_config[i].attr.config;
+}
+
+unsigned long aop_get_counter_count(unsigned int i)
+{
+	if (counter_config == NULL) {
+		printk(KERN_ERR "Event mode not configured\n");
+		return -EINVAL;
+	}
+
+	return counter_config[i].attr.sample_period;
+}
+
+unsigned long aop_get_counter_type(unsigned int i)
+{
+	if (counter_config == NULL) {
+		printk(KERN_ERR "Event mode not configured\n");
+		return -EINVAL;
+	}
+
+	return counter_config[i].attr.type;
+}
+
+int aop_get_counter_enabled(unsigned int i)
+{
+	if (counter_config == NULL) {
+		printk(KERN_ERR "Event mode not configured\n");
+		return -EINVAL;
+	}
+
+	return counter_config[i].enabled;
+}
+
+int aop_setup_counter(unsigned int i, int count,
+	int config, int type, int enable)
+{
+	int ret = 0;
+	if (i >= num_counters)
+		return -EINVAL;
+
+	ret = aop_switch_to_perf_events_sampling();
+
+	if (ret < 0) {
+		printk(KERN_ERR "Error in switching to EVENT mode\n");
+		return ret;
+	}
+
+	if (counter_config == NULL) {
+		printk(KERN_ERR "Event mode not configured\n");
+		return -EINVAL;
+	}
+
+	counter_config[i].attr.sample_period = (uint64_t)count;
+	counter_config[i].attr.config = (unsigned long)config;
+	counter_config[i].attr.type = (unsigned long)type;
+	counter_config[i].enabled = (unsigned long)enable;
+
+	return 0;
+}
+#endif
 
 static int op_create_counter(int cpu, int event)
 {
@@ -220,7 +306,11 @@ static struct platform_driver oprofile_driver = {
 
 static struct platform_device *oprofile_pdev;
 
+#ifdef CONFIG_CACHE_ANALYZER
+static int init_driverfs(void)
+#else
 static int __init init_driverfs(void)
+#endif
 {
 	int ret;
 
@@ -256,6 +346,15 @@ void oprofile_perf_exit(void)
 	int cpu, id;
 	struct perf_event *event;
 
+#ifdef CONFIG_CACHE_ANALYZER
+	WARN_ON(!counter_config);
+
+	if (counter_config == NULL) {
+		printk(KERN_ERR "Error!!!, oprofile_perf_exit() called twice\n");
+		return;
+	}
+#endif
+
 	for_each_possible_cpu(cpu) {
 		for (id = 0; id < num_counters; ++id) {
 			event = per_cpu(perf_events, cpu)[id];
@@ -264,13 +363,23 @@ void oprofile_perf_exit(void)
 		}
 
 		kfree(per_cpu(perf_events, cpu));
+#ifdef CONFIG_CACHE_ANALYZER
+		per_cpu(perf_events, cpu) = NULL;
+#endif
 	}
 
 	kfree(counter_config);
+#ifdef CONFIG_CACHE_ANALYZER
+	counter_config = NULL;
+#endif
 	exit_driverfs();
 }
 
+#ifdef CONFIG_CACHE_ANALYZER
+int oprofile_perf_init(struct oprofile_operations *ops)
+#else
 int __init oprofile_perf_init(struct oprofile_operations *ops)
+#endif
 {
 	int cpu, ret = 0;
 

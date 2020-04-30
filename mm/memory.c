@@ -69,6 +69,11 @@
 
 #include "internal.h"
 
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+void show_kernel_patch_version(void);
+#endif
+
 #ifdef LAST_NID_NOT_IN_PAGE_FLAGS
 #warning Unfortunate NUMA and NUMA Balancing config, growing page-frame for last_nid.
 #endif
@@ -696,6 +701,9 @@ static void print_bad_pte(struct vm_area_struct *vma, unsigned long addr,
 		"BUG: Bad page map in process %s  pte:%08llx pmd:%08llx\n",
 		current->comm,
 		(long long)pte_val(pte), (long long)pmd_val(*pmd));
+#ifdef CONFIG_VDLP_VERSION_INFO
+	show_kernel_patch_version();
+#endif
 	if (page)
 		dump_page(page);
 	printk(KERN_ALERT
@@ -891,6 +899,7 @@ copy_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	if (page) {
 		get_page(page);
 		page_dup_rmap(page);
+		mupt_inc_ctr(vma, page, addr, 1);
 		if (PageAnon(page))
 			rss[MM_ANONPAGES]++;
 		else
@@ -952,6 +961,7 @@ again:
 	spin_unlock(src_ptl);
 	pte_unmap(orig_src_pte);
 	add_mm_rss_vec(dst_mm, rss);
+	inc_rss_counter(vma, rss[0] + rss[1]); /* VD_SP */
 	pte_unmap_unlock(orig_dst_pte, dst_ptl);
 	cond_resched();
 
@@ -1154,12 +1164,15 @@ again:
 					mark_page_accessed(page);
 				rss[MM_FILEPAGES]--;
 			}
+			mupt_dec_ctr(vma, page, addr, 1);
 			page_remove_rmap(page);
 			if (unlikely(page_mapcount(page) < 0))
 				print_bad_pte(vma, addr, ptent, page);
-			force_flush = !__tlb_remove_page(tlb, page);
-			if (force_flush)
+			if (unlikely(!__tlb_remove_page(tlb, page))) {
+				force_flush = 1;
+				addr += PAGE_SIZE;
 				break;
+			}
 			continue;
 		}
 		/*
@@ -1193,6 +1206,7 @@ again:
 	} while (pte++, addr += PAGE_SIZE, addr != end);
 
 	add_mm_rss_vec(mm, rss);
+	inc_rss_counter(vma, (rss[MM_FILEPAGES]+rss[MM_ANONPAGES]));      /* VD_SP */
 	arch_leave_lazy_mmu_mode();
 	pte_unmap_unlock(start_pte, ptl);
 
@@ -1462,6 +1476,16 @@ int zap_vma_ptes(struct vm_area_struct *vma, unsigned long address,
 }
 EXPORT_SYMBOL_GPL(zap_vma_ptes);
 
+/*
+ * FOLL_FORCE can write to even unwritable pte's, but only
+ * after we've gone through a COW cycle and they are dirty.
+ */
+static inline bool can_follow_write_pte(pte_t pte, unsigned int flags)
+{
+	return pte_write(pte) ||
+		((flags & FOLL_FORCE) && (flags & FOLL_COW) && pte_dirty(pte));
+}
+
 /**
  * follow_page_mask - look up a page descriptor from a user-virtual address
  * @vma: vm_area_struct mapping @address
@@ -1569,7 +1593,7 @@ split_fallthrough:
 	}
 	if ((flags & FOLL_NUMA) && pte_numa(pte))
 		goto no_page;
-	if ((flags & FOLL_WRITE) && !pte_write(pte))
+	if ((flags & FOLL_WRITE) && !can_follow_write_pte(pte, flags))
 		goto unlock;
 
 	page = vm_normal_page(vma, address, pte);
@@ -1876,7 +1900,7 @@ long __get_user_pages(struct task_struct *tsk, struct mm_struct *mm,
 				 */
 				if ((ret & VM_FAULT_WRITE) &&
 				    !(vma->vm_flags & VM_WRITE))
-					foll_flags &= ~FOLL_WRITE;
+					foll_flags |= FOLL_COW;
 
 				cond_resched();
 			}
@@ -1937,10 +1961,15 @@ int fixup_user_fault(struct task_struct *tsk, struct mm_struct *mm,
 		     unsigned long address, unsigned int fault_flags)
 {
 	struct vm_area_struct *vma;
+	vm_flags_t vm_flags;
 	int ret;
 
 	vma = find_extend_vma(mm, address);
 	if (!vma || address < vma->vm_start)
+		return -EFAULT;
+
+	vm_flags = (fault_flags & FAULT_FLAG_WRITE) ? VM_WRITE : VM_READ;
+	if (!(vm_flags & vma->vm_flags))
 		return -EFAULT;
 
 	ret = handle_mm_fault(mm, vma, address, fault_flags);
@@ -2045,7 +2074,7 @@ EXPORT_SYMBOL(get_user_pages);
  *
  * Called without mmap_sem, but after all other threads have been killed.
  */
-#ifdef CONFIG_ELF_CORE
+#if defined(CONFIG_MINIMAL_CORE) || defined(CONFIG_ELF_CORE)
 struct page *get_dump_page(unsigned long addr)
 {
 	struct vm_area_struct *vma;
@@ -2058,7 +2087,7 @@ struct page *get_dump_page(unsigned long addr)
 	flush_cache_page(vma, addr, page_to_pfn(page));
 	return page;
 }
-#endif /* CONFIG_ELF_CORE */
+#endif /* CONFIG_MINIMAL_CORE */
 
 pte_t *__get_locked_pte(struct mm_struct *mm, unsigned long addr,
 			spinlock_t **ptl)
@@ -2107,6 +2136,8 @@ static int insert_page(struct vm_area_struct *vma, unsigned long addr,
 	inc_mm_counter_fast(mm, MM_FILEPAGES);
 	page_add_file_rmap(page);
 	set_pte_at(mm, addr, pte, mk_pte(page, prot));
+	inc_rss_counter(vma, 1);
+	mupt_inc_ctr(vma, page, addr, 1);
 
 	retval = 0;
 	pte_unmap_unlock(pte, ptl);
@@ -2813,8 +2844,11 @@ gotten:
 				dec_mm_counter_fast(mm, MM_FILEPAGES);
 				inc_mm_counter_fast(mm, MM_ANONPAGES);
 			}
-		} else
+		} else {
 			inc_mm_counter_fast(mm, MM_ANONPAGES);
+			inc_rss_counter(vma,1); /* VD_SP */
+			mupt_inc_ctr(vma, new_page, address, 1);
+		}
 		flush_cache_page(vma, address, pte_pfn(orig_pte));
 		entry = mk_pte(new_page, vma->vm_page_prot);
 		entry = maybe_mkwrite(pte_mkdirty(entry), vma);
@@ -3115,6 +3149,7 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
 
 	inc_mm_counter_fast(mm, MM_ANONPAGES);
 	dec_mm_counter_fast(mm, MM_SWAPENTS);
+	inc_rss_counter(vma,1); /* VD_SP */
 	pte = mk_pte(page, vma->vm_page_prot);
 	if ((flags & FAULT_FLAG_WRITE) && reuse_swap_page(page)) {
 		pte = maybe_mkwrite(pte_mkdirty(pte), vma);
@@ -3128,6 +3163,7 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		do_page_add_anon_rmap(page, vma, address, exclusive);
 	else /* ksm created a completely new copy */
 		page_add_new_anon_rmap(page, vma, address);
+	mupt_inc_ctr(vma, page, address, 1);
 	/* It's better to call commit-charge after rmap is established */
 	mem_cgroup_commit_charge_swapin(page, ptr);
 
@@ -3263,6 +3299,8 @@ static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		goto release;
 
 	inc_mm_counter_fast(mm, MM_ANONPAGES);
+	inc_rss_counter(vma,1); /* VD_SP */
+	mupt_inc_ctr(vma, page, address, 1);
 	page_add_new_anon_rmap(page, vma, address);
 setpte:
 	set_pte_at(mm, address, page_table, entry);
@@ -3418,9 +3456,13 @@ static int __do_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 			entry = maybe_mkwrite(pte_mkdirty(entry), vma);
 		if (anon) {
 			inc_mm_counter_fast(mm, MM_ANONPAGES);
+			inc_rss_counter(vma,1); /* VD_SP */
+			mupt_inc_ctr(vma, page, address, 1);
 			page_add_new_anon_rmap(page, vma, address);
 		} else {
 			inc_mm_counter_fast(mm, MM_FILEPAGES);
+			inc_rss_counter(vma,1); /* VD_SP */
+			mupt_inc_ctr(vma, page, address, 1);
 			page_add_file_rmap(page);
 			if (flags & FAULT_FLAG_WRITE) {
 				dirty_page = page;

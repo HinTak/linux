@@ -1,0 +1,493 @@
+/*
+ * Copyright (C) 2015 Samsung Electronics Co.Ltd
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
+/dts-v1/;
+/include/ "sdp1501.dtsi"
+
+/ {
+	model = "Samsung DTV Eval Board based on SDP1501(Jazz-Mt) SoC";
+	compatible = "samsung,dtv", "samsung,sdp1501";
+
+	memory {
+		device_type = "memory";
+		reg = <0x01000000 0x0D600000>; //, <0x20000000 0x0AD00000>, <0x45800000 0x01200000>, <0x60000000 0x11700000>, <0x80000000 0x39400000>;
+	};
+
+	chosen {
+		bootargs = "console=ttyS0,115200N8 root=/dev/mmcblk0p3 rootfstype=squashfs rootwait earlyprintk sdp_sparsemem nosmp";
+	};
+
+	fixed-rate-clocks {
+		fin {
+			compatible = "samsung,sdp-clock-fin";
+			clock-frequency = <24576000>;
+		};
+	};
+
+	serial@00190A00 {
+		status = "okay";
+	};
+
+	serial@00190A40 {
+		status = "okay";
+	};
+
+	serial@00190A80 {
+		status = "okay";
+	};
+
+	serial@00190AC0 {
+		status = "okay";
+	};
+
+	pinctrl{
+		compatible = "samsung,sdp-pinctrl";
+		reg = <0x005C1000 0x230>;
+		start-offset = <0x118>;
+		nr-banks = <23>;
+		model-sel = <1>;
+	};
+	i2c@00190100 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x001901f4>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+	i2c@00190120 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x001901f4>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+	i2c@00190140 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x001901f4>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+	i2c@00190160 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x001901f4>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+	i2c@00190180 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x001901f4>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+	i2c@001901a0 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x001901f4>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+	i2c@001901c0 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x001901f4>;
+		samsung,i2c-cpu-affinity = <3>;
+
+		tps56720@6e {
+			compatible = "ti,tps56720";
+			reg = <0x6e>;
+
+			regulator-name = "CPU_PW";
+			regulator-min-microvolt = <600000>;
+			regulator-max-microvolt = <1870000>;
+			regulator-always-on;
+			regulator-boot-on;
+
+			default_volt = <1100000>;
+		};
+		tps56920@6a {
+			compatible = "ti,tps56920";
+			reg = <0x6a>;
+
+			regulator-name = "CORE_PW";
+			regulator-min-microvolt = <600000>;
+			regulator-max-microvolt = <1870000>;
+			regulator-always-on;
+			regulator-boot-on;
+
+			default_volt = <1000000>;
+		};
+		tps56520@6c {
+			compatible = "ti,tps56520";
+			reg = <0x6c>;
+
+			regulator-name = "DVDE_PW";
+			regulator-min-microvolt = <600000>;
+			regulator-max-microvolt = <1870000>;
+			regulator-always-on;
+			regulator-boot-on;
+
+			default_volt = <1000000>;
+		};
+	};
+
+	i2c@001901e0 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x001901f4>;
+		samsung,i2c-cpu-affinity = <3>;
+		/*
+		tps56520@6e {
+			compatible = "ti,tps56520";
+			reg = <0x6e>;
+
+			regulator-name = "GPU_PW";
+			regulator-min-microvolt = <600000>;
+			regulator-max-microvolt = <1870000>;
+			regulator-always-on;
+			regulator-boot-on;
+
+			default_volt = <1000000>;
+		};
+		tps56920@6e {
+			compatible = "ti,tps56920";
+			reg = <0x6c>;
+
+			regulator-name = "FRC_PW";
+			regulator-min-microvolt = <600000>;
+			regulator-max-microvolt = <1870000>;
+			regulator-always-on;
+			regulator-boot-on;
+
+			default_volt = <1000000>;
+		};
+		*/
+	};
+
+	i2c@00191000 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x001910f4>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+	i2c@00191020 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x001910f4>;
+		samsung,i2c-pad-enable = <0x005C1040 0x800000>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+	i2c@00191040 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x001910f4>;
+	//	samsung,i2c-pad-enable = <0x10030000 0x80000000>;// Mux HS
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+	i2c@00191060 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x001910f4>;
+		samsung,i2c-pad-enable = <0x005C1040 0x1000000>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+	i2c@00191080 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x001910f4>;
+		samsung,i2c-pad-enable = <0x005C1040 0x2000000>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+	i2c@001910a0 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x001910f4>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+	i2c@001910c0 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x001910f4>;
+		samsung,i2c-pad-enable = <0x005C1044 0x8000000>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+	i2c@001910e0 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x001910f4>;
+		samsung,i2c-pad-enable = <0x005C1044 0x10000000>;
+		samsung,i2c-cpu-affinity = <3>;
+
+	};
+/*
+	i2c@00190000 {
+		status = "okay";
+		samsung,i2c-hs-sel = <0x130000 0x02000000>;
+		samsung,i2c-hs-fifosize = <64>;
+	//	samsung,i2c-sda-delay = <1>;
+		samsung,i2c-hs-bus-freq = <1000000>;
+	//	samsung,i2c-irq-status-reg = <0x100901F4>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+*/
+	dummy_panel {
+			compatible = "dummy_panel";
+
+			display-timings {
+				native-mode = <&timing0>;
+
+				timing0: timing-0 {
+					clock-frequency = <0>;
+					hactive = <1920>;
+					vactive = <1080>;
+					hfront-porch = <0>;
+					hback-porch = <0>;
+					hsync-len = <0>;
+					vfront-porch = <0>;
+					vback-porch = <0>;
+					vsync-len = <0>;
+			};
+		};
+
+	};
+
+	ehci@00500000 {
+		status = "okay";
+	};
+
+	ehci@00510000 {
+		status = "okay";
+	};
+
+	ehci@00520000 {
+		status = "okay";
+	};
+
+	ehci@00530000 {
+		status = "okay";
+	};
+
+
+	xhci@00400000 {
+		status = "okay";
+	};
+
+
+	ohci@00508000 {
+		status = "okay";
+	};
+
+	ohci@00518000 {
+		status = "okay";
+	};
+
+	ohci@00528000 {
+		status = "okay";
+	};
+
+	ohci@00538000 {
+		status = "okay";
+	};
+
+	sdp_dp@00988000 {
+		compatible = "samsung,sdp1511-sdp_dp";
+		reg =	<0x00C00000	0xA0000>,	/*TOP_DP_SCL*/
+		<0x00CB0000	0x10000>,	/*TOP_DP_SCL2*/
+		<0x00D00000	0x50000>,	/*TOP_DP_NRFC1*/
+		<0x00D80000	0x30000>,	/*TOP_DP_NRFC2*/
+		<0x00DC0000	0x20000>,	/*TOP_DP_NRFC3*/
+		<0x00980000	0x38000>,	/*TOP_DP_VE*/
+		<0x00B90000	0x10000>,	/*TOP_DP_TFC*/
+		<0x00B80000	0x10000>,	/*TOP_DP_ROT*/
+		<0x005C0008	0x4>,		/*TOP_VID_PLL_PMS*/
+		<0x005C001C	0x4>,		/*TOP_VX1_PLL_PMS*/
+		<0x005C00F8	0x4>;		/*TOP_VID_CLK_MUX_SEL*/
+
+
+		interrupts              = <0 94 0>;
+		samsung,dp0             = <0 0X3A300000 0x3A00000>;      /* 58 Mbyte*/
+		samsung,dp1             = <0 0x79900000 0x3900000>;      /* 57 Mbyte*/
+		samsung,dp2             = <0 0x3DD00000 0x2200000>;      /* 34  Mbyte*/
+		samsung,dp3             = <0 0x7D200000 0x1400000>;      /* 20  Mbyte*/
+		samsung,cap_wry      	= <0 0xBD900000 0x400000>;        /*4 MB*/
+		samsung,cap_wrc		= <0 0xBDD00000 0x400000>;        /*4 MB*/
+		samsung,dp_enc_buf      = <0 0xBBA80000 0x680000>;       /*6.5 MB*/
+
+		samsung,dp_ttx_out      = <0 0x7EA00000 0x40000>;        /* 256KB */
+
+/*
+		clocks = <&disp_pclk_nr>,  <&disp_pclk_dcar>,  <&disp_pclk_ipc>,  <&disp_pclk_ucar>,  <&dp_scl_sub_clk>,   <&dp_scl_pclk>;
+		clock-names = "disp_pclk_nr", "disp_pclk_dcar", "disp_pclk_ipc", "disp_pclk_ucar", "dp_scl_sub_clk", "dp_scl_pclk";
+*/
+	};
+	sdp_dp_sub@0x00B71414 {
+		compatible = "samsung,sdp1511-sdp_dp_sub";
+		reg = <0x00B71414 0x4>;		/* AFE - OUT-PATH */
+	};
+	sdp_cvbsout@0x00B71414 {
+		compatible = "samsung,sdp1511-sdp_cvbsout";
+		reg = <0x00B71414 0x4>;		/* AFE - OUT-PATH */
+		};
+
+	drm {
+			compatible = "samsung,sdp-drm";
+	};
+
+	thermal@005c10c0 {
+		status = "okay";
+		compatible = "samsung,sdp-thermal";
+
+		reg = <0x005c10c0 0x30>;
+
+		start_cold_throttle	= <40>;
+		stop_cold_throttle	= <45>;
+		stop_1st_throttle	= <102>;
+		start_1st_throttle	= <110>;
+		stop_2nd_throttle	= <112>;
+		start_2nd_throttle	= <118>;
+		stop_3rd_throttle	= <120>;
+		start_3rd_throttle	= <125>;
+		start_3rd_hotplug	= <130>;
+
+		cpu_limit_1st_throttle	= <1000000>;
+		cpu_limit_2nd_throttle	= <700000>;
+		cpu_limit_3rd_throttle	= <100000>;
+
+		gpu_limit_1st_throttle	= <200000>;
+		gpu_limit_2nd_throttle	= <200000>;
+		gpu_limit_3rd_throttle	= <100000>;
+
+		log_file_path = "/rwarea/ThermalThrottle.txt";
+	};
+
+	sdp_mfc@0x00a40000 {
+		samsung,bus-mode = "2bus-a";
+		samsung,fw-name = "sdp_mfc/ucode-mfc.fw";
+		samsung,fw-size = <0x200000>;
+		/*
+		* FIXME
+		* maybe these addresses are configurable.
+		* if so, please remove them.
+		*/
+		samsung,dram-base-a = <0x0E800000>;
+		samsung,dram-base-b = <0x2AD00000>;
+		samsung,dram-size-a = <0x0C000000>;
+		samsung,dram-size-b = <0x10A00000>;
+		xmif_a_reg = <0x00F10700>;
+		xmif_b_reg = <0x00F20700>;
+		xmif_c_reg = <0x00F30700>;
+		xmif_d_reg = <0x00F40700>;
+	};
+
+	sdp_hen@0x00ac0000 {
+		samsung,fw-name = "sdp_hen/ucode-hen.fw";
+		samsung,fw-size = <0x100000>;
+		samsung,dram-base-a = <0xBB300000>;
+		samsung,dram-base-b = <0xBBA00000>;
+		samsung,src-base = <0xBBD80000>;
+	};
+
+	sdp_uddec@00b00000 {
+		samsung,bus-mode = "2bus-a";
+		samsung,dram-base-a = <0x6b400000>;
+		samsung,dram-base-b = <0x23000000>;
+	};
+
+	sdp_mmap {
+		compatible = "samsung,sdp-mmap";
+
+		/* DDR A */
+		dram-base-a = <0x01000000 0x1F000000>;
+		samsung,kernel0 = <0x0 0x1000000 0xD600000>;
+		samsung,se-tz = <0x0 0xE600000 0x200000>;
+		samsung,mfc-a = <0x0 0xE800000 0xC000000>;
+		samsung,dp-ttx-vbi = <0x0 0x1A800000 0x40000>;
+		samsung,avd = <0x0 0x1A840000 0x600000>;
+		samsung,tsd = <0x0 0x1AE40000 0x300000>;
+		samsung,pvr = <0x0 0x1B140000 0xE00000>;
+		samsung,hcas = <0x0 0x1BF40000 0x100000>;
+		samsung,chdec = <0x0 0x1C040000 0x880000>;
+		samsung,3dfy = <0x0 0x1C8C0000 0x3600000>;
+		samsung,align0 = <0x0 0x1FEC0000 0x40000>;
+		samsung,str = <0x0 0x1FF00000 0x100000>;
+
+		/* DDR B */
+		dram-base-b = <0x20000000 0x20000000>;
+		samsung,kernel1 = <0x0 0x20000000 0xAD00000>;
+		samsung,mfc-b = <0x0 0x2AD00000 0x10A00000>;
+		samsung,gfx0 = <0x0 0x3B700000 0x1000000>;
+		samsung,gfx1 = <0x0 0x3C700000 0x1000000>;
+		samsung,cursor = <0x0 0x3D700000 0x180000>;
+		samsung,3dc = <0x0 0x3D880000 0x500000>;
+		samsung,gdc = <0x0 0x3DD80000 0x500000>;
+		samsung,demura = <0x0 0x3DD80000 0x1D00000>;
+		samsung,emergency_log = <0x0 0x3FF80000 0x40000>;
+		samsung,align1 = <0x0 0x3FFC0000 0x40000>;
+
+		/* DDR C */
+		dram-base-c = <0x40000000 0x20000000>;
+		samsung,trust-zone = <0x0 0x40000000 0x4000000>;
+		samsung,trust-zone-shared = <0x0 0x44000000 0x500000>;
+		samsung,trust-zone-data = <0x0 0x44500000 0x0>;
+		samsung,ae0 = <0x0 0x44500000 0x1200000>;
+		samsung,align3 = <0x0 0x45700000 0x100000>;
+		samsung,kernel2 = <0x0 0x45800000 0xF200000>;
+		samsung,hen-a = <0x0 0x54A00000 0x700000>;
+		samsung,dp-enc = <0x0 0x55100000 0x680000>;
+		samsung,dp0 = <0x0 0x55780000 0x5400000>;
+		samsung,dp2 = <0x0 0x5AB80000 0x5400000>;
+		samsung,align2 = <0x0 0x5FF80000 0x80000>;
+
+		/* DDR D */
+		dram-base-d = <0x60000000 0x20000000>;
+		samsung,kernel3 = <0x0 0x60000000 0x11700000>;
+		samsung,hen-b = <0x0 0x71700000 0x380000>;
+		samsung,dp1 = <0x0 0x71A80000 0x5C00000>;
+		samsung,dp3 = <0x0 0x77680000 0x5C00000>;
+		samsung,memcmap = <0x0 0x7D280000 0x2D00000>;
+		samsung,align4 = <0x0 0x7FF80000 0x80000>;
+		
+		/* DDR E */
+		dram-base-e = <0x80000000 0x40000000>;
+		samsung,kernel4 = <0x0 0x80000000 0x39400000>;
+		samsung,memcy = <0x0 0xB9400000 0x1200000>;
+		samsung,memcc = <0x0 0xBA600000 0x1200000>;
+		samsung,3dfc = <0x0 0xBB800000 0x3600000>;
+		samsung,dp-cw-y = <0x0 0xBEE00000 0x400000>;
+		samsung,dp-cw-c = <0x0 0xBF200000 0x180000>;
+		samsung,dp-vt-y = <0x0 0xBF380000 0x800000>;
+		samsung,dp-vt-c = <0x0 0xBFB80000 0x400000>;
+		samsung,align5 = <0x0 0xBFF80000 0x80000>;
+		
+	};
+};

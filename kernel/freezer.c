@@ -18,6 +18,9 @@ EXPORT_SYMBOL(system_freezing_cnt);
 /* indicate whether PM freezing is in effect, protected by pm_mutex */
 bool pm_freezing;
 bool pm_nosig_freezing;
+#ifdef CONFIG_IOTMODE
+bool pm_iot_freezing;
+#endif
 
 /*
  * Temporary export for the deadlock workaround in ata_scsi_hotplug().
@@ -130,6 +133,7 @@ bool freeze_task(struct task_struct *p)
 	spin_unlock_irqrestore(&freezer_lock, flags);
 	return true;
 }
+EXPORT_SYMBOL(freeze_task);
 
 void __thaw_task(struct task_struct *p)
 {
@@ -146,6 +150,7 @@ void __thaw_task(struct task_struct *p)
 		wake_up_process(p);
 	spin_unlock_irqrestore(&freezer_lock, flags);
 }
+EXPORT_SYMBOL(__thaw_task);
 
 /**
  * set_freezable - make %current freezable

@@ -33,6 +33,7 @@
 #include <asm/div64.h>
 
 #include "dvb_demux.h"
+#include "dmxdev.h"
 
 #define NOBUFS
 /*
@@ -822,6 +823,24 @@ static int dvbdmx_allocate_ts_feed(struct dmx_demux *dmx,
 	return 0;
 }
 
+static int dvbdmx_add_ts_hdr_callback(struct dmx_demux *dmx,
+		struct dmx_ts_feed *ts_feed, dmx_ts_hdr_cb callback)
+{
+	struct dvb_demux *demux = (struct dvb_demux *)dmx;
+	struct dvb_demux_feed *feed;
+
+	if (mutex_lock_interruptible(&demux->mutex))
+		return -ERESTARTSYS;
+
+	feed = container_of(ts_feed, struct dvb_demux_feed, feed.ts);
+
+	feed->ts_hdr_cb = callback;
+
+	mutex_unlock(&demux->mutex);
+
+	return 0;
+}
+
 static int dvbdmx_release_ts_feed(struct dmx_demux *dmx,
 				  struct dmx_ts_feed *ts_feed)
 {
@@ -1235,6 +1254,20 @@ static int dvbdmx_get_pes_pids(struct dmx_demux *demux, u16 * pids)
 	return 0;
 }
 
+static bool dvbdmx_match_filter(struct dmx_section_feed *feed,
+				struct dmx_sct_filter_params *old_param,
+				struct dmx_sct_filter_params *new_param)
+{
+	/*
+	 * Default behavior: multiple sections at the same PID is not
+	 * supported, due to software filter current constraints
+	 */
+	if (new_param->pid == old_param->pid)
+		return true;
+
+	return false;
+}
+
 int dvb_dmx_init(struct dvb_demux *dvbdemux)
 {
 	int i;
@@ -1291,6 +1324,7 @@ int dvb_dmx_init(struct dvb_demux *dvbdemux)
 	dmx->close = dvbdmx_close;
 	dmx->write = dvbdmx_write;
 	dmx->allocate_ts_feed = dvbdmx_allocate_ts_feed;
+	dmx->add_ts_hdr_cb = dvbdmx_add_ts_hdr_callback;
 	dmx->release_ts_feed = dvbdmx_release_ts_feed;
 	dmx->allocate_section_feed = dvbdmx_allocate_section_feed;
 	dmx->release_section_feed = dvbdmx_release_section_feed;
@@ -1301,6 +1335,7 @@ int dvb_dmx_init(struct dvb_demux *dvbdemux)
 	dmx->connect_frontend = dvbdmx_connect_frontend;
 	dmx->disconnect_frontend = dvbdmx_disconnect_frontend;
 	dmx->get_pes_pids = dvbdmx_get_pes_pids;
+	dmx->match_filter = dvbdmx_match_filter;
 
 	mutex_init(&dvbdemux->mutex);
 	spin_lock_init(&dvbdemux->lock);

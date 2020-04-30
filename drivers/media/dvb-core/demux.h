@@ -31,6 +31,7 @@
 #include <linux/list.h>
 #include <linux/time.h>
 #include <linux/dvb/dmx.h>
+#include <linux/dvb/dmx_tztv.h>
 
 /*--------------------------------------------------------------------------*/
 /* Common definitions */
@@ -151,6 +152,13 @@ typedef int (*dmx_section_cb) (	const u8 * buffer1,
 				struct dmx_section_filter * source,
 				enum dmx_success success);
 
+typedef int (*dmx_ts_hdr_cb) (const u8 *buffer1,
+			      size_t buffer1_len,
+			      const u8 *buffer2,
+			      size_t buffer2_len,
+			      struct dmx_ts_feed *feed,
+			      enum dmx_success success);
+
 /*--------------------------------------------------------------------------*/
 /* DVB Front-End */
 /*--------------------------------------------------------------------------*/
@@ -188,6 +196,7 @@ struct dmx_frontend {
 #define DMX_MEMORY_BASED_FILTERING              8    /* write() available */
 #define DMX_CRC_CHECKING                        16
 #define DMX_TS_DESCRAMBLING                     32
+#define DMX_TS_HEADER_PARSER                    64
 
 /*
  * Demux resource type identifier.
@@ -209,9 +218,13 @@ struct dmx_demux {
 	int (*open) (struct dmx_demux* demux);
 	int (*close) (struct dmx_demux* demux);
 	int (*write) (struct dmx_demux* demux, const char __user *buf, size_t count);
+	int (*ioctl) (struct dmx_demux* demux, unsigned int cmd, void *parg);
 	int (*allocate_ts_feed) (struct dmx_demux* demux,
 				 struct dmx_ts_feed** feed,
 				 dmx_ts_cb callback);
+	int (*add_ts_hdr_cb) (struct dmx_demux* demux,
+				  struct dmx_ts_feed* feed,
+				  dmx_ts_hdr_cb callback);
 	int (*release_ts_feed) (struct dmx_demux* demux,
 				struct dmx_ts_feed* feed);
 	int (*allocate_section_feed) (struct dmx_demux* demux,
@@ -236,6 +249,20 @@ struct dmx_demux {
 
 	int (*get_stc) (struct dmx_demux* demux, unsigned int num,
 			u64 *stc, unsigned int *base);
+
+	int (*set_stc) (struct dmx_demux* demux, unsigned int num,
+			u64 stc, unsigned int base);
+
+	int (*get_status) (struct dmx_demux *demux,
+			struct dmx_status *dmx_status);
+
+	int (*get_pestype) (struct dmx_demux *demux,
+			struct dmx_pestype_info *info);
+			
+	int (*set_dvr_idx)(struct dmx_demux *demux, dvr_index_config_t *dvr_index);
+	bool (*match_filter)(struct dmx_section_feed *feed,
+				struct dmx_sct_filter_params *old_param,
+				struct dmx_sct_filter_params *new_param);
 };
 
 #endif /* #ifndef __DEMUX_H */

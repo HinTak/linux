@@ -34,6 +34,9 @@
 ENTRY(v7_invalidate_l1)
        mov     r0, #0
        mcr     p15, 2, r0, c0, c0, 0
+#ifdef CONFIG_ARCH_SDP1406       
+       isb
+#endif
        mrc     p15, 1, r0, c0, c0, 0
 
        ldr     r1, =0x7fff
@@ -56,6 +59,9 @@ ENTRY(v7_invalidate_l1)
        mov     r6, r2, lsl r0
        orr     r5, r5, r6      @ Reg = (Temp<<WayShift)|(NumSets<<SetShift)
        mcr     p15, 0, r5, c7, c6, 2
+#ifdef CONFIG_ARCH_SDP1406       
+       isb
+#endif
        bgt     2b
        cmp     r2, #0
        bgt     1b
@@ -75,7 +81,13 @@ ENDPROC(v7_invalidate_l1)
 ENTRY(v7_flush_icache_all)
 	mov	r0, #0
 	ALT_SMP(mcr	p15, 0, r0, c7, c1, 0)		@ invalidate I-cache inner shareable
+#ifdef CONFIG_ARCH_SDP1406	
+	ALT_SMP(isb)
+#endif	
 	ALT_UP(mcr	p15, 0, r0, c7, c5, 0)		@ I+BTB cache invalidate
+#ifdef CONFIG_ARCH_SDP1406	
+	ALT_UP(isb)
+#endif	
 	mov	pc, lr
 ENDPROC(v7_flush_icache_all)
 
@@ -155,6 +167,9 @@ loop2:
  THUMB(	lsl	r6, r7, r2		)
  THUMB(	orr	r11, r11, r6		)	@ factor index number into r11
 	mcr	p15, 0, r11, c7, c14, 2		@ clean & invalidate by set/way
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 	subs	r9, r9, #1			@ decrement the way
 	bge	loop2
 	subs	r7, r7, #1			@ decrement the index
@@ -188,7 +203,19 @@ ENTRY(v7_flush_kern_cache_all)
 	bl	v7_flush_dcache_all
 	mov	r0, #0
 	ALT_SMP(mcr	p15, 0, r0, c7, c1, 0)	@ invalidate I-cache inner shareable
+#ifdef CONFIG_ARCH_SDP1406	
+	ALT_SMP(isb)
+#endif
 	ALT_UP(mcr	p15, 0, r0, c7, c5, 0)	@ I+BTB cache invalidate
+#ifdef CONFIG_ARCH_SDP1406	
+	ALT_UP(isb)
+#endif
+#ifdef CONFIG_ARM_ERRATA_830077
+	mcr	p15, 0, lr, c7, c1, 0		@ dummy ICIMVA
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif	
+#endif
  ARM(	ldmfd	sp!, {r4-r5, r7, r9-r11, lr}	)
  THUMB(	ldmfd	sp!, {r4-r7, r9-r11, lr}	)
 	mov	pc, lr
@@ -206,7 +233,13 @@ ENTRY(v7_flush_kern_cache_louis)
 	bl	v7_flush_dcache_louis
 	mov	r0, #0
 	ALT_SMP(mcr	p15, 0, r0, c7, c1, 0)	@ invalidate I-cache inner shareable
+#ifdef CONFIG_ARCH_SDP1406	
+	ALT_SMP(isb)
+#endif	
 	ALT_UP(mcr	p15, 0, r0, c7, c5, 0)	@ I+BTB cache invalidate
+#ifdef CONFIG_ARCH_SDP1406	
+	ALT_UP(isb)
+#endif	
  ARM(	ldmfd	sp!, {r4-r5, r7, r9-r11, lr}	)
  THUMB(	ldmfd	sp!, {r4-r7, r9-r11, lr}	)
 	mov	pc, lr
@@ -279,6 +312,9 @@ ENTRY(v7_coherent_user_range)
 #endif
 1:
  USER(	mcr	p15, 0, r12, c7, c11, 1	)	@ clean D line to the point of unification
+#ifdef CONFIG_ARCH_SDP1406 
+ 	isb
+#endif
 	add	r12, r12, r2
 	cmp	r12, r1
 	blo	1b
@@ -288,12 +324,21 @@ ENTRY(v7_coherent_user_range)
 	bic	r12, r0, r3
 2:
  USER(	mcr	p15, 0, r12, c7, c5, 1	)	@ invalidate I line
+#ifdef CONFIG_ARCH_SDP1406
+ 	isb
+#endif
 	add	r12, r12, r2
 	cmp	r12, r1
 	blo	2b
 	mov	r0, #0
 	ALT_SMP(mcr	p15, 0, r0, c7, c1, 6)	@ invalidate BTB Inner Shareable
+#ifdef CONFIG_ARCH_SDP1406	
+	ALT_SMP(isb)
+#endif	
 	ALT_UP(mcr	p15, 0, r0, c7, c5, 6)	@ invalidate BTB
+#ifdef CONFIG_ARCH_SDP1406	
+	ALT_UP(isb)
+#endif
 	dsb
 	isb
 	mov	pc, lr
@@ -332,6 +377,9 @@ ENTRY(v7_flush_kern_dcache_area)
 #endif
 1:
 	mcr	p15, 0, r0, c7, c14, 1		@ clean & invalidate D line / unified line
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 	add	r0, r0, r2
 	cmp	r0, r1
 	blo	1b
@@ -359,12 +407,21 @@ v7_dma_inv_range:
 	ALT_UP(W(nop))
 #endif
 	mcrne	p15, 0, r0, c7, c14, 1		@ clean & invalidate D / U line
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 
 	tst	r1, r3
 	bic	r1, r1, r3
 	mcrne	p15, 0, r1, c7, c14, 1		@ clean & invalidate D / U line
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 1:
 	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D / U line
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif	
 	add	r0, r0, r2
 	cmp	r0, r1
 	blo	1b
@@ -387,6 +444,9 @@ v7_dma_clean_range:
 #endif
 1:
 	mcr	p15, 0, r0, c7, c10, 1		@ clean D / U line
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 	add	r0, r0, r2
 	cmp	r0, r1
 	blo	1b
@@ -409,6 +469,9 @@ ENTRY(v7_dma_flush_range)
 #endif
 1:
 	mcr	p15, 0, r0, c7, c14, 1		@ clean & invalidate D / U line
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 	add	r0, r0, r2
 	cmp	r0, r1
 	blo	1b

@@ -27,10 +27,20 @@
 #include <linux/rcupdate.h>
 #include <linux/audit.h>
 #include <linux/falloc.h>
+#ifdef CONFIG_FS_SEL_READAHEAD
+extern bool disk_name_from_dev(dev_t dev);
+#endif
 #include <linux/fs_struct.h>
 #include <linux/ima.h>
 #include <linux/dnotify.h>
 #include <linux/compat.h>
+
+/**
+* @brief Include Security Framework security operations
+* @author Maksym Koshel (m.koshel@samsung.com)
+* @date Sep 20, 2014
+*/
+#include <linux/sf_security.h>
 
 #include "internal.h"
 
@@ -466,6 +476,9 @@ static int chmod_common(struct path *path, umode_t mode)
 	struct inode *inode = path->dentry->d_inode;
 	struct iattr newattrs;
 	int error;
+#ifndef CONFIG_VD_RELEASE
+	const unsigned char *_name_;
+#endif
 
 	error = mnt_want_write(path->mnt);
 	if (error)
@@ -477,6 +490,13 @@ static int chmod_common(struct path *path, umode_t mode)
 	newattrs.ia_mode = (mode & S_IALLUGO) | (inode->i_mode & ~S_IALLUGO);
 	newattrs.ia_valid = ATTR_MODE | ATTR_CTIME;
 	error = notify_change(path->dentry, &newattrs);
+#ifndef CONFIG_VD_RELEASE
+	_name_ = path->dentry->d_name.name;
+	if (!strncmp(_name_, "umplock", 7))
+		pr_alert("[%s][%d],parent[%s][%d]:change permission of [%s] with[%o],"
+		 " UID[%d], GID[%d]\n", current->comm, current->pid, current->real_parent->comm,
+		  current->real_parent->pid, _name_, mode, inode->i_uid, inode->i_gid);
+#endif
 out_unlock:
 	mutex_unlock(&inode->i_mutex);
 	mnt_drop_write(path->mnt);
@@ -628,23 +648,12 @@ out:
 static inline int __get_file_write_access(struct inode *inode,
 					  struct vfsmount *mnt)
 {
-	int error;
-	error = get_write_access(inode);
+	int error = get_write_access(inode);
 	if (error)
 		return error;
-	/*
-	 * Do not take mount writer counts on
-	 * special files since no writes to
-	 * the mount itself will occur.
-	 */
-	if (!special_file(inode->i_mode)) {
-		/*
-		 * Balanced in __fput()
-		 */
-		error = __mnt_want_write(mnt);
-		if (error)
-			put_write_access(inode);
-	}
+	error = __mnt_want_write(mnt);
+	if (error)
+		put_write_access(inode);
 	return error;
 }
 
@@ -677,12 +686,11 @@ static int do_dentry_open(struct file *f,
 
 	path_get(&f->f_path);
 	inode = f->f_inode = f->f_path.dentry->d_inode;
-	if (f->f_mode & FMODE_WRITE) {
+	if (f->f_mode & FMODE_WRITE && !special_file(inode->i_mode)) {
 		error = __get_file_write_access(inode, f->f_path.mnt);
 		if (error)
 			goto cleanup_file;
-		if (!special_file(inode->i_mode))
-			file_take_write(f);
+		file_take_write(f);
 	}
 
 	f->f_mapping = inode->i_mapping;
@@ -696,6 +704,15 @@ static int do_dentry_open(struct file *f,
 	f->f_op = fops_get(inode->i_fop);
 
 	error = security_file_open(f, cred);
+	if (error)
+		goto cleanup_all;
+
+	/**
+	* @brief Call of the Security Framework routine for file open
+	* @author Maksym Koshel (m.koshel@samsung.com)
+	* @date Sep 20, 2014
+	*/
+	error = sf_security_file_open(f, cred);
 	if (error)
 		goto cleanup_all;
 
@@ -716,6 +733,25 @@ static int do_dentry_open(struct file *f,
 	f->f_flags &= ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC);
 
 	file_ra_state_init(&f->f_ra, f->f_mapping->host->i_mapping);
+#ifdef CONFIG_BD_CACHE_ENABLED
+	if(f->f_flags & O_BDCACHE) {
+		printk(KERN_DEBUG "setting ra to 128 pages\n");
+		f->f_ra.ra_pages = BD_VM_MAX_READAHEAD_PAGES; 
+	}
+#endif
+
+#ifdef CONFIG_FS_SEL_READAHEAD
+	if (S_ISCHR(f->f_path.dentry->d_inode->i_mode) ||
+	    S_ISFIFO(f->f_path.dentry->d_inode->i_mode)) {
+		f->f_ra.state = NULL;
+	} else if (S_ISBLK(f->f_path.dentry->d_inode->i_mode)) {
+		f->f_ra.state =
+		disk_name_from_dev(f->f_path.dentry->d_inode->i_rdev);
+	} else {
+		f->f_ra.state =
+		disk_name_from_dev(f->f_path.mnt->mnt_sb->s_dev);
+	}
+#endif
 
 	return 0;
 
@@ -723,7 +759,6 @@ cleanup_all:
 	fops_put(f->f_op);
 	file_sb_list_del(f);
 	if (f->f_mode & FMODE_WRITE) {
-		put_write_access(inode);
 		if (!special_file(inode->i_mode)) {
 			/*
 			 * We don't consider this a real
@@ -731,6 +766,7 @@ cleanup_all:
 			 * because it all happenend right
 			 * here, so just reset the state.
 			 */
+			put_write_access(inode);
 			file_reset_write(f);
 			__mnt_drop_write(f->f_path.mnt);
 		}
@@ -946,6 +982,10 @@ long do_sys_open(int dfd, const char __user *filename, int flags, umode_t mode)
 			} else {
 				fsnotify_open(f);
 				fd_install(fd, f);
+#ifdef CONFIG_BD_CACHE_ENABLED
+				if(f->f_flags & O_BDCACHE)          
+					set_bit(AS_DIRECT, &f->f_mapping->flags);       
+#endif
 			}
 		}
 		putname(tmp);

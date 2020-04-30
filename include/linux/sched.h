@@ -53,7 +53,13 @@ struct sched_param {
 #include <linux/uidgid.h>
 #include <linux/gfp.h>
 
+#include <asm/local.h>
+
 #include <asm/processor.h>
+
+#ifdef CONFIG_SMART_DEADLOCK
+#include <linux/smart-deadlock.h>
+#endif
 
 struct exec_domain;
 struct futex_pi_state;
@@ -102,7 +108,12 @@ extern unsigned long nr_running(void);
 extern unsigned long nr_iowait(void);
 extern unsigned long nr_iowait_cpu(int cpu);
 extern unsigned long this_cpu_load(void);
-
+#ifdef CONFIG_SCHED_HMP
+extern unsigned long nr_running_cpu(unsigned int cpu);
+extern int register_hmp_task_migration_notifier(struct notifier_block *nb);
+#define HMP_UP_MIGRATION       0
+#define HMP_DOWN_MIGRATION     1
+#endif
 
 extern void calc_global_load(unsigned long ticks);
 extern void update_cpu_load_nohz(void);
@@ -128,6 +139,10 @@ extern void proc_sched_set_task(struct task_struct *p);
 extern void
 print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq);
 #endif
+
+#define VMACACHE_BITS 2
+#define VMACACHE_SIZE (1U << VMACACHE_BITS)
+#define VMACACHE_MASK (VMACACHE_SIZE - 1)
 
 /*
  * Task state bitmask. NOTE! These bits are also
@@ -258,6 +273,21 @@ extern void show_regs(struct pt_regs *);
  * trace (or NULL if the entire call-chain of the task should be shown).
  */
 extern void show_stack(struct task_struct *task, unsigned long *sp);
+
+extern int find_match_elf_name(struct task_struct *t, char *name,
+		unsigned long addr);
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+extern void show_pid_maps(struct task_struct *task);
+extern void show_user_stack(struct task_struct *task, struct pt_regs * regs);
+#ifdef CONFIG_ARM
+extern void dump_info(struct task_struct *task, struct pt_regs *regs, unsigned long addr);
+#elif defined(CONFIG_MIPS)
+extern void dump_info(struct task_struct *task, struct pt_regs * regs);
+#endif
+extern void dump_mem_kernel(const char *str, unsigned long bottom, unsigned long top);
+#endif
+extern void set_flag_block_sigkill(struct task_struct *task, int sig);
+extern void clear_flag_block_sigkill(struct task_struct *task);
 
 void io_schedule(void);
 long io_schedule_timeout(long timeout);
@@ -480,6 +510,7 @@ struct signal_struct {
 	atomic_t		sigcnt;
 	atomic_t		live;
 	int			nr_threads;
+	struct list_head	thread_head;
 
 	wait_queue_head_t	wait_chldexit;	/* for wait4() */
 
@@ -617,10 +648,23 @@ struct signal_struct {
 	short oom_score_adj;		/* OOM kill score adjustment */
 	short oom_score_adj_min;	/* OOM kill score adjustment min value.
 					 * Only settable by CAP_SYS_RESOURCE. */
+#ifdef CONFIG_SLP_LOWMEM_NOTIFY_PRELOAD
+	unsigned int preload_prio;	/* Preloaded app priority */
+	bool oom_adj_locked;		/* Prevents changing oom_adj and
+					 * oom_score_adj if set */
+#endif
+
+#ifdef CONFIG_LMK_PRELOAD_APP
+	unsigned int lmk_preload_prio;
+	unsigned long lmk_background_time;
+#endif
 
 	struct mutex cred_guard_mutex;	/* guard against foreign influences on
 					 * credential calculations
 					 * (notably. ptrace) */
+#ifdef CONFIG_SLP_LOWMEM_NOTIFY_VIPAPP
+	int vip_app;
+#endif
 };
 
 /*
@@ -639,6 +683,15 @@ struct signal_struct {
 
 #define SIGNAL_UNKILLABLE	0x00000040 /* for init: ignore fatal signals */
 
+#ifdef CONFIG_COREDUMP_SIGKILL_BLOCKED
+#define SIGNAL_GROUP_BLOCK_SIGKILL 0x00000080 /*Block SIGKILL*/
+#else
+#define SIGNAL_GROUP_BLOCK_SIGKILL 0x00000000 /*Block SIGKILL*/
+#endif
+
+#define signal_block_sigkill(tsk) \
+		(tsk->signal->flags & \
+		(SIGNAL_GROUP_BLOCK_SIGKILL | SIGNAL_GROUP_COREDUMP))
 /* If true, all threads except ->group_exit_task have pending SIGKILL */
 static inline int signal_group_exit(const struct signal_struct *sig)
 {
@@ -783,6 +836,10 @@ enum cpu_idle_type {
 #define SD_PREFER_SIBLING	0x1000	/* Prefer to place tasks in a sibling domain */
 #define SD_OVERLAP		0x2000	/* sched_domains of this level overlap */
 
+#ifdef CONFIG_VD_HMP
+#define SD_HMP_BALANCE		0x4000	/* Use HMP load balancing algorithm */
+#endif
+
 extern int __weak arch_sd_sibiling_asym_packing(void);
 
 struct sched_domain_attr {
@@ -825,6 +882,13 @@ struct sched_domain {
 
 	u64 last_update;
 
+#ifdef CONFIG_VD_HMP
+	struct sched_group *a15_group;
+	struct sched_group *a7_group;
+
+	struct sched_group *primary_group;
+	struct sched_group *secondary_group;
+#endif
 #ifdef CONFIG_SCHEDSTATS
 	/* load_balance() stats */
 	unsigned int lb_count[CPU_MAX_IDLE_TYPES];
@@ -889,6 +953,30 @@ void free_sched_domains(cpumask_var_t doms[], unsigned int ndoms);
 
 bool cpus_share_cache(int this_cpu, int that_cpu);
 
+#ifdef CONFIG_SCHED_HMP
+struct hmp_domain {
+	struct cpumask cpus;
+	struct cpumask possible_cpus;
+	struct list_head hmp_domains;
+};
+
+extern int set_hmp_boost(int enable);
+extern int set_hmp_semiboost(int enable);
+extern int set_hmp_boostpulse(int duration);
+#ifdef CONFIG_HMP_VARIABLE_SCALE
+extern int set_hmp_boostpulse_duration(int duration);
+extern int touch_hmp_boost(void);
+extern int get_hmp_boostpulse_duration(void);
+extern int get_hmp_boost_val(void);
+#endif
+extern int get_hmp_boost(void);
+extern int get_hmp_semiboost(void);
+extern int set_hmp_up_threshold(int value);
+extern int set_hmp_down_threshold(int value);
+extern int set_active_down_migration(int enable);
+extern int set_hmp_aggressive_up_migration(int enable);
+extern int set_hmp_aggressive_yield(int enable);
+#endif /* CONFIG_SCHED_HMP */
 #else /* CONFIG_SMP */
 
 struct sched_domain_attr;
@@ -935,6 +1023,12 @@ struct sched_avg {
 	u64 last_runnable_update;
 	s64 decay_count;
 	unsigned long load_avg_contrib;
+	unsigned long load_avg_ratio;
+#ifdef CONFIG_SCHED_HMP
+	u64 hmp_last_up_migration;
+	u64 hmp_last_down_migration;
+#endif
+	u32 usage_avg_sum;
 };
 
 #ifdef CONFIG_SCHEDSTATS
@@ -979,6 +1073,15 @@ struct sched_entity {
 	struct list_head	group_node;
 	unsigned int		on_rq;
 
+#ifdef CONFIG_VD_HMP
+	long			druntime;
+
+	/* Time of last migration between HMP domains (in jiffies)*/
+	unsigned long		last_migration;
+
+	/* If set, don't touch for migration */
+	int			migrate_candidate;
+#endif
 	u64			exec_start;
 	u64			sum_exec_runtime;
 	u64			vruntime;
@@ -1034,6 +1137,30 @@ enum perf_event_task_context {
 	perf_sw_context,
 	perf_nr_task_contexts,
 };
+
+#ifdef CONFIG_MUPT_TRACE
+struct mupt_interface {
+	/* Current MUPT counter values for VMAG_XXX Index. */
+	int curr_mupt[VMAG_CNT];
+	/* Maximum MUPT counter values for VMAG_XXX Index. */
+	int max_mupt[VMAG_CNT];
+	/* Struct for terminate thread accounting info. */
+	struct terminate_thread_struct *tt_info;
+};
+
+struct mupt_expose_struct {
+	/* MUPT entry / exit function pointers. */
+	void (*mupt_entry_func) (struct task_struct *tsk);
+	void (*mupt_exit_func) (struct task_struct *tsk);
+	/* Counter increment / decrement function pointers. */
+	void (*mupt_inc_ctr) (struct vm_area_struct *vma, struct page *page,
+		unsigned long addr, int value);
+	void (*mupt_dec_ctr) (struct vm_area_struct *vma, struct page *page,
+		unsigned long addr, int value);
+	/* Dead thread accounting func pointer. */
+	void (*mupt_terminate_thread) (struct task_struct *tsk);
+};
+#endif
 
 struct task_struct {
 	volatile long state;	/* -1 unrunnable, 0 runnable, >0 stopped */
@@ -1104,6 +1231,9 @@ struct task_struct {
 #ifdef CONFIG_COMPAT_BRK
 	unsigned brk_randomized:1;
 #endif
+	/* per-thread vma caching */
+	u32 vmacache_seqnum;
+	struct vm_area_struct *vmacache[VMACACHE_SIZE];
 #if defined(SPLIT_RSS_COUNTING)
 	struct task_rss_stat	rss_stat;
 #endif
@@ -1160,6 +1290,7 @@ struct task_struct {
 	/* PID/PID hash table linkage. */
 	struct pid_link pids[PIDTYPE_MAX];
 	struct list_head thread_group;
+	struct list_head thread_node;
 
 	struct completion *vfork_done;		/* for vfork() */
 	int __user *set_child_tid;		/* CLONE_CHILD_SETTID */
@@ -1380,6 +1511,11 @@ struct task_struct {
 	unsigned long timer_slack_ns;
 	unsigned long default_timer_slack_ns;
 
+	/* VDLinux, based VDLP.Mstar default patch No.5,show fault user stack, 2010-01-29 */
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+	unsigned long user_ssp;  /* user mode start sp */
+#endif
+
 #ifdef CONFIG_FUNCTION_GRAPH_TRACER
 	/* Index of current stored address in ret_stack */
 	int curr_ret_stack;
@@ -1419,6 +1555,35 @@ struct task_struct {
 #if defined(CONFIG_BCACHE) || defined(CONFIG_BCACHE_MODULE)
 	unsigned int	sequential_io;
 	unsigned int	sequential_io_avg;
+#endif
+#ifdef CONFIG_CMA_APP_ALLOC
+	bool cma_alloc;
+#endif
+#ifdef CONFIG_MUPT_TRACE
+	struct mupt_interface *mupt;
+#endif
+
+#ifdef CONFIG_SMART_DEADLOCK
+       struct smart_deadlock_task sm_tsk;
+#endif
+
+// jason77.lee@samsung.com
+#ifdef CONFIG_SECURITY_SFD_SECURECONTAINER
+	int uepLevel;
+#endif // CONFIG_SECURITY_SFD_SECURECONTAINER
+
+/*
+ * ALWAYS KEEP KASAN at the bottom. So we can enable/disable
+ * KASAN without the need of recompiling all the external
+ * modules.
+ */
+#ifdef CONFIG_KASAN
+	int kasan_depth;
+
+# ifdef CONFIG_KASAN_UAR
+	local_t kasan_fake_sp;
+	int kasan_uar_off;
+# endif
 #endif
 };
 
@@ -1642,6 +1807,9 @@ extern void thread_group_cputime_adjusted(struct task_struct *p, cputime_t *ut, 
 #define PF_MEMPOLICY	0x10000000	/* Non-default NUMA mempolicy */
 #define PF_MUTEX_TESTER	0x20000000	/* Thread belongs to the rt mutex tester */
 #define PF_FREEZER_SKIP	0x40000000	/* Freezer should not count it as freezable */
+#ifdef CONFIG_IOTMODE
+#define PF_IOT_FLAG     0x80000000      /* I am an IoT thread */
+#endif
 
 /*
  * Only the _current_ task can read/write to tsk->flags, but other
@@ -2166,6 +2334,16 @@ extern bool current_is_single_threaded(void);
 
 #define while_each_thread(g, t) \
 	while ((t = next_thread(t)) != g)
+
+#define __for_each_thread(signal, t)	\
+	list_for_each_entry_rcu(t, &(signal)->thread_head, thread_node)
+
+#define for_each_thread(p, t)		\
+	__for_each_thread((p)->signal, t)
+
+/* Careful: this is a double loop, 'break' won't work as expected. */
+#define for_each_process_thread(p, t)	\
+	for_each_process(p) for_each_thread(p, t)
 
 static inline int get_nr_threads(struct task_struct *tsk)
 {

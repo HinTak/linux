@@ -763,7 +763,11 @@ int drm_crtc_helper_set_config(struct drm_mode_set *set)
 			for (i = 0; i < set->num_connectors; i++) {
 				DRM_DEBUG_KMS("\t[CONNECTOR:%d:%s] set DPMS on\n", set->connectors[i]->base.id,
 					      drm_get_connector_name(set->connectors[i]));
+#if defined(CONFIG_ARCH_SDP) && defined(CONFIG_PLAT_TIZEN)
+				DRM_DEBUG_KMS("Setting skip DPMS for SDC Panel\n");
+#else
 				set->connectors[i]->funcs->dpms(set->connectors[i], DRM_MODE_DPMS_ON);
+#endif
 			}
 		}
 		drm_helper_disable_unused_functions(dev);

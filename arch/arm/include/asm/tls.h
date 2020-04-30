@@ -7,8 +7,14 @@
 
 	.macro set_tls_v6k, tp, tmp1, tmp2
 	mcr	p15, 0, \tp, c13, c0, 3		@ set TLS register
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 	mov	\tmp1, #0
 	mcr	p15, 0, \tmp1, c13, c0, 2	@ clear user r/w TLS register
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 	.endm
 
 	.macro set_tls_v6, tp, tmp1, tmp2

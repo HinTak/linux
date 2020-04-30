@@ -21,6 +21,10 @@
 #include <linux/pid_namespace.h>
 #include <linux/parser.h>
 
+#ifdef CONFIG_FS_SEL_READAHEAD
+extern void readahead_init(void);
+#endif
+
 #include "internal.h"
 
 static int proc_test_super(struct super_block *sb, void *data)
@@ -165,6 +169,10 @@ void __init proc_root_init(void)
 		return;
 
 	proc_self_init();
+
+#ifdef CONFIG_DEFERRED_INITCALL
+	proc_create("deferred_initcalls", 0, NULL, &deferred_initcalls_fops);
+#endif
 	proc_symlink("mounts", NULL, "self/mounts");
 
 	proc_net_init();
@@ -263,6 +271,12 @@ int pid_ns_prepare_proc(struct pid_namespace *ns)
 		return PTR_ERR(mnt);
 
 	ns->proc_mnt = mnt;
+
+	/* intialize readahead state */
+	#ifdef CONFIG_FS_SEL_READAHEAD
+	readahead_init();
+	#endif
+
 	return 0;
 }
 

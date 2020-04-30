@@ -6,7 +6,10 @@
 #include <asm/exec.h>
 #include <uapi/linux/binfmts.h>
 
-#define CORENAME_MAX_SIZE 128
+/* For Tizen the mincore path name is increased,
+ * to accomadate that we have increased the buffer size
+ */
+#define CORENAME_MAX_SIZE 179
 
 /*
  * This structure is used to hold the arguments that are used when loading binaries.

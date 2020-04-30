@@ -1,0 +1,34 @@
+menu "CI+ Option"
+
+config PROHIBIT_DEVMEM
+		bool "prohibit access to /dev/mem and /dev/kmem"
+		default n 
+		help
+		  It will prevent to access to /dev/mem and /dev/kmem for security issue.
+
+config PROHIBIT_GROUP_SETUID
+		bool "prohibit setuid operation for preventing privilege rise"
+		default n
+		help
+		  It will prevent to setuid implementation for security issue.
+
+config USE_ARS
+    bool "Anit RemoteShell Dummy function"
+    default n
+
+config PNACL
+    bool "Modification for PNaCl"
+    default n
+
+config BOOTLOADER_ERASE
+	bool "erase bootloader in memory"
+	default n
+	help
+		During kernel initialization, onboot will be erased in memory
+config BOOTLOADER_SIZE
+	hex "bootloader size"
+	default 0x20000
+	depends on BOOTLOADER_ERASE
+	help
+		erase bootloader size
+endmenu # end of "CI+ Option" menu

@@ -28,4 +28,9 @@ obj-$(CONFIG_CLKSRC_EXYNOS_MCT)	+= exynos_mct.o
 obj-$(CONFIG_CLKSRC_SAMSUNG_PWM)	+= samsung_pwm_timer.o
 
 obj-$(CONFIG_ARM_ARCH_TIMER)		+= arm_arch_timer.o
+ifeq ($(CONFIG_ARCH_NVT_V7),y)
+obj-$(CONFIG_ARM_GLOBAL_TIMER)		+= arm_global_timer.o
+endif
 obj-$(CONFIG_CLKSRC_METAG_GENERIC)	+= metag_generic.o
+obj-$(CONFIG_CLKSRC_SDP_TIMER)	+= sdp-timer.o
+obj-$(CONFIG_CLKSRC_SDP12XX_TIMER) += sdp12xx_timer.o

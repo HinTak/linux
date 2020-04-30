@@ -142,7 +142,7 @@ struct task_group {
 
 	atomic_t load_weight;
 	atomic64_t load_avg;
-	atomic_t runnable_avg;
+	atomic_t runnable_avg, usage_avg;
 #endif
 
 #ifdef CONFIG_RT_GROUP_SCHED
@@ -279,7 +279,7 @@ struct cfs_rq {
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 /* These always depend on CONFIG_FAIR_GROUP_SCHED */
 #ifdef CONFIG_FAIR_GROUP_SCHED
-	u32 tg_runnable_contrib;
+	u32 tg_runnable_contrib, tg_usage_contrib;
 	u64 tg_load_contrib;
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 
@@ -293,7 +293,9 @@ struct cfs_rq {
 #endif /* CONFIG_SMP */
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
+	unsigned long magic1;
 	struct rq *rq;	/* cpu runqueue to which this cfs_rq is attached */
+	unsigned long magic2;
 
 	/*
 	 * leaf cfs_rqs are those that hold tasks (lowest schedulable entity in
@@ -443,6 +445,14 @@ struct rq {
 	 */
 	unsigned long nr_uninterruptible;
 
+#ifdef CONFIG_VD_HMP
+	struct task_struct *migrate_task; /* task from this rq for migration */
+
+	/* shows the amount of accumulated unfairness by tasks of this rq */
+	long druntime_sum;
+	unsigned int nr_hmp_tasks;
+	struct cpu_stop_work hmp_policy_switch_work;
+#endif
 	struct task_struct *curr, *idle, *stop;
 	unsigned long next_balance;
 	struct mm_struct *prev_mm;
@@ -464,6 +474,9 @@ struct rq {
 	int active_balance;
 	int push_cpu;
 	struct cpu_stop_work active_balance_work;
+#ifdef CONFIG_SCHED_HMP
+	struct task_struct *migrate_task;
+#endif
 	/* cpu of this runqueue: */
 	int cpu;
 	int online;
@@ -641,6 +654,29 @@ static inline unsigned int group_first_cpu(struct sched_group *group)
 }
 
 extern int group_balance_cpu(struct sched_group *sg);
+
+#ifdef CONFIG_SCHED_HMP
+static LIST_HEAD(hmp_domains);
+DECLARE_PER_CPU(struct hmp_domain *, hmp_cpu_domain);
+#define hmp_cpu_domain(cpu)	(per_cpu(hmp_cpu_domain, (cpu)))
+#endif /* CONFIG_SCHED_HMP */
+
+#ifdef CONFIG_VD_HMP
+extern struct cpumask *cpu_fastest_mask;
+extern struct cpumask *cpu_slowest_mask;
+extern struct cpumask *cpu_primary_mask;
+extern struct cpumask *cpu_secondary_mask;
+
+static inline bool cpu_is_fastest(int cpu)
+{
+	return cpumask_test_cpu(cpu, cpu_fastest_mask);
+}
+
+static inline bool cpu_is_primary(int cpu)
+{
+	return cpumask_test_cpu(cpu, cpu_primary_mask);
+}
+#endif
 
 #endif /* CONFIG_SMP */
 

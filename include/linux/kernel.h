@@ -792,4 +792,19 @@ static inline void ftrace_dump(enum ftrace_dump_mode oops_dump_mode) { }
 # define REBUILD_DUE_TO_FTRACE_MCOUNT_RECORD
 #endif
 
+#ifdef CONFIG_DTVLOGD
+/* Add for DTVLOGD */
+extern int do_dtvlog(int type, const char __user *buf, int len);
+/* functions required for saving logs during coredump */
+#ifdef CONFIG_BINFMT_ELF_COMP
+extern void dtvlogd_write_start(void);
+extern void dtvlogd_write_stop(void);
+extern int acquire_dtvlogd_buffer(char **buf1, int *len1,
+		char **buf2, int *len);
+extern int acquire_dtvlogd_all_buffer(char **buf1, int *len1,
+		char **buf2, int *len);
+extern int get_dtvlogd_max_length(void);
+
+#endif
+#endif
 #endif

@@ -571,6 +571,31 @@ void iterate_supers_type(struct file_system_type *type,
 
 EXPORT_SYMBOL(iterate_supers_type);
 
+
+/**
+ *  lock_supers - call function forlock of superblocks 
+ */
+void lock_supers(void)
+{
+        struct super_block *sb;
+        spin_lock(&sb_lock);
+        list_for_each_entry(sb, &super_blocks, s_list) {
+                if (hlist_unhashed(&sb->s_instances))
+		    continue;
+                sb->s_count++;
+                spin_unlock(&sb_lock);
+
+                if(strstr(sb->s_type->name,"vdfs")!=0)
+                        down_write(&sb->s_umount);
+
+                spin_lock(&sb_lock);
+        }
+        spin_unlock(&sb_lock);
+}
+
+EXPORT_SYMBOL(lock_supers);
+
+
 /**
  *	get_super - get the superblock of a device
  *	@bdev: device to get the superblock for
@@ -941,7 +966,24 @@ static int test_bdev_super(struct super_block *s, void *data)
 {
 	return (void *)s->s_bdev == data;
 }
-
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+// added by kks, using hotplug with umount & mount
+static void bdev_uevent(struct block_device *bdev, enum kobject_action action)
+{
+        if (bdev->bd_disk) {
+                if (bdev->bd_part)
+                {
+                        kobject_uevent(&bdev->bd_part->__dev.kobj, action);
+                        //KKS_DEBUG("~~kks test : bdev_uevent partition : %s\n",(action==7)?"mount":"umount");
+                        }
+                else
+                {
+                        kobject_uevent(&bdev->bd_disk->driverfs_dev->kobj, action);
+                        //KKS_DEBUG("~~kks test : bdev_uevent disk : %s\n", (action==7)?"mount":"umount" );
+                        }
+        }
+}
+#endif
 struct dentry *mount_bdev(struct file_system_type *fs_type,
 	int flags, const char *dev_name, void *data,
 	int (*fill_super)(struct super_block *, void *, int))
@@ -1006,6 +1048,9 @@ struct dentry *mount_bdev(struct file_system_type *fs_type,
 
 		s->s_flags |= MS_ACTIVE;
 		bdev->bd_super = s;
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+                bdev_uevent(bdev, KOBJ_MOUNT); // added by kks, using hotplug with mount
+#endif
 	}
 
 	return dget(s->s_root);
@@ -1025,6 +1070,9 @@ void kill_block_super(struct super_block *sb)
 	fmode_t mode = sb->s_mode;
 
 	bdev->bd_super = NULL;
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+        bdev_uevent(bdev, KOBJ_UMOUNT); //added by kks, using hotplug with umount
+#endif
 	generic_shutdown_super(sb);
 	sync_blockdev(bdev);
 	WARN_ON_ONCE(!(mode & FMODE_EXCL));

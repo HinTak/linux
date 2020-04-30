@@ -51,6 +51,11 @@ extern unsigned int sysctl_numa_balancing_scan_period_reset;
 extern unsigned int sysctl_numa_balancing_scan_size;
 extern unsigned int sysctl_numa_balancing_settle_count;
 
+#ifdef CONFIG_VD_HMP
+extern unsigned int sysctl_sched_vd_hmp_log_level;
+extern unsigned int sysctl_sched_vd_hmp_policy;
+#endif /* CONFIG_VD_HMP */
+
 #ifdef CONFIG_SCHED_DEBUG
 extern unsigned int sysctl_sched_migration_cost;
 extern unsigned int sysctl_sched_nr_migrate;
