@@ -2157,7 +2157,7 @@ static int dm_any_congested(void *congested_data, int bdi_bits)
 			 * the query about congestion status of request_queue
 			 */
 			if (dm_request_based(md))
-				r = md->queue->backing_dev_info.state &
+				r = md->queue->backing_dev_info->state &
 				    bdi_bits;
 			else
 				r = dm_table_any_congested(map, bdi_bits);
@@ -2244,8 +2244,8 @@ static void dm_init_old_md_queue(struct mapped_device *md)
 	 * Initialize aspects of queue that aren't relevant for blk-mq
 	 */
 	md->queue->queuedata = md;
-	md->queue->backing_dev_info.congested_fn = dm_any_congested;
-	md->queue->backing_dev_info.congested_data = md;
+	md->queue->backing_dev_info->congested_fn = dm_any_congested;
+	md->queue->backing_dev_info->congested_data = md;
 
 	blk_queue_bounce_limit(md->queue, BLK_BOUNCE_ANY);
 }

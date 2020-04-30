@@ -131,8 +131,13 @@ static void __init init_port(struct earlycon_device *device)
 	serial8250_early_out(port, UART_LCR, c & ~UART_LCR_DLAB);
 }
 
+#ifdef CONFIG_MTK_KERNEL_SOLUTION
+int __init early_serial8250_setup(struct earlycon_device *device,
+					 const char *options)
+#else
 static int __init early_serial8250_setup(struct earlycon_device *device,
 					 const char *options)
+#endif
 {
 	if (!(device->port.membase || device->port.iobase))
 		return -ENODEV;

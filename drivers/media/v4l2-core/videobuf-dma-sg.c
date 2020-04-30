@@ -617,7 +617,7 @@ static int __videobuf_mmap_mapper(struct videobuf_queue *q,
 
 	/* create mapping + update buffer list */
 	retval = -ENOMEM;
-	map = kmalloc(sizeof(struct videobuf_mapping), GFP_KERNEL);
+	map = kzalloc(sizeof(struct videobuf_mapping), GFP_KERNEL);
 	if (NULL == map)
 		goto done;
 
@@ -636,7 +636,7 @@ static int __videobuf_mmap_mapper(struct videobuf_queue *q,
 	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
 	vma->vm_flags &= ~VM_IO; /* using shared anonymous pages */
 	vma->vm_private_data = map;
-	dprintk(1, "mmap %p: q=%p %08lx-%08lx pgoff %08lx bufs %d-%d\n",
+	dprintk(1, "mmap %p: q=%p %08lx-%08lx pgoff %08lx bufs %u-%u\n",
 		map, q, vma->vm_start, vma->vm_end, vma->vm_pgoff, first, last);
 	retval = 0;
 

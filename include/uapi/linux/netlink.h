@@ -27,6 +27,9 @@
 #define NETLINK_ECRYPTFS	19
 #define NETLINK_RDMA		20
 #define NETLINK_CRYPTO		21	/* Crypto layer */
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+#define NETLINK_SMDL_DAEMON	22	/*SMDL - LLDB communication*/ 	
+#endif
 
 #define NETLINK_INET_DIAG	NETLINK_SOCK_DIAG
 

@@ -22,6 +22,8 @@
 #include <linux/memblock.h>
 #include <linux/dma-contiguous.h>
 #include <linux/sizes.h>
+#include <linux/kasan.h>
+#include <linux/bitops.h>
 
 #include <asm/cp15.h>
 #include <asm/mach-types.h>
@@ -273,6 +275,8 @@ void __init arm_memblock_init(const struct machine_desc *mdesc)
 	/* reserve memory for DMA contiguous allocations */
 	dma_contiguous_reserve(arm_dma_limit);
 
+	kasan_alloc_shadow();
+
 	arm_memblock_steal_permitted = false;
 	memblock_dump_all();
 }
@@ -409,10 +413,24 @@ static void __init free_unused_memmap(void)
 }
 
 #ifdef CONFIG_HIGHMEM
-static inline void free_area_high(unsigned long pfn, unsigned long end)
+static __init void free_area_high(unsigned long pfn, unsigned long end)
 {
-	for (; pfn < end; pfn++)
-		free_highmem_page(pfn_to_page(pfn));
+	while (pfn < end) {
+		struct page *page = pfn_to_page(pfn);
+		unsigned long order = min(__ffs(pfn), (unsigned long) MAX_ORDER - 1);
+		unsigned long nr_pages = 1 << order;
+		unsigned long rem = end - pfn;
+
+		if (nr_pages > rem) {
+			order = __fls(rem);
+			nr_pages = 1 << order;
+		}
+
+		totalram_pages += nr_pages;
+		totalhigh_pages += nr_pages;
+		__free_pages_bootmem(page, order);
+		pfn += nr_pages;
+	}
 }
 #endif
 
@@ -609,8 +627,8 @@ static struct section_perm ro_perms[] = {
 		.start  = (unsigned long)_stext,
 		.end    = (unsigned long)__init_begin,
 #ifdef CONFIG_ARM_LPAE
-		.mask   = ~L_PMD_SECT_RDONLY,
-		.prot   = L_PMD_SECT_RDONLY,
+		.mask   = ~(L_PMD_SECT_RDONLY | PMD_SECT_AP2),
+		.prot   = L_PMD_SECT_RDONLY | PMD_SECT_AP2,
 #else
 		.mask   = ~(PMD_SECT_APX | PMD_SECT_AP_WRITE),
 		.prot   = PMD_SECT_APX | PMD_SECT_AP_WRITE,

@@ -24,6 +24,8 @@
 #include <linux/vmalloc.h>
 #include <linux/lz4.h>
 
+#define KB (1 << 10)
+
 struct lz4_ctx {
 	void *lz4_comp_mem;
 };
@@ -52,7 +54,10 @@ static int lz4_compress_crypto(struct crypto_tfm *tfm, const u8 *src,
 	size_t tmp_len = *dlen;
 	int err;
 
-	err = lz4_compress(src, slen, dst, &tmp_len, ctx->lz4_comp_mem);
+	if (slen < (32 * KB))
+		err = lz4_compress(src, slen, dst, &tmp_len, ctx->lz4_comp_mem, DynOffset);
+	else
+		err = lz4_compress(src, slen, dst, &tmp_len, ctx->lz4_comp_mem, NoDynOffset);
 
 	if (err < 0)
 		return -EINVAL;
@@ -68,7 +73,11 @@ static int lz4_decompress_crypto(struct crypto_tfm *tfm, const u8 *src,
 	size_t tmp_len = *dlen;
 	size_t __slen = slen;
 
-	err = lz4_decompress_unknownoutputsize(src, __slen, dst, &tmp_len);
+	if (tmp_len < (32 * KB))
+		err = lz4_decompress_unknownoutputsize(src, __slen, dst, &tmp_len, DynOffset);
+	else
+		err = lz4_decompress_unknownoutputsize(src, __slen, dst, &tmp_len, NoDynOffset);
+
 	if (err < 0)
 		return -EINVAL;
 

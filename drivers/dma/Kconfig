@@ -63,6 +63,17 @@ config AMBA_PL08X
 	  Platform has a PL08x DMAC device
 	  which can provide DMA engine support
 
+config DMA_MTK_UART
+	tristate "MediaTek SoCs APDMA support for UART"
+	depends on OF
+	select DMA_ENGINE
+	select DMA_VIRTUAL_CHANNELS
+	help
+	  Enable support for MediaTek SoC uart DMA engine.
+	  This DMA engine just only used when 8250 mtk uart is enabled.
+	  This DMA controller transfers data from memory to peripheral.
+	  It does not support memory to memory data transfer.
+
 config INTEL_IOATDMA
 	tristate "Intel I/OAT DMA support"
 	depends on PCI && X86

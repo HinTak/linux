@@ -33,7 +33,11 @@ static int mmc_prep_request(struct request_queue *q, struct request *req)
 	/*
 	 * We only like normal block requests and discards.
 	 */
+#if defined(CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM)
+	if (req->cmd_type != REQ_TYPE_FS && !(req->cmd_flags & REQ_DISCARD) && req->cmd_type != REQ_TYPE_SPECIAL ) {
+#else
 	if (req->cmd_type != REQ_TYPE_FS && !(req->cmd_flags & REQ_DISCARD)) {
+#endif
 		blk_dump_rq_flags(req, "MMC bad request");
 		return BLKPREP_KILL;
 	}
@@ -554,3 +558,18 @@ void mmc_queue_bounce_post(struct mmc_queue_req *mqrq)
 	sg_copy_from_buffer(mqrq->bounce_sg, mqrq->bounce_sg_len,
 		mqrq->bounce_buf, mqrq->sg[0].length);
 }
+
+#ifdef CONFIG_EMRG_SAVE_KLOG
+void *get_queue_host(struct block_device *bdev)
+{
+	struct mmc_queue *mq = bdev_get_queue(bdev)->queuedata;
+	struct mmc_host *host = mq->card->host;
+	return host;
+}
+
+sector_t get_bdev_mmc_offset(struct block_device *bdev)
+{
+	return bdev->bd_part->start_sect;
+}
+#endif
+

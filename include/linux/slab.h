@@ -185,7 +185,7 @@ size_t ksize(const void *);
  * (PAGE_SIZE*2).  Larger requests are passed to the page allocator.
  */
 #define KMALLOC_SHIFT_HIGH	(PAGE_SHIFT + 1)
-#define KMALLOC_SHIFT_MAX	(MAX_ORDER + PAGE_SHIFT)
+#define KMALLOC_SHIFT_MAX	(MAX_ORDER + PAGE_SHIFT - 1)
 #ifndef KMALLOC_SHIFT_LOW
 #define KMALLOC_SHIFT_LOW	3
 #endif
@@ -198,7 +198,7 @@ size_t ksize(const void *);
  * be allocated from the same page.
  */
 #define KMALLOC_SHIFT_HIGH	PAGE_SHIFT
-#define KMALLOC_SHIFT_MAX	30
+#define KMALLOC_SHIFT_MAX	(MAX_ORDER + PAGE_SHIFT - 1)
 #ifndef KMALLOC_SHIFT_LOW
 #define KMALLOC_SHIFT_LOW	3
 #endif
@@ -238,13 +238,14 @@ extern struct kmem_cache *kmalloc_dma_caches[KMALLOC_SHIFT_HIGH + 1];
 /*
  * Figure out which kmalloc slab an allocation of a certain size
  * belongs to.
- * 0 = zero alloc
- * 1 =  65 .. 96 bytes
- * 2 = 120 .. 192 bytes
- * n = 2^(n-1) .. 2^n -1
+ * 0 = 64 bytes
+ * 1 =  128 bytes
+ * n = (1 << ((n >> 1) + 7)),((1 << ((n >> 1) + 6)) + (1 << ((n >> 1) + 5))).... upto n=KMALLOC_SHIFT_HIGH
+ * 192,256,512...8096.
  */
 static __always_inline int kmalloc_index(size_t size)
 {
+#ifndef CONFIG_VD_KMALLOC_SLAB
 	if (!size)
 		return 0;
 
@@ -265,6 +266,21 @@ static __always_inline int kmalloc_index(size_t size)
 	if (size <=       1024) return 10;
 	if (size <=   2 * 1024) return 11;
 	if (size <=   4 * 1024) return 12;
+#else
+	if (size <=         64) return 0;
+	if (size <=        128) return 1;
+	if (size <=        192) return 2;
+	if (size <=        256) return 3;
+	if (size <=        384) return 4;
+	if (size <=        512) return 5;
+	if (size <=        768) return 6;
+	if (size <=       1024) return 7;
+	if (size <=       1536) return 8;
+	if (size <=   2 * 1024) return 9;
+	if (size <=       3072) return 10;
+	if (size <=   4 * 1024) return 11;
+	if (size <=       6144) return 12;
+#endif
 	if (size <=   8 * 1024) return 13;
 	if (size <=  16 * 1024) return 14;
 	if (size <=  32 * 1024) return 15;
@@ -422,11 +438,19 @@ static __always_inline void *kmalloc(size_t size, gfp_t flags)
 			return kmalloc_large(size, flags);
 #ifndef CONFIG_SLOB
 		if (!(flags & GFP_DMA)) {
+#ifndef CONFIG_VD_KMALLOC_SLAB
 			int index = kmalloc_index(size);
 
 			if (!index)
 				return ZERO_SIZE_PTR;
+#else
+			int index;
 
+			if (!size)
+				return ZERO_SIZE_PTR;
+
+			index = kmalloc_index(size);
+#endif
 			return kmem_cache_alloc_trace(kmalloc_caches[index],
 					flags, size);
 		}
@@ -443,6 +467,7 @@ static __always_inline void *kmalloc(size_t size, gfp_t flags)
 static __always_inline int kmalloc_size(int n)
 {
 #ifndef CONFIG_SLOB
+#ifndef CONFIG_VD_KMALLOC_SLAB
 	if (n > 2)
 		return 1 << n;
 
@@ -451,6 +476,15 @@ static __always_inline int kmalloc_size(int n)
 
 	if (n == 2 && KMALLOC_MIN_SIZE <= 64)
 		return 192;
+#else
+	if (n == 0)
+		return 64;
+
+	if (n & 0x1)
+		return (1 << ((n >> 1) + 7));
+	else
+		return ((1 << ((n >> 1) + 6)) + (1 << ((n >> 1) + 5)));
+#endif
 #endif
 	return 0;
 }
@@ -460,11 +494,19 @@ static __always_inline void *kmalloc_node(size_t size, gfp_t flags, int node)
 #ifndef CONFIG_SLOB
 	if (__builtin_constant_p(size) &&
 		size <= KMALLOC_MAX_CACHE_SIZE && !(flags & GFP_DMA)) {
+#ifndef CONFIG_VD_KMALLOC_SLAB
 		int i = kmalloc_index(size);
 
 		if (!i)
 			return ZERO_SIZE_PTR;
+#else
+		int i;
 
+		if (!size)
+			return ZERO_SIZE_PTR;
+
+		i = kmalloc_index(size);
+#endif
 		return kmem_cache_alloc_node_trace(kmalloc_caches[i],
 						flags, node, size);
 	}
@@ -596,5 +638,11 @@ static inline void *kzalloc_node(size_t size, gfp_t flags, int node)
 
 unsigned int kmem_cache_size(struct kmem_cache *s);
 void __init kmem_cache_init_late(void);
+
+#ifdef CONFIG_SLABINFO
+void print_slabinfo_oom(void);
+#else
+static inline void print_slabinfo_oom(void) { }
+#endif
 
 #endif	/* _LINUX_SLAB_H */

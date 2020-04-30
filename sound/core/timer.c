@@ -56,6 +56,7 @@ MODULE_PARM_DESC(timer_tstamp_monotonic, "Use posix monotonic clock source for t
 MODULE_ALIAS_CHARDEV(CONFIG_SND_MAJOR, SNDRV_MINOR_TIMER);
 MODULE_ALIAS("devname:snd/timer");
 
+/**[2017.11.30 SP.Audio] https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=af368027a49a751d6ff4ee9e3f9961f35bb4fede **/
 struct snd_timer_user {
 	struct snd_timer_instance *timeri;
 	int tread;		/* enhanced read with timestamps and events */
@@ -73,7 +74,7 @@ struct snd_timer_user {
 	struct timespec tstamp;		/* trigger tstamp */
 	wait_queue_head_t qchange_sleep;
 	struct fasync_struct *fasync;
-	struct mutex tread_sem;
+	struct mutex ioctl_lock;
 };
 
 /* list of timers */
@@ -205,6 +206,7 @@ static void snd_timer_check_slave(struct snd_timer_instance *slave)
  *
  * call this with register_mutex down.
  */
+/**[2017.11.30 SP.Audio] https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=b5a663aa426f4884c71cd8580adae73f33570f0d **/
 static void snd_timer_check_master(struct snd_timer_instance *master)
 {
 	struct snd_timer_instance *slave, *tmp;
@@ -215,11 +217,13 @@ static void snd_timer_check_master(struct snd_timer_instance *master)
 		    slave->slave_id == master->slave_id) {
 			list_move_tail(&slave->open_list, &master->slave_list_head);
 			spin_lock_irq(&slave_active_lock);
+			spin_lock(&master->timer->lock);
 			slave->master = master;
 			slave->timer = master->timer;
 			if (slave->flags & SNDRV_TIMER_IFLG_RUNNING)
 				list_add_tail(&slave->active_list,
 					      &master->slave_active_head);
+			spin_unlock(&master->timer->lock);
 			spin_unlock_irq(&slave_active_lock);
 		}
 	}
@@ -305,6 +309,7 @@ static int _snd_timer_stop(struct snd_timer_instance *timeri,
 /*
  * close a timer instance
  */
+/**[2017.11.30 SP.Audio] https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=b5a663aa426f4884c71cd8580adae73f33570f0d **/
 int snd_timer_close(struct snd_timer_instance *timeri)
 {
 	struct snd_timer *timer = NULL;
@@ -346,15 +351,18 @@ int snd_timer_close(struct snd_timer_instance *timeri)
 		    timer->hw.close)
 			timer->hw.close(timer);
 		/* remove slave links */
+		spin_lock_irq(&slave_active_lock);
+		spin_lock(&timer->lock);
 		list_for_each_entry_safe(slave, tmp, &timeri->slave_list_head,
 					 open_list) {
-			spin_lock_irq(&slave_active_lock);
-			_snd_timer_stop(slave, 1, SNDRV_TIMER_EVENT_RESOLUTION);
 			list_move_tail(&slave->open_list, &snd_timer_slave_list);
 			slave->master = NULL;
 			slave->timer = NULL;
-			spin_unlock_irq(&slave_active_lock);
+			list_del_init(&slave->ack_list);
+			list_del_init(&slave->active_list);
 		}
+		spin_unlock(&timer->lock);
+		spin_unlock_irq(&slave_active_lock);
 		mutex_unlock(&register_mutex);
 	}
  out:
@@ -435,15 +443,19 @@ static int snd_timer_start1(struct snd_timer *timer, struct snd_timer_instance *
 	}
 }
 
+/**[2017.11.30 SP.Audio] https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=b5a663aa426f4884c71cd8580adae73f33570f0d **/
 static int snd_timer_start_slave(struct snd_timer_instance *timeri)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&slave_active_lock, flags);
 	timeri->flags |= SNDRV_TIMER_IFLG_RUNNING;
-	if (timeri->master)
+	if (timeri->master && timeri->timer) {
+		spin_lock(&timeri->timer->lock);
 		list_add_tail(&timeri->active_list,
 			      &timeri->master->slave_active_head);
+		spin_unlock(&timeri->timer->lock);
+	}
 	spin_unlock_irqrestore(&slave_active_lock, flags);
 	return 1; /* delayed start */
 }
@@ -476,6 +488,7 @@ int snd_timer_start(struct snd_timer_instance *timeri, unsigned int ticks)
 	return result;
 }
 
+/**[2017.11.30 SP.Audio] https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=b5a663aa426f4884c71cd8580adae73f33570f0d **/
 static int _snd_timer_stop(struct snd_timer_instance * timeri,
 			   int keep_flag, int event)
 {
@@ -489,6 +502,8 @@ static int _snd_timer_stop(struct snd_timer_instance * timeri,
 		if (!keep_flag) {
 			spin_lock_irqsave(&slave_active_lock, flags);
 			timeri->flags &= ~SNDRV_TIMER_IFLG_RUNNING;
+			list_del_init(&timeri->ack_list);
+			list_del_init(&timeri->active_list);
 			spin_unlock_irqrestore(&slave_active_lock, flags);
 		}
 		goto __end;
@@ -653,6 +668,7 @@ static void snd_timer_tasklet(unsigned long arg)
  * ticks_left is usually equal to timer->sticks.
  *
  */
+/**[2017.11.30 SP.Audio] https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=ee8413b01045c74340aa13ad5bdf905de32be736 **/
 void snd_timer_interrupt(struct snd_timer * timer, unsigned long ticks_left)
 {
 	struct snd_timer_instance *ti, *ts, *tmp;
@@ -694,7 +710,7 @@ void snd_timer_interrupt(struct snd_timer * timer, unsigned long ticks_left)
 		} else {
 			ti->flags &= ~SNDRV_TIMER_IFLG_RUNNING;
 			if (--timer->running)
-				list_del(&ti->active_list);
+				list_del_init(&ti->active_list);
 		}
 		if ((timer->hw.flags & SNDRV_TIMER_HW_TASKLET) ||
 		    (ti->flags & SNDRV_TIMER_IFLG_FAST))
@@ -1157,6 +1173,7 @@ static void snd_timer_user_append_to_tqueue(struct snd_timer_user *tu,
 	}
 }
 
+/**[2017.11.30 SP.Audio] https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=9a47e9cff994f37f7f0dbd9ae23740d0f64f9fe6 **/
 static void snd_timer_user_ccallback(struct snd_timer_instance *timeri,
 				     int event,
 				     struct timespec *tstamp,
@@ -1171,6 +1188,7 @@ static void snd_timer_user_ccallback(struct snd_timer_instance *timeri,
 		tu->tstamp = *tstamp;
 	if ((tu->filter & (1 << event)) == 0 || !tu->tread)
 		return;
+	memset(&r1, 0, sizeof(r1));
 	r1.event = event;
 	r1.tstamp = *tstamp;
 	r1.val = resolution;
@@ -1205,6 +1223,7 @@ static void snd_timer_user_tinterrupt(struct snd_timer_instance *timeri,
 	}
 	if ((tu->filter & (1 << SNDRV_TIMER_EVENT_RESOLUTION)) &&
 	    tu->last_resolution != resolution) {
+		memset(&r1, 0, sizeof(r1));
 		r1.event = SNDRV_TIMER_EVENT_RESOLUTION;
 		r1.tstamp = tstamp;
 		r1.val = resolution;
@@ -1239,6 +1258,7 @@ static void snd_timer_user_tinterrupt(struct snd_timer_instance *timeri,
 	wake_up(&tu->qchange_sleep);
 }
 
+/**[2017.11.30 SP.Audio] https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=af368027a49a751d6ff4ee9e3f9961f35bb4fede **/
 static int snd_timer_user_open(struct inode *inode, struct file *file)
 {
 	struct snd_timer_user *tu;
@@ -1253,7 +1273,7 @@ static int snd_timer_user_open(struct inode *inode, struct file *file)
 		return -ENOMEM;
 	spin_lock_init(&tu->qlock);
 	init_waitqueue_head(&tu->qchange_sleep);
-	mutex_init(&tu->tread_sem);
+	mutex_init(&tu->ioctl_lock);
 	tu->ticks = 1;
 	tu->queue_size = 128;
 	tu->queue = kmalloc(tu->queue_size * sizeof(struct snd_timer_read),
@@ -1266,6 +1286,8 @@ static int snd_timer_user_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
+/**[2017.11.30 SP.Audio] https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=af368027a49a751d6ff4ee9e3f9961f35bb4fede **/		
+
 static int snd_timer_user_release(struct inode *inode, struct file *file)
 {
 	struct snd_timer_user *tu;
@@ -1273,8 +1295,10 @@ static int snd_timer_user_release(struct inode *inode, struct file *file)
 	if (file->private_data) {
 		tu = file->private_data;
 		file->private_data = NULL;
+		mutex_lock(&tu->ioctl_lock);
 		if (tu->timeri)
 			snd_timer_close(tu->timeri);
+		mutex_unlock(&tu->ioctl_lock);
 		kfree(tu->queue);
 		kfree(tu->tqueue);
 		kfree(tu);
@@ -1503,6 +1527,7 @@ static int snd_timer_user_gstatus(struct file *file,
 	return err;
 }
 
+/**[2017.11.30 SP.Audio] https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=af368027a49a751d6ff4ee9e3f9961f35bb4fede **/
 static int snd_timer_user_tselect(struct file *file,
 				  struct snd_timer_select __user *_tselect)
 {
@@ -1512,7 +1537,6 @@ static int snd_timer_user_tselect(struct file *file,
 	int err = 0;
 
 	tu = file->private_data;
-	mutex_lock(&tu->tread_sem);
 	if (tu->timeri) {
 		snd_timer_close(tu->timeri);
 		tu->timeri = NULL;
@@ -1556,7 +1580,6 @@ static int snd_timer_user_tselect(struct file *file,
 	}
 
       __err:
-      	mutex_unlock(&tu->tread_sem);
 	return err;
 }
 
@@ -1590,6 +1613,7 @@ static int snd_timer_user_info(struct file *file,
 	return err;
 }
 
+/**[2017.11.30 SP.Audio] https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=cec8f96e49d9be372fdb0c3836dcf31ec71e457e **/
 static int snd_timer_user_params(struct file *file,
 				 struct snd_timer_params __user *_params)
 {
@@ -1670,6 +1694,7 @@ static int snd_timer_user_params(struct file *file,
 	if (tu->timeri->flags & SNDRV_TIMER_IFLG_EARLY_EVENT) {
 		if (tu->tread) {
 			struct snd_timer_tread tread;
+			memset(&tread, 0, sizeof(tread));
 			tread.event = SNDRV_TIMER_EVENT_EARLY;
 			tread.tstamp.tv_sec = 0;
 			tread.tstamp.tv_nsec = 0;
@@ -1769,7 +1794,8 @@ enum {
 	SNDRV_TIMER_IOCTL_PAUSE_OLD = _IO('T', 0x23),
 };
 
-static long snd_timer_user_ioctl(struct file *file, unsigned int cmd,
+/**[2017.11.30 SP.Audio] https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=af368027a49a751d6ff4ee9e3f9961f35bb4fede **/		
+static long __snd_timer_user_ioctl(struct file *file, unsigned int cmd,
 				 unsigned long arg)
 {
 	struct snd_timer_user *tu;
@@ -1786,17 +1812,11 @@ static long snd_timer_user_ioctl(struct file *file, unsigned int cmd,
 	{
 		int xarg;
 
-		mutex_lock(&tu->tread_sem);
-		if (tu->timeri)	{	/* too late */
-			mutex_unlock(&tu->tread_sem);
+		if (tu->timeri)	/* too late */
 			return -EBUSY;
-		}
-		if (get_user(xarg, p)) {
-			mutex_unlock(&tu->tread_sem);
+		if (get_user(xarg, p))
 			return -EFAULT;
-		}
 		tu->tread = xarg ? 1 : 0;
-		mutex_unlock(&tu->tread_sem);
 		return 0;
 	}
 	case SNDRV_TIMER_IOCTL_GINFO:
@@ -1827,6 +1847,19 @@ static long snd_timer_user_ioctl(struct file *file, unsigned int cmd,
 		return snd_timer_user_pause(file);
 	}
 	return -ENOTTY;
+}
+
+/**[2017.11.30 SP.Audio] https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=af368027a49a751d6ff4ee9e3f9961f35bb4fede **/		
+static long snd_timer_user_ioctl(struct file *file, unsigned int cmd,
+				 unsigned long arg)
+{
+	struct snd_timer_user *tu = file->private_data;
+	long ret;
+
+	mutex_lock(&tu->ioctl_lock);
+	ret = __snd_timer_user_ioctl(file, cmd, arg);
+	mutex_unlock(&tu->ioctl_lock);
+	return ret;
 }
 
 static int snd_timer_user_fasync(int fd, struct file * file, int on)

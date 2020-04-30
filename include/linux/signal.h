@@ -386,7 +386,12 @@ int unhandled_signal(struct task_struct *tsk, int sig);
 #else
 #define rt_sigmask(sig)	sigmask(sig)
 #endif
-#define siginmask(sig, mask) (rt_sigmask(sig) & (mask))
+
+#define siginmask(sig, mask) \
+	((sig) < SIGRTMIN && (rt_sigmask(sig) & (mask)))
+
+#define SIG_KERNEL_FORCE_DUMP_INFO (\
+	rt_sigmask(SIGABRT))
 
 #define SIG_KERNEL_ONLY_MASK (\
 	rt_sigmask(SIGKILL)   |  rt_sigmask(SIGSTOP))
@@ -403,18 +408,16 @@ int unhandled_signal(struct task_struct *tsk, int sig);
         rt_sigmask(SIGXCPU)   |  rt_sigmask(SIGXFSZ)   | \
 	SIGEMT_MASK				       )
 
+#define sig_kernel_force_dump_info(sig) \
+	(((sig) < SIGRTMIN) && siginmask(sig, SIG_KERNEL_FORCE_DUMP_INFO))
 #define SIG_KERNEL_IGNORE_MASK (\
         rt_sigmask(SIGCONT)   |  rt_sigmask(SIGCHLD)   | \
 	rt_sigmask(SIGWINCH)  |  rt_sigmask(SIGURG)    )
 
-#define sig_kernel_only(sig) \
-	(((sig) < SIGRTMIN) && siginmask(sig, SIG_KERNEL_ONLY_MASK))
-#define sig_kernel_coredump(sig) \
-	(((sig) < SIGRTMIN) && siginmask(sig, SIG_KERNEL_COREDUMP_MASK))
-#define sig_kernel_ignore(sig) \
-	(((sig) < SIGRTMIN) && siginmask(sig, SIG_KERNEL_IGNORE_MASK))
-#define sig_kernel_stop(sig) \
-	(((sig) < SIGRTMIN) && siginmask(sig, SIG_KERNEL_STOP_MASK))
+#define sig_kernel_only(sig)		siginmask(sig, SIG_KERNEL_ONLY_MASK)
+#define sig_kernel_coredump(sig)	siginmask(sig, SIG_KERNEL_COREDUMP_MASK)
+#define sig_kernel_ignore(sig)		siginmask(sig, SIG_KERNEL_IGNORE_MASK)
+#define sig_kernel_stop(sig)		siginmask(sig, SIG_KERNEL_STOP_MASK)
 
 #define sig_user_defined(t, signr) \
 	(((t)->sighand->action[(signr)-1].sa.sa_handler != SIG_DFL) &&	\
@@ -423,6 +426,21 @@ int unhandled_signal(struct task_struct *tsk, int sig);
 #define sig_fatal(t, signr) \
 	(!siginmask(signr, SIG_KERNEL_IGNORE_MASK|SIG_KERNEL_STOP_MASK) && \
 	 (t)->sighand->action[(signr)-1].sa.sa_handler == SIG_DFL)
+
+#ifdef CONFIG_PRINT_KILL_SIGNAL_ONLY_PERMITTED
+#define sig_kernel_print_info(signr) \
+	(((signr) < SIGRTMIN) && (sig_kernel_coredump(signr) || \
+	signr == SIGKILL || signr == SIGTERM))
+#else
+#define sig_kernel_print_info(signr) (true)
+#endif
+
+#define SIG_KERNEL_ALLOW_FIRST_HANDLER (\
+	rt_sigmask(SIGSEGV) | rt_sigmask(SIGILL)| \
+	rt_sigmask(SIGABRT) | rt_sigmask(SIGBUS))
+
+#define	sig_kernel_allow_first_handler(signr) \
+	(((sig) < SIGRTMIN) && siginmask(sig, SIG_KERNEL_ALLOW_FIRST_HANDLER))
 
 void signals_init(void);
 
@@ -440,6 +458,19 @@ int __save_altstack(stack_t __user *, unsigned long);
 #ifdef CONFIG_PROC_FS
 struct seq_file;
 extern void render_sigset_t(struct seq_file *, const char *, sigset_t *);
+#endif
+
+#ifdef CONFIG_COREDUMP_SIGKILL_BLOCKED
+void set_flag_block_sigkill(struct task_struct *task, int sig);
+void set_flag_block_sigkill_lockless(struct task_struct *task, int sig);
+#else
+static inline void set_flag_block_sigkill(struct task_struct *task, int sig)
+{
+}
+static inline void set_flag_block_sigkill_lockless(struct task_struct *task,
+							int sig)
+{
+}
 #endif
 
 #endif /* _LINUX_SIGNAL_H */

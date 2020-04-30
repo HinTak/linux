@@ -24,6 +24,98 @@
 #include "xhci-mvebu.h"
 #include "xhci-rcar.h"
 
+#ifdef CONFIG_ARCH_SDP
+/* portsc */
+static ssize_t xhci_portsc_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
+{	
+	struct xhci_hcd 	*xhci2;
+	struct xhci_hcd 	*xhci3;
+	struct usb_hcd		*hcd2;
+	struct usb_hcd		*hcd3;
+	unsigned int regval=0;
+	
+
+	hcd2 = bus_to_hcd(dev_get_drvdata(dev->parent));
+	hcd3 = hcd2->shared_hcd;
+	xhci2 = hcd_to_xhci(hcd2);
+	xhci3 = hcd_to_xhci(hcd3);
+		
+	if (dev == &hcd3->self.root_hub->dev) { 		
+		regval = xhci_readl(xhci3, *xhci3->usb3_ports); 	
+	}
+	
+	if (dev == &hcd2->self.root_hub->dev) {
+		regval = xhci_readl(xhci2, *xhci2->usb2_ports); 	
+	}
+
+	return snprintf(buf, PAGE_SIZE, "0x%x", regval);			
+	
+}
+
+
+static ssize_t xhci_portsc_store(struct device *dev,
+			       struct device_attribute *attr,
+			       const char *buf, size_t count)
+{
+	char recv_buffer[32];
+	long value;
+	struct xhci_hcd 	*xhci2;
+	struct xhci_hcd 	*xhci3;
+	struct usb_hcd		*hcd2;
+	struct usb_hcd		*hcd3;
+	
+	hcd2 = bus_to_hcd(dev_get_drvdata(dev->parent));
+	hcd3 = hcd2->shared_hcd;
+	xhci2 = hcd_to_xhci(hcd2);
+	xhci3 = hcd_to_xhci(hcd3);
+
+	snprintf(recv_buffer, sizeof(recv_buffer), "%s", buf);
+	
+	if (dev == &hcd3->self.root_hub->dev) { 			
+		if (!kstrtol(recv_buffer, 0, &value)) {
+			xhci_writel(xhci3, (unsigned int)value, *xhci3->usb3_ports);
+		} else {
+			pr_err("conversion failed..\n");
+			return -1;
+		}
+	}
+	
+	if (dev == &hcd2->self.root_hub->dev) {
+		if (!kstrtol(recv_buffer, 0, &value)) {
+			xhci_writel(xhci2, (unsigned int)value, *xhci2->usb2_ports);
+		} else {
+			pr_err("conversion failed..\n");
+			return -1;
+		}
+	}
+	
+	return (ssize_t)count;
+}
+static DEVICE_ATTR(portsc, 0644, xhci_portsc_show, xhci_portsc_store);
+
+#ifdef CONFIG_USB_DEBUG
+static ssize_t sdp_xhci_get_handshake_fail_cnt_usb2port(struct device *dev
+				,struct device_attribute *attr, char *buf)
+{
+	struct usb_hcd *hcd2 = bus_to_hcd(dev_get_drvdata(dev->parent));
+	struct xhci_hcd *xhci2 = hcd_to_xhci(hcd2);
+	return snprintf(buf,PAGE_SIZE,"%u\n",xhci2->handshake_fail_cnt_usb2);
+}
+static DEVICE_ATTR(handshake_fails_cnt_usb2port,0444
+			,sdp_xhci_get_handshake_fail_cnt_usb2port,NULL);
+
+static ssize_t sdp_xhci_get_cerr(struct device *dev
+			,struct device_attribute *attr, char *buf)
+{
+	struct usb_hcd *hcd2 = bus_to_hcd(dev_get_drvdata(dev->parent));
+	struct xhci_hcd *xhci2 = hcd_to_xhci(hcd2);
+	return snprintf(buf,PAGE_SIZE,"%d\n",xhci2->cerr);
+}
+static DEVICE_ATTR(get_cerr,0444,sdp_xhci_get_cerr,NULL);
+#endif
+#endif
+
 static struct hc_driver __read_mostly xhci_plat_hc_driver;
 
 static void xhci_plat_quirks(struct device *dev, struct xhci_hcd *xhci)
@@ -84,6 +176,7 @@ static int xhci_plat_probe(struct platform_device *pdev)
 	if (irq < 0)
 		return -ENODEV;
 
+#if 0
 	/* Initialize dma_mask and coherent_dma_mask to 32-bits */
 	ret = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
 	if (ret)
@@ -92,6 +185,23 @@ static int xhci_plat_probe(struct platform_device *pdev)
 		pdev->dev.dma_mask = &pdev->dev.coherent_dma_mask;
 	else
 		dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
+#endif
+
+	/* refer code : linux 4.4 xhci-plat.c */
+	/* Try to set 64-bit DMA first */
+	if (WARN_ON(!pdev->dev.dma_mask))
+		/* Platform did not initialize dma_mask */
+		ret = dma_coerce_mask_and_coherent(&pdev->dev,
+						DMA_BIT_MASK(64));
+	else 
+		ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
+
+	/* If seting 64-bit DMA mask fails, fall back to 32-bit DMA mask */
+	if (ret) {
+		ret = dma_set_mask_and_coherent(&pdev->dev,DMA_BIT_MASK(32));
+		if (ret)
+			return ret;
+	}
 
 	hcd = usb_create_hcd(driver, &pdev->dev, dev_name(&pdev->dev));
 	if (!hcd)
@@ -172,6 +282,31 @@ static int xhci_plat_probe(struct platform_device *pdev)
 	if (ret)
 		goto disable_usb_phy;
 
+#ifdef CONFIG_ARCH_SDP
+	/* only for Jazz-OCM HUB */
+	xhci->cnt_txerr_setaddr_usb2 = 0;
+	//xhci->err_babble_ocmhub = 0;
+
+#ifdef CONFIG_USB_DEBUG
+	/* USB 2.0 : add device file for debugging */
+	xhci->handshake_fail_cnt_usb2 = 0;
+	if (device_create_file(&hcd->self.root_hub->dev, &dev_attr_handshake_fails_cnt_usb2port)) {
+		pr_err("Error device_create_file\n");
+	}
+	
+	xhci->cerr = 0;
+	if (device_create_file(&hcd->self.root_hub->dev, &dev_attr_get_cerr)) {
+		pr_err("Error device_create_file\n");
+	}
+#endif
+
+	if (device_create_file(&hcd->self.root_hub->dev, &dev_attr_portsc)) {
+		pr_err("Error device_create_file\n");
+	}
+	if (device_create_file(&hcd->shared_hcd->self.root_hub->dev, &dev_attr_portsc)) {
+		pr_err("Error device_create_file\n");
+	}
+#endif
 	return 0;
 
 disable_usb_phy:
@@ -233,8 +368,12 @@ static int xhci_plat_resume(struct device *dev)
 {
 	struct usb_hcd	*hcd = dev_get_drvdata(dev);
 	struct xhci_hcd	*xhci = hcd_to_xhci(hcd);
-
+	
+#ifdef CONFIG_ARCH_SDP
+	return xhci_resume(xhci, true);
+#else
 	return xhci_resume(xhci, 0);
+#endif
 }
 
 static const struct dev_pm_ops xhci_plat_pm_ops = {
@@ -247,12 +386,16 @@ static const struct dev_pm_ops xhci_plat_pm_ops = {
 
 #ifdef CONFIG_OF
 static const struct of_device_id usb_xhci_of_match[] = {
+#ifdef CONFIG_ARCH_SDP
+	{.compatible = "samsung,xhci-hcd"},
+#else
 	{ .compatible = "generic-xhci" },
 	{ .compatible = "xhci-platform" },
 	{ .compatible = "marvell,armada-375-xhci"},
 	{ .compatible = "marvell,armada-380-xhci"},
 	{ .compatible = "renesas,xhci-r8a7790"},
 	{ .compatible = "renesas,xhci-r8a7791"},
+#endif	
 	{ },
 };
 MODULE_DEVICE_TABLE(of, usb_xhci_of_match);
@@ -269,19 +412,19 @@ static struct platform_driver usb_xhci_driver = {
 };
 MODULE_ALIAS("platform:xhci-hcd");
 
-static int __init xhci_plat_init(void)
+int xhci_plat_init(void)
 {
 	xhci_init_driver(&xhci_plat_hc_driver, xhci_plat_setup);
 	xhci_plat_hc_driver.start = xhci_plat_start;
 	return platform_driver_register(&usb_xhci_driver);
 }
-module_init(xhci_plat_init);
+//module_init(xhci_plat_init);
 
-static void __exit xhci_plat_exit(void)
+void xhci_plat_exit(void)
 {
 	platform_driver_unregister(&usb_xhci_driver);
 }
-module_exit(xhci_plat_exit);
+//module_exit(xhci_plat_exit);
 
 MODULE_DESCRIPTION("xHCI Platform Host Controller Driver");
 MODULE_LICENSE("GPL");

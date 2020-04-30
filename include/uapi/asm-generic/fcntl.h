@@ -46,6 +46,9 @@
 #ifndef O_DIRECT
 #define O_DIRECT	00040000	/* direct disk access hint */
 #endif
+#ifdef CONFIG_BD_CACHE_ENABLED
+#define O_BDCACHE	040000000
+#endif
 #ifndef O_LARGEFILE
 #define O_LARGEFILE	00100000
 #endif
@@ -60,6 +63,9 @@
 #endif
 #ifndef O_CLOEXEC
 #define O_CLOEXEC	02000000	/* set close_on_exec */
+#endif
+#ifdef CONFIG_VDFS4_SQUEEZE
+#define O_PROFILED	0100000000
 #endif
 
 /*

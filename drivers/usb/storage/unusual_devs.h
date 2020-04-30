@@ -1372,6 +1372,11 @@ UNUSUAL_DEV(0x0bc2, 0x2300, 0x0000, 0x9999,
 		"Portable HDD",
 		USB_SC_DEVICE, USB_PR_DEVICE, NULL, US_FL_WRITE_CACHE),
 
+UNUSUAL_DEV(0x04e8, 0x6239, 0x0000, 0x9999,
+		"Samsung",
+		"UHD Video Player",
+		USB_SC_DEVICE, USB_PR_DEVICE, NULL, US_FL_WRITE_CACHE),
+
 /* Reported by Ben Efros <ben@pc-doctor.com> */
 UNUSUAL_DEV( 0x0bc2, 0x3010, 0x0000, 0x0000,
 		"Seagate",

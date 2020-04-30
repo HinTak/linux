@@ -921,6 +921,11 @@ bool drm_mode_equal(const struct drm_display_mode *mode1, const struct drm_displ
 	    (mode2->flags & DRM_MODE_FLAG_3D_MASK))
 		return false;
 
+#ifdef CONFIG_BD_CACHE_ENABLED
+	if (mode1->vrefresh && mode2->vrefresh && (mode1->vrefresh != mode2->vrefresh))
+		return false;
+#endif 
+
 	return drm_mode_equal_no_clocks_no_stereo(mode1, mode2);
 }
 EXPORT_SYMBOL(drm_mode_equal);

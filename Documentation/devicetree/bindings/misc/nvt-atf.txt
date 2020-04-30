@@ -1,0 +1,15 @@
+Novatek atf engine
+-----------------------------------------------------
+This binding defines the location of the bounce buffer
+used for non-secure to secure communications.
+
+Required properties:
+- compatible : "nvt,atf"
+- reg :	register space
+
+Example:
+	atf@0xfd060100 {
+		compatible = "nvt,atf";
+		interrupts = <0 57 4>;
+		reg = <0xfd060100 0xc0>;
+	};

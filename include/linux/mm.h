@@ -20,6 +20,7 @@
 #include <linux/shrinker.h>
 #include <linux/resource.h>
 #include <linux/page_ext.h>
+#include <linux/cma.h>
 
 struct mempolicy;
 struct anon_vma;
@@ -71,6 +72,7 @@ extern int sysctl_legacy_va_layout;
 extern unsigned long sysctl_user_reserve_kbytes;
 extern unsigned long sysctl_admin_reserve_kbytes;
 
+extern int sysctl_vmallocinfo_enabled;
 extern int sysctl_overcommit_memory;
 extern int sysctl_overcommit_ratio;
 extern unsigned long sysctl_overcommit_kbytes;
@@ -187,6 +189,12 @@ extern unsigned int kobjsize(const void *objp);
 #define VM_STACK_FLAGS	(VM_GROWSUP | VM_STACK_DEFAULT_FLAGS | VM_ACCOUNT)
 #else
 #define VM_STACK_FLAGS	(VM_GROWSDOWN | VM_STACK_DEFAULT_FLAGS | VM_ACCOUNT)
+#endif
+
+#ifdef CONFIG_STACK_RECLAIM
+extern void shrink_user_stack(unsigned long sp);
+#else
+static inline void shrink_user_stack(unsigned long sp) {}
 #endif
 
 /*
@@ -322,51 +330,6 @@ static inline int get_freepage_migratetype(struct page *page)
 #include <linux/page-flags.h>
 #include <linux/huge_mm.h>
 
-/*
- * Methods to modify the page usage count.
- *
- * What counts for a page usage:
- * - cache mapping   (page->mapping)
- * - private data    (page->private)
- * - page mapped in a task's page tables, each mapping
- *   is counted separately
- *
- * Also, many kernel routines increase the page count before a critical
- * routine so they can be sure the page doesn't go away from under them.
- */
-
-/*
- * Drop a ref, return true if the refcount fell to zero (the page has no users)
- */
-static inline int put_page_testzero(struct page *page)
-{
-	VM_BUG_ON_PAGE(atomic_read(&page->_count) == 0, page);
-	return atomic_dec_and_test(&page->_count);
-}
-
-/*
- * Try to grab a ref unless the page has a refcount of zero, return false if
- * that is the case.
- * This can be called when MMU is off so it must not access
- * any of the virtual mappings.
- */
-static inline int get_page_unless_zero(struct page *page)
-{
-	return atomic_inc_not_zero(&page->_count);
-}
-
-/*
- * Try to drop a ref unless the page has a refcount of one, return false if
- * that is the case.
- * This is to make sure that the refcount won't become zero after this drop.
- * This can be called when MMU is off so it must not access
- * any of the virtual mappings.
- */
-static inline int put_page_unless_one(struct page *page)
-{
-	return atomic_add_unless(&page->_count, -1, 1);
-}
-
 extern int page_is_ram(unsigned long pfn);
 extern int region_is_ram(resource_size_t phys_addr, unsigned long size);
 
@@ -476,6 +439,53 @@ static inline struct page *compound_head_fast(struct page *page)
 	return page;
 }
 
+#include <linux/page_ref.h>
+
+/*
+ * Methods to modify the page usage count.
+ *
+ * What counts for a page usage:
+ * - cache mapping   (page->mapping)
+ * - private data    (page->private)
+ * - page mapped in a task's page tables, each mapping
+ *   is counted separately
+ *
+ * Also, many kernel routines increase the page count before a critical
+ * routine so they can be sure the page doesn't go away from under them.
+ */
+
+/*
+ * Drop a ref, return true if the refcount fell to zero (the page has no users)
+ */
+static inline int put_page_testzero(struct page *page)
+{
+	VM_BUG_ON_PAGE(page_ref_count(page) == 0, page);
+	return page_ref_dec_and_test(page);
+}
+
+/*
+ * Try to grab a ref unless the page has a refcount of zero, return false if
+ * that is the case.
+ * This can be called when MMU is off so it must not access
+ * any of the virtual mappings.
+ */
+static inline int get_page_unless_zero(struct page *page)
+{
+	return page_ref_add_unless(page, 1, 0);
+}
+
+/*
+ * Try to drop a ref unless the page has a refcount of one, return false if
+ * that is the case.
+ * This is to make sure that the refcount won't become zero after this drop.
+ * This can be called when MMU is off so it must not access
+ * any of the virtual mappings.
+ */
+static inline int put_page_unless_one(struct page *page)
+{
+	return page_ref_add_unless(page, -1, 1);
+}
+
 /*
  * The atomic page->_mapcount, starts from -1: so that transitions
  * both from it and to it can be tracked, using atomic_inc_and_test
@@ -490,11 +500,6 @@ static inline int page_mapcount(struct page *page)
 {
 	VM_BUG_ON_PAGE(PageSlab(page), page);
 	return atomic_read(&page->_mapcount) + 1;
-}
-
-static inline int page_count(struct page *page)
-{
-	return atomic_read(&compound_head(page)->_count);
 }
 
 static inline bool __compound_tail_refcounted(struct page *page)
@@ -523,7 +528,7 @@ static inline void get_huge_page_tail(struct page *page)
 	 */
 	VM_BUG_ON_PAGE(!PageTail(page), page);
 	VM_BUG_ON_PAGE(page_mapcount(page) < 0, page);
-	VM_BUG_ON_PAGE(atomic_read(&page->_count) != 0, page);
+	VM_BUG_ON_PAGE(page_ref_count(page) != 0, page);
 	if (compound_tail_refcounted(page->first_page))
 		atomic_inc(&page->_mapcount);
 }
@@ -537,10 +542,10 @@ static inline void get_page(struct page *page)
 			return;
 	/*
 	 * Getting a normal page or the head of a compound page
-	 * requires to already have an elevated page->_count.
+	 * requires to already have an elevated page->_refcount.
 	 */
-	VM_BUG_ON_PAGE(atomic_read(&page->_count) <= 0, page);
-	atomic_inc(&page->_count);
+	VM_BUG_ON_PAGE(page_ref_count(page) <= 0, page);
+	page_ref_inc(page);
 }
 
 static inline struct page *virt_to_head_page(const void *x)
@@ -556,20 +561,10 @@ static inline struct page *virt_to_head_page(const void *x)
 	return compound_head_fast(page);
 }
 
-/*
- * Setup the page count before being freed into the page allocator for
- * the first time (boot or memory hotplug)
- */
-static inline void init_page_count(struct page *page)
-{
-	atomic_set(&page->_count, 1);
-}
-
 void put_page(struct page *page);
 void put_pages_list(struct list_head *pages);
 
 void split_page(struct page *page, unsigned int order);
-int split_free_page(struct page *page);
 
 /*
  * Compound pages have a destructor function.  Provide a
@@ -682,6 +677,20 @@ void do_set_pte(struct vm_area_struct *vma, unsigned long address,
  * The zone field is never updated after free_area_init_core()
  * sets it, so none of the operations on it need to be atomic.
  */
+/* functions related to RSS quota */
+int _get_group_idx(struct mm_struct *mm, unsigned long flags,
+			struct file *file, unsigned long start, unsigned long end);
+int get_group_idx(struct vm_area_struct *vma);
+unsigned long get_curr_rss(struct mm_struct *mm, int index);
+unsigned long get_max_rss(struct mm_struct *mm, int index);
+unsigned long get_max_total_rss(struct mm_struct *mm);
+void inc_rss_counter(struct vm_area_struct *vma, unsigned long value);
+void dec_rss_counter(struct vm_area_struct *vma, unsigned long value);
+int get_rss_cnt(struct mm_struct *mm, int group, unsigned long *cur, unsigned long *max);
+int vmg_enough_memory(struct mm_struct *mm, int group, long pages);
+int check_enough_pages(unsigned long required);
+int is_page_present(struct mm_struct *mm, unsigned long address);
+int get_vma_rss(struct vm_area_struct *vma);
 
 /* Page flags: | [SECTION] | [NODE] | ZONE | [LAST_CPUPID] | ... | FLAGS | */
 #define SECTIONS_PGOFF		((sizeof(unsigned long)*8) - SECTIONS_WIDTH)
@@ -724,7 +733,15 @@ void do_set_pte(struct vm_area_struct *vma, unsigned long address,
 
 static inline enum zone_type page_zonenum(const struct page *page)
 {
-	return (page->flags >> ZONES_PGSHIFT) & ZONES_MASK;
+	enum zone_type zone_type = (page->flags >> ZONES_PGSHIFT) & ZONES_MASK;
+
+	if (ZONE_CMA_IN_PAGE_FLAGS)
+		return zone_type;
+#ifdef CONFIG_CMA
+	return page_zonenum_special(page, zone_type);
+#else
+	return zone_type;
+#endif
 }
 
 #if defined(CONFIG_SPARSEMEM) && !defined(CONFIG_SPARSEMEM_VMEMMAP)
@@ -1247,32 +1264,9 @@ int clear_page_dirty_for_io(struct page *page);
 
 int get_cmdline(struct task_struct *task, char *buffer, int buflen);
 
-/* Is the vma a continuation of the stack vma above it? */
-static inline int vma_growsdown(struct vm_area_struct *vma, unsigned long addr)
+static inline bool vma_is_anonymous(struct vm_area_struct *vma)
 {
-	return vma && (vma->vm_end == addr) && (vma->vm_flags & VM_GROWSDOWN);
-}
-
-static inline int stack_guard_page_start(struct vm_area_struct *vma,
-					     unsigned long addr)
-{
-	return (vma->vm_flags & VM_GROWSDOWN) &&
-		(vma->vm_start == addr) &&
-		!vma_growsdown(vma->vm_prev, addr);
-}
-
-/* Is the vma a continuation of the stack vma below it? */
-static inline int vma_growsup(struct vm_area_struct *vma, unsigned long addr)
-{
-	return vma && (vma->vm_start == addr) && (vma->vm_flags & VM_GROWSUP);
-}
-
-static inline int stack_guard_page_end(struct vm_area_struct *vma,
-					   unsigned long addr)
-{
-	return (vma->vm_flags & VM_GROWSUP) &&
-		(vma->vm_end == addr) &&
-		!vma_growsup(vma->vm_next, addr);
+	return !vma->vm_ops;
 }
 
 extern struct task_struct *task_of_stack(struct task_struct *task,
@@ -1373,8 +1367,16 @@ static inline void setmax_mm_hiwater_rss(unsigned long *maxrss,
 
 #if defined(SPLIT_RSS_COUNTING)
 void sync_mm_rss(struct mm_struct *mm);
+void sync_task_rss(struct task_struct *task);
+void sync_process_rss(struct task_struct *task);
 #else
 static inline void sync_mm_rss(struct mm_struct *mm)
+{
+}
+static inline void sync_task_rss(struct task_struct *task)
+{
+}
+static inline void sync_process_rss(struct task_struct *task)
 {
 }
 #endif
@@ -1767,6 +1769,7 @@ extern int __meminit init_per_zone_wmark_min(void);
 extern void mem_init(void);
 extern void __init mmap_init(void);
 extern void show_mem(unsigned int flags);
+extern long si_mem_available(void);
 extern void si_meminfo(struct sysinfo * val);
 extern void si_meminfo_node(struct sysinfo *val, int nid);
 
@@ -1777,6 +1780,8 @@ extern void setup_per_cpu_pageset(void);
 
 extern void zone_pcp_update(struct zone *zone);
 extern void zone_pcp_reset(struct zone *zone);
+extern void setup_zone_pageset(struct zone *zone);
+ 
 
 /* page_alloc.c */
 extern int min_free_kbytes;
@@ -1943,7 +1948,8 @@ int write_one_page(struct page *page, int wait);
 void task_dirty_inc(struct task_struct *tsk);
 
 /* readahead.c */
-#define VM_MAX_READAHEAD	128	/* kbytes */
+#define VM_MAX_READAHEAD	128     /* kbytes */
+#define BD_VM_MAX_READAHEAD_PAGES	128 /* nr of pages for BDCACHE */
 #define VM_MIN_READAHEAD	16	/* kbytes (includes current page) */
 
 int force_page_cache_readahead(struct address_space *mapping, struct file *filp,
@@ -1963,7 +1969,7 @@ void page_cache_async_readahead(struct address_space *mapping,
 				unsigned long size);
 
 unsigned long max_sane_readahead(unsigned long nr);
-
+extern unsigned long stack_guard_gap;
 /* Generic expand stack which grows the stack according to GROWS{UP,DOWN} */
 extern int expand_stack(struct vm_area_struct *vma, unsigned long address);
 
@@ -1990,6 +1996,29 @@ static inline struct vm_area_struct * find_vma_intersection(struct mm_struct * m
 	if (vma && end_addr <= vma->vm_start)
 		vma = NULL;
 	return vma;
+}
+static inline unsigned long vm_start_gap(struct vm_area_struct *vma)
+{
+	unsigned long vm_start = vma->vm_start;
+
+	if (vma->vm_flags & VM_GROWSDOWN) {
+		vm_start -= stack_guard_gap;
+		if (vm_start > vma->vm_start)
+			vm_start = 0;
+	}
+	return vm_start;
+}
+
+static inline unsigned long vm_end_gap(struct vm_area_struct *vma)
+{
+	unsigned long vm_end = vma->vm_end;
+
+	if (vma->vm_flags & VM_GROWSUP) {
+		vm_end += stack_guard_gap;
+		if (vm_end < vma->vm_end)
+			vm_end = -PAGE_SIZE;
+	}
+	return vm_end;
 }
 
 static inline unsigned long vma_pages(struct vm_area_struct *vma)
@@ -2063,6 +2092,7 @@ static inline struct page *follow_page(struct vm_area_struct *vma,
 #define FOLL_NUMA	0x200	/* force NUMA hinting page fault */
 #define FOLL_MIGRATION	0x400	/* wait for page to replace migration entry */
 #define FOLL_TRIED	0x800	/* a retry, previous pass started an IO */
+#define FOLL_COW	0x4000	/* internal GUP flag */
 
 typedef int (*pte_fn_t)(pte_t *pte, pgtable_t token, unsigned long addr,
 			void *data);
@@ -2078,6 +2108,23 @@ static inline void vm_stat_account(struct mm_struct *mm,
 	mm->total_vm += pages;
 }
 #endif /* CONFIG_PROC_FS */
+
+#if defined(CONFIG_PROC_PAGE_MONITOR) || \
+	defined(CONFIG_PROFILE_MEMORY_USAGE) || defined(CONFIG_VD_MEMINFO)
+struct mem_size_stats {
+	unsigned long resident;
+	unsigned long shared_clean;
+	unsigned long shared_dirty;
+	unsigned long private_clean;
+	unsigned long private_dirty;
+	unsigned long referenced;
+	unsigned long anonymous;
+	unsigned long anonymous_thp;
+	unsigned long swap;
+	u64 pss;
+	u64 swap_pss;
+};
+#endif
 
 #ifdef CONFIG_DEBUG_PAGEALLOC
 extern bool _debug_pagealloc_enabled;
@@ -2227,6 +2274,39 @@ void __init setup_nr_node_ids(void);
 #else
 static inline void setup_nr_node_ids(void) {}
 #endif
+
+struct kernel_mem_usage {
+	unsigned long total_mem_size;	/* total memory */
+	unsigned long free_mem_size;	/* free memory */
+	unsigned long slab_size;	/* slab size */
+	unsigned long vmallocused_size;	/* vmalloc used size (incl. ioremap) */
+	unsigned long ioremap_size;	/* ioremap size */
+	unsigned long pagetable_size;	/* pagetable size */
+	unsigned long kernelstack_size;	/* kernel stack size */
+	unsigned long zram_size;	/* zram used memory size */
+	unsigned long buddy_size;	/* size of calling alloc_page directly*/
+
+	unsigned long sum_kernel_size;	/* total memory used by kernel */
+};
+
+struct user_mem_usage {
+	unsigned long page_cache_size;		/* NR_FILE_PAGE */
+	unsigned long active_anon_size;		/* Active Anon */
+	unsigned long inactive_anon_size;	/* Inactive Anon */
+	unsigned long active_file_size;		/* Active File */
+	unsigned long inactive_file_size;	/* inactive file */
+	unsigned long unevictable_size;		/* unevictable pages */
+
+	unsigned long anon_pages_size;	/* Anon Pages */
+	unsigned long mapped_size;	/* mapped File */
+	unsigned long shmem_size;	/* shmem  size */
+
+	unsigned long sum_user_size;	/* total user memory size */
+};
+
+extern void get_kernel_mem_usage(struct kernel_mem_usage *usage);
+extern void get_user_mem_usage(struct user_mem_usage *usage);
+extern size_t get_zram_info(void);
 
 #endif /* __KERNEL__ */
 #endif /* _LINUX_MM_H */

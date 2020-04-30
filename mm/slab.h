@@ -65,7 +65,10 @@ extern struct list_head slab_caches;
 
 /* The slab cache that manages slab cache information */
 extern struct kmem_cache *kmem_cache;
-
+#ifdef CONFIG_KASAN
+void kasan_get_track(struct kmem_cache *cache, void *object,
+		int alloc, struct stack_trace *trace);
+#endif
 unsigned long calculate_alignment(unsigned long flags,
 		unsigned long align, unsigned long size);
 

@@ -35,6 +35,35 @@
 #ifdef __KERNEL__
 #include <linux/compat.h>
 #endif
+#if defined(CONFIG_EXT4_FS_TRUNCATE_RANGE) \
+	|| defined(CONFIG_EXT4_FS_SPLIT_FILE) \
+	|| defined(CONFIG_EXT4_FS_MERGE_FILE)
+#include <linux/fs.h>
+#include <linux/file.h>
+#include <linux/fdtable.h>
+#include <linux/rcupdate.h>
+#include <linux/pid_namespace.h>
+#include <linux/pvr_edit.h>
+
+#define GET_INODE_FROM_FILP(x) (x->f_path.dentry->d_inode->i_ino)
+#define GET_SUPERDEV_FROM_FILP(x) (x->f_path.dentry->d_inode->i_sb->s_dev)
+#endif
+
+/*
+ * Truncate range alias
+ */
+#ifdef CONFIG_EXT4_FS_TRUNCATE_RANGE
+#define EXT4_IOC_TRUNCATE_RANGE		FTRUNCATERANGE
+#define EXT4_IOC_TRUNCATE_ARRAY_RANGE	FTRUNCATE_ARRAY_RANGE
+#endif
+
+#ifdef CONFIG_EXT4_FS_SPLIT_FILE
+#define EXT4_IOC_SPLIT_FILE		FSPLIT
+#endif
+
+#ifdef CONFIG_EXT4_FS_MERGE_FILE
+#define EXT4_IOC_MERGE_FILE		FMERGE
+#endif
 
 /*
  * The fourth extended filesystem constants/structures
@@ -224,6 +253,7 @@ struct ext4_io_submit {
 #define	EXT4_MAX_BLOCK_SIZE		65536
 #define EXT4_MIN_BLOCK_LOG_SIZE		10
 #define EXT4_MAX_BLOCK_LOG_SIZE		16
+#define EXT4_MAX_CLUSTER_LOG_SIZE	30
 #ifdef __KERNEL__
 # define EXT4_BLOCK_SIZE(s)		((s)->s_blocksize)
 #else
@@ -873,6 +903,15 @@ struct ext4_inode_info {
 	 * by other means, so we have i_data_sem.
 	 */
 	struct rw_semaphore i_data_sem;
+	/*
+	 * i_mmap_sem is for serializing page faults with truncate / punch hole
+	 * operations. We have to make sure that new page cannot be faulted in
+	 * a section of the inode that is being punched. We cannot easily use
+	 * i_data_sem for this since we need protection for the whole punch
+	 * operation and i_data_sem ranks below transaction start so we have
+	 * to occasionally drop it.
+	 */
+	struct rw_semaphore i_mmap_sem;
 	struct inode vfs_inode;
 	struct jbd2_inode *jinode;
 
@@ -1213,6 +1252,7 @@ struct ext4_super_block {
  * fourth extended-fs super-block data in memory
  */
 struct ext4_sb_info {
+	bool    is_case_insensitive;    /* Check if Ext4 is case insensitive */
 	unsigned long s_desc_size;	/* Size of a group descriptor in bytes */
 	unsigned long s_inodes_per_block;/* Number of inodes per block */
 	unsigned long s_blocks_per_group;/* Number of blocks in a group */
@@ -1400,11 +1440,6 @@ static inline struct timespec ext4_current_time(struct inode *inode)
 static inline int ext4_valid_inum(struct super_block *sb, unsigned long ino)
 {
 	return ino == EXT4_ROOT_INO ||
-		ino == EXT4_USR_QUOTA_INO ||
-		ino == EXT4_GRP_QUOTA_INO ||
-		ino == EXT4_BOOT_LOADER_INO ||
-		ino == EXT4_JOURNAL_INO ||
-		ino == EXT4_RESIZE_INO ||
 		(ino >= EXT4_FIRST_INO(sb) &&
 		 ino <= le32_to_cpu(EXT4_SB(sb)->s_es->s_inodes_count));
 }
@@ -2287,6 +2322,7 @@ extern int ext4_chunk_trans_blocks(struct inode *, int nrblocks);
 extern int ext4_zero_partial_blocks(handle_t *handle, struct inode *inode,
 			     loff_t lstart, loff_t lend);
 extern int ext4_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf);
+extern int ext4_filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
 extern qsize_t *ext4_get_reserved_space(struct inode *inode);
 extern void ext4_da_update_reserve_space(struct inode *inode,
 					int used, int quota_claim);
@@ -2797,9 +2833,6 @@ extern struct buffer_head *ext4_get_first_inline_block(struct inode *inode,
 extern int ext4_inline_data_fiemap(struct inode *inode,
 				   struct fiemap_extent_info *fieinfo,
 				   int *has_inline, __u64 start, __u64 len);
-extern int ext4_try_to_evict_inline_data(handle_t *handle,
-					 struct inode *inode,
-					 int needed);
 extern void ext4_inline_data_truncate(struct inode *inode, int *has_inline);
 
 extern int ext4_convert_inline_data(struct inode *inode);
@@ -2877,6 +2910,9 @@ extern int ext4_ext_index_trans_blocks(struct inode *inode, int extents);
 extern int ext4_ext_map_blocks(handle_t *handle, struct inode *inode,
 			       struct ext4_map_blocks *map, int flags);
 extern void ext4_ext_truncate(handle_t *, struct inode *);
+extern int ext4_ext_truncate_range(struct file *filp,
+				   loff_t start, loff_t end);
+
 extern int ext4_ext_remove_space(struct inode *inode, ext4_lblk_t start,
 				 ext4_lblk_t end);
 extern void ext4_ext_init(struct super_block *);
@@ -2910,6 +2946,7 @@ extern int ext4_find_delalloc_cluster(struct inode *inode, ext4_lblk_t lblk);
 extern ext4_lblk_t ext4_ext_next_allocated_block(struct ext4_ext_path *path);
 extern int ext4_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 			__u64 start, __u64 len);
+int ext4_cmp_offsets(const void *a, const void *b);
 extern int ext4_ext_precache(struct inode *inode);
 extern int ext4_collapse_range(struct inode *inode, loff_t offset, loff_t len);
 extern int ext4_swap_extents(handle_t *handle, struct inode *inode1,
@@ -2925,6 +2962,9 @@ extern void ext4_double_up_write_data_sem(struct inode *orig_inode,
 extern int ext4_move_extents(struct file *o_filp, struct file *d_filp,
 			     __u64 start_orig, __u64 start_donor,
 			     __u64 len, __u64 *moved_len);
+
+extern int ext4_split_file(struct file *o_filp, char *dest_file, __u64 offset);
+extern int ext4_merge_file(struct file *o_filp, char *dest_file);
 
 /* page-io.c */
 extern int __init ext4_init_pageio(void);
@@ -2992,6 +3032,45 @@ extern struct mutex ext4__aio_mutex[EXT4_WQ_HASH_SZ];
 #define EXT4_RESIZING	0
 extern int ext4_resize_begin(struct super_block *sb);
 extern void ext4_resize_end(struct super_block *sb);
+
+static inline __u32 ext4_do_div(void *a, __u32 b, int n)
+{
+	__u32   mod;
+
+	switch (n) {
+	case 4:
+		mod = *(__u32 *)a % b;
+		*(__u32 *)a = *(__u32 *)a / b;
+		return mod;
+	case 8:
+		mod = do_div(*(__u64 *)a, b);
+		return mod;
+	}
+
+	/* NOTREACHED */
+	return 0;
+}
+
+static inline __u32 ext4_do_mod(void *a, __u32 b, int n)
+{
+	switch (n) {
+	case 4:
+		return *(__u32 *)a % b;
+	case 8:
+		{
+		__u64   c = *(__u64 *)a;
+		return do_div(c, b);
+		}
+	}
+
+	/* NOTREACHED */
+	return 0;
+}
+
+#undef do_div
+#define do_div(a, b)    ext4_do_div(&(a), (b), sizeof(a))
+#define do_mod(a, b)    ext4_do_mod(&(a), (b), sizeof(a))
+
 
 #endif	/* __KERNEL__ */
 

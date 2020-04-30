@@ -983,7 +983,9 @@ grow_dev_page(struct block_device *bdev, sector_t block,
 	gfp_t gfp_mask;
 
 	gfp_mask = (mapping_gfp_mask(inode->i_mapping) & ~__GFP_FS) | gfp;
-
+#ifdef CONFIG_PREVENT_ALLOC_BUFFER_IN_CMA
+	gfp_mask |= __GFP_NONE_CMA;
+#endif
 	/*
 	 * XXX: __getblk_slow() can not really deal with failure and
 	 * will endlessly loop on improvised global reclaim.  Prefer

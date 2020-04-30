@@ -32,6 +32,8 @@ config ARM
 	select HAVE_ARCH_AUDITSYSCALL if (AEABI && !OABI_COMPAT)
 	select HAVE_ARCH_BITREVERSE if (CPU_32v7M || CPU_32v7) && !CPU_32v6
 	select HAVE_ARCH_JUMP_LABEL if !XIP_KERNEL
+	select HAVE_ARCH_KASAN
+	select ARCH_HAS_UBSAN_SANITIZE_ALL
 	select HAVE_ARCH_KGDB
 	select HAVE_ARCH_SECCOMP_FILTER if (AEABI && !OABI_COMPAT)
 	select HAVE_ARCH_TRACEHOOK
@@ -186,6 +188,9 @@ config ARCH_HAS_ILOG2_U64
 config ARCH_HAS_BANDGAP
 	bool
 
+config FIX_EARLYCON_MEM
+	def_bool y if MMU
+
 config GENERIC_HWEIGHT
 	bool
 	default y
@@ -314,6 +319,48 @@ choice
 	default ARCH_VERSATILE if !MMU
 	default ARCH_MULTIPLATFORM if MMU
 
+config ARCH_SDP
+	bool "Samsung DTV Platform"
+	select ARCH_HAS_HOLES_MEMORYMODEL
+	select ARCH_SPARSEMEM_ENABLE
+	select ARCH_FLATMEM_ENABLE
+	select ARM_AMBA
+	select ARM_GIC
+	select CPU_V7
+	select CLKDEV_LOOKUP
+	select COMMON_CLK
+	select GENERIC_CLOCKEVENTS
+	select HAVE_CLK
+	select HAVE_SMP
+	select NEED_MACH_MEMORY_H
+	select AUTO_ZRELADDR
+	select MIGHT_HAVE_CACHE_L2X0
+#	select HAVE_ARM_SCU if SMP
+#	select HAVE_ARM_TWD if LOCAL_TIMERS
+#	select PCI if ARCH_SDP1404
+	help
+	  Support for Samsung DTV platforms based on SDPxxxx.
+
+config ARCH_MEDIATEK
+	bool "Mediatek MT65xx & MT81xx SoC"
+	depends on MMU
+	select ARCH_WANT_OPTIONAL_GPIOLIB
+	select ARM_HAS_SG_CHAIN
+	select ARM_PATCH_PHYS_VIRT
+	select AUTO_ZRELADDR
+	select CLKSRC_OF
+	select COMMON_CLK
+	select GENERIC_CLOCKEVENTS
+	select MIGHT_HAVE_PCI
+	select MULTI_IRQ_HANDLER
+	select SPARSE_IRQ
+	select USE_OF
+	select ARM_GIC
+	select PINCTRL
+	select MTK_TIMER
+	help
+	  Support for Mediatek MT65xx & MT81xx SoCs
+
 config ARCH_MULTIPLATFORM
 	bool "Allow multiple platforms to be selected"
 	depends on MMU
@@ -328,6 +375,31 @@ config ARCH_MULTIPLATFORM
 	select MULTI_IRQ_HANDLER
 	select SPARSE_IRQ
 	select USE_OF
+
+config ARCH_NVT_V7
+	bool "Novatek DTV Platform"
+	depends on MMU
+	select ARCH_HAS_HOLES_MEMORYMODEL
+	select ARCH_FLATMEM_ENABLE
+	select ARCH_SPARSEMEM_ENABLE
+	select ARM_GIC
+	select ARM_GLOBAL_TIMER
+	select ARM_HAS_SG_CHAIN
+	select CLKDEV_LOOKUP
+	select CLKSRC_ARM_GLOBAL_TIMER_BROADCAST if ARM_GLOBAL_TIMER
+	select COMMON_CLK
+	select CPU_V7
+	select GENERIC_CLOCKEVENTS
+	select HAVE_ARM_SCU
+	select HAVE_ARM_TWD if SMP
+	select HAVE_CLK
+	select HAVE_SMP
+	select NEED_MACH_MEMORY_H
+	select MIGHT_HAVE_CACHE_L2X0
+	select PLAT_NOVATEK
+	select SERIAL_OF_PLATFORM
+	select USE_OF
+	select ARCH_REQUIRE_GPIOLIB
 
 config ARCH_REALVIEW
 	bool "ARM Ltd. RealView family"
@@ -913,6 +985,8 @@ source "arch/arm/mach-rockchip/Kconfig"
 
 source "arch/arm/mach-sa1100/Kconfig"
 
+source "arch/arm/mach-sdp/Kconfig"
+
 source "arch/arm/mach-socfpga/Kconfig"
 
 source "arch/arm/mach-spear/Kconfig"
@@ -943,6 +1017,7 @@ source "arch/arm/mach-ux500/Kconfig"
 source "arch/arm/mach-versatile/Kconfig"
 
 source "arch/arm/mach-vexpress/Kconfig"
+source "arch/arm/mach-nvt72xxx/Kconfig"
 source "arch/arm/plat-versatile/Kconfig"
 
 source "arch/arm/mach-vt8500/Kconfig"
@@ -974,6 +1049,9 @@ config PLAT_PXA
 	bool
 
 config PLAT_VERSATILE
+	bool
+
+config PLAT_NOVATEK
 	bool
 
 config ARM_TIMER_SP804
@@ -1254,6 +1332,16 @@ config ISA_DMA
 config ISA_DMA_API
 	bool
 
+config HOLES_IN_ZONE
+	bool "Manage holes in memory"
+	depends on SPARSEMEM
+	default y
+	help
+	  CONFIG_HOLES_IN_ZONE should be used when SPARSEMEM or
+	  ARCH_HAS_HOLES_MEMORYMODEL is enabled.This option should be
+	  enabled to avoid kernel crash when kernel memory is not aligned
+	  to SECTION_SIZE_BITS.
+
 config PCI
 	bool "PCI support" if MIGHT_HAVE_PCI
 	help
@@ -1463,6 +1551,16 @@ config HOTPLUG_CPU
 	  Say Y here to experiment with turning CPUs off and on.  CPUs
 	  can be controlled through /sys/devices/system/cpu.
 
+config PRESERVE_IRQ_AFFINITY
+        bool "Restore IRQ affinities when CPU comes online"
+        depends on HOTPLUG_CPU
+        default y
+        help
+          If some CPU goes offline, manually setted IRQ affinities could change.
+          When CPU comes online, all relevant IRQs will be re-affined to it
+          if you will say Y here.
+
+
 config ARM_PSCI
 	bool "Support for the ARM Power State Coordination Interface (PSCI)"
 	depends on CPU_V7
@@ -1486,6 +1584,7 @@ config ARCH_NR_GPIO
 	default 352 if ARCH_VT8500
 	default 288 if ARCH_ROCKCHIP
 	default 264 if MACH_H4700
+	default 512 if ARCH_SDP
 	default 0
 	help
 	  Maximum number of GPIOs in the system.
@@ -1629,6 +1728,9 @@ config ARCH_HAS_HOLES_MEMORYMODEL
 config ARCH_SPARSEMEM_ENABLE
 	bool
 
+config ARCH_FLATMEM_ENABLE
+	bool
+
 config ARCH_SPARSEMEM_DEFAULT
 	def_bool ARCH_SPARSEMEM_ENABLE
 
@@ -1663,6 +1765,24 @@ config HIGHPTE
 	bool "Allocate 2nd-level pagetables from highmem"
 	depends on HIGHMEM
 
+config MODULES_USE_LONG_CALLS
+	bool "Build modules with long-calls"
+	depends on MMU && MODULES
+	depends on !FUNCTION_TRACER
+	help
+	  By default, kernel modules use short-calls ("bl" instruction) which
+	  has limited jump distance (+/- 32MB). That's why modules are loaded
+	  just below kernel text.
+
+	  After enabling this option, kernel modules will be built using
+	  long-calls ("blx" instruction) and 32MB jump distance limitation
+	  will no longer apply.
+
+	  Currently this option is incompatible with CONFIG_FUNCTION_TRACER.
+	  Compiler emits short-calls to mcount() even with -mlong-calls.
+	  Most likely this is a bug in GCC, but anyway ftrace doesn't have
+	  support for patching long-calls of mcount.
+
 config HW_PERF_EVENTS
 	bool "Enable hardware performance counter support for perf events"
 	depends on PERF_EVENTS
@@ -1685,7 +1805,7 @@ config ARCH_WANT_GENERAL_HUGETLB
 source "mm/Kconfig"
 
 config FORCE_MAX_ZONEORDER
-	int "Maximum zone order" if ARCH_SHMOBILE_LEGACY
+	int "Maximum zone order" if (ARCH_SHMOBILE || ARCH_SDP)
 	range 11 64 if ARCH_SHMOBILE_LEGACY
 	default "12" if SOC_AM33XX
 	default "9" if SA1111 || ARCH_EFM32
@@ -2109,6 +2229,8 @@ source "drivers/firmware/Kconfig"
 source "fs/Kconfig"
 
 source "arch/arm/Kconfig.debug"
+
+source "arch/Kconfig.VDLP"
 
 source "security/Kconfig"
 

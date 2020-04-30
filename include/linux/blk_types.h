@@ -131,6 +131,9 @@ struct bio {
 #define BIO_OWNS_VEC	13	/* bio_free() should free bvec */
 
 #define bio_flagged(bio, flag)	((bio)->bi_flags & (1 << (flag)))
+#if defined (CONFIG_BD_CACHE_ENABLED)
+#define BIO_DIRECT      14       /* direct IO from originating file request */
+#endif
 
 /*
  * top 4 bits of bio flags indicate the pool this bio came from
@@ -188,6 +191,11 @@ enum rq_flag_bits {
 	__REQ_COPY_USER,	/* contains copies of user pages */
 	__REQ_FLUSH_SEQ,	/* request for flush sequence */
 	__REQ_IO_STAT,		/* account I/O stat */
+	__REQ_OP_WRITE_ZEROES,	/* fill zero */
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	__REQ_DIRECTIO,         /* original file-based request was O_DIRECT */
+//	__REQ_ISSUED,           /* request was issued by lower driver layers */
+#endif
 	__REQ_MIXED_MERGE,	/* merge of different types, fail separately */
 	__REQ_PM,		/* runtime pm request */
 	__REQ_HASHED,		/* on IO scheduler merge hash */
@@ -207,13 +215,15 @@ enum rq_flag_bits {
 #define REQ_WRITE_SAME		(1ULL << __REQ_WRITE_SAME)
 #define REQ_NOIDLE		(1ULL << __REQ_NOIDLE)
 #define REQ_INTEGRITY		(1ULL << __REQ_INTEGRITY)
+#define REQ_DIRECTIO		(1ULL << __REQ_DIRECTIO)
+#define REQ_OP_WRITE_ZEROES	(1ULL << __REQ_OP_WRITE_ZEROES)
 
 #define REQ_FAILFAST_MASK \
 	(REQ_FAILFAST_DEV | REQ_FAILFAST_TRANSPORT | REQ_FAILFAST_DRIVER)
 #define REQ_COMMON_MASK \
 	(REQ_WRITE | REQ_FAILFAST_MASK | REQ_SYNC | REQ_META | REQ_PRIO | \
 	 REQ_DISCARD | REQ_WRITE_SAME | REQ_NOIDLE | REQ_FLUSH | REQ_FUA | \
-	 REQ_SECURE | REQ_INTEGRITY)
+	 REQ_SECURE | REQ_INTEGRITY | REQ_OP_WRITE_ZEROES)
 #define REQ_CLONE_MASK		REQ_COMMON_MASK
 
 #define BIO_NO_ADVANCE_ITER_MASK	(REQ_DISCARD|REQ_WRITE_SAME)

@@ -1,0 +1,21 @@
+#
+# MediaTek Clock Drivers
+#
+menu "Clock driver for MediaTek SoC"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+
+config COMMON_CLK_MEDIATEK
+	bool
+	select RESET_CONTROLLER
+	---help---
+	  MediaTek SoCs' clock support.
+
+config COMMON_CLK_MT8167
+	bool "Clock driver for MediaTek MT8167"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	select COMMON_CLK_MEDIATEK
+	default ARCH_MEDIATEK
+	---help---
+	  This driver supports MediaTek MT8167 clocks.
+
+endmenu

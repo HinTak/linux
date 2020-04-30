@@ -327,8 +327,15 @@ static int dev_uevent(struct kset *kset, struct kobject *kobj,
 	if (dev->type && dev->type->name)
 		add_uevent_var(env, "DEVTYPE=%s", dev->type->name);
 
+	/*
+	 * dev->driver is set NULL under dev->udev_mutex so it should be
+	 * checked within dev->udev_mutex. This prevents a race between
+	 * dev_uevent and __device_release_driver.
+	 */
+	mutex_lock(&dev->udev_mutex);
 	if (dev->driver)
 		add_uevent_var(env, "DRIVER=%s", dev->driver->name);
+	mutex_unlock(&dev->udev_mutex);
 
 	/* Add common DT information about the device */
 	of_device_uevent(dev, env);
@@ -657,6 +664,7 @@ void device_initialize(struct device *dev)
 	kobject_init(&dev->kobj, &device_ktype);
 	INIT_LIST_HEAD(&dev->dma_pools);
 	mutex_init(&dev->mutex);
+	mutex_init(&dev->udev_mutex);
 	lockdep_set_novalidate_class(&dev->mutex);
 	spin_lock_init(&dev->devres_lock);
 	INIT_LIST_HEAD(&dev->devres_head);
@@ -1264,6 +1272,48 @@ static struct device *next_device(struct klist_iter *i)
 	}
 	return dev;
 }
+
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+
+#define SMK_LONGLABEL 256
+
+int device_get_smack64_label(struct device *dev, char** lab_smk64)
+{
+    char *buf = NULL;
+    int ret_smk = 0;
+
+    *lab_smk64 = NULL;
+
+    if ((dev->type && dev->type->get_smack64_label) ||
+	(dev->class && dev->class->get_smack64_label)) {
+		ret_smk = -1;
+		buf = kzalloc(SMK_LONGLABEL, GFP_KERNEL);
+		if (!buf)
+			return -ENOMEM;
+    }
+
+    /* the device type may provide a specific label name of SMACK64*/
+    if (dev->type && dev->type->get_smack64_label)
+	ret_smk = dev->type->get_smack64_label(dev, buf, SMK_LONGLABEL);
+
+    if (!ret_smk)
+	goto done;
+
+    /* the class may provide a specific label name of SMACK64 */
+    if (dev->class && dev->class->get_smack64_label)
+	ret_smk = dev->class->get_smack64_label(dev, buf, SMK_LONGLABEL);
+
+done:
+    if (!ret_smk && buf && buf[0]) {
+	buf[SMK_LONGLABEL - 1] = 0;
+	*lab_smk64 = buf;
+    } else if (buf)
+	kfree(buf);
+
+    return ret_smk;
+}
+
+#endif
 
 /**
  * device_get_devnode - path of device node file

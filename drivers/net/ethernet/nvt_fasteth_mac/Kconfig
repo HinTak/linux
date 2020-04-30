@@ -1,0 +1,79 @@
+#
+# NVT FASTETH MAC network device configuration
+#
+
+config NVT_FASTETH_MAC
+	tristate "Novatek Fast Ethernet Mac support"
+	help
+	  Support for Novatek Mac and Internal phy.
+	  This is the network dependent layer
+	  to handle network related functionality.
+	  To compile this driver as a module, choose M here.
+
+config NVT_FASTETH_MAC_NAPI
+	bool "Novatek Fast Ethernet NAPI Support"
+	depends on NVT_FASTETH_MAC
+	help
+	  Support the NAPI function.
+	  New API (also referred to as NAPI) is an interface
+	  to use interrupt mitigation techniques
+	  for networking devices in the driver.
+
+choice
+	prompt "Ethernet Phy Type"
+	depends on NVT_FASTETH_MAC
+	default NVT_INTERNAL_PHY
+
+config NVT_MICREL_PHY_SUPPORT
+	bool "Micrel Ethernet Phy Support"
+	help
+	  Micrel Ethernet Phy Support
+	  If use Micrel Ethernet Phy,
+	  please select this.
+	  It is rarely used in NVT.
+
+config NVT_RTL_PHY_SUPPORT
+	bool "Realtek Ethernet Phy Support"
+	help
+	  Realtek Ethernet Phy Support
+	  If use Realtek Ethernet Phy,
+	  please select this.
+	  It is rarely used in NVT now.
+
+config NVT_ICPLUS_PHY_SUPPORT
+	bool "IC Plus Ethernet Phy Support"
+	help
+	  IC Plus Ethernet Phy Support.
+	  If use IC Plus Ethernet Phy,
+	  please select this.
+	  It is rarely used in NVT.
+
+config NVT_INTERNAL_PHY
+	bool "Novatek Ethernet Phy Support"
+	help
+	  Novatek Ethernet Phy Support.
+	  If use Novatek Ethernet Phy,
+	  please select this.
+	  It is most used in NVT.
+endchoice
+
+choice
+	prompt "Novatek Ethernet PHY Type"
+	depends on NVT_FASTETH_MAC && NVT_INTERNAL_PHY
+	default NVT_PHY_NVT72673 if ARCH_NVT72673
+	default NVT_PHY_NVT72172
+	help
+	  This value can be used to select the type of Novatek
+	  Ethernet PHY
+
+config NVT_PHY_NVT72673
+	bool "NVT72673"
+	help
+	  The Novatek Ethernet NVT72673 PHY
+
+config NVT_PHY_NVT72172
+	bool "NVT72172"
+	help
+	  The Novatek Ethernet NVT72172 PHY
+endchoice
+

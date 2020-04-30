@@ -57,7 +57,11 @@ extern void __chk_io_ptr(const volatile void __iomem *);
 #ifdef CC_USING_HOTPATCH
 #define notrace __attribute__((hotpatch(0,0)))
 #else
+#ifdef __cplusplus
+#define notrace
+#else
 #define notrace __attribute__((no_instrument_function))
+#endif
 #endif
 
 /* Intel compiler defines __GNUC__. So we will overwrite implementations

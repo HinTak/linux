@@ -2335,15 +2335,20 @@ static int mmc_test_profile_sglen_r_nonblock_perf(struct mmc_test_card *test)
 /*
  * eMMC hardware reset.
  */
+#ifndef CONFIG_MTK_KERNEL_SOLUTION
 static int mmc_test_hw_reset(struct mmc_test_card *test)
+#else
+static int mmc_test_reset(struct mmc_test_card *test)
+#endif
 {
 	struct mmc_card *card = test->card;
 	struct mmc_host *host = card->host;
 	int err;
 
+#ifndef CONFIG_MTK_KERNEL_SOLUTION
 	if (!mmc_card_mmc(card) || !mmc_can_reset(card))
 		return RESULT_UNSUP_CARD;
-
+#endif
 	err = mmc_hw_reset(host);
 	if (!err)
 		return RESULT_OK;
@@ -2677,8 +2682,13 @@ static const struct mmc_test_case mmc_test_cases[] = {
 	},
 
 	{
+#ifdef CONFIG_MTK_KERNEL_SOLUTION
+		.name = "Reset test",
+		.run = mmc_test_reset,
+#else
 		.name = "eMMC hardware reset",
 		.run = mmc_test_hw_reset,
+#endif
 	},
 };
 

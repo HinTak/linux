@@ -98,4 +98,10 @@ static inline int migrate_misplaced_transhuge_page(struct mm_struct *mm,
 }
 #endif /* CONFIG_NUMA_BALANCING && CONFIG_TRANSPARENT_HUGEPAGE*/
 
+#if defined(CONFIG_CMA_DEBUG) & defined(CONFIG_PAGE_OWNER)
+extern void migrate_failed_page_dump(struct page *page, char *reason);
+#else
+static inline void migrate_failed_page_dump(struct page *page, char *reason) {}
+#endif
+
 #endif /* _LINUX_MIGRATE_H */

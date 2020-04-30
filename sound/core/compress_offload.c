@@ -463,11 +463,15 @@ out:
 }
 
 /* revisit this with snd_pcm_preallocate_xxx */
+/**[2017.11.30 SP.Audio] https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=b35cc8225845112a616e3a2266d2fde5ab13d3ab **/
 static int snd_compr_allocate_buffer(struct snd_compr_stream *stream,
 		struct snd_compr_params *params)
 {
 	unsigned int buffer_size;
 	void *buffer;
+	if (params->buffer.fragment_size == 0 || 
+		params->buffer.fragments > SIZE_MAX / params->buffer.fragment_size)
+			return -EINVAL;
 
 	buffer_size = params->buffer.fragment_size * params->buffer.fragments;
 	if (stream->ops->copy) {
@@ -618,12 +622,14 @@ snd_compr_set_metadata(struct snd_compr_stream *stream, unsigned long arg)
 	return retval;
 }
 
+/**[2017.11.30 SP.Audio] https://source.codeaurora.org/quic/la/kernel/msm-3.10/commit/?id=591b1f455c32206704cbcf426bb30911c260c33e **/
 static inline int
 snd_compr_tstamp(struct snd_compr_stream *stream, unsigned long arg)
 {
-	struct snd_compr_tstamp tstamp = {0};
+	struct snd_compr_tstamp tstamp;
 	int ret;
 
+	memset(&tstamp, 0, sizeof(tstamp));
 	ret = snd_compr_update_tstamp(stream, &tstamp);
 	if (ret == 0)
 		ret = copy_to_user((struct snd_compr_tstamp __user *)arg,

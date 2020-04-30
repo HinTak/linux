@@ -100,6 +100,9 @@ static int save_trace(struct stackframe *frame, void *d)
 
 	regs = (struct pt_regs *)frame->sp;
 
+	if (!__kernel_text_address(regs->ARM_pc))
+		return 1;
+
 	trace->entries[trace->nr_entries++] = regs->ARM_pc;
 
 	return trace->nr_entries >= trace->max_entries;

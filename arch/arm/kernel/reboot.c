@@ -13,6 +13,10 @@
 #include <asm/cacheflush.h>
 #include <asm/idmap.h>
 
+#if defined(CONFIG_POWER_SAVING_MODE) || defined(CONFIG_ALWAYS_INSTANT_ON)
+#include <linux/console.h>
+#endif
+
 #include "reboot.h"
 
 typedef void (*phys_reset_t)(unsigned long);
@@ -21,6 +25,11 @@ typedef void (*phys_reset_t)(unsigned long);
  * Function pointers to optional machine specific functions
  */
 void (*arm_pm_restart)(enum reboot_mode reboot_mode, const char *cmd);
+EXPORT_SYMBOL_GPL(arm_pm_restart);
+
+void (*arm_pm_restart_standby)(enum reboot_mode reboot_mode, const char *cmd);
+EXPORT_SYMBOL_GPL(arm_pm_restart_standby);
+
 void (*pm_power_off)(void);
 EXPORT_SYMBOL(pm_power_off);
 
@@ -153,3 +162,25 @@ void machine_restart(char *cmd)
 	local_irq_disable();
 	while (1);
 }
+
+#if defined(CONFIG_POWER_SAVING_MODE) || defined(CONFIG_ALWAYS_INSTANT_ON)
+void machine_restart_standby(char *cmd)
+{
+	local_irq_disable();
+	smp_send_stop();
+
+	console_flush_messages();
+	if (arm_pm_restart_standby)
+		arm_pm_restart_standby(reboot_mode, cmd);
+	else
+		do_kernel_restart(cmd);
+
+	/* Give a grace period for failure to restart of 1s */
+	mdelay(1000);
+
+	/* Whoops - the platform was unable to reboot. Tell the user! */
+	printk("Reboot failed -- System halted\n");
+	local_irq_disable();
+	while (1);
+}
+#endif

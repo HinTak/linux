@@ -27,6 +27,10 @@ enum scsi_timeouts {
  */
 #define SCSI_MAX_SG_SEGMENTS	128
 
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT       // patch for US_FLIDX_SCSI_MAX_32_BLOCK device, 20070716
+#define SCSI_MAX_PHYS_SEGMENTS_32       32
+#endif
+
 /*
  * Like SCSI_MAX_SG_SEGMENTS, but for archs that have sg chaining. This limit
  * is totally arbitrary, a setting of 2048 will get you at least 8mb ios.

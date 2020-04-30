@@ -1,0 +1,59 @@
+
+menuconfig MEDIATEK_SOLUTION
+        bool "MediaTek Properitary Configuration"
+        select I2C
+        help
+          Check this to enable MediaTek properity configuration.
+
+if MEDIATEK_SOLUTION
+
+config MTK_PLATFORM
+        string "MTK platform name"
+
+config ARCH_MTK_PROJECT
+        string "MTK project name"
+
+config MTK_KERNEL_SOLUTION
+        bool "MediaTek Kernel Solution Configuration"
+	default y
+
+config MTK_TEMP_TIZEN_SOLUTION
+        bool "MediaTek Kernel temporary Tizen solution Configuration."
+        default y
+        help
+          To setup Tizen 3.0 environment. Some codes are modified by this configuration.
+          It should be removed not so far.
+
+menu "Storage: EMMC, NAND, partition..."
+endmenu  # Storage
+
+menu "Power, PMIC, Battery & Low Power related configs"
+endmenu
+
+menu "MultiMedia, Display, Camera related configs"
+endmenu
+
+menu "Sensors"
+endmenu
+
+menu "Modem & Connectivity related configs"
+endmenu  # CONN
+
+menu "Other Peripherals"
+source "drivers/misc/mediatek/usb11/Kconfig"
+source "drivers/misc/mediatek/usb20/Kconfig"
+source "drivers/misc/mediatek/btif/Kconfig"
+source "drivers/misc/mediatek/connectivity/Kconfig"
+source "drivers/misc/mediatek/ice_debug/Kconfig"
+source "drivers/misc/mediatek/xo/Kconfig"
+source "drivers/misc/mediatek/misc/Kconfig"
+endmenu  # Peripheral
+
+menu "Misc configs"
+endmenu    # Misc
+
+menu "Power, PMIC, Battery & Low Power related configs"
+source "drivers/misc/mediatek/power/Kconfig"
+endmenu  # Power
+
+endif

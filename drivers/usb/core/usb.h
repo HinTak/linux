@@ -1,6 +1,6 @@
 #include <linux/pm.h>
 #include <linux/acpi.h>
-
+#define PARALLEL_RESET_RESUME_REMOVABLE_DEVICE /*Enabling parallel resume of usser port devices for iot like chip*/
 struct usb_hub_descriptor;
 struct usb_dev_state;
 
@@ -185,3 +185,75 @@ extern acpi_handle usb_get_hub_port_acpi_handle(struct usb_device *hdev,
 static inline int usb_acpi_register(void) { return 0; };
 static inline void usb_acpi_unregister(void) { };
 #endif
+
+/*Below information has been added to create a framework for resuming user port devices parallely */
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+extern volatile unsigned long   khubd_resume_flag;
+enum resume_id{
+	PARALLEL_RESUME_ID =	1,
+	USERPORT_RESUME_ID =	2
+};
+#ifdef PARALLEL_RESET_RESUME_REMOVABLE_DEVICE
+extern int resume_device_interface(struct usb_device *udev, pm_message_t msg);
+
+/* Currently only iot device is required to reset resume so count is 1 */
+/* If more devices are to be added then increase this count */
+#define PARALLEL_DEVICE_COUNT 	1
+#define IOT_DEVICE 	0
+#define OCM_DEVICE 	1
+#define ZIGBEE_IOT_VENDORID	0x10c4
+#define ZIGBEE_IOT_PRODUCTID	0x0003
+
+#define USER_PORT_FAMILY	0x03
+
+struct userport_usb_info{
+	struct usb_device	*udev[PARALLEL_DEVICE_COUNT];
+	struct k_info		thread_info[PARALLEL_DEVICE_COUNT];
+};
+
+#endif
+#endif
+#if defined(SAMSUNG_USB_BTWIFI_RESET_WAIT)
+#define ZIGBEE_IOT_VENDORID		0x10c4
+#define ZIGBEE_IOT_PRODUCTID		0x0003
+#define BTCOMBO_QCA_PRODUCT_ID		0x3004
+#define WIFICOMBO_QCA_PRODUCT_ID	0x9378
+#define HUB11_VENDOR_ID			0x05e3
+#define HUB11_PRODUCT_ID		0x0608
+#define HUB11_BUSNO			1
+#define QCA_VENDOR_ID			0x0A5C /*QCA - WIFI*/
+#define BCM_VENDOR_ID			0x0CF3 /*BCM - BT, WIFI, WIFICOMBO*/
+#define BCM_IOT_VENDOR_ID		0x04E8  /*BCM BT-WIFI COMBO for IoT*/
+#define BTHUB_PRODUCT_ID		0x4500 /*BTHUB*/
+#define BTCOMBO_PRODUCT_ID		0x2045 /*BTCOMBO*/
+#define WIFI_BCM_PRODUCT_ID		0x1022 /*WIFI-BCM*/
+#define WIFI_QCA_PRODUCT_ID		0xBD1D /*WIFI-QCA*/
+#define WIFICOMBO_PRODUCT_ID		0XBD27 /*WIFI-COMBO*/
+#define WIFI_IOT_PRODUCT_ID		0x20A0  /*BCM WIFI-COMBO for IoT*/
+#define BT_IOT_PRODUCT_ID		0x20A1  /*BCM BT-COMBO for IoT*/
+#define BT_QCA9379_PRODUCT_ID		0x20A4  /* BT QCA9379 combo chip */
+#define WIFI_QCA9379_PRODUCT_ID	0x20A5  /* WiFi QCA9379 combo chip */
+#define WIFI_MEDIATEK_VENDOR_ID	0x0E8D  /* WiFi MEDIATEK chip */
+#define WIFI_MEDIATEK_PRODUCT_ID	0x7603  /* WiFi MEDIATEK  chip */
+#define WIFI_SAM_PRODUCT_ID		0x20A9  /* WiFi SAMSUNG chip */
+#define MEDIATEK_COMBO_PRODUCT_ID	0x20AD	/*MediaTek WIFI/BT Combo Chip(MT7668) */
+#define MTK_MOB_PRODUCT_ID           	0x20AE	/*MediaTek MT7668 MOB (Module on Board) */
+#define DEV_MEDIATEK_COMBO_PRODUCT_ID	0x7668	/*DEV MediaTek WIFI/BT Combo Chip(MT7668) */
+
+#define PORT_RESET_WAIT_SLEEP		20
+#define PORT_RESET_WAIT_TIMEOUT		6000 // temporary change utill kant stable
+#define PORT_RESET_WAIT_TIMEOUT_2K	2000 //Muse M port_reset_wait_timeout
+#define IS_HAWKP			soc_is_sdp1404()
+#define IS_HAWKM			soc_is_sdp1406()
+#endif
+
+#if defined(CONFIG_USB_MODULE) && defined(CONFIG_SAMSUNG_USB_TV_PRODUCT) && \
+		(defined(CONFIG_ARCH_SDP1601) && defined(__KANTM_REV_0__))		// Only Kant.M TV
+extern unsigned int sdp_ocm_is_internal_hub(void);
+extern int sdp_ocm_reset_ext_hub(void);
+#define OCM_EXT_HUB_VID         0x05E3
+#define OCM_EXT_HUB_PID         0x0608
+#define OCM_EXT_HUB_BUSID       5
+#endif
+
+

@@ -155,6 +155,11 @@ int __init init_rootfs(void);
 
 extern void (*late_time_init)(void);
 
+#ifdef CONFIG_EMRG_SAVE_KLOG
+/* Init emergency klog dump to partition*/
+void init_emrg_klog_save(void);
+#endif
+
 extern bool initcall_debug;
 
 #endif

@@ -387,9 +387,13 @@ struct rcu_data {
 #define RCU_NOGP_WAKE		1
 #define RCU_NOGP_WAKE_FORCE	2
 
+#ifdef CONFIG_FASTBOOT_RCU
+#define RCU_JIFFIES_TILL_FORCE_QS	 3	/* for rsp->jiffies_force_qs */
+#else
 #define RCU_JIFFIES_TILL_FORCE_QS (1 + (HZ > 250) + (HZ > 500))
 					/* For jiffies_till_first_fqs and */
 					/*  and jiffies_till_next_fqs. */
+#endif
 
 #define RCU_JIFFIES_FQS_DIV	256	/* Very large systems need more */
 					/*  delay between bouts of */

@@ -1244,7 +1244,11 @@ EXPORT_SYMBOL_GPL(usb_string_ids_n);
 
 /*-------------------------------------------------------------------------*/
 
+#ifdef CONFIG_MTK_KERNEL_SOLUTION
+void composite_setup_complete(struct usb_ep *ep, struct usb_request *req)
+#else
 static void composite_setup_complete(struct usb_ep *ep, struct usb_request *req)
+#endif
 {
 	struct usb_composite_dev *cdev;
 

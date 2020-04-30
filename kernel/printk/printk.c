@@ -20,6 +20,7 @@
 #include <linux/mm.h>
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
+#include <linux/vt_kern.h>
 #include <linux/console.h>
 #include <linux/init.h>
 #include <linux/jiffies.h>
@@ -46,14 +47,24 @@
 #include <linux/utsname.h>
 #include <linux/ctype.h>
 #include <linux/uio.h>
+#include <linux/kthread.h>
 
 #include <asm/uaccess.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/printk.h>
 
+#ifdef CONFIG_SEPARATE_PRINTK_FROM_USER
+	void _sep_printk_start(void);
+	void _sep_printk_end(void);
+#endif
+
 #include "console_cmdline.h"
 #include "braille.h"
+
+#ifdef CONFIG_SEPARATE_PRINTK_FROM_USER
+#include <linux/vt_kern.h>
+#endif
 
 int console_printk[4] = {
 	CONSOLE_LOGLEVEL_DEFAULT,	/* console_loglevel */
@@ -138,6 +149,9 @@ EXPORT_SYMBOL(console_set_on_cmdline);
 /* Flag: console code may call schedule() */
 static int console_may_schedule;
 
+int console_portnum = 0;
+EXPORT_SYMBOL(console_portnum);
+
 /*
  * The printk log buffer consists of a chain of concatenated variable
  * length records. Every record starts with a record header, containing
@@ -210,6 +224,7 @@ enum log_flags {
 	LOG_NEWLINE	= 2,	/* text ended with a newline */
 	LOG_PREFIX	= 4,	/* text started with a prefix */
 	LOG_CONT	= 8,	/* text is a fragment of a continuation line */
+	LOG_SUPPCONS	= 16,	/* suppress from console */
 };
 
 struct printk_log {
@@ -220,6 +235,14 @@ struct printk_log {
 	u8 facility;		/* syslog facility */
 	u8 flags:5;		/* internal record flags */
 	u8 level:3;		/* syslog level */
+#ifdef CONFIG_PRINTK_CPUID
+	u16 cpuid;		/* cpu invoking the log */
+#endif
+#ifdef CONFIG_PRINTK_PROCESS
+	char process[16];	/* process name */
+	pid_t pid;		/* process id */
+	u8 in_interrupt;	/* interrupt context */
+#endif
 };
 
 /*
@@ -254,7 +277,13 @@ static enum log_flags console_prev;
 static u64 clear_seq;
 static u32 clear_idx;
 
+static bool suppress_message_printing(int level);
+
+#ifdef CONFIG_PRINTK_PROCESS
+#define PREFIX_MAX		48
+#else
 #define PREFIX_MAX		32
+#endif
 #define LOG_LINE_MAX		(1024 - PREFIX_MAX)
 
 /* record buffer */
@@ -278,6 +307,26 @@ char *log_buf_addr_get(void)
 u32 log_buf_len_get(void)
 {
 	return log_buf_len;
+}
+
+/* Control whether printing to console must be synchronous. */
+static bool __read_mostly printk_sync;
+/*
+ * Force sync printk mode during suspend/kexec, regardless whether
+ * console_suspend_enabled permits console suspend.
+ */
+static int __read_mostly force_printk_sync;
+/* Printing kthread for async printk */
+static struct task_struct *printk_kthread;
+/* When `true' printing thread has messages to print */
+static bool printk_kthread_need_flush_console;
+
+static inline bool can_printk_async(void)
+{
+	int ret = !printk_sync && printk_kthread && !force_printk_sync;
+
+	smp_rmb();
+	return ret;
 }
 
 /* human readable text of the record */
@@ -378,6 +427,26 @@ static u32 msg_used_size(u16 text_len, u16 dict_len, u32 *pad_len)
 	return size;
 }
 
+#ifdef CONFIG_PRINTK_PROCESS
+static bool printk_process = 1;
+module_param_named(process, printk_process, bool, S_IRUGO | S_IWUSR);
+
+static size_t print_process(const struct printk_log *msg, char *buf)
+
+{
+	if (!printk_process)
+		return 0;
+
+	if (!buf)
+		return snprintf(NULL, 0, "%c[%15s:%5d] ", ' ', " ", 0);
+
+	return sprintf(buf, "%c[%15s:%5d] ",
+			msg->in_interrupt ? 'I' : ' ',
+			msg->process,
+			msg->pid);
+}
+#endif
+
 /*
  * Define how much of the log buffer we could take at maximum. The value
  * must be greater than two. Note that only half of the buffer is available
@@ -408,7 +477,8 @@ static u32 truncate_msg(u16 *text_len, u16 *trunc_msg_len,
 static int log_store(int facility, int level,
 		     enum log_flags flags, u64 ts_nsec,
 		     const char *dict, u16 dict_len,
-		     const char *text, u16 text_len)
+		     const char *text, u16 text_len,
+			 const u16 cpuid)
 {
 	struct printk_log *msg;
 	u32 size, pad_len;
@@ -449,12 +519,27 @@ static int log_store(int facility, int level,
 	msg->facility = facility;
 	msg->level = level & 7;
 	msg->flags = flags & 0x1f;
+
+	if (suppress_message_printing(level))
+		msg->flags |= LOG_SUPPCONS;
+
 	if (ts_nsec > 0)
 		msg->ts_nsec = ts_nsec;
 	else
 		msg->ts_nsec = local_clock();
 	memset(log_dict(msg) + dict_len, 0, pad_len);
 	msg->len = size;
+
+#ifdef CONFIG_PRINTK_CPUID
+   msg->cpuid = cpuid;
+#endif
+#ifdef CONFIG_PRINTK_PROCESS
+	if (printk_process) {
+		strncpy(msg->process, current->comm, sizeof(msg->process));
+		msg->pid = task_pid_nr(current);
+		msg->in_interrupt = in_interrupt() ? 1 : 0;
+	}
+#endif
 
 	/* insert message */
 	log_next_idx += msg->len;
@@ -939,6 +1024,11 @@ module_param(ignore_loglevel, bool, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(ignore_loglevel,
 		 "ignore loglevel setting (prints all kernel messages to the console)");
 
+static bool suppress_message_printing(int level)
+{
+	return (level >= console_loglevel && !ignore_loglevel);
+}
+
 #ifdef CONFIG_BOOT_PRINTK_DELAY
 
 static int boot_delay; /* msecs delay after each printk during bootup */
@@ -968,7 +1058,7 @@ static void boot_delay_msec(int level)
 	unsigned long timeout;
 
 	if ((boot_delay == 0 || system_state != SYSTEM_BOOTING)
-		|| (level >= console_loglevel && !ignore_loglevel)) {
+		|| suppress_message_printing(level)) {
 		return;
 	}
 
@@ -1005,14 +1095,44 @@ static size_t print_time(u64 ts, char *buf)
 		return 0;
 
 	rem_nsec = do_div(ts, 1000000000);
+#ifdef CONFIG_PRINTK_REDUCE_CPUID_TIME_CHAR
+	if (!buf)
+		return (size_t)snprintf(NULL, 0, "%lu.0000] ", (unsigned long)ts);
 
+	return (size_t)sprintf(buf, "%lu.%04lu] ",
+			(unsigned long)ts, ((rem_nsec / 1000)/100));
+#else
 	if (!buf)
 		return snprintf(NULL, 0, "[%5lu.000000] ", (unsigned long)ts);
 
 	return sprintf(buf, "[%5lu.%06lu] ",
 		       (unsigned long)ts, rem_nsec / 1000);
+#endif
 }
 
+#ifdef CONFIG_PRINTK_CPUID
+static bool printk_cpuid = 1;
+module_param_named(cpuid, printk_cpuid, bool, S_IRUGO | S_IWUSR);
+
+static size_t print_cpuid(u16 cpuid, char *buf)
+{
+
+	if (!printk_cpuid)
+		return 0;
+
+#ifdef CONFIG_PRINTK_REDUCE_CPUID_TIME_CHAR
+	if (!buf)
+		return (size_t)snprintf(NULL, 0, "[%d-", cpuid);
+
+	return (size_t)snprintf(buf, 6, "[%d-", cpuid);
+#else
+	if (!buf)
+		return snprintf(NULL, 0, "[%2d]", cpuid);
+
+	return snprintf(buf, 7, "[%2d]", cpuid);
+#endif
+}
+#endif
 static size_t print_prefix(const struct printk_log *msg, bool syslog, char *buf)
 {
 	size_t len = 0;
@@ -1032,7 +1152,13 @@ static size_t print_prefix(const struct printk_log *msg, bool syslog, char *buf)
 		}
 	}
 
+#ifdef CONFIG_PRINTK_CPUID
+	len += print_cpuid(msg->cpuid, buf ? buf + len : NULL);
+#endif
 	len += print_time(msg->ts_nsec, buf ? buf + len : NULL);
+#ifdef CONFIG_PRINTK_PROCESS
+	len += print_process(msg, buf ? buf + len : NULL);
+#endif
 	return len;
 }
 
@@ -1385,6 +1511,82 @@ SYSCALL_DEFINE3(syslog, int, type, char __user *, buf, int, len)
 	return do_syslog(type, buf, len, SYSLOG_FROM_READER);
 }
 
+#ifdef CONFIG_PRETTY_SHELL
+/* TTY pretty mode, defined in n_tty.c */
+extern unsigned char tty_pretty_mode;
+#endif
+
+#ifdef CONFIG_SEPARATE_PRINTK_FROM_USER
+void _sep_printk_start(void)
+{
+	struct console *con;
+	struct tty_driver *tty_drv, *tty_driver;
+	int index;
+	struct tty_struct *tty = NULL;
+
+	console_lock();
+	for_each_console(con) {
+		if ((con->flags & CON_ENABLED) && con->write &&
+		    (cpu_online(raw_smp_processor_id()) ||
+		    (con->flags & CON_ANYTIME))) {
+			tty_drv = con->device(con, &index);
+			tty_driver =  tty_driver_kref_get(tty_drv);
+			if (tty_driver) {
+				if (strcmp(con->name, "tty") == 0) {
+					index = fg_console;
+					mutex_lock(&tty_mutex);
+					tty = tty_init_dev(tty_driver, index);
+					mutex_unlock(&tty_mutex);
+				} else {
+					if (tty_drv->ttys[index])
+						tty = tty_drv->ttys[index];
+					else {
+						mutex_lock(&tty_mutex);
+						tty = tty_init_dev(tty_driver, index);
+						mutex_unlock(&tty_mutex);
+					}
+				}
+				tty_driver_kref_put(tty_driver);
+			}
+			if (!IS_ERR_OR_NULL(tty)) {
+				tty->hw_stopped = 1;
+				/* tty_drv->stop(tty_drv->ttys[index]); */
+			}
+		}
+	}
+	console_unlock();
+}
+
+void _sep_printk_end(void)
+{
+	struct console *con;
+	struct tty_driver *tty_drv, *tty_driver;
+	int index;
+	struct tty_struct *tty = NULL;
+
+	console_lock();
+	for_each_console(con) {
+		if ((con->flags & CON_ENABLED) && con->write &&
+		    (cpu_online(raw_smp_processor_id()) ||
+		    (con->flags & CON_ANYTIME))) {
+			tty_drv = con->device(con, &index);
+			tty_driver = tty_driver_kref_get(tty_drv);
+			if (tty_driver) {
+				if (strcmp(con->name, "tty") == 0)
+					index = fg_console;
+
+				tty = tty_drv->ttys[index];
+				tty->hw_stopped = 0;
+				/* tty_drv->start(tty_drv->ttys[index]); */
+				tty_driver_kref_put(tty_driver);
+				tty_wakeup(tty);
+			}
+		}
+	}
+	console_unlock();
+}
+#endif
+
 /*
  * Call the console drivers, asking them to write out
  * log_buf[start] to log_buf[end - 1].
@@ -1394,10 +1596,15 @@ static void call_console_drivers(int level, const char *text, size_t len)
 {
 	struct console *con;
 
-	trace_console(text, len);
+	trace_console_rcuidle(text, len);
 
-	if (level >= console_loglevel && !ignore_loglevel)
+#ifdef CONFIG_PRETTY_SHELL
+	/* In case of pretty mode we do not want
+	   to see even printk in our serial */
+	if (unlikely(tty_pretty_mode > 1))
 		return;
+#endif
+
 	if (!console_drivers)
 		return;
 
@@ -1437,58 +1644,6 @@ static void zap_locks(void)
 	sema_init(&console_sem, 1);
 }
 
-/*
- * Check if we have any console that is capable of printing while cpu is
- * booting or shutting down. Requires console_sem.
- */
-static int have_callable_console(void)
-{
-	struct console *con;
-
-	for_each_console(con)
-		if (con->flags & CON_ANYTIME)
-			return 1;
-
-	return 0;
-}
-
-/*
- * Can we actually use the console at this time on this cpu?
- *
- * Console drivers may assume that per-cpu resources have been allocated. So
- * unless they're explicitly marked as being able to cope (CON_ANYTIME) don't
- * call them until this CPU is officially up.
- */
-static inline int can_use_console(unsigned int cpu)
-{
-	return cpu_online(cpu) || have_callable_console();
-}
-
-/*
- * Try to get console ownership to actually show the kernel
- * messages from a 'printk'. Return true (and with the
- * console_lock held, and 'console_locked' set) if it
- * is successful, false otherwise.
- */
-static int console_trylock_for_printk(void)
-{
-	unsigned int cpu = smp_processor_id();
-
-	if (!console_trylock())
-		return 0;
-	/*
-	 * If we can't use the console, we need to release the console
-	 * semaphore by hand to avoid flushing the buffer. We need to hold the
-	 * console semaphore in order to do this test safely.
-	 */
-	if (!can_use_console(cpu)) {
-		console_locked = 0;
-		up_console_sem();
-		return 0;
-	}
-	return 1;
-}
-
 int printk_delay_msec __read_mostly;
 
 static inline void printk_delay(void)
@@ -1517,6 +1672,7 @@ static struct cont {
 	u64 ts_nsec;			/* time of first print */
 	u8 level;			/* log level of first message */
 	u8 facility;			/* log facility of first message */
+	u16 cpuid;          /* cpu invoking the logging request */
 	enum log_flags flags;		/* prefix, newline flags */
 	bool flushed:1;			/* buffer sealed and committed */
 } cont;
@@ -1535,7 +1691,8 @@ static void cont_flush(enum log_flags flags)
 		 * line. LOG_NOCONS suppresses a duplicated output.
 		 */
 		log_store(cont.facility, cont.level, flags | LOG_NOCONS,
-			  cont.ts_nsec, NULL, 0, cont.buf, cont.len);
+			  cont.ts_nsec, NULL, 0, cont.buf, cont.len,
+			  cont.cpuid);
 		cont.flags = flags;
 		cont.flushed = true;
 	} else {
@@ -1544,12 +1701,14 @@ static void cont_flush(enum log_flags flags)
 		 * just submit it to the store and free the buffer.
 		 */
 		log_store(cont.facility, cont.level, flags, 0,
-			  NULL, 0, cont.buf, cont.len);
+			  NULL, 0, cont.buf, cont.len,
+			  cont.cpuid);
 		cont.len = 0;
 	}
 }
 
-static bool cont_add(int facility, int level, const char *text, size_t len)
+static bool cont_add(int facility, int level, const char *text, size_t len,
+			const u16 cpuid)
 {
 	if (cont.len && cont.flushed)
 		return false;
@@ -1566,12 +1725,16 @@ static bool cont_add(int facility, int level, const char *text, size_t len)
 		cont.owner = current;
 		cont.ts_nsec = local_clock();
 		cont.flags = 0;
+		if (suppress_message_printing(level))
+			cont.flags |= LOG_SUPPCONS;
+
 		cont.cons = 0;
 		cont.flushed = false;
 	}
 
 	memcpy(cont.buf + cont.len, text, len);
 	cont.len += len;
+	cont.cpuid = cpuid;
 
 	if (cont.len > (sizeof(cont.buf) * 80) / 100)
 		cont_flush(LOG_CONT);
@@ -1585,7 +1748,14 @@ static size_t cont_print_text(char *text, size_t size)
 	size_t len;
 
 	if (cont.cons == 0 && (console_prev & LOG_NEWLINE)) {
-		textlen += print_time(cont.ts_nsec, text);
+#ifdef CONFIG_PRINTK_CPUID
+		textlen += print_cpuid(cont.cpuid, text);
+#endif
+		textlen += print_time(cont.ts_nsec, text + textlen);
+#ifdef CONFIG_PRINTK_PROCESS
+		*(text+textlen) = ' ';
+		textlen += print_process(NULL, NULL);
+#endif
 		size -= textlen;
 	}
 
@@ -1607,11 +1777,48 @@ static size_t cont_print_text(char *text, size_t size)
 	return textlen;
 }
 
+/*
+ * Return true if printing can be offloaded to a dedicated printk kthread
+ * and console_unlock(), hence, can simply return w/o doing any actual
+ * printing work. Return false, otherwise.
+ */
+static bool console_unlock_async_flush(void)
+{
+	/*
+	 * Attempt to print the messages to console asynchronously so
+	 * that the kernel doesn't get stalled due to slow serial
+	 * console. That can lead to softlockups, lost interrupts, or
+	 * userspace timing out under heavy printing load.
+	 *
+	 * However we resort to synchronous printing of messages during
+	 * early boot, when synchronous printing was explicitly
+	 * requested by a kernel parameter, or when console_verbose()
+	 * was called to print everything during panic / oops.
+	 * Unlike bust_spinlocks() and oops_in_progress,
+	 * console_verbose() sets console_loglevel to MOTORMOUTH and
+	 * never clears it, while oops_in_progress can go back to 0,
+	 * switching printk back to async mode; we want printk to
+	 * operate in sync mode once panic() occurred.
+	 */
+	if (console_loglevel != CONSOLE_LOGLEVEL_MOTORMOUTH &&
+			can_printk_async()) {
+		/* Offload printing to a schedulable context. */
+		printk_kthread_need_flush_console = true;
+		console_locked = 0;
+		up_console_sem();
+		wake_up_process(printk_kthread);
+		return true;
+	}
+	return false;
+}
+
 asmlinkage int vprintk_emit(int facility, int level,
 			    const char *dict, size_t dictlen,
 			    const char *fmt, va_list args)
 {
-	static int recursion_bug;
+	/* cpu currently holding logbuf_lock in this function */
+	static volatile unsigned int logbuf_cpu = UINT_MAX;
+	static bool recursion_bug;
 	static char textbuf[LOG_LINE_MAX];
 	char *text = textbuf;
 	size_t text_len = 0;
@@ -1620,8 +1827,6 @@ asmlinkage int vprintk_emit(int facility, int level,
 	int this_cpu;
 	int printed_len = 0;
 	bool in_sched = false;
-	/* cpu currently holding logbuf_lock in this function */
-	static unsigned int logbuf_cpu = UINT_MAX;
 
 	if (level == LOGLEVEL_SCHED) {
 		level = LOGLEVEL_DEFAULT;
@@ -1631,7 +1836,6 @@ asmlinkage int vprintk_emit(int facility, int level,
 	boot_delay_msec(level);
 	printk_delay();
 
-	/* This stops the holder of console_sem just where we want him */
 	local_irq_save(flags);
 	this_cpu = smp_processor_id();
 
@@ -1655,6 +1859,7 @@ asmlinkage int vprintk_emit(int facility, int level,
 	}
 
 	lockdep_off();
+	/* This stops the holder of console_sem just where we want him */
 	raw_spin_lock(&logbuf_lock);
 	logbuf_cpu = this_cpu;
 
@@ -1666,7 +1871,7 @@ asmlinkage int vprintk_emit(int facility, int level,
 		/* emit KERN_CRIT message */
 		printed_len += log_store(0, 2, LOG_PREFIX|LOG_NEWLINE, 0,
 					 NULL, 0, recursion_msg,
-					 strlen(recursion_msg));
+					 strlen(recursion_msg), this_cpu);
 	}
 
 	/*
@@ -1711,6 +1916,9 @@ asmlinkage int vprintk_emit(int facility, int level,
 	if (dict)
 		lflags |= LOG_PREFIX|LOG_NEWLINE;
 
+	if (suppress_message_printing(level))
+		lflags |= LOG_SUPPCONS;
+
 	if (!(lflags & LOG_NEWLINE)) {
 		/*
 		 * Flush the conflicting buffer. An earlier newline was missing,
@@ -1720,12 +1928,12 @@ asmlinkage int vprintk_emit(int facility, int level,
 			cont_flush(LOG_NEWLINE);
 
 		/* buffer line if possible, otherwise store it right away */
-		if (cont_add(facility, level, text, text_len))
+		if (cont_add(facility, level, text, text_len, this_cpu))
 			printed_len += text_len;
 		else
 			printed_len += log_store(facility, level,
 						 lflags | LOG_CONT, 0,
-						 dict, dictlen, text, text_len);
+						 dict, dictlen, text, text_len, this_cpu);
 	} else {
 		bool stored = false;
 
@@ -1740,7 +1948,7 @@ asmlinkage int vprintk_emit(int facility, int level,
 		if (cont.len) {
 			if (cont.owner == current && !(lflags & LOG_PREFIX))
 				stored = cont_add(facility, level, text,
-						  text_len);
+						  text_len, this_cpu);
 			cont_flush(LOG_NEWLINE);
 		}
 
@@ -1748,8 +1956,18 @@ asmlinkage int vprintk_emit(int facility, int level,
 			printed_len += text_len;
 		else
 			printed_len += log_store(facility, level, lflags, 0,
-						 dict, dictlen, text, text_len);
+						 dict, dictlen, text, text_len, this_cpu);
 	}
+#ifdef CONFIG_DTVLOGD
+	/*
+	 * Write printk messages to dlog buffer,
+	 * we skip the printk levels, include newline too.
+	 */
+	if (lflags & LOG_NEWLINE)
+		text_len++;
+
+	do_dtvlog(3, text, text_len);
+#endif
 
 	logbuf_cpu = UINT_MAX;
 	raw_spin_unlock(&logbuf_lock);
@@ -1760,20 +1978,14 @@ asmlinkage int vprintk_emit(int facility, int level,
 	if (!in_sched) {
 		lockdep_off();
 		/*
-		 * Disable preemption to avoid being preempted while holding
-		 * console_sem which would prevent anyone from printing to
-		 * console
-		 */
-		preempt_disable();
-
-		/*
 		 * Try to acquire and then immediately release the console
-		 * semaphore.  The release will print out buffers and wake up
-		 * /dev/kmsg and syslog() users.
+		 * semaphore. The release will either directly print out
+		 * buffers and wake up /dev/kmsg and syslog() users or it
+		 * will wake up printing kthread and offload printing to a
+		 * schedulable context.
 		 */
-		if (console_trylock_for_printk())
+		if (console_trylock())
 			console_unlock();
-		preempt_enable();
 		lockdep_on();
 	}
 
@@ -1896,10 +2108,12 @@ static void call_console_drivers(int level, const char *text, size_t len) {}
 static size_t msg_print_text(const struct printk_log *msg, enum log_flags prev,
 			     bool syslog, char *buf, size_t size) { return 0; }
 static size_t cont_print_text(char *text, size_t size) { return 0; }
+static bool suppress_message_printing(int level) { return false; }
+static bool console_unlock_async_flush(void) { return false; }
 
 /* Still needs to be defined for users */
 DEFINE_PER_CPU(printk_func_t, printk_func);
-
+static bool __read_mostly force_printk_sync;
 #endif /* CONFIG_PRINTK */
 
 #ifdef CONFIG_EARLY_PRINTK
@@ -1962,6 +2176,10 @@ static int __init console_setup(char *str)
 	char *s, *options, *brl_options = NULL;
 	int idx;
 
+#ifdef CONFIG_FORCE_EXEC_SHELL_N_SERIAL
+        str = CONFIG_CONSOLE_TTY_OF_FORCE_EXEC_SHELL;
+#endif
+
 	if (_braille_console_setup(&str, &brl_options))
 		return 1;
 
@@ -1992,6 +2210,8 @@ static int __init console_setup(char *str)
 
 	__add_preferred_console(buf, idx, options, brl_options);
 	console_set_on_cmdline = 1;
+
+	console_portnum = idx;
 	return 1;
 }
 __setup("console=", console_setup);
@@ -2028,6 +2248,18 @@ module_param_named(console_suspend, console_suspend_enabled,
 MODULE_PARM_DESC(console_suspend, "suspend console during suspend"
 	" and hibernate operations");
 
+void console_forbid_async_printk(void)
+{
+	smp_wmb();
+	++force_printk_sync;
+}
+
+void console_permit_async_printk(void)
+{
+	smp_wmb();
+	--force_printk_sync;
+}
+
 /**
  * suspend_console - suspend the console subsystem
  *
@@ -2035,6 +2267,8 @@ MODULE_PARM_DESC(console_suspend, "suspend console during suspend"
  */
 void suspend_console(void)
 {
+	console_forbid_async_printk();
+
 	if (!console_suspend_enabled)
 		return;
 	printk("Suspending console(s) (use no_console_suspend to debug)\n");
@@ -2045,6 +2279,8 @@ void suspend_console(void)
 
 void resume_console(void)
 {
+	console_permit_async_printk();
+
 	if (!console_suspend_enabled)
 		return;
 	down_console_sem();
@@ -2114,7 +2350,19 @@ int console_trylock(void)
 		return 0;
 	}
 	console_locked = 1;
-	console_may_schedule = 0;
+	/*
+	 * When PREEMPT_COUNT disabled we can't reliably detect if it's
+	 * safe to schedule (e.g. calling printk while holding a spin_lock),
+	 * because preempt_disable()/preempt_enable() are just barriers there
+	 * and preempt_count() is always 0.
+	 *
+	 * RCU read sections have a separate preemption counter when
+	 * PREEMPT_RCU enabled thus we must take extra care and check
+	 * rcu_preempt_depth(), otherwise RCU read sections modify
+	 * preempt_count().
+	 */
+	console_may_schedule = !oops_in_progress && preemptible() &&
+				!rcu_preempt_depth();
 	return 1;
 }
 EXPORT_SYMBOL(console_trylock);
@@ -2122,6 +2370,34 @@ EXPORT_SYMBOL(console_trylock);
 int is_console_locked(void)
 {
 	return console_locked;
+}
+
+/*
+ * Check if we have any console that is capable of printing while cpu is
+ * booting or shutting down. Requires console_sem.
+ */
+static int have_callable_console(void)
+{
+	struct console *con;
+
+	for_each_console(con)
+		if ((con->flags & CON_ENABLED) &&
+				(con->flags & CON_ANYTIME))
+			return 1;
+
+	return 0;
+}
+
+/*
+ * Can we actually use the console at this time on this cpu?
+ *
+ * Console drivers may assume that per-cpu resources have been allocated. So
+ * unless they're explicitly marked as being able to cope (CON_ANYTIME) don't
+ * call them until this CPU is officially up.
+ */
+static inline int can_use_console(void)
+{
+	return cpu_online(raw_smp_processor_id()) || have_callable_console();
 }
 
 static void console_cont_flush(char *text, size_t size)
@@ -2133,6 +2409,15 @@ static void console_cont_flush(char *text, size_t size)
 
 	if (!cont.len)
 		goto out;
+
+#ifdef CONFIG_PRINTK
+	if (cont.flags & LOG_SUPPCONS) {
+		cont.cons = cont.len;
+		if (cont.flushed)
+			cont.len = 0;
+		goto out;
+	}
+#endif
 
 	/*
 	 * We still queue earlier records, likely because the console was
@@ -2154,37 +2439,60 @@ out:
 }
 
 /**
- * console_unlock - unlock the console system
+ * console_flush_and_unlock - unlock the console system
  *
  * Releases the console_lock which the caller holds on the console system
  * and the console driver list.
  *
  * While the console_lock was held, console output may have been buffered
- * by printk().  If this is the case, console_unlock(); emits
+ * by printk().  If this is the case, console_flush_and_unlock(); emits
  * the output prior to releasing the lock.
  *
  * If there is output waiting, we wake /dev/kmsg and syslog() users.
  *
- * console_unlock(); may be called from any context.
+ * console_flush_and_unlock(); may be called from any context.
  */
-void console_unlock(void)
+static void console_flush_and_unlock(void)
 {
 	static char text[LOG_LINE_MAX + PREFIX_MAX];
 	static u64 seen_seq;
 	unsigned long flags;
 	bool wake_klogd = false;
-	bool retry;
+	bool do_cond_resched, retry;
 
 	if (console_suspended) {
 		up_console_sem();
 		return;
 	}
 
+	/*
+	 * Console drivers are called under logbuf_lock, so
+	 * @console_may_schedule should be cleared before; however, we may
+	 * end up dumping a lot of lines, for example, if called from
+	 * console registration path, and should invoke cond_resched()
+	 * between lines if allowable.  Not doing so can cause a very long
+	 * scheduling stall on a slow console leading to RCU stall and
+	 * softlockup warnings which exacerbate the issue with more
+	 * messages practically incapacitating the system.
+	 */
+	do_cond_resched = console_may_schedule;
 	console_may_schedule = 0;
+
+again:
+	/*
+	 * We released the console_sem lock, so we need to recheck if
+	 * cpu is online and (if not) is there at least one CON_ANYTIME
+	 * console.
+	 */
+	if (!can_use_console()) {
+		console_locked = 0;
+		up_console_sem();
+		return;
+	}
 
 	/* flush buffered message fragment immediately to console */
 	console_cont_flush(text, sizeof(text));
-again:
+
 	for (;;) {
 		struct printk_log *msg;
 		size_t len;
@@ -2212,10 +2520,13 @@ skip:
 			break;
 
 		msg = log_from_idx(console_idx);
-		if (msg->flags & LOG_NOCONS) {
+		level = msg->level;
+		if (msg->flags & (LOG_NOCONS | LOG_SUPPCONS)) {
 			/*
 			 * Skip record we have buffered and already printed
-			 * directly to the console when we received it.
+			 * directly to the console when we received it or this
+			 * record is meant to be suppressed from console due to
+			 * loglevel of message.
 			 */
 			console_idx = log_next(console_idx);
 			console_seq++;
@@ -2229,7 +2540,6 @@ skip:
 			goto skip;
 		}
 
-		level = msg->level;
 		len += msg_print_text(msg, console_prev, false,
 				      text + len, sizeof(text) - len);
 		console_idx = log_next(console_idx);
@@ -2241,6 +2551,9 @@ skip:
 		call_console_drivers(level, text, len);
 		start_critical_timings();
 		local_irq_restore(flags);
+
+		if (do_cond_resched)
+			cond_resched();
 	}
 	console_locked = 0;
 
@@ -2267,6 +2580,24 @@ skip:
 
 	if (wake_klogd)
 		wake_up_klogd();
+}
+
+/**
+ * console_unlock - unlock the console system
+ *
+ * Releases the console_lock which the caller holds on the console system.
+ *
+ * The fast path is to wake up the printing kthread (if the system can
+ * perform asynchronous printing) and return; the slow path is to emit
+ * the messages directly invoking console_flush_and_unlock().
+ *
+ * console_unlock() may be called from any context.
+ */
+void console_unlock(void)
+{
+	if (console_unlock_async_flush())
+		return;
+	console_flush_and_unlock();
 }
 EXPORT_SYMBOL(console_unlock);
 
@@ -2306,6 +2637,52 @@ void console_unblank(void)
 		if ((c->flags & CON_ENABLED) && c->unblank)
 			c->unblank();
 	console_unlock();
+}
+
+/**
+ * console_flush_on_panic - flush console content on panic
+ *
+ * Immediately output all pending messages no matter what.
+ */
+void console_flush_on_panic(void)
+{
+	/*
+	 *     !!!! BIG-BIG-BIG-BIG-BIG WARNING !!!!
+	 *
+	 * NEVER-EVER CALL THIS FUNCTION DIRECTLY. NEVER.
+	 * UNLESS YOU _REALLY_ KNOW WHAT YOU ARE DOING!
+	 */
+
+	/*
+	 * If someone else is holding the console lock, trylock will fail
+	 * and may_schedule may be set.  Ignore and proceed to unlock so
+	 * that messages are flushed out.  As this can be called from any
+	 * context and we don't want to get preempted while flushing,
+	 * ensure may_schedule is cleared.
+	 */
+	console_trylock();
+	console_may_schedule = 0;
+	console_flush_and_unlock();
+}
+
+/*
+ * Wait (might sleep!) for console_sem and
+ * synchronously flush the logbuf.
+ *
+ * let me repeat again...
+ *
+ * It synchronously flushes the logbuf messages.
+ *
+ * Do not wrap this function in
+ *      console_forbid_async_printk()
+ *      console_permit_async_printk()
+ *
+ * Do not.
+ */
+void console_flush_messages(void)
+{
+	console_lock();
+	console_flush_and_unlock();
 }
 
 /*
@@ -2596,6 +2973,87 @@ late_initcall(printk_late_init);
 
 #if defined CONFIG_PRINTK
 /*
+ * kernel_param_ops.set is called from two places:
+ * - from parse_args()->printk_sync_set(), when we can't kthread_run(), so
+ *   we just set the param value. The actual initalization happens later,
+ *   from late_initcall().
+ *
+ * - from user space via sysfs knob; we can kthread_run() there (if needed).
+ */
+static bool printk_kthread_can_run;
+
+static int printk_kthread_func(void *data)
+{
+	while (1) {
+		set_current_state(TASK_INTERRUPTIBLE);
+		if (!printk_kthread_need_flush_console)
+			schedule();
+
+		__set_current_state(TASK_RUNNING);
+		/*
+		 * Avoid an infinite loop when console_unlock() cannot
+		 * access consoles, e.g. because console_suspended is
+		 * true. schedule(), someone else will print the messages
+		 * from resume_console().
+		 */
+		printk_kthread_need_flush_console = false;
+
+		console_lock();
+		console_flush_and_unlock();
+	}
+
+	return 0;
+}
+
+static int __init_printk_kthread(void)
+{
+	struct task_struct *thread;
+
+	if (!printk_kthread_can_run || printk_sync || printk_kthread)
+		return 0;
+
+	thread = kthread_run(printk_kthread_func, NULL, "printk");
+	if (IS_ERR(thread)) {
+		pr_err("printk: unable to create printing thread\n");
+		printk_sync = true;
+		return PTR_ERR(thread);
+	}
+
+	printk_kthread = thread;
+	return 0;
+}
+
+static int printk_sync_set(const char *val, const struct kernel_param *kp)
+{
+	int ret;
+
+	ret = param_set_bool(val, kp);
+	if (ret)
+		return ret;
+	return __init_printk_kthread();
+}
+
+static const struct kernel_param_ops param_ops_printk_sync = {
+	.set = printk_sync_set,
+	.get = param_get_bool,
+};
+
+module_param_cb(synchronous, &param_ops_printk_sync, &printk_sync,
+		S_IRUGO | S_IWUSR);
+MODULE_PARM_DESC(synchronous, "make printing to console synchronous");
+
+/*
+ * Init async printk via late_initcall, after core/arch/device/etc.
+ * initialization.
+ */
+static __init int init_printk_kthread(void)
+{
+	printk_kthread_can_run = true;
+	return __init_printk_kthread();
+}
+subsys_initcall(init_printk_kthread);
+
+/*
  * Delayed printk version, for scheduler-internal messages:
  */
 #define PRINTK_PENDING_WAKEUP	0x01
@@ -2608,9 +3066,16 @@ static void wake_up_klogd_work_func(struct irq_work *irq_work)
 	int pending = __this_cpu_xchg(printk_pending, 0);
 
 	if (pending & PRINTK_PENDING_OUTPUT) {
-		/* If trylock fails, someone else is doing the printing */
-		if (console_trylock())
-			console_unlock();
+		if (can_printk_async()) {
+			wake_up_process(printk_kthread);
+		} else {
+			/*
+			 * If trylock fails, someone else is doing
+			 * the printing
+			 */
+			if (console_trylock())
+				console_unlock();
+		}
 	}
 
 	if (pending & PRINTK_PENDING_WAKEUP)
@@ -3024,6 +3489,30 @@ void __init dump_stack_set_arch_desc(const char *fmt, ...)
 	va_end(args);
 }
 
+#ifdef CONFIG_SCHEDULE_INFO
+char* schedpolicy[7] =
+{
+	"SCHED_NORMAL",
+	"SCHED_FIFO",
+	"SCHED_RR",
+	"SCHED_BATCH",
+	"",
+	"SCHED_IDLE",
+	"SCHED_DEADLINE"
+};
+
+void print_schedinfo(void)
+{
+	struct task_struct *gl = current->group_leader;
+	printk(KERN_ALERT "%s (p:%d, static_p:%d, normal_p:%d, rt_p:%d)\n", schedpolicy[current->policy],
+			current->prio, current->static_prio, current->normal_prio, current->rt_priority);
+
+       if(current->policy != gl->policy || current->normal_prio != gl->normal_prio)
+		printk(KERN_ALERT "%s : %s (p:%d, static_p:%d, normal_p:%d, rt_p:%d\n", gl->comm, schedpolicy[gl->policy],
+			gl->prio, gl->static_prio, gl->normal_prio, gl->rt_priority);
+}
+#endif
+
 /**
  * dump_stack_print_info - print generic debug info for dump_stack()
  * @log_lvl: log level
@@ -3033,11 +3522,30 @@ void __init dump_stack_set_arch_desc(const char *fmt, ...)
  */
 void dump_stack_print_info(const char *log_lvl)
 {
-	printk("%sCPU: %d PID: %d Comm: %.20s %s %s %.*s\n",
-	       log_lvl, raw_smp_processor_id(), current->pid, current->comm,
-	       print_tainted(), init_utsname()->release,
-	       (int)strcspn(init_utsname()->version, " "),
-	       init_utsname()->version);
+#ifdef CONFIG_PRINT_GROUP_LEADER_DUMPSTACK
+	int gl_comm = 0;
+	struct task_struct *gl = current->group_leader;
+	gl_comm = strncmp(current->comm, gl->comm, strlen(current->comm));
+	if(gl_comm)
+		printk("%sCPU: %d PID: %d Comm: %.20s (%.20s) %s %s %.*s PPID: %d PComm: %.20s\n",
+		       log_lvl, raw_smp_processor_id(), current->pid, current->comm,
+		       gl->comm,
+		       print_tainted(), init_utsname()->release,
+		       (int)strcspn(init_utsname()->version, " "),
+		       init_utsname()->version,
+                       task_pid_nr(current->real_parent), current->real_parent->comm);
+	else
+#endif
+		printk("%sCPU: %d PID: %d Comm: %.20s %s %s %.*s PPID: %d PComm: %.20s\n",
+		       log_lvl, raw_smp_processor_id(), current->pid, current->comm,
+		       print_tainted(), init_utsname()->release,
+		       (int)strcspn(init_utsname()->version, " "),
+		       init_utsname()->version,
+                       task_pid_nr(current->real_parent), current->real_parent->comm);
+
+#ifdef CONFIG_SCHEDULE_INFO
+	print_schedinfo();
+#endif
 
 	if (dump_stack_arch_desc_str[0] != '\0')
 		printk("%sHardware name: %s\n",
@@ -3061,5 +3569,474 @@ void show_regs_print_info(const char *log_lvl)
 	       log_lvl, current, current_thread_info(),
 	       task_thread_info(current));
 }
+
+#ifdef CONFIG_EMRG_SAVE_KLOG
+#include <linux/crc32.h>
+#include <linux/proc_fs.h>
+#include <linux/vdlp_version.h>
+
+#define WRITE_RAW_KLOG_HEAD_SIZE 512
+#define WRITE_RAW_KLOG_MAGIC (*(u32 *) "Dmsg")
+#define WRITE_RAW_KLOG_VERSION 4
+
+extern bool get_global_uniqueID(char *globalID);
+extern void get_life_cycleID(char *life_cyclelID);
+
+int kdump_part=0;
+static char dump_part[20];
+
+struct emrg_klog_params {
+	sector_t part_abs_offset;
+	void *buf;
+	int buf_len;
+	struct mmc_host *mmc_host;
+	u32 crc;
+};
+static struct emrg_klog_params emrg_klog_params;
+static atomic_t is_klog_dumped;
+
+struct write_raw_klog_head {
+	__u32 magic;
+	__u16 version;
+
+	/* printk_log is not aligned, so there is no guarantees of matching
+	 * in-memory representation between kernel and userspace app
+	 * Lets save offsets to fields we need in the userspace
+	 */
+	__u8 offset_ts_nsec;
+	__u8 offset_len;
+	__u8 offset_text_len;
+	__u8 offset_cpuid;
+	__u8 offset_text;
+	__u8 pad;
+
+	__u32 crc;
+	__u32 len;
+	__u32 first_idx;
+	__u32 next_idx;
+	__u32 start_offset;
+	__u32 pc;
+	__u32 lr;
+	__u32 tv_sec;
+	__u32 tv_nsec;
+	__u32 klog_buf_crc;
+
+	/* dtvlogd */
+	__u32 dtvlogd_start;
+	__u32 dtvlogd_len;
+	__u32 dtvlogd_buf_crc;
+
+	/* strings */
+	char kern_ver[16];
+	char module_pc[32];
+	char module_lr[32];
+
+	__u32 type;
+
+	/* WDT system info */
+	__u8 tgID[36+1]; /* unique ID */
+	__u8 lcID[10+1]; /* life cycle ID */
+};
+
+void get_module_name(unsigned long addr, char *buf, int buf_len)
+{
+	struct module *mod = __module_address(addr);
+
+	/* mod->name do not have to have termination null byte. All bytes
+	 * might be a string. Userspace should handle this correctly */
+	if (mod)
+		strncpy(buf, mod->name, buf_len);
+	else
+		strncpy(buf, "NA", buf_len);
+}
+
+static void fill_raw_klog_head(
+		struct write_raw_klog_head *head, u32 buf_len,
+		u32 first, u32 next, struct pt_regs *regs, __u32 klog_buf_crc,
+		u32 dtvlogd_len, u32 dtvlogd_start, u32 dtvlogd_crc, u32 type)
+{
+	struct timespec fault_time;
+	int ver_len = min_t(int, sizeof(DTV_KERNEL_VERSION),
+			sizeof(head->kern_ver));
+#if defined(CONFIG_ARM64)
+	unsigned long lr;
+#endif
+
+	memset(head, 0, WRITE_RAW_KLOG_HEAD_SIZE);
+	head->magic = WRITE_RAW_KLOG_MAGIC;
+	head->version = WRITE_RAW_KLOG_VERSION;
+	head->len = buf_len;
+	head->first_idx = first;
+	head->next_idx = next;
+	head->start_offset = WRITE_RAW_KLOG_HEAD_SIZE;
+	head->type = type;
+	if (regs) {
+#if defined(CONFIG_ARM64)
+		if (compat_user_mode(regs))
+			lr = regs->compat_lr;
+		else
+			lr = regs->regs[30];
+		head->pc = regs->pc;
+		head->lr = lr;
+#elif defined(CONFIG_ARM)
+		head->pc = regs->ARM_pc;
+		head->lr = regs->ARM_lr;
+#endif
+	} else {
+		head->pc = 0x11111111;
+		head->lr = 0x22222222;
+	}
+
+#if defined(CONFIG_ARM64)
+	get_module_name(regs ? regs->pc : 0, head->module_pc,
+			sizeof(head->module_pc));
+	get_module_name(regs ? lr : 0, head->module_lr,
+			sizeof(head->module_lr));
+#elif defined(CONFIG_ARM)
+	get_module_name(regs ? regs->ARM_pc : 0, head->module_pc,
+			sizeof(head->module_pc));
+	get_module_name(regs ? regs->ARM_lr : 0, head->module_lr,
+			sizeof(head->module_lr));
+#endif
+	do_posix_clock_monotonic_gettime(&fault_time);
+	get_monotonic_boottime(&fault_time);
+	head->tv_sec = fault_time.tv_sec;
+	head->tv_nsec = fault_time.tv_nsec;
+	head->klog_buf_crc = klog_buf_crc;
+
+	memcpy(head->kern_ver, DTV_KERNEL_VERSION, ver_len);
+
+	/* See the comment at the structure definition */
+	head->offset_ts_nsec	= offsetof(struct printk_log, ts_nsec);
+	head->offset_len	= offsetof(struct printk_log, len);
+	head->offset_text_len	= offsetof(struct printk_log, text_len);
+#ifdef CONFIG_PRINTK_CPUID
+	head->offset_cpuid	= offsetof(struct printk_log, cpuid);
+#endif
+	head->offset_text	= sizeof(struct printk_log);
+
+	/* dtvlogd stuff */
+	head->dtvlogd_start = dtvlogd_start;
+	head->dtvlogd_len = dtvlogd_len;
+	head->dtvlogd_buf_crc = dtvlogd_crc;
+
+	/* WDT system info */
+	if(!get_global_uniqueID(head->tgID))
+		printk(KERN_ERR"none uniqueID\n");
+
+	get_life_cycleID(head->lcID);
+
+	head->crc = crc32(0, (void *) head, WRITE_RAW_KLOG_HEAD_SIZE);
+}
+
+#ifdef CONFIG_PLAT_NOVATEK
+int nvt_mmc_rw_request(struct mmc_host *host, u32 blk_addr,
+                           u32 blk_count, u8 *buf, bool is_write);
+#elif defined(CONFIG_ARCH_SDP)
+int sdp_mmch_polling_request(void *host, u32 blk_addr,
+                             u32 blk_count, u8 *buf, bool is_write);
+#else /* eg) QEMU */
+int sdp_mmch_polling_request(void *host, u32 blk_addr,
+                             u32 blk_count, u8 *buf, bool is_write)
+{
+	return 0;
+}
+#endif
+
+static int write_emrg_klog_data(void *data, int sectors_n, int offset)
+{
+#ifdef CONFIG_PLAT_NOVATEK
+	return nvt_mmc_rw_request(emrg_klog_params.mmc_host,
+			emrg_klog_params.part_abs_offset + offset,
+			sectors_n, data, true);
+#else
+	return sdp_mmch_polling_request(emrg_klog_params.mmc_host,
+			emrg_klog_params.part_abs_offset + offset,
+			sectors_n, data, true);
+#endif
+}
+
+#if (defined(CONFIG_DTVLOGD) && defined(CONFIG_BINFMT_ELF_COMP))
+/* Quite creepy and paranoid. But I'm afraid some day dtvlogd might be changed
+ * without concerning this code
+ *
+ * Returns number of copied bytes. In case of error - 0
+ */
+int copy_dtvlogd_buffer(char *buf, int buf_len)
+{
+	int ret, ret_len = 0;
+	char *buf1, *buf2;
+	int len1, len2;
+
+	if (buf_len < get_dtvlogd_max_length()) {
+		pr_err("Can not write emrg dtvlog, because system buffer "
+				"is bigger then preallocated emrg buffer\n");
+		return 0;
+	}
+
+	dtvlogd_write_stop();
+	ret = acquire_dtvlogd_all_buffer(&buf1, &len1, &buf2, &len2);
+	if (ret) {
+		pr_err("Can not write emrg dtvlog: fail to acquire\n");
+		goto exit;
+	}
+
+	if (len1 + len2 > buf_len) {
+		pr_err("Can not write emrg dtvlog: acquire_dtvlogd_all_buffer "
+				"returned wrong lenght\n");
+		goto exit;
+	} else
+		ret_len = len1 + len2;
+
+	if (len1)
+		memcpy(buf, buf1, len1);
+
+	if (len2)
+		memcpy(buf + len1, buf2, len2);
+
+exit:
+	dtvlogd_write_start();
+	/* Check if dtvlogd have enabled interrupts */
+	WARN_ON(!irqs_disabled());
+	return ret_len;
+}
+
+#else
+	#define copy_dtvlogd_buffer(buf, buf_len) 0
+#endif
+
+void write_emrg_klog(struct pt_regs *regs, u32 type)
+{
+	u32 first, next;
+	int ret;
+	int sectors_to_write;
+	unsigned long flags;
+	__u32 klog_buf_crc, dtvlogd_crc = 0, dtvlogd_start = 0;
+	int dtvlogd_len;
+
+	if (atomic_cmpxchg(&is_klog_dumped, 0, 1)) {
+		/* Already dumped */
+		return;
+	}
+
+	if (!emrg_klog_params.buf) {
+		pr_err("Can not write ermg klog, because emrg buffer "
+				"has not been preallocated\n");
+		return;
+	}
+
+	if (emrg_klog_params.crc != crc32(0, (void *) &emrg_klog_params,
+			offsetof(struct emrg_klog_params, crc))) {
+		pr_err("Can not write emrg klog, because of corruption of the "
+				"control structure\n");
+		return;
+	}
+
+	if (emrg_klog_params.buf_len < log_buf_len) {
+		/* Double check. See comment in the init_emrg_klog_save */
+		pr_err("Can not write emrg klog, because log_buffer is bigger "
+				"then preallocated emrg buffer\n");
+		return;
+	}
+	/* Freeze current status of the log buffer */
+	raw_spin_lock_irqsave(&logbuf_lock, flags);
+	memcpy(emrg_klog_params.buf, log_buf, log_buf_len);
+	next = log_next_idx;
+	first = log_first_idx;
+	raw_spin_unlock_irqrestore(&logbuf_lock, flags);
+
+	/* Write the log buffer itself */
+	/* No round_up here, because log_buf_len has to be pow_of_2 value */
+	sectors_to_write = log_buf_len >> 9;
+	ret = write_emrg_klog_data(emrg_klog_params.buf, sectors_to_write, 1);
+	if (ret) {
+		pr_err("can not write emrg klog data\n");
+		return;
+	}
+
+	klog_buf_crc = crc32(0, emrg_klog_params.buf, log_buf_len);
+
+	/* Since preallocated buffer already written, and no more needed
+	 * it can be reused for other purposes*/
+#if (defined(CONFIG_DTVLOGD) && defined(CONFIG_BINFMT_ELF_COMP))
+	dtvlogd_len = copy_dtvlogd_buffer(emrg_klog_params.buf,
+			emrg_klog_params.buf_len);
+	if (dtvlogd_len && IS_ENABLED(CONFIG_DTVLOGD)) {
+		dtvlogd_start = (sectors_to_write << 9)  +
+			WRITE_RAW_KLOG_HEAD_SIZE;
+		dtvlogd_crc = crc32(0, emrg_klog_params.buf, dtvlogd_len);
+		sectors_to_write = (dtvlogd_len + 511) >> 9;
+		ret = write_emrg_klog_data(emrg_klog_params.buf,
+				sectors_to_write, dtvlogd_start >> 9);
+		if (ret) {
+			pr_err("can not write emrg dtvlogd data\n");
+			/* Consider dtvlog as not written */
+			dtvlogd_start = 0;
+			dtvlogd_crc = 0;
+		}
+	}
+#endif
+
+	fill_raw_klog_head(emrg_klog_params.buf, log_buf_len, first, next, regs,
+			klog_buf_crc, dtvlogd_len, dtvlogd_start, dtvlogd_crc, type);
+
+	/* And write the header */
+	ret = write_emrg_klog_data(emrg_klog_params.buf,
+			WRITE_RAW_KLOG_HEAD_SIZE >> 9, 0);
+	if (ret) {
+		pr_err("can not write emrg klog data\n");
+		return;
+	}
+}
+
+static int emrg_klog_proc_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "%s\n", dump_part);
+	return 0;
+}
+
+static int ermg_klog_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, emrg_klog_proc_show, NULL);
+}
+
+static const struct file_operations emrg_klog_proc_fops = {
+	.open		= ermg_klog_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+static int save_emrg_log_event(struct notifier_block *self,
+			    unsigned long val,
+			    void *data)
+{
+	/* val specifies the klog type*/
+	write_emrg_klog(NULL, val);
+	dump_stack();
+
+	return 0;
+}
+
+static struct notifier_block emrg_save_log_notifier = {
+	.notifier_call	= save_emrg_log_event,
+	.priority	= INT_MAX,
+};
+
+void setup_dump_partition(void)
+{
+	if(kdump_part)
+	{
+		snprintf(dump_part, 20, "/dev/mmcblk0p%d", kdump_part);
+#ifndef CONFIG_VD_RELEASE
+		printk("[EMERG]emrg dump part is %s as KDUMP=xxx\n", dump_part);
+#endif
+	}
+	else
+	{
+		snprintf(dump_part, 20, "/dev/mmcblk0p%d", CONFIG_EMRG_SAVE_KLOG_PARTITION_N);
+#ifndef CONFIG_VD_RELEASE
+		printk("[EMERG]emrg dump part is %s as kernel config\n", dump_part);
+#endif
+	}
+}
+
+#include <linux/mount.h>
+void *get_queue_host(struct block_device *bdev);
+sector_t get_bdev_mmc_offset(struct block_device *bdev);
+__init void init_emrg_klog_save(void)
+{
+	struct block_device *bdev;
+	fmode_t mode = FMODE_WRITE;
+	loff_t bdev_size, needed_space;
+	u32 dtvlogd_len = 0;
+#if (defined(CONFIG_DTVLOGD) && defined(CONFIG_BINFMT_ELF_COMP))
+	dtvlogd_len = get_dtvlogd_max_length();
+#endif
+
+	setup_dump_partition();
+
+	/* Check the layout.
+	 * Header has to have a size multiple to 4 bytes.
+	 * This makes us sure all members of the structure are on the aligned
+	 * positions. If you modifying struct write_raw_klog_head, please
+	 * modify the multiplier in the BUILD_BUG_ON
+	 */
+	BUILD_BUG_ON(sizeof(struct write_raw_klog_head) != 49*4);
+	BUILD_BUG_ON(sizeof(struct write_raw_klog_head) >
+			WRITE_RAW_KLOG_HEAD_SIZE);
+
+	if (!IS_ALIGNED(log_buf_len, 512) || !IS_ALIGNED(dtvlogd_len, 512)) {
+		pr_err("System message buffur is not aligned\n");
+		return;
+	}
+
+	bdev = blkdev_get_by_path(dump_part, mode,
+			init_emrg_klog_save);
+	if (IS_ERR_OR_NULL(bdev)) {
+		pr_err("Unable to open block device to write klog: %s\n",
+				dump_part);
+		return;
+	}
+
+	emrg_klog_params.part_abs_offset = get_bdev_mmc_offset(bdev);
+	emrg_klog_params.mmc_host = get_queue_host((bdev));
+
+	/* Check if we are fit into specified partition */
+	bdev_size = i_size_read(bdev->bd_inode);
+	needed_space = WRITE_RAW_KLOG_HEAD_SIZE + (loff_t)log_buf_len + (loff_t)dtvlogd_len;
+
+	BUG_ON(needed_space >= INT_MAX);
+
+	if (bdev_size < needed_space) {
+		pr_err("Block device %s is to small for saving emrg klog: "
+				"need %lld have %lld\n", dump_part,
+				needed_space, bdev_size);
+		goto exit;
+	}
+
+	/* Just double check. Currently, it is impossible that log_buf_len or
+	 * dtvlogd_len going to be changed after boot. Just protection in case
+	 * of future modifications */
+	emrg_klog_params.buf_len = max(log_buf_len, dtvlogd_len);
+
+	emrg_klog_params.buf = kmalloc(emrg_klog_params.buf_len, GFP_KERNEL);
+	if (!emrg_klog_params.buf) {
+		pr_err("Unable to allocate buffer for emrg save klog"
+				" - feature disabled\n");
+		/* Even though allocation failed, we are still going ahead
+		 * Because the feature is not critical for system work
+		 * */
+		goto exit;
+	}
+
+	emrg_klog_params.crc = crc32(0, (void *) &emrg_klog_params,
+			offsetof(struct emrg_klog_params, crc));
+
+	/* part_abs_offset is to critical to be corrupted.
+	 * Paranoid check, if value got corrupted before we calculated the crc
+	 */
+	if (emrg_klog_params.part_abs_offset != get_bdev_mmc_offset(bdev)) {
+		pr_err("Memory corruption while init the \"save emrg klog\"\n");
+		kfree(emrg_klog_params.buf);
+		memset(&emrg_klog_params, 0, sizeof(emrg_klog_params));
+		goto exit;
+	}
+
+	if (!proc_create("emrg_log_partition", 0, NULL, &emrg_klog_proc_fops))
+		pr_err("Unable to create last_boot_emrg_log proc entry\n");
+
+	atomic_set(&is_klog_dumped, 0);
+
+	/* We are not interest of return value. Just keep going. If panic
+	 * notifier failed to be registered, we have at least OOPs*/
+	atomic_notifier_chain_register(&panic_notifier_list,
+					       &emrg_save_log_notifier);
+
+exit:
+	blkdev_put(bdev, mode);
+	return;
+}
+#endif
 
 #endif

@@ -80,6 +80,31 @@ static inline int atomic_##op##_return(int i, atomic_t *v)		\
 	return result;							\
 }
 
+static inline int atomic_set_return(int i, atomic_t *v)
+{
+	unsigned long tmp;
+	int tmp1;
+	int result;
+
+	smp_mb();	/*Memory Barrier*/
+	prefetchw(&v->counter);
+
+	__asm__ __volatile__("@ atomic_set_return\n"
+			"1:     ldrex   %0, [%4]\n"
+			"       mov     %3, %5\n"
+			"       strex   %1, %3, [%4]\n"
+			"       teq     %1, #0\n"
+			"       bne     1b"
+			: "=&r" (tmp), "=&r" (result), "+Qo" (v->counter), "=&r" (tmp1)
+			: "r" (&v->counter), "Ir" (i)
+			: "cc");
+
+	/*Memory Barrier*/
+	smp_mb();
+
+	return tmp;
+}
+
 static inline int atomic_cmpxchg(atomic_t *ptr, int old, int new)
 {
 	int oldval;

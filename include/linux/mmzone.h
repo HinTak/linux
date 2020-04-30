@@ -41,33 +41,11 @@ enum {
 	MIGRATE_MOVABLE,
 	MIGRATE_PCPTYPES,	/* the number of types on the pcp lists */
 	MIGRATE_RESERVE = MIGRATE_PCPTYPES,
-#ifdef CONFIG_CMA
-	/*
-	 * MIGRATE_CMA migration type is designed to mimic the way
-	 * ZONE_MOVABLE works.  Only movable pages can be allocated
-	 * from MIGRATE_CMA pageblocks and page allocator never
-	 * implicitly change migration type of MIGRATE_CMA pageblock.
-	 *
-	 * The way to use it is to change migratetype of a range of
-	 * pageblocks to MIGRATE_CMA which can be done by
-	 * __free_pageblock_cma() function.  What is important though
-	 * is that a range of pageblocks must be aligned to
-	 * MAX_ORDER_NR_PAGES should biggest page be bigger then
-	 * a single pageblock.
-	 */
-	MIGRATE_CMA,
-#endif
 #ifdef CONFIG_MEMORY_ISOLATION
 	MIGRATE_ISOLATE,	/* can't allocate from here */
 #endif
 	MIGRATE_TYPES
 };
-
-#ifdef CONFIG_CMA
-#  define is_migrate_cma(migratetype) unlikely((migratetype) == MIGRATE_CMA)
-#else
-#  define is_migrate_cma(migratetype) false
-#endif
 
 #define for_each_migratetype_order(order, type) \
 	for (order = 0; order < MAX_ORDER; order++) \
@@ -114,7 +92,6 @@ struct zone_padding {
 enum zone_stat_item {
 	/* First 128 byte cacheline (assuming 64 bit words) */
 	NR_FREE_PAGES,
-	NR_ALLOC_BATCH,
 	NR_LRU_BASE,
 	NR_INACTIVE_ANON = NR_LRU_BASE, /* must match order of LRU_[IN]ACTIVE */
 	NR_ACTIVE_ANON,		/*  "     "     "   "       "         */
@@ -156,7 +133,6 @@ enum zone_stat_item {
 	WORKINGSET_ACTIVATE,
 	WORKINGSET_NODERECLAIM,
 	NR_ANON_TRANSPARENT_HUGEPAGES,
-	NR_FREE_CMA_PAGES,
 	NR_VM_ZONE_STAT_ITEMS };
 
 /*
@@ -319,6 +295,10 @@ enum zone_type {
 	ZONE_HIGHMEM,
 #endif
 	ZONE_MOVABLE,
+#ifdef CONFIG_CMA
+	ZONE_CMA,
+#endif
+
 	__MAX_NR_ZONES
 };
 
@@ -542,7 +522,6 @@ enum zone_flags {
 	ZONE_WRITEBACK,			/* reclaim scanning has recently found
 					 * many pages under writeback
 					 */
-	ZONE_FAIR_DEPLETED,		/* fair zone policy batch depleted */
 };
 
 static inline unsigned long zone_end_pfn(const struct zone *zone)
@@ -853,11 +832,38 @@ static inline int zone_movable_is_highmem(void)
 }
 #endif
 
+static inline int is_zone_cma_idx(enum zone_type idx)
+{
+#ifdef CONFIG_CMA
+	return idx == ZONE_CMA;
+#else
+	return 0;
+#endif
+}
+
+static inline int is_zone_cma(struct zone *zone)
+{
+	int zone_idx = zone_idx(zone);
+
+	return is_zone_cma_idx(zone_idx);
+}
+
+static inline int zone_cma_is_highmem(void)
+{
+#ifdef CONFIG_HIGHMEM
+	return 1;
+#else
+	return 0;
+#endif
+}
+
+
 static inline int is_highmem_idx(enum zone_type idx)
 {
 #ifdef CONFIG_HIGHMEM
 	return (idx == ZONE_HIGHMEM ||
-		(idx == ZONE_MOVABLE && zone_movable_is_highmem()));
+		(idx == ZONE_MOVABLE && zone_movable_is_highmem()) ||
+		(is_zone_cma_idx(idx) && zone_cma_is_highmem()));
 #else
 	return 0;
 #endif
@@ -874,6 +880,10 @@ static inline int is_highmem(struct zone *zone)
 #ifdef CONFIG_HIGHMEM
 	int zone_off = (char *)zone - (char *)zone->zone_pgdat->node_zones;
 	return zone_off == ZONE_HIGHMEM * sizeof(*zone) ||
+#ifdef CONFIG_CMA
+		 (zone_off == ZONE_CMA * sizeof(*zone) &&
+			zone_cma_is_highmem()) ||
+#endif
 	       (zone_off == ZONE_MOVABLE * sizeof(*zone) &&
 		zone_movable_is_highmem());
 #else
@@ -881,11 +891,18 @@ static inline int is_highmem(struct zone *zone)
 #endif
 }
 
+static inline int is_normal(struct zone *zone)
+{
+	int zone_off = (char *)zone - (char *)zone->zone_pgdat->node_zones;
+	return zone_off == ZONE_NORMAL * sizeof(*zone);
+}
+
+
 /* These two functions are used to setup the per zone pages min values */
 struct ctl_table;
 int min_free_kbytes_sysctl_handler(struct ctl_table *, int,
 					void __user *, size_t *, loff_t *);
-extern int sysctl_lowmem_reserve_ratio[MAX_NR_ZONES-1];
+extern int sysctl_lowmem_reserve_ratio[MAX_NR_ZONES];
 int lowmem_reserve_ratio_sysctl_handler(struct ctl_table *, int,
 					void __user *, size_t *, loff_t *);
 int percpu_pagelist_fraction_sysctl_handler(struct ctl_table *, int,
@@ -915,7 +932,9 @@ extern struct pglist_data contig_page_data;
 extern struct pglist_data *first_online_pgdat(void);
 extern struct pglist_data *next_online_pgdat(struct pglist_data *pgdat);
 extern struct zone *next_zone(struct zone *zone);
-
+#ifdef CONFIG_PAGE_OWNER
+extern unsigned long normal_fallback(void);
+#endif
 /**
  * for_each_online_pgdat - helper macro to iterate over all online nodes
  * @pgdat - pointer to a pg_data_t variable

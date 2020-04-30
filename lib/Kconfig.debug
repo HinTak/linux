@@ -15,6 +15,17 @@ config PRINTK_TIME
 	  The behavior is also controlled by the kernel command line
 	  parameter printk.time=1. See Documentation/kernel-parameters.txt
 
+config PRINTK_CPUID
+   bool "Show cpu id information on printks"
+   depends on PRINTK && SMP
+   help
+     Selecting this option causes cpu identifier to be added to the
+     output of the syslog() system call and at the console.
+
+     The feature can be disabled by the kernel command line
+     parameter printk.cpuid=0.
+
+
 config MESSAGE_LOGLEVEL_DEFAULT
 	int "Default message log level (1-7)"
 	range 1 7
@@ -243,6 +254,7 @@ config PAGE_OWNER
 	depends on DEBUG_KERNEL && STACKTRACE_SUPPORT
 	select DEBUG_FS
 	select STACKTRACE
+	select STACKDEPOT
 	select PAGE_EXTENSION
 	help
 	  This keeps track of what call chain is the owner of a page, may
@@ -1776,4 +1788,6 @@ config MEMTEST
 source "samples/Kconfig"
 
 source "lib/Kconfig.kgdb"
+
+source "lib/Kconfig.ubsan"
 

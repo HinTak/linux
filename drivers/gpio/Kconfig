@@ -503,6 +503,15 @@ config GPIO_ZEVIO
 	help
 	  Say yes here to support the GPIO controller in LSI ZEVIO SoCs.
 
+config GPIO_NVT
+	bool "NVT GPIO driver"
+	depends on ARM && OF_GPIO
+	help
+		Say yes here to support the GPIO controller in NVT SoCs.
+		Remind to default open config of sysfs interface.
+		If enable this, it support standard GPIO I/O access.
+		It also support DTS for each I/O initialization.
+
 config GPIO_ZYNQ
 	tristate "Xilinx Zynq GPIO support"
 	depends on ARCH_ZYNQ

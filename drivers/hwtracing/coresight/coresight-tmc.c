@@ -76,8 +76,13 @@
 #define TMC_FFCR_TRIGON_TRIGIN	BIT(8)
 #define TMC_FFCR_STOP_ON_FLUSH	BIT(12)
 
-#define TMC_STS_TRIGGERED_BIT	2
+#define TMC_STS_TMCREADY_BIT	2
 #define TMC_FFCR_FLUSHMAN_BIT	6
+
+#ifdef CONFIG_CORESIGHT_DUMP_TMC
+#define DUMP_BUFFER_SZ		4096
+static char tmc_buf[DUMP_BUFFER_SZ];
+#endif
 
 enum tmc_config_type {
 	TMC_CONFIG_TYPE_ETB,
@@ -133,11 +138,11 @@ struct tmc_drvdata {
 	u32			trigger_cntr;
 };
 
-static void tmc_wait_for_ready(struct tmc_drvdata *drvdata)
+static void tmc_wait_for_tmcready(struct tmc_drvdata *drvdata)
 {
 	/* Ensure formatter, unformatter and hardware fifo are empty */
 	if (coresight_timeout(drvdata->base,
-			      TMC_STS, TMC_STS_TRIGGERED_BIT, 1)) {
+			      TMC_STS, TMC_STS_TMCREADY_BIT, 1)) {
 		dev_err(drvdata->dev,
 			"timeout observed when probing at offset %#x\n",
 			TMC_STS);
@@ -161,7 +166,7 @@ static void tmc_flush_and_stop(struct tmc_drvdata *drvdata)
 			TMC_FFCR);
 	}
 
-	tmc_wait_for_ready(drvdata);
+	tmc_wait_for_tmcready(drvdata);
 }
 
 static void tmc_enable_hw(struct tmc_drvdata *drvdata)
@@ -288,13 +293,10 @@ static int tmc_enable_link(struct coresight_device *csdev, int inport,
 	return tmc_enable(drvdata, TMC_MODE_HARDWARE_FIFO);
 }
 
-static void tmc_etb_dump_hw(struct tmc_drvdata *drvdata)
+static u8 tmc_get_memwords(struct tmc_drvdata *drvdata)
 {
 	enum tmc_mem_intf_width memwidth;
 	u8 memwords;
-	char *bufp;
-	u32 read_data;
-	int i;
 
 	memwidth = BMVAL(readl_relaxed(drvdata->base + CORESIGHT_DEVID), 8, 10);
 	if (memwidth == TMC_MEM_INTF_WIDTH_32BITS)
@@ -306,10 +308,17 @@ static void tmc_etb_dump_hw(struct tmc_drvdata *drvdata)
 	else
 		memwords = 8;
 
-	bufp = drvdata->buf;
+	return memwords;
+}
+static void tmc_etb_dump_hw(struct tmc_drvdata *drvdata)
+{
+	u8 memwords = tmc_get_memwords(drvdata);
+	char *bufp = drvdata->buf;
+
 	while (1) {
+		int i;
 		for (i = 0; i < memwords; i++) {
-			read_data = readl_relaxed(drvdata->base + TMC_RRD);
+			u32 read_data = readl_relaxed(drvdata->base + TMC_RRD);
 			if (read_data == 0xFFFFFFFF)
 				return;
 			memcpy(bufp, &read_data, 4);
@@ -369,8 +378,10 @@ static void tmc_disable(struct tmc_drvdata *drvdata, enum tmc_mode mode)
 	unsigned long flags;
 
 	spin_lock_irqsave(&drvdata->spinlock, flags);
-	if (drvdata->reading)
+	if (drvdata->reading) {
+		dev_warn(drvdata->dev, "TMC disabled: currently reading!\n");
 		goto out;
+	}
 
 	if (drvdata->config_type == TMC_CONFIG_TYPE_ETB) {
 		tmc_etb_disable_hw(drvdata);
@@ -487,6 +498,42 @@ out:
 
 	dev_info(drvdata->dev, "TMC read end\n");
 }
+
+#ifdef CONFIG_CORESIGHT_DUMP_TMC
+int tmc_is_enabled(struct coresight_device *csdev)
+{
+	struct tmc_drvdata *drvdata = dev_get_drvdata(csdev->dev.parent);
+	return readl_relaxed(drvdata->base + TMC_CTL) & 0x1;
+}
+
+int tmc_savebuf(struct coresight_device *csdev)
+{
+	struct tmc_drvdata *drvdata = dev_get_drvdata(csdev->dev.parent);
+	char *bufp = drvdata->buf;
+	int len = drvdata->size;
+	int ret = 0;
+
+	ret = tmc_read_prepare(drvdata);
+	if (ret)
+		return ret;
+
+	if (len > drvdata->size)
+		len = drvdata->size;
+
+	if (drvdata->config_type == TMC_CONFIG_TYPE_ETR) {
+		if (bufp == (char *)(drvdata->vaddr + drvdata->size))
+			bufp = drvdata->vaddr;
+		else if (bufp > (char *)(drvdata->vaddr + drvdata->size))
+			bufp -= drvdata->size;
+		if ((bufp + len) > (char *)(drvdata->vaddr + drvdata->size))
+			len = (char *)(drvdata->vaddr + drvdata->size) - bufp;
+	}
+
+	memcpy(tmc_buf, bufp, len);
+	tmc_read_unprepare(drvdata);
+	return 0;
+}
+#endif
 
 static int tmc_open(struct inode *inode, struct file *file)
 {
@@ -773,6 +820,9 @@ static int tmc_probe(struct amba_device *adev, const struct amba_id *id)
 	if (ret)
 		goto err_misc_register;
 
+#ifdef CONFIG_CORESIGHT_AUTO_ENABLE
+	drvdata->csdev->activated = true;
+#endif
 	dev_info(dev, "TMC initialized\n");
 	return 0;
 

@@ -79,6 +79,9 @@ struct usbnet {
 #		define EVENT_RX_KILL	10
 #		define EVENT_LINK_CHANGE	11
 #		define EVENT_SET_RX_MODE	12
+	unsigned int tx_submitted;
+	unsigned int tx_completed;
+	int hdebug;
 };
 
 static inline struct usb_driver *driver_of(struct usb_interface *intf)
@@ -228,6 +231,11 @@ struct skb_data {	/* skb->cb is one of these */
 	struct usbnet		*dev;
 	enum skb_state		state;
 	long			length;
+#ifdef SAMSUNG_HYPERUART_PREALLOC_SUPPORT
+	char			skb_src[4];
+	unsigned char		prealloc_pool_id;
+	unsigned short		prealloc_buf_id;
+#endif
 	unsigned long		packets;
 };
 

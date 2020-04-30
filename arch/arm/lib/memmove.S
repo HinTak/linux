@@ -16,8 +16,10 @@
 
 		.text
 
+		.weak memmove
+
 /*
- * Prototype: void *memmove(void *dest, const void *src, size_t n);
+ * Prototype: void *__memmove(void *dest, const void *src, size_t n);
  *
  * Note:
  *
@@ -27,6 +29,7 @@
  * occurring in the opposite direction.
  */
 
+ENTRY(__memmove)
 ENTRY(memmove)
 	UNWIND(	.fnstart			)
 
@@ -225,3 +228,4 @@ ENTRY(memmove)
 18:		backward_copy_shift	push=24	pull=8
 
 ENDPROC(memmove)
+ENDPROC(__memmove)

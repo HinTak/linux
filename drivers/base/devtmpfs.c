@@ -24,6 +24,9 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/kthread.h>
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+#include <linux/security.h>
+#endif
 #include "base.h"
 
 static struct task_struct *thread;
@@ -44,6 +47,9 @@ static struct req {
 	umode_t mode;	/* 0 => delete */
 	kuid_t uid;
 	kgid_t gid;
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+	char *lab_smk64; /*smack lebel for SMACK64*/
+#endif
 	struct device *dev;
 } *requests;
 
@@ -83,6 +89,9 @@ int devtmpfs_create_node(struct device *dev)
 {
 	const char *tmp = NULL;
 	struct req req;
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+	int ret = 0;
+#endif
 
 	if (!thread)
 		return 0;
@@ -101,6 +110,14 @@ int devtmpfs_create_node(struct device *dev)
 	else
 		req.mode |= S_IFCHR;
 
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+	ret = device_get_smack64_label(dev, &req.lab_smk64);
+	if (ret) {
+		kfree(tmp);
+		return ret;
+	}
+#endif
+
 	req.dev = dev;
 
 	init_completion(&req.done);
@@ -112,6 +129,11 @@ int devtmpfs_create_node(struct device *dev)
 
 	wake_up_process(thread);
 	wait_for_completion(&req.done);
+
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+	if(req.lab_smk64)
+		kfree(req.lab_smk64);
+#endif
 
 	kfree(tmp);
 
@@ -192,8 +214,13 @@ static int create_path(const char *nodepath)
 	return err;
 }
 
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+static int handle_create(const char *nodename, umode_t mode, kuid_t uid,
+			 kgid_t gid, const char* lab_smk64, struct device *dev)
+#else
 static int handle_create(const char *nodename, umode_t mode, kuid_t uid,
 			 kgid_t gid, struct device *dev)
+#endif
 {
 	struct dentry *dentry;
 	struct path path;
@@ -215,6 +242,17 @@ static int handle_create(const char *nodename, umode_t mode, kuid_t uid,
 		newattrs.ia_uid = uid;
 		newattrs.ia_gid = gid;
 		newattrs.ia_valid = ATTR_MODE|ATTR_UID|ATTR_GID;
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+		/* set smack xattr label for SMACK64 */
+		if (lab_smk64) {
+			mutex_lock(&d_inode(dentry)->i_mutex);
+			err = security_inode_setsecurity(d_inode(dentry), "SMACK64",
+							lab_smk64, strlen(lab_smk64), 0);
+			if (err)
+				printk(KERN_INFO "Smack label %s not set on %s device\n", lab_smk64, nodename);
+			mutex_unlock(&d_inode(dentry)->i_mutex);
+		}
+#endif
 		mutex_lock(&d_inode(dentry)->i_mutex);
 		notify_change(dentry, &newattrs, NULL);
 		mutex_unlock(&d_inode(dentry)->i_mutex);
@@ -364,11 +402,20 @@ int devtmpfs_mount(const char *mntdir)
 
 static DECLARE_COMPLETION(setup_done);
 
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+static int handle(const char *name, umode_t mode, kuid_t uid, kgid_t gid,
+		  const char* lab_smk64, struct device *dev)
+#else
 static int handle(const char *name, umode_t mode, kuid_t uid, kgid_t gid,
 		  struct device *dev)
+#endif
 {
 	if (mode)
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+		return handle_create(name, mode, uid, gid, lab_smk64, dev);
+#else
 		return handle_create(name, mode, uid, gid, dev);
+#endif
 	else
 		return handle_remove(name, dev);
 }
@@ -394,8 +441,13 @@ static int devtmpfsd(void *p)
 			spin_unlock(&req_lock);
 			while (req) {
 				struct req *next = req->next;
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+				req->err = handle(req->name, req->mode,
+						  req->uid, req->gid, req->lab_smk64, req->dev);
+#else
 				req->err = handle(req->name, req->mode,
 						  req->uid, req->gid, req->dev);
+#endif
 				complete(&req->done);
 				req = next;
 			}

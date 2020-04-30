@@ -53,6 +53,10 @@
 #include <linux/uidgid.h>
 #include <linux/cred.h>
 
+#ifdef CONFIG_PROC_VD_SIGNAL_HANDLER_LIST
+#include <linux/vd_signal_policy.h>
+#endif
+
 #include <linux/kmsg_dump.h>
 /* Move somewhere else to avoid recompiling? */
 #include <generated/utsrelease.h>
@@ -60,6 +64,14 @@
 #include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/unistd.h>
+/* Hardening for Spectre-v1 */
+#include <linux/nospec.h>
+
+#ifdef CONFIG_USE_HW_CLOCK_FOR_USERTRACE
+#define CREATE_TRACE_POINTS
+#include <trace/events/user.h>
+#define MAX_USER_TRACE_SIZE 512
+#endif
 
 #ifndef SET_UNALIGN_CTL
 # define SET_UNALIGN_CTL(a, b)	(-EINVAL)
@@ -1311,6 +1323,7 @@ SYSCALL_DEFINE2(old_getrlimit, unsigned int, resource,
 	if (resource >= RLIM_NLIMITS)
 		return -EINVAL;
 
+	resource = array_index_nospec(resource, RLIM_NLIMITS);
 	task_lock(current->group_leader);
 	x = current->signal->rlim[resource];
 	task_unlock(current->group_leader);
@@ -2109,6 +2122,13 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 			error = -EINVAL;
 		break;
 	case PR_SET_NAME:
+#ifdef CONFIG_PROC_VD_SIGNAL_HANDLER_LIST
+		/* Register Process name in vd_signal_policy_list */
+		if (!strncmp(current->comm, "dotnet-launcher", 15)) {
+			loff_t pos;
+			vd_signal_policy_add(NULL, (char __user *)arg2, strlen_user((char __user *)arg2), &pos);
+		}
+#endif
 		comm[sizeof(me->comm) - 1] = 0;
 		if (strncpy_from_user(comm, (char __user *)arg2,
 				      sizeof(me->comm) - 1) < 0)
@@ -2145,6 +2165,23 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 	case PR_TASK_PERF_EVENTS_ENABLE:
 		error = perf_event_task_enable();
 		break;
+#ifdef CONFIG_USE_HW_CLOCK_FOR_USERTRACE
+	case PR_TASK_PERF_USER_TRACE:
+	{
+		void __user *uevent_ptr = (void *)arg2;
+		char kstring[MAX_USER_TRACE_SIZE+1];
+		unsigned long uevent_len = arg3;
+
+		if (uevent_len > MAX_USER_TRACE_SIZE)
+			return -EINVAL;
+		if (copy_from_user(kstring, uevent_ptr, uevent_len))
+			return -EFAULT;
+		kstring[uevent_len] = 0;
+
+		trace_user(kstring);
+		return 0;
+	}
+#endif
 	case PR_GET_TIMERSLACK:
 		error = current->timer_slack_ns;
 		break;

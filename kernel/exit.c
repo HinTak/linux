@@ -58,6 +58,9 @@
 #include <asm/unistd.h>
 #include <asm/pgtable.h>
 #include <asm/mmu_context.h>
+#ifdef CONFIG_MINCORE_RLIMIT_NOFILE
+#include <linux/mincore.h>
+#endif
 
 static void exit_mm(struct task_struct *tsk);
 
@@ -204,6 +207,15 @@ repeat:
 
 	write_unlock_irq(&tasklist_lock);
 	release_thread(p);
+
+#ifdef CONFIG_MINCORE_RLIMIT_NOFILE
+	/* Cleanup only if main thread exits */
+	rcu_read_lock();
+	if (get_nr_threads(current) == 0)
+		free_open_file_task_list();
+	rcu_read_unlock();
+#endif
+
 	call_rcu(&p->rcu, delayed_put_task_struct);
 
 	p = leader;
@@ -754,6 +766,7 @@ void do_exit(long code)
 	 */
 	perf_event_exit_task(tsk);
 
+
 	cgroup_exit(tsk);
 
 	/*
@@ -857,18 +870,27 @@ do_group_exit(int exit_code)
 	if (signal_group_exit(sig))
 		exit_code = sig->group_exit_code;
 	else if (!thread_group_empty(current)) {
+		int coredump_expected = 0;
 		struct sighand_struct *const sighand = current->sighand;
 
 		spin_lock_irq(&sighand->siglock);
-		if (signal_group_exit(sig))
-			/* Another thread got here before we took the lock.  */
-			exit_code = sig->group_exit_code;
-		else {
-			sig->group_exit_code = exit_code;
-			sig->flags = SIGNAL_GROUP_EXIT;
-			zap_other_threads(current);
+		if (signal_block_sigkill(current)) {
+			coredump_expected = 1;
+			exit_code = signal_group_exit(sig) ? sig->group_exit_code : exit_code;
+		} else {
+			if (signal_group_exit(sig))
+				/* Another thread got here before we took the lock.  */
+				exit_code = sig->group_exit_code;
+			else {
+				sig->group_exit_code = exit_code;
+				sig->flags = SIGNAL_GROUP_EXIT;
+				zap_other_threads(current);
+			}
 		}
 		spin_unlock_irq(&sighand->siglock);
+		if (coredump_expected)
+			pr_alert("[%s:%d] Coredump Expected don't send SIGKILL to other threads\n",
+					current->comm, current->pid);
 	}
 
 	do_exit(exit_code);

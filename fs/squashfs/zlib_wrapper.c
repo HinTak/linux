@@ -118,6 +118,9 @@ static int zlib_uncompress(struct squashfs_sb_info *msblk, void *strm,
 	return stream->total_out;
 
 out:
+	/* for squashfs debugger */
+	output->k = k;
+
 	for (; k < b; k++)
 		put_bh(bh[k]);
 

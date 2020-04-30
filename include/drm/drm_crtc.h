@@ -45,6 +45,9 @@ struct drm_clip_rect;
 struct device_node;
 struct fence;
 
+/* MACRO to enble DRM_TZTV_HELPER */
+#define USE_DRM_TZTV_HELPER 
+
 #define DRM_MODE_OBJECT_CRTC 0xcccccccc
 #define DRM_MODE_OBJECT_CONNECTOR 0xc0c0c0c0
 #define DRM_MODE_OBJECT_ENCODER 0xe0e0e0e0
@@ -61,7 +64,7 @@ struct drm_mode_object {
 	struct drm_object_properties *properties;
 };
 
-#define DRM_OBJECT_MAX_PROPERTY 24
+#define DRM_OBJECT_MAX_PROPERTY 40
 struct drm_object_properties {
 	int count, atomic_count;
 	/* NOTE: if we ever start dynamically destroying properties (ie.
@@ -840,6 +843,14 @@ enum drm_plane_type {
  * @properties: property tracking for this plane
  * @type: type of plane (overlay, primary, cursor)
  * @state: current atomic state for this plane
+ * @crtc_x: plane x crtc position
+ * @crtc_y: plane y crtc position
+ * @crtc_w: plane w crtc width
+ * @crtc_y: plane h crtc height
+ * @src_x: plane x source position
+ * @src_y: plane y source position
+ * @src_w: plane w source width
+ * @src_y: plane h source height
  */
 struct drm_plane {
 	struct drm_device *dev;
@@ -868,6 +879,14 @@ struct drm_plane {
 	const void *helper_private;
 
 	struct drm_plane_state *state;
+	/* plane info for user to get */
+	/* Signed dest location allows it to be partially off screen */
+	int32_t crtc_x, crtc_y;
+	uint32_t crtc_w, crtc_h;
+
+	/* Source values are 16.16 fixed point */
+	uint32_t src_x, src_y;
+	uint32_t src_h, src_w;
 };
 
 /**
@@ -1164,6 +1183,12 @@ struct drm_mode_config {
 
 	/* cursor size */
 	uint32_t cursor_width, cursor_height;
+#ifdef USE_DRM_TZTV_HELPER	 /* Tizen TV DRM */
+	/* Tizen TV Related prop */
+	struct drm_property *tztv_plane_mute_sync;
+	struct drm_property *tztv_force_mute_sync;
+#endif /*USE_DRM_TZTV_HELPER*/
+	struct mutex setplane_lock;
 };
 
 /**

@@ -156,6 +156,7 @@ int usb_register_dev(struct usb_interface *intf,
 	int minor;
 	char name[20];
 	char *temp;
+	static DEFINE_MUTEX(init_usb_class_mutex);
 
 #ifdef CONFIG_USB_DYNAMIC_MINORS
 	/*
@@ -171,7 +172,10 @@ int usb_register_dev(struct usb_interface *intf,
 	if (intf->minor >= 0)
 		return -EADDRINUSE;
 
+	mutex_lock(&init_usb_class_mutex);
 	retval = init_usb_class();
+	mutex_unlock(&init_usb_class_mutex);
+	
 	if (retval)
 		return retval;
 

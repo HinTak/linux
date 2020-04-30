@@ -32,11 +32,42 @@
 #include <linux/cpufreq.h>
 #include <linux/cpuidle.h>
 #include <linux/timer.h>
+#include <linux/delay.h>
 
 #include "../base.h"
 #include "power.h"
 
+#ifdef CONFIG_DPM_SHOW_TIME_IN_HWTRACING 
+#include <trace/early.h>
+#endif
+
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+#include <linux/priority_devconfig.h>
+struct instant_resume_control instant_ctrl;
+EXPORT_SYMBOL_GPL(instant_ctrl);
+#endif
+
+#ifdef USB_AMBIENTMODE
+struct k_info usb_kthread_info;
+EXPORT_SYMBOL_GPL(usb_kthread_info);
+
+static struct k_info *pinfo;
+pm_message_t k_state;
+
+int prevent_suspend_resume = 1;
+struct completion usb_devices_resume_completion; 
+EXPORT_SYMBOL_GPL(usb_devices_resume_completion);
+#endif
+
 typedef int (*pm_callback_t)(struct device *);
+
+void PM_IRQ_CHECK(int line, const char* func, const char *dev)
+{
+	if(irqs_disabled())
+		printk(KERN_ERR "PM-ERROR:%d:%s:%s\n", line,
+				func, dev);
+}
+
 
 /*
  * The entries in the dpm_list list are in a depth first order, simply
@@ -51,8 +82,19 @@ typedef int (*pm_callback_t)(struct device *);
 LIST_HEAD(dpm_list);
 static LIST_HEAD(dpm_prepared_list);
 static LIST_HEAD(dpm_suspended_list);
+#ifdef USB_AMBIENTMODE
+static LIST_HEAD(dpm_prepared_usb_list);
+static LIST_HEAD(dpm_suspended_usb_list);
+#endif
 static LIST_HEAD(dpm_late_early_list);
 static LIST_HEAD(dpm_noirq_list);
+#ifdef CONFIG_POWER_SAVING_MODE
+static LIST_HEAD(dpm_pwsv_list);
+static LIST_HEAD(dpm_late_early_pwsv_list);
+static LIST_HEAD(dpm_suspended_pwsv_list);
+static LIST_HEAD(dpm_resume_pwsv_list);
+extern int pwsv_current_mode;
+#endif
 
 struct suspend_stats suspend_stats;
 static DEFINE_MUTEX(dpm_list_mtx);
@@ -83,6 +125,21 @@ static char *pm_verb(int event)
 		return "(unknown PM event)";
 	}
 }
+
+#ifdef CONFIG_PM_PRINT_DRIVER_CALLBACK_START_END
+void trace_device_pm_callback_start(struct device *dev, const char *pm_ops, int event)
+{
+	printk(KERN_EMERG "PM: %s %s, parent: %s, %s[%s]\n", dev_driver_string(dev),
+		dev_name(dev), dev->parent ? dev_name(dev->parent) : "none"
+		, pm_ops ? pm_ops : "none", pm_verb(event));
+}
+
+void trace_device_pm_callback_end(struct device *dev, int error)
+{
+	printk(KERN_EMERG "PM: %s %s, err=%d\n",
+		dev_driver_string(dev), dev_name(dev), error);
+}
+#endif
 
 /**
  * device_pm_sleep_init - Initialize system suspend-related device fields.
@@ -249,6 +306,16 @@ static void dpm_wait_for_children(struct device *dev, bool async)
 static pm_callback_t pm_op(const struct dev_pm_ops *ops, pm_message_t state)
 {
 	switch (state.event) {
+#ifdef CONFIG_POWER_SAVING_MODE
+	case PM_EVENT_PWSV_POWEROFF:
+		return ops->pwsv_poweroff;
+	case PM_EVENT_PWSV_RESUME:
+		return ops->pwsv_resume;
+	case PM_EVENT_PWSV_SUSPEND:
+		return ops->pwsv_suspend;
+	case PM_EVENT_PWSV_RESTORE:
+		return ops->pwsv_restore;
+#endif
 #ifdef CONFIG_SUSPEND
 	case PM_EVENT_SUSPEND:
 		return ops->suspend;
@@ -284,6 +351,12 @@ static pm_callback_t pm_late_early_op(const struct dev_pm_ops *ops,
 				      pm_message_t state)
 {
 	switch (state.event) {
+#ifdef CONFIG_POWER_SAVING_MODE
+	case PM_EVENT_PWSV_POWEROFF:
+		return ops->pwsv_poweroff_late;
+	case PM_EVENT_PWSV_RESUME:
+		return ops->pwsv_resume_early;
+#endif
 #ifdef CONFIG_SUSPEND
 	case PM_EVENT_SUSPEND:
 		return ops->suspend_late;
@@ -360,16 +433,25 @@ static void dpm_show_time(ktime_t starttime, pm_message_t state, char *info)
 	ktime_t calltime;
 	u64 usecs64;
 	int usecs;
-
+#ifdef CONFIG_DPM_SHOW_TIME_IN_HWTRACING
+	char hwc_buf[256];
+#endif
 	calltime = ktime_get();
 	usecs64 = ktime_to_ns(ktime_sub(calltime, starttime));
 	do_div(usecs64, NSEC_PER_USEC);
 	usecs = usecs64;
 	if (usecs == 0)
 		usecs = 1;
-	pr_info("PM: %s%s%s of devices complete after %ld.%03ld msecs\n",
+
+	printk(KERN_EMERG "PM: %s%s%s of devices complete after %ld.%03ld msecs\n",
 		info ?: "", info ? " " : "", pm_verb(state.event),
 		usecs / USEC_PER_MSEC, usecs % USEC_PER_MSEC);
+
+#ifdef CONFIG_DPM_SHOW_TIME_IN_HWTRACING
+	snprintf(hwc_buf, sizeof(hwc_buf), "PM: %s%s%s of devices complete after %ld.%03ld msecs%c",info ?: "", info ? " " : "", pm_verb(state.event),
+		usecs / USEC_PER_MSEC, usecs % USEC_PER_MSEC, '\0');
+	trace_early_message(hwc_buf);
+#endif
 }
 
 static int dpm_run_callback(pm_callback_t cb, struct device *dev,
@@ -387,7 +469,11 @@ static int dpm_run_callback(pm_callback_t cb, struct device *dev,
 	trace_device_pm_callback_start(dev, info, state.event);
 	error = cb(dev);
 	trace_device_pm_callback_end(dev, error);
+#ifdef CONFIG_PRINT_MODULENAME_PM_FAIL
+	suspend_report_result_dev(dev, cb, error);
+#else
 	suspend_report_result(cb, error);
+#endif
 
 	initcall_debug_report(dev, calltime, error, state, info);
 
@@ -580,6 +666,7 @@ void dpm_resume_noirq(pm_message_t state)
 			}
 		}
 
+		PM_IRQ_CHECK(__LINE__, __func__, dev_name(dev));	/* nobody cared issue check */
 		mutex_lock(&dpm_list_mtx);
 		put_device(dev);
 	}
@@ -687,7 +774,16 @@ void dpm_resume_early(pm_message_t state)
 	while (!list_empty(&dpm_late_early_list)) {
 		dev = to_device(dpm_late_early_list.next);
 		get_device(dev);
-		list_move_tail(&dev->power.entry, &dpm_suspended_list);
+#ifdef USB_AMBIENTMODE	
+		if(!dev->is_usb){
+			list_move_tail(&dev->power.entry, &dpm_suspended_list);
+		}else{
+			list_move_tail(&dev->power.entry, &dpm_suspended_usb_list);
+		}
+#else 
+		 list_move_tail(&dev->power.entry, &dpm_suspended_list);
+#endif
+		
 		mutex_unlock(&dpm_list_mtx);
 
 		if (!is_async(dev)) {
@@ -701,6 +797,7 @@ void dpm_resume_early(pm_message_t state)
 				pm_dev_err(dev, state, " early", error);
 			}
 		}
+		PM_IRQ_CHECK(__LINE__, __func__, dev_name(dev));	/* nobody cared issue check */
 		mutex_lock(&dpm_list_mtx);
 		put_device(dev);
 	}
@@ -822,10 +919,73 @@ static void async_resume(void *data, async_cookie_t cookie)
 	int error;
 
 	error = device_resume(dev, pm_transition, true);
+
+	PM_IRQ_CHECK(__LINE__, __func__, dev_name(dev));	/* nobody cared issue check */
+
 	if (error)
 		pm_dev_err(dev, pm_transition, " async", error);
 	put_device(dev);
 }
+
+#ifdef USB_AMBIENTMODE	
+int thread_fn(void *ptrinfo)
+{
+	struct device *dev;
+	pinfo = ptrinfo;
+check:
+	printk(KERN_DEBUG "Thread waiting\n");
+	wait_event_interruptible(pinfo->waitQ, pinfo->wait_condition_flag != 0);
+	msleep(50);
+	printk(KERN_DEBUG "Thread Running\n");
+	mutex_lock(&dpm_list_mtx);
+	pm_transition = k_state;
+	pinfo->wait_condition_flag = 0;	
+	async_error = 0;
+	
+	list_for_each_entry(dev, &dpm_suspended_usb_list, power.entry) {
+		reinit_completion(&dev->power.completion);
+		if (is_async(dev)) {
+			get_device(dev);
+			async_schedule(async_resume, dev);
+		}
+	}
+
+	while (!list_empty(&dpm_suspended_usb_list)) {
+		dev = to_device(dpm_suspended_usb_list.next);
+		get_device(dev);
+		if (!is_async(dev)) {
+			int error;
+
+			mutex_unlock(&dpm_list_mtx);
+
+			error = device_resume(dev, k_state, false);
+			if (error) {
+				suspend_stats.failed_resume++;
+				dpm_save_failed_step(SUSPEND_RESUME);
+				dpm_save_failed_dev(dev_name(dev));
+				pm_dev_err(dev, k_state, "", error);
+			}
+
+			PM_IRQ_CHECK(__LINE__, __func__, dev_name(dev));	/* nobody cared issue check */
+			mutex_lock(&dpm_list_mtx);
+		}
+		if (!list_empty(&dev->power.entry)){
+			if(dev->is_usb){
+				list_move_tail(&dev->power.entry, &dpm_prepared_usb_list);
+			}
+		}
+		put_device(dev);
+	}
+	mutex_unlock(&dpm_list_mtx);
+	async_synchronize_full();
+	printk(KERN_ERR"Triggering the completion of resumed USB devices\n");	
+	complete_all(&usb_devices_resume_completion);	
+	goto check;
+
+    return 0;
+}
+EXPORT_SYMBOL_GPL(thread_fn);
+#endif
 
 /**
  * dpm_resume - Execute "resume" callbacks for non-sysdev devices.
@@ -844,6 +1004,9 @@ void dpm_resume(pm_message_t state)
 
 	mutex_lock(&dpm_list_mtx);
 	pm_transition = state;
+#ifdef USB_AMBIENTMODE	
+	k_state = state;
+#endif
 	async_error = 0;
 
 	list_for_each_entry(dev, &dpm_suspended_list, power.entry) {
@@ -870,19 +1033,396 @@ void dpm_resume(pm_message_t state)
 				pm_dev_err(dev, state, "", error);
 			}
 
+			PM_IRQ_CHECK(__LINE__, __func__, dev_name(dev));	/* nobody cared issue check */
 			mutex_lock(&dpm_list_mtx);
 		}
-		if (!list_empty(&dev->power.entry))
-			list_move_tail(&dev->power.entry, &dpm_prepared_list);
+		if (!list_empty(&dev->power.entry)){
+#ifdef USB_AMBIENTMODE	
+			if(!dev->is_usb)
+#endif
+			{
+				list_move_tail(&dev->power.entry, &dpm_prepared_list);
+			}
+		}
 		put_device(dev);
 	}
+#ifdef USB_AMBIENTMODE	
+
+	printk(KERN_DEBUG "Going to Trigger the Thread \n");
+#endif
 	mutex_unlock(&dpm_list_mtx);
 	async_synchronize_full();
+#ifdef USB_AMBIENTMODE	
+	pinfo->wait_condition_flag = 1;	
+	printk(KERN_DEBUG "Trigger the Thread \n");
+	wake_up_interruptible(&pinfo->waitQ);
+
+#endif
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+	instant_ctrl.access_once = true;
+	if(instant_ctrl.iot_func)
+		complete_all(&instant_ctrl.kernel_resume_end);
+#endif
+
 	dpm_show_time(starttime, state, NULL);
 
 	cpufreq_resume();
 	trace_suspend_resume(TPS("dpm_resume"), state.event, false);
 }
+
+#ifdef CONFIG_POWER_SAVING_MODE
+
+/**
+ * dpm_poweroff_pwsv - Execute "pwsv_poweroff" callbacks for devices.
+ * @state: PM transition of the system being carried out.
+ *
+ * Execute the appropriate "pwsv_poweroff" callback for all devices
+ */
+void dpm_poweroff_pwsv(pm_message_t state)
+{
+	struct device *dev;
+	struct dev_pm_ops *pm = NULL;
+	char *info;
+	int error;
+	pm_callback_t callback = NULL;
+
+	might_sleep();
+
+	mutex_lock(&dpm_list_mtx);
+	while (!list_empty(&dpm_list)) {
+		callback = NULL;
+		info = NULL;
+		dev = to_device(dpm_list.next);
+		get_device(dev);
+
+		mutex_unlock(&dpm_list_mtx);
+		if (dev->bus && dev->bus->pm) {
+			pm = (struct dev_pm_ops *)dev->bus->pm;
+			info = "bus ";
+			callback = pm_op(dev->bus->pm, state);
+			if(callback)
+				printk("PWSV] %pf\n",(void*)callback);
+		}
+		
+		if (!callback && dev->driver && dev->driver->pm) {
+			pm = (struct dev_pm_ops *)dev->driver->pm;
+			info = "driver ";
+			callback = pm_op(dev->driver->pm, state);
+			if(callback)
+				printk("PWSV] %pf\n",(void*)callback);
+		}
+
+		/* give current power saving mode instead of parameter */
+		if(pm)
+			pm->pwsv_mode = pwsv_current_mode;
+		error = dpm_run_callback(callback, dev, state, info);
+		if (error) {
+			suspend_stats.failed_resume++;
+			dpm_save_failed_step(SUSPEND_RESUME); /* TODO */
+			dpm_save_failed_dev(dev_name(dev));
+			pm_dev_err(dev, state, "", error);
+		}
+
+		mutex_lock(&dpm_list_mtx);
+
+		if (!list_empty(&dev->power.entry))
+			list_move_tail(&dev->power.entry, &dpm_pwsv_list);
+
+		put_device(dev);
+	}
+	mutex_unlock(&dpm_list_mtx);
+}
+
+/**
+ * dpm_poweroff_pwsv_late - Execute "pwsv_poweroff_late" callbacks for devices.
+ * @state: PM transition of the system being carried out.
+ *
+ * Execute the appropriate "pwsv_poweroff_late" callback for all poweroff devices
+ * It helps power off sequence of devices
+ */
+void dpm_poweroff_pwsv_late(pm_message_t state)
+{
+	struct device *dev;
+	char *info;
+	int error;
+
+	pm_callback_t callback = NULL;
+
+	might_sleep();
+
+	mutex_lock(&dpm_list_mtx);
+	while (!list_empty(&dpm_pwsv_list)) {
+		callback = NULL;
+		info = NULL;
+
+		dev = to_device(dpm_pwsv_list.next);
+		get_device(dev);
+
+		mutex_unlock(&dpm_list_mtx);
+		if (dev->bus && dev->bus->pm) {
+			info = "late bus";
+			callback = pm_late_early_op(dev->bus->pm, state);
+			if(callback)
+				printk("PWSV] %pf\n",(void*)callback);
+		}
+		
+		if (!callback && dev->driver && dev->driver->pm) {
+			info = "late driver ";
+			callback = pm_late_early_op(dev->driver->pm, state);
+			if(callback)
+				printk("PWSV] %pf\n",(void*)callback);
+		}
+
+		error = dpm_run_callback(callback, dev, state, info);
+		if (error) {
+			suspend_stats.failed_resume++;
+			dpm_save_failed_step(SUSPEND_RESUME); /* TODO */
+			dpm_save_failed_dev(dev_name(dev));
+			pm_dev_err(dev, state, "", error);
+		}
+		mutex_lock(&dpm_list_mtx);
+
+		if (!list_empty(&dev->power.entry))
+			list_move_tail(&dev->power.entry, &dpm_late_early_pwsv_list);
+
+		put_device(dev);
+	}
+	mutex_unlock(&dpm_list_mtx);
+}
+
+/**
+ * dpm_suspend_pwsv - Execute "pwsv_suspend" callbacks for devices at pwsv status.
+ * @state: PM transition of the system being carried out.
+ *
+ * Execute the appropriate "pwsv_suspend" callback for devices which was power-off
+ * It helps sequence of device resume.
+ */
+void dpm_suspend_pwsv(pm_message_t state)
+{
+	struct device *dev;
+	char *info = NULL;
+	int error;
+
+	pm_callback_t callback = NULL;
+	might_sleep();
+
+	mutex_lock(&dpm_list_mtx);
+	while (!list_empty(&dpm_late_early_pwsv_list)) {
+		callback = NULL;
+		info = NULL;
+
+		dev = to_device(dpm_late_early_pwsv_list.next);
+		get_device(dev);
+
+		mutex_unlock(&dpm_list_mtx);
+		if (dev->bus && dev->bus->pm) {
+			info = "suspend bus ";
+			callback = pm_op(dev->bus->pm, state);
+			if(callback)
+				printk("PWSV] %pf\n",(void*)callback);
+		}
+		
+		if (!callback && dev->driver && dev->driver->pm) {
+			info = "suspend driver ";
+			callback = pm_op(dev->driver->pm, state);
+			if(callback)
+				printk("PWSV] %pf\n",(void*)callback);
+		}
+
+		error = dpm_run_callback(callback, dev, state, info);
+		if (error) {
+			suspend_stats.failed_resume++;
+			dpm_save_failed_step(SUSPEND_RESUME); /* TODO */
+			dpm_save_failed_dev(dev_name(dev));
+			pm_dev_err(dev, state, "", error);
+		}
+		mutex_lock(&dpm_list_mtx);
+
+		if (!list_empty(&dev->power.entry))
+			list_move_tail(&dev->power.entry, &dpm_suspended_pwsv_list);
+
+		put_device(dev);
+	}
+	mutex_unlock(&dpm_list_mtx);
+}
+
+/**
+ * dpm_restore_pwsv - Execute "pwsv_restore" callbacks for devices at pwsv status.
+ * @state: PM transition of the system being carried out.
+ *
+ * Execute the appropriate "pwsv_restore" callback for devices which was power-off
+ * It helps sequence of device resume.
+ */
+void dpm_restore_pwsv(pm_message_t state)
+{
+	struct device *dev;
+	char *info = NULL;
+	int error;
+
+	pm_callback_t callback = NULL;
+	might_sleep();
+
+	mutex_lock(&dpm_list_mtx);
+	while (!list_empty(&dpm_suspended_pwsv_list)) {
+		callback = NULL;
+		info = NULL;
+
+		dev = to_device(dpm_suspended_pwsv_list.next);
+		get_device(dev);
+
+		mutex_unlock(&dpm_list_mtx);
+		if (dev->bus && dev->bus->pm) {
+			info = "suspend bus ";
+			callback = pm_op(dev->bus->pm, state);
+			if(callback)
+				printk("PWSV] %pf\n",(void*)callback);
+		}
+		
+		if (!callback && dev->driver && dev->driver->pm) {
+			info = "suspend driver ";
+			callback = pm_op(dev->driver->pm, state);
+			if(callback)
+				printk("PWSV] %pf\n",(void*)callback);
+		}
+
+		error = dpm_run_callback(callback, dev, state, info);
+		if (error) {
+			suspend_stats.failed_resume++;
+			dpm_save_failed_step(SUSPEND_RESUME); /* TODO */
+			dpm_save_failed_dev(dev_name(dev));
+			pm_dev_err(dev, state, "", error);
+		}
+		mutex_lock(&dpm_list_mtx);
+
+		if (!list_empty(&dev->power.entry))
+			list_move_tail(&dev->power.entry, &dpm_late_early_pwsv_list);
+
+		put_device(dev);
+	}
+	mutex_unlock(&dpm_list_mtx);
+}
+
+/**
+ * dpm_resume_pwsv_early - Execute "pwsv_resume_early" callbacks for devices at pwsv status.
+ * @state: PM transition of the system being carried out.
+ *
+ * Execute the appropriate "pwsv_resume_early" callback for devices which was power-off
+ * It helps sequence of device resume.
+ */
+void dpm_resume_pwsv_early(pm_message_t state)
+{
+	struct device *dev;
+	char *info = NULL;
+	int error;
+
+	pm_callback_t callback = NULL;
+	might_sleep();
+
+	mutex_lock(&dpm_list_mtx);
+	while (!list_empty(&dpm_late_early_pwsv_list)) {
+		callback = NULL;
+		info = NULL;
+
+		dev = to_device(dpm_late_early_pwsv_list.next);
+		get_device(dev);
+
+		mutex_unlock(&dpm_list_mtx);
+		if (dev->bus && dev->bus->pm) {
+			info = "early bus ";
+			callback = pm_late_early_op(dev->bus->pm, state);
+			if(callback)
+				printk("PWSV] %pf\n",(void*)callback);
+		}
+		
+		if (!callback && dev->driver && dev->driver->pm) {
+			info = "early driver ";
+			callback = pm_late_early_op(dev->driver->pm, state);
+			if(callback)
+				printk("PWSV] %pf\n",(void*)callback);
+		}
+
+		error = dpm_run_callback(callback, dev, state, info);
+		if (error) {
+			suspend_stats.failed_resume++;
+			dpm_save_failed_step(SUSPEND_RESUME); /* TODO */
+			dpm_save_failed_dev(dev_name(dev));
+			pm_dev_err(dev, state, "", error);
+		}
+		mutex_lock(&dpm_list_mtx);
+
+		if (!list_empty(&dev->power.entry))
+			list_move_tail(&dev->power.entry, &dpm_resume_pwsv_list);
+
+		put_device(dev);
+	}
+	mutex_unlock(&dpm_list_mtx);
+}
+
+/**
+ * dpm_resume_pwsv - Execute "pwsv_resume" callbacks.
+ * @state: PM transition of the system being carried out.
+ *
+ * Execute the appropriate "pwsv_resume_early" callback for devices related to power saving mode.
+ * It helps sequence of device resume.
+ */
+void dpm_resume_pwsv(pm_message_t state)
+{
+	struct device *dev;
+	char *info = NULL;
+	int error;
+
+	pm_callback_t callback = NULL;
+
+	might_sleep();
+
+	mutex_lock(&dpm_list_mtx);
+	while (!list_empty(&dpm_resume_pwsv_list)) {
+		callback = NULL;
+		info = NULL;
+		dev = to_device(dpm_resume_pwsv_list.next);
+		get_device(dev);
+
+		mutex_unlock(&dpm_list_mtx);
+		if (dev->bus && dev->bus->pm) {
+			info = "bus ";
+			callback = pm_op(dev->bus->pm, state);
+			if(callback)
+				printk("PWSV] %pf\n",(void*)callback);
+		}
+		
+		if (!callback && dev->driver && dev->driver->pm) {
+			info = "driver ";
+			callback = pm_op(dev->driver->pm, state);
+			if(callback)
+				printk("PWSV] %pf\n",(void*)callback);
+		}
+
+		error = dpm_run_callback(callback, dev, state, info);
+		if (error) {
+			suspend_stats.failed_resume++;
+			dpm_save_failed_step(SUSPEND_RESUME); /* TODO */
+			dpm_save_failed_dev(dev_name(dev));
+			pm_dev_err(dev, state, "", error);
+		}
+		mutex_lock(&dpm_list_mtx);
+
+		if (!list_empty(&dev->power.entry)){
+#ifdef USB_AMBIENTMODE	
+			if(!dev->is_usb){
+				list_move_tail(&dev->power.entry, &dpm_prepared_list);
+			}else{
+				list_move_tail(&dev->power.entry, &dpm_prepared_usb_list);
+			}
+#else
+			list_move_tail(&dev->power.entry, &dpm_prepared_list);
+#endif
+		}
+		put_device(dev);
+	}
+	mutex_unlock(&dpm_list_mtx);
+}
+
+#endif
 
 /**
  * device_complete - Complete a PM transition for given device.
@@ -956,9 +1496,29 @@ void dpm_complete(pm_message_t state)
 
 		device_complete(dev, state);
 
+		PM_IRQ_CHECK(__LINE__, __func__, dev_name(dev));	/* nobody cared issue check */
+
 		mutex_lock(&dpm_list_mtx);
 		put_device(dev);
 	}
+#ifdef USB_AMBIENTMODE
+
+	while (!list_empty(&dpm_prepared_usb_list)) {
+		struct device *dev = to_device(dpm_prepared_usb_list.prev);
+
+		get_device(dev);
+		dev->power.is_prepared = false;
+		list_move(&dev->power.entry, &list);
+		mutex_unlock(&dpm_list_mtx);
+
+		device_complete(dev, state);
+
+		PM_IRQ_CHECK(__LINE__, __func__, dev_name(dev));	/* nobody cared issue check */
+
+		mutex_lock(&dpm_list_mtx);
+		put_device(dev);
+	}
+#endif
 	list_splice(&list, &dpm_list);
 	mutex_unlock(&dpm_list_mtx);
 	trace_suspend_resume(TPS("dpm_complete"), state.event, false);
@@ -973,11 +1533,32 @@ void dpm_complete(pm_message_t state)
  */
 void dpm_resume_end(pm_message_t state)
 {
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+	if(instant_ctrl.iot_func)
+		instant_ctrl.iot_func();
+#endif	
 	dpm_resume(state);
 	dpm_complete(state);
 }
 EXPORT_SYMBOL_GPL(dpm_resume_end);
 
+#ifdef CONFIG_POWER_SAVING_MODE
+/**
+ * dpm_resume_end_pwsv - Execute "resume" callbacks and complete system transition.
+ * @state: PM transition of the system being carried out.
+ *
+ * Execute "pwsv_resume_early" & "pwsv_resume" callbacks for all devices and complete
+ * the PM transition of the system.
+ */
+void dpm_resume_end_pwsv(pm_message_t state)
+{
+	dpm_resume_pwsv_early(state);
+        dpm_resume_pwsv(state);
+	dpm_complete(PMSG_RESUME);
+}
+EXPORT_SYMBOL_GPL(dpm_resume_end_pwsv);
+
+#endif
 
 /*------------------------- Suspend routines -------------------------*/
 
@@ -1117,6 +1698,7 @@ int dpm_suspend_noirq(pm_message_t state)
 
 		error = device_suspend_noirq(dev);
 
+		PM_IRQ_CHECK(__LINE__, __func__, dev_name(dev));	/* nobody cared issue check */
 		mutex_lock(&dpm_list_mtx);
 		if (error) {
 			pm_dev_err(dev, state, " noirq", error);
@@ -1258,6 +1840,7 @@ int dpm_suspend_late(pm_message_t state)
 
 		error = device_suspend_late(dev);
 
+		PM_IRQ_CHECK(__LINE__, __func__, dev_name(dev));	/* nobody cared issue check */
 		mutex_lock(&dpm_list_mtx);
 		if (error) {
 			pm_dev_err(dev, state, " late", error);
@@ -1272,6 +1855,33 @@ int dpm_suspend_late(pm_message_t state)
 		if (async_error)
 			break;
 	}
+#ifdef USB_AMBIENTMODE
+
+	while (!list_empty(&dpm_suspended_usb_list)) {
+		struct device *dev = to_device(dpm_suspended_usb_list.prev);
+
+		get_device(dev);
+		mutex_unlock(&dpm_list_mtx);
+
+		error = device_suspend_late(dev);
+
+		PM_IRQ_CHECK(__LINE__, __func__, dev_name(dev));	/* nobody cared issue check */
+		mutex_lock(&dpm_list_mtx);
+		if (error) {
+			pm_dev_err(dev, state, " late", error);
+			dpm_save_failed_dev(dev_name(dev));
+			put_device(dev);
+			break;
+		}
+		if (!list_empty(&dev->power.entry))
+			list_move(&dev->power.entry, &dpm_late_early_list);
+		put_device(dev);
+
+		if (async_error)
+			break;
+	}
+
+#endif
 	mutex_unlock(&dpm_list_mtx);
 	async_synchronize_full();
 	if (!error)
@@ -1465,6 +2075,9 @@ static void async_suspend(void *data, async_cookie_t cookie)
 	int error;
 
 	error = __device_suspend(dev, pm_transition, true);
+	
+	PM_IRQ_CHECK(__LINE__, __func__, dev_name(dev));	/* nobody cared issue check */
+
 	if (error) {
 		dpm_save_failed_dev(dev_name(dev));
 		pm_dev_err(dev, pm_transition, " async", error);
@@ -1494,7 +2107,7 @@ int dpm_suspend(pm_message_t state)
 {
 	ktime_t starttime = ktime_get();
 	int error = 0;
-
+	int m_secs;
 	trace_suspend_resume(TPS("dpm_suspend"), state.event, true);
 	might_sleep();
 
@@ -1503,6 +2116,21 @@ int dpm_suspend(pm_message_t state)
 	mutex_lock(&dpm_list_mtx);
 	pm_transition = state;
 	async_error = 0;
+
+#ifdef USB_AMBIENTMODE
+	if(prevent_suspend_resume){
+		prevent_suspend_resume = 0; 
+		init_completion(&usb_devices_resume_completion);
+		printk(KERN_EMERG "Init completion of USB devices\n");
+	}
+	else{
+		printk(KERN_EMERG"Wait & Prevent simultaneous suspend/resume [event=%d] \n", usb_devices_resume_completion.done);
+		m_secs = jiffies_to_msecs(wait_for_completion_timeout(&usb_devices_resume_completion, msecs_to_jiffies(EVENT_WAIT_TIMEOUT)));	
+		reinit_completion(&usb_devices_resume_completion);
+		printk(KERN_EMERG "Prevented simultaneous suspend and resume [duration %d/%d\n]",EVENT_WAIT_TIMEOUT - m_secs, EVENT_WAIT_TIMEOUT);
+	}
+#endif
+
 	while (!list_empty(&dpm_prepared_list)) {
 		struct device *dev = to_device(dpm_prepared_list.prev);
 
@@ -1511,6 +2139,7 @@ int dpm_suspend(pm_message_t state)
 
 		error = device_suspend(dev);
 
+		PM_IRQ_CHECK(__LINE__, __func__, dev_name(dev));	/* nobody cared issue check */
 		mutex_lock(&dpm_list_mtx);
 		if (error) {
 			pm_dev_err(dev, state, "", error);
@@ -1518,12 +2147,55 @@ int dpm_suspend(pm_message_t state)
 			put_device(dev);
 			break;
 		}
-		if (!list_empty(&dev->power.entry))
+
+		if (!list_empty(&dev->power.entry)){
+#ifdef USB_AMBIENTMODE
+			if(!dev->is_usb){
+				list_move(&dev->power.entry, &dpm_suspended_list);
+			}else{
+				list_move(&dev->power.entry, &dpm_suspended_usb_list);
+			}
+#else
 			list_move(&dev->power.entry, &dpm_suspended_list);
+#endif
+		}
 		put_device(dev);
 		if (async_error)
-			break;
+			break;		
 	}
+	
+#ifdef USB_AMBIENTMODE
+
+	while (!list_empty(&dpm_prepared_usb_list)) {
+		struct device *dev = to_device(dpm_prepared_usb_list.prev);
+
+		get_device(dev);
+		mutex_unlock(&dpm_list_mtx);
+
+		error = device_suspend(dev);
+
+		PM_IRQ_CHECK(__LINE__, __func__, dev_name(dev));	/* nobody cared issue check */
+		mutex_lock(&dpm_list_mtx);
+		if (error) {
+			pm_dev_err(dev, state, "", error);
+			dpm_save_failed_dev(dev_name(dev));
+			put_device(dev);
+			break;
+		}
+		if (!list_empty(&dev->power.entry)){
+			if(!dev->is_usb){
+				list_move(&dev->power.entry, &dpm_suspended_list);
+			}else{
+				list_move(&dev->power.entry, &dpm_suspended_usb_list);
+			}
+		}
+		put_device(dev);
+		if (async_error){
+			break;
+		}
+	}
+#endif
+	
 	mutex_unlock(&dpm_list_mtx);
 	async_synchronize_full();
 	if (!error)
@@ -1633,6 +2305,7 @@ int dpm_prepare(pm_message_t state)
 
 		error = device_prepare(dev, state);
 
+		PM_IRQ_CHECK(__LINE__, __func__, dev_name(dev));	/* nobody cared issue check */
 		mutex_lock(&dpm_list_mtx);
 		if (error) {
 			if (error == -EAGAIN) {
@@ -1647,8 +2320,18 @@ int dpm_prepare(pm_message_t state)
 			break;
 		}
 		dev->power.is_prepared = true;
-		if (!list_empty(&dev->power.entry))
+		if (!list_empty(&dev->power.entry)){
+#ifdef USB_AMBIENTMODE
+			if(!dev->is_usb){
+				list_move_tail(&dev->power.entry, &dpm_prepared_list);
+			}
+			else{
+				list_move_tail(&dev->power.entry, &dpm_prepared_usb_list);
+			}
+#else
 			list_move_tail(&dev->power.entry, &dpm_prepared_list);
+#endif
+		}
 		put_device(dev);
 	}
 	mutex_unlock(&dpm_list_mtx);
@@ -1666,6 +2349,9 @@ int dpm_prepare(pm_message_t state)
 int dpm_suspend_start(pm_message_t state)
 {
 	int error;
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+	int i = 0;
+#endif
 
 	error = dpm_prepare(state);
 	if (error) {
@@ -1673,9 +2359,27 @@ int dpm_suspend_start(pm_message_t state)
 		dpm_save_failed_step(SUSPEND_PREPARE);
 	} else
 		error = dpm_suspend(state);
+	
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+	for(i = 0; i < MAX_INSTANT_TREES; i++){
+		if(instant_ctrl.instant_tree[i]){
+			instant_ctrl.instant_tree[i]->state = INSTANT_STATE_COLDBOOT;
+		}
+	}
+#endif
+
 	return error;
 }
 EXPORT_SYMBOL_GPL(dpm_suspend_start);
+
+#ifdef CONFIG_PRINT_MODULENAME_PM_FAIL
+void __suspend_report_result_dev(const char *function, struct device *dev, void *fn, int ret)
+{
+	if (ret)
+		printk(KERN_ERR "%s(): %pF (%s) returns %d\n", function, fn, dev_driver_string(dev), ret);
+}
+EXPORT_SYMBOL_GPL(__suspend_report_result_dev);
+#endif
 
 void __suspend_report_result(const char *function, void *fn, int ret)
 {

@@ -39,6 +39,7 @@
 #include <linux/slab.h>
 
 #include <linux/dvb/frontend.h>
+#include <linux/dvb/frontend_tztv.h>
 
 #include "dvbdev.h"
 
@@ -46,7 +47,7 @@
  * Maximum number of Delivery systems per frontend. It
  * should be smaller or equal to 32
  */
-#define MAX_DELSYS	8
+#define MAX_DELSYS	16
 
 struct dvb_frontend_tune_settings {
 	int min_delay_ms;
@@ -194,6 +195,19 @@ enum dvbfe_search {
 };
 
 
+/* values for TV_FE_MODE */
+enum fe_tv_mode{
+    FE_TV_MODE_DTV = 0,
+    FE_TV_MODE_ATV = 1,
+};
+
+/* Just same as v4l2_tuner_type */
+enum fe_tuner_type {
+	FE_TUNER_RADIO	     = 1,
+	FE_TUNER_ANALOG_TV	     = 2,
+	FE_TUNER_DIGITAL_TV	     = 3,
+};
+
 struct dvb_tuner_ops {
 
 	struct dvb_tuner_info info;
@@ -235,6 +249,10 @@ struct dvb_tuner_ops {
 	 */
 	int (*set_state)(struct dvb_frontend *fe, enum tuner_param param, struct tuner_state *state);
 	int (*get_state)(struct dvb_frontend *fe, enum tuner_param param, struct tuner_state *state);
+
+	int (*get_afd)(struct dvb_frontend *fe, s32 *afd); /* auto fine tune offset for ATV */
+	int (*set_mft)(struct dvb_frontend *fe, s32 offset); /* Set manual fine tune, offset of 62.5kHz */
+	int (*get_tune_type)(struct dvb_frontend *fe, u16 *tune_type); /* Set manual fine tune, offset of 62.5kHz */
 };
 
 struct analog_demod_info {
@@ -307,6 +325,8 @@ struct dvb_frontend_ops {
 	int (*ts_bus_ctrl)(struct dvb_frontend* fe, int acquire);
 	int (*set_lna)(struct dvb_frontend *);
 
+	int (*get_packet_err)(struct dvb_frontend *fe, int *status);
+
 	/* These callbacks are for devices that implement their own
 	 * tuning algorithms, rather than a simple swzigzag
 	 */
@@ -317,6 +337,25 @@ struct dvb_frontend_ops {
 
 	int (*set_property)(struct dvb_frontend* fe, struct dtv_property* tvp);
 	int (*get_property)(struct dvb_frontend* fe, struct dtv_property* tvp);
+
+	int (*send_dbg_cmd)(struct dvb_frontend* fe, struct fe_dbg_cmd* cmd);
+	int (*get_lock_time)(struct dvb_frontend* fe, __u32 *ms);
+	int (*get_sync_time)(struct dvb_frontend* fe, __u32 *ms);
+	int (*get_stream_id_list)(struct dvb_frontend* fe, unsigned int *cnt, unsigned char *data);
+	int (*send_positioner_cmd)(struct dvb_frontend* fe, unsigned char cmd, int param);
+	int (*send_satcr_cmd)(struct dvb_frontend* fe, unsigned char cmd, bool  SatCR_Enable, unsigned char slotNumber, int slotFrequency, int version);
+	int (*set_lnb_power)(struct dvb_frontend* fe, bool bLNBPower);
+	int (*get_lnb_power)(struct dvb_frontend* fe, bool *bLNBPower);
+	int (*get_ber)(struct dvb_frontend* fe, int *data);
+	int (*get_reference_ber)(struct dvb_frontend* fe, int *data);
+	int (*get_bit_errorlevel)(struct dvb_frontend* fe, unsigned int *data);
+	int (*get_signal_quality_margin)(struct dvb_frontend* fe, int *data);
+	int (*get_signal_strength_margin)(struct dvb_frontend* fe, int *data);
+	int (*get_cellid)(struct dvb_frontend* fe, int *data);
+	int (*get_demod_hierarchy)(struct dvb_frontend* fe, int *data);
+	int (*get_signal_quality)(struct dvb_frontend* fe, int *data);
+	int (*get_signal_strength)(struct dvb_frontend* fe, int *data);
+	int (*get_stream_id)(struct dvb_frontend* fe, int *data);
 };
 
 #ifdef __DVB_CORE__
@@ -331,6 +370,52 @@ struct dvb_fe_events {
 	struct mutex		  mtx;
 };
 #endif
+
+
+typedef struct  {
+	int posParameter;
+	unsigned char posCommand;
+	bool UsePositioner;
+}fe_sat_positioner_t;
+
+struct fe_sat_parameter_t {
+
+//DTV_POSITIONER
+	fe_sat_positioner_t position;
+
+
+//no used::	unsigned int 		orbital_position;		//!< Orbital position [1/10 deg].
+
+	// Satellite settings.
+//no used::	bool 			east;				//!< East part of orbit if TRUE.
+
+//DTV_LNB_HI_OSC
+   unsigned int 		lnb_hi_osc;			//!< Lnb hi oscillator freq [kHz].
+
+//DTV_LNB_LOW_OSC
+	unsigned int 		lnb_lo_osc;			//!< Lnb low oscillator freq [kHz].
+
+//DTV_DISEQC_MODE
+	int 				diseqc_mode;		//!< DiseqC mode.
+
+//DTV_TONE
+	int 				tone_22_khz;		//!< Tone 22 kHz for LNB. //dtv_tone
+//no used::		int 				roll_off;				//!< Roll-off factor used in DVB-S2.
+
+//etc
+	bool 				LineCompensation;//!< Compensate for the voltage loss in very long cables.
+	unsigned int		bandSwitchFrequency;  //!< Frequency of switching satellite bands from low to high in [MHz].
+};
+
+/* JUR add */
+typedef struct  {
+	// SatCR parameters.
+	int slotFrequency;				// [MHz]
+	bool  SatCR_Enable;
+	unsigned char slotNumber;		// 1 - 8 slot numbers are allowed
+	int version;					// 0:50494,  1:50607
+} fe_satcr_config_t;
+
 
 struct dtv_frontend_properties {
 
@@ -405,6 +490,12 @@ struct dtv_frontend_properties {
 	struct dtv_fe_stats	post_bit_count;
 	struct dtv_fe_stats	block_error;
 	struct dtv_fe_stats	block_count;
+
+	int tv_mode;
+	struct analog_parameters fe_atv_prop;
+	u8			scan_mode;
+	struct fe_sat_parameter_t fe_sat_prop;
+	fe_satcr_config_t fe_satcr_config;
 };
 
 #define DVB_FE_NO_EXIT  0
@@ -420,6 +511,11 @@ struct dvb_frontend {
 	void *frontend_priv;
 	void *sec_priv;
 	void *analog_demod_priv;
+
+	void *config_data;
+	int  freq_prev;
+	int  dtv_lock_status_prev;
+	int  mft_prev;
 	struct dtv_frontend_properties dtv_property_cache;
 #define DVB_FRONTEND_COMPONENT_TUNER 0
 #define DVB_FRONTEND_COMPONENT_DEMOD 1

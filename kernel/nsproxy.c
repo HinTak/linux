@@ -26,6 +26,10 @@
 #include <linux/file.h>
 #include <linux/syscalls.h>
 
+#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+#include <linux/sf_security.h>
+#endif
+
 static struct kmem_cache *nsproxy_cachep;
 
 struct nsproxy init_nsproxy = {
@@ -38,6 +42,9 @@ struct nsproxy init_nsproxy = {
 	.pid_ns_for_children	= &init_pid_ns,
 #ifdef CONFIG_NET
 	.net_ns			= &init_net,
+#endif
+#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+	.type = 0,
 #endif
 };
 
@@ -97,6 +104,25 @@ static struct nsproxy *create_new_namespaces(unsigned long flags,
 		err = PTR_ERR(new_nsp->net_ns);
 		goto out_net;
 	}
+
+	#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+	if ((flags & CLONE_CONTAINER_ISOLATE) && (flags & CLONE_CONTAINER_HYBRID))
+	{
+		new_nsp->type = NS_TYPE_SECURE;
+	}
+	else if(flags & CLONE_CONTAINER_ISOLATE)
+	{
+		new_nsp->type = NS_TYPE_ISOLATE;
+	}
+	else if(flags & CLONE_CONTAINER_HYBRID)
+	{
+		new_nsp->type = NS_TYPE_HYBRID;
+	}
+	else
+	{
+		new_nsp->type = tsk->nsproxy->type;
+	}
+	#endif
 
 	return new_nsp;
 

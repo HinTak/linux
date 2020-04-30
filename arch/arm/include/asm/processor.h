@@ -41,6 +41,8 @@ struct thread_struct {
 	unsigned long		address;
 	unsigned long		trap_no;
 	unsigned long		error_code;
+	unsigned long		pc;
+	unsigned long		lr;
 							/* debugging	  */
 	struct debug_info	debug;
 };

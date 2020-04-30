@@ -16,11 +16,20 @@
 #include <linux/kmod.h>
 #include <linux/kobj_map.h>
 #include <linux/mutex.h>
+
+
 #include <linux/idr.h>
 #include <linux/log2.h>
 #include <linux/pm_runtime.h>
+#include <linux/freezer.h>
 
 #include "blk.h"
+
+#ifdef CONFIG_FS_SEL_READAHEAD
+extern bool create_readahead_proc(const char *name);
+extern void remove_readahead_proc(const char *name);
+extern bool get_readahead_entry(const char *name);
+#endif
 
 static DEFINE_MUTEX(block_class_lock);
 struct kobject *block_depr;
@@ -530,6 +539,10 @@ static void register_disk(struct gendisk *disk)
 		}
 	}
 
+#ifdef CONFIG_FS_SEL_READAHEAD
+	create_readahead_proc(dev_name(ddev));
+#endif
+
 	/*
 	 * avoid probable deadlock caused by allocating memory with
 	 * GFP_KERNEL in runtime_resume callback of its all ancestor
@@ -610,7 +623,7 @@ void add_disk(struct gendisk *disk)
 	disk_alloc_events(disk);
 
 	/* Register BDI before referencing it from bdev */
-	bdi = &disk->queue->backing_dev_info;
+	bdi = disk->queue->backing_dev_info;
 	bdi_register_dev(bdi, disk_devt(disk));
 
 	blk_register_region(disk_devt(disk), disk->minors, NULL,
@@ -644,11 +657,17 @@ void del_gendisk(struct gendisk *disk)
 			     DISK_PITER_INCL_EMPTY | DISK_PITER_REVERSE);
 	while ((part = disk_part_iter_next(&piter))) {
 		invalidate_partition(disk, part->partno);
+		bdev_unhash_inode(part_devt(part));
 		delete_partition(disk, part->partno);
 	}
 	disk_part_iter_exit(&piter);
 
+#ifdef CONFIG_FS_SEL_READAHEAD
+	remove_readahead_proc(dev_name(disk_to_dev(disk)));
+#endif
+
 	invalidate_partition(disk, 0);
+	bdev_unhash_inode(disk_devt(disk));
 	set_capacity(disk, 0);
 	disk->flags &= ~GENHD_FL_UP;
 
@@ -661,13 +680,30 @@ void del_gendisk(struct gendisk *disk)
 
 	kobject_put(disk->part0.holder_dir);
 	kobject_put(disk->slave_dir);
-	disk->driverfs_dev = NULL;
 	if (!sysfs_deprecated)
 		sysfs_remove_link(block_depr, dev_name(disk_to_dev(disk)));
 	pm_runtime_set_memalloc_noio(disk_to_dev(disk), false);
 	device_del(disk_to_dev(disk));
 }
 EXPORT_SYMBOL(del_gendisk);
+
+#ifdef CONFIG_FS_SEL_READAHEAD
+bool disk_name_from_dev(dev_t dev)
+{
+	struct block_device *bdev = bdget(dev);
+	char buff[BDEVNAME_SIZE] = {0};
+	bool pstate = false;
+	if (bdev) {
+		if (MAJOR(dev)) {
+			bdevname(bdev, buff);
+			pstate = get_readahead_entry(buff);
+		}
+		bdput(bdev);
+	}
+        return pstate;
+}
+EXPORT_SYMBOL(disk_name_from_dev);
+#endif
 
 /**
  * get_gendisk - get partitioning information for a given device
@@ -828,6 +864,7 @@ static void disk_seqf_stop(struct seq_file *seqf, void *v)
 	if (iter) {
 		class_dev_iter_exit(iter);
 		kfree(iter);
+		seqf->private = NULL;
 	}
 }
 
@@ -1306,7 +1343,7 @@ struct kobject *get_disk(struct gendisk *disk)
 	owner = disk->fops->owner;
 	if (owner && !try_module_get(owner))
 		return NULL;
-	kobj = kobject_get(&disk_to_dev(disk)->kobj);
+	kobj = kobject_get_unless_zero(&disk_to_dev(disk)->kobj);
 	if (kobj == NULL) {
 		module_put(owner);
 		return NULL;
@@ -1374,7 +1411,10 @@ int invalidate_partition(struct gendisk *disk, int partno)
 	int res = 0;
 	struct block_device *bdev = bdget_disk(disk, partno);
 	if (bdev) {
-		fsync_bdev(bdev);
+		if (!(check_freezing() &&
+			MAJOR(bdev->bd_dev) == SCSI_DISK0_MAJOR))
+				fsync_bdev(bdev);
+
 		res = __invalidate_device(bdev, true);
 		bdput(bdev);
 	}

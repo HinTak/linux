@@ -89,6 +89,12 @@ static int of_platform_serial_setup(struct platform_device *ofdev,
 
 	spin_lock_init(&port->lock);
 	port->mapbase = resource.start;
+#if defined(CONFIG_NVT_HSUART_SUPPORT)
+	if (ndp_hsuart_ctl_switch(port)) {
+		dev_warn(&ofdev->dev, "[NDP_HSUART] switch fail.\n");
+		goto out;
+	}
+#endif
 	port->mapsize = resource_size(&resource);
 
 	/* Check for shifted address mapping */

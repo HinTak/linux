@@ -98,9 +98,20 @@ static void identity_mapping_add(pgd_t *pgd, const char *text_start,
 
 extern char  __idmap_text_start[], __idmap_text_end[];
 
+#if defined(CONFIG_ARM_CPU_SUSPEND) & defined(CONFIG_ARM_LPAE)
+extern void* suspend_save_sp;
+#endif
 static int __init init_static_idmap(void)
 {
+
+#if defined(CONFIG_ARM_CPU_SUSPEND) & defined(CONFIG_ARM_LPAE)
+	/* Assign reserved page restricted 32bit phys on idmap_pgd */
+	idmap_pgd = suspend_pgd_alloc(&init_mm, suspend_save_sp);
+	pr_notice("%s idmap_pgd:%p initialized \n", 
+		__func__, idmap_pgd);
+#else
 	idmap_pgd = pgd_alloc(&init_mm);
+#endif
 	if (!idmap_pgd)
 		return -ENOMEM;
 

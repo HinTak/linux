@@ -733,6 +733,11 @@ static void end_unlink_intr(struct ehci_hcd *ehci, struct ehci_qh *qh)
 	qh->qh_state = QH_STATE_IDLE;
 	hw->hw_next = EHCI_LIST_END(ehci);
 
+	#ifdef CONFIG_USB_NVT_EHCI_HCD
+	/* make sure qh is updated */
+	wmb();
+	#endif
+
 	if (!list_empty(&qh->qtd_list))
 		qh_completions(ehci, qh);
 
@@ -946,6 +951,13 @@ static int intr_submit (
 		status = -ESHUTDOWN;
 		goto done_not_linked;
 	}
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+	if (unlikely(test_bit(HCD_FLAG_NRY,
+			&ehci_to_hcd(ehci)->flags))) {
+		status = -ENODEV;
+		goto done_not_linked;
+	}
+#endif
 	status = usb_hcd_link_urb_to_ep(ehci_to_hcd(ehci), urb);
 	if (unlikely(status))
 		goto done_not_linked;
@@ -1094,7 +1106,28 @@ iso_stream_init (
 		stream->ps.period = urb->interval >> 3;
 		stream->bandwidth = stream->ps.usecs * 8 /
 				stream->ps.bw_uperiod;
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+	} else if ((dev->speed == USB_SPEED_FULL)
+		&& (dev->parent->devpath[0] == '0')) {
+		unsigned multi = hb_mult(maxp);
 
+		maxp = max_packet(maxp);
+		buf1 |= maxp;
+		maxp *= multi;
+		stream->buf0 = cpu_to_hc32(ehci, (epnum << 8) | dev->devnum);
+		stream->buf1 = cpu_to_hc32(ehci, buf1);
+		stream->buf2 = cpu_to_hc32(ehci, multi);
+
+		stream->ps.usecs = HS_USECS_ISO(maxp);
+
+		/* Allow urb->interval to override */
+		stream->ps.bw_uperiod = urb->interval << 3;
+
+		stream->uperiod = urb->interval << 3;
+		stream->ps.period = urb->interval;
+		stream->bandwidth = stream->ps.usecs * 8 /
+			stream->ps.bw_uperiod;
+#endif
 	} else {
 		u32		addr;
 		int		think_time;
@@ -1536,9 +1569,21 @@ iso_stream_schedule (
 			next = start;
 			start += period;
 			do {
-				start--;
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+				if (!((urb->dev->speed == USB_SPEED_FULL)
+				&& (urb->dev->parent->devpath[0] == '0')))
+					start--;
+#else
+					start--;
+#endif
 				/* check schedule: enough space? */
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+				if (stream->highspeed ||
+				((urb->dev->speed == USB_SPEED_FULL)
+				&& (urb->dev->parent->devpath[0] == '0'))) {
+#else
 				if (stream->highspeed) {
+#endif
 					if (itd_slot_ok(ehci, stream, start))
 						done = 1;
 				} else {
@@ -1780,11 +1825,12 @@ static void itd_link_urb(
 		ehci_to_hcd(ehci)->self.bandwidth_allocated
 				+= stream->bandwidth;
 
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 	if (ehci_to_hcd(ehci)->self.bandwidth_isoc_reqs == 0) {
 		if (ehci->amd_pll_fix == 1)
 			usb_amd_quirk_pll_disable();
 	}
-
+#endif
 	ehci_to_hcd(ehci)->self.bandwidth_isoc_reqs++;
 
 	/* fill iTDs uframe by uframe */
@@ -1874,16 +1920,35 @@ static bool itd_complete(struct ehci_hcd *ehci, struct ehci_itd *itd)
 				desc->status = -EOVERFLOW;
 			else /* (t & EHCI_ISOC_XACTERR) */
 				desc->status = -EPROTO;
-
+		#ifndef CONFIG_USB_NVT_EHCI_HCD
 			/* HC need not update length with this error */
 			if (!(t & EHCI_ISOC_BABBLE)) {
 				desc->actual_length = EHCI_ITD_LENGTH(t);
 				urb->actual_length += desc->actual_length;
 			}
+		#else
+			/* HC need not update length with this error */
+			if (!(t & EHCI_ISOC_BABBLE)) {
+				desc->actual_length =
+				usb_pipein((urb)->pipe) ?
+				((desc)->length - EHCI_ITD_LENGTH(t))
+					: EHCI_ITD_LENGTH(t);
+				urb->actual_length += desc->actual_length;
+			}
+		#endif
 		} else if (likely ((t & EHCI_ISOC_ACTIVE) == 0)) {
+		#ifndef CONFIG_USB_NVT_EHCI_HCD
 			desc->status = 0;
 			desc->actual_length = EHCI_ITD_LENGTH(t);
 			urb->actual_length += desc->actual_length;
+		#else
+			desc->status = 0;
+			desc->actual_length =
+			usb_pipein((urb)->pipe) ?
+			((desc)->length - EHCI_ITD_LENGTH(t))
+				: EHCI_ITD_LENGTH(t);
+			urb->actual_length += desc->actual_length;
+		#endif
 		} else {
 			/* URB was too late */
 			urb->error_count++;
@@ -1909,11 +1974,13 @@ static bool itd_complete(struct ehci_hcd *ehci, struct ehci_itd *itd)
 	disable_periodic(ehci);
 
 	ehci_to_hcd(ehci)->self.bandwidth_isoc_reqs--;
+
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 	if (ehci_to_hcd(ehci)->self.bandwidth_isoc_reqs == 0) {
 		if (ehci->amd_pll_fix == 1)
 			usb_amd_quirk_pll_enable();
 	}
-
+#endif
 	if (unlikely(list_is_singular(&stream->td_list)))
 		ehci_to_hcd(ehci)->self.bandwidth_allocated
 				-= stream->bandwidth;
@@ -1949,12 +2016,28 @@ static int itd_submit (struct ehci_hcd *ehci, struct urb *urb,
 		ehci_dbg (ehci, "can't get iso stream\n");
 		return -ENOMEM;
 	}
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 	if (unlikely(urb->interval != stream->uperiod)) {
-		ehci_dbg (ehci, "can't change iso interval %d --> %d\n",
+		ehci_dbg(ehci, "can't change iso interval %d --> %d\n",
 			stream->uperiod, urb->interval);
 		goto done;
 	}
-
+#else
+	if (unlikely(urb->interval != stream->uperiod) &&
+		!((urb->dev->speed == USB_SPEED_FULL)
+		&& (urb->dev->parent->devpath[0] == '0'))) {
+		ehci_dbg(ehci, "can't change iso interval %d --> %d\n",
+		stream->uperiod, urb->interval);
+		goto done;
+	}
+#endif
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+	if (unlikely(test_bit(HCD_FLAG_NRY,
+			&ehci_to_hcd(ehci)->flags))) {
+		status = -ENODEV;
+		goto done;
+	}
+#endif
 #ifdef EHCI_URB_TRACE
 	ehci_dbg (ehci,
 		"%s %s urb %p ep%d%s len %d, %d pkts %d uframes [%p]\n",
@@ -2183,11 +2266,12 @@ static void sitd_link_urb(
 		ehci_to_hcd(ehci)->self.bandwidth_allocated
 				+= stream->bandwidth;
 
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 	if (ehci_to_hcd(ehci)->self.bandwidth_isoc_reqs == 0) {
 		if (ehci->amd_pll_fix == 1)
 			usb_amd_quirk_pll_disable();
 	}
-
+#endif
 	ehci_to_hcd(ehci)->self.bandwidth_isoc_reqs++;
 
 	/* fill sITDs frame by frame */
@@ -2335,6 +2419,13 @@ static int sitd_submit (struct ehci_hcd *ehci, struct urb *urb,
 		goto done;
 	}
 
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+	if (unlikely(test_bit(HCD_FLAG_NRY,
+		&ehci_to_hcd(ehci)->flags))) {
+		status = -ENODEV;
+		goto done;
+	}
+#endif
 #ifdef EHCI_URB_TRACE
 	ehci_dbg (ehci,
 		"submit %p dev%s ep%d%s-iso len %d\n",

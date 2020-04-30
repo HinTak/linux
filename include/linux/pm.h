@@ -316,6 +316,18 @@ struct dev_pm_ops {
 	int (*runtime_suspend)(struct device *dev);
 	int (*runtime_resume)(struct device *dev);
 	int (*runtime_idle)(struct device *dev);
+#ifdef CONFIG_POWER_SAVING_MODE
+	int pwsv_magic;
+	int pwsv_mode;	/* give current mode to driver */
+	/* normal to pwsv */
+	int (*pwsv_poweroff)(struct device *dev);
+	int (*pwsv_poweroff_late)(struct device *dev);
+	int (*pwsv_resume)(struct device *dev);
+	int (*pwsv_resume_early)(struct device *dev);
+	/* pwsv to suspend(no B power) */
+	int (*pwsv_suspend)(struct device *dev);
+	int (*pwsv_restore)(struct device *dev);
+#endif
 };
 
 #ifdef CONFIG_PM_SLEEP
@@ -444,6 +456,12 @@ const struct dev_pm_ops name = { \
 #define PM_EVENT_USER		0x0100
 #define PM_EVENT_REMOTE		0x0200
 #define PM_EVENT_AUTO		0x0400
+#ifdef CONFIG_POWER_SAVING_MODE
+#define PM_EVENT_PWSV_SUSPEND	0x1000
+#define PM_EVENT_PWSV_RESTORE	0x2000
+#define PM_EVENT_PWSV_POWEROFF	0x3000
+#define PM_EVENT_PWSV_RESUME	0x4000
+#endif
 
 #define PM_EVENT_SLEEP		(PM_EVENT_SUSPEND | PM_EVENT_HIBERNATE)
 #define PM_EVENT_USER_SUSPEND	(PM_EVENT_USER | PM_EVENT_SUSPEND)
@@ -474,6 +492,12 @@ const struct dev_pm_ops name = { \
 					{ .event = PM_EVENT_AUTO_RESUME, })
 
 #define PMSG_IS_AUTO(msg)	(((msg).event & PM_EVENT_AUTO) != 0)
+#ifdef CONFIG_POWER_SAVING_MODE
+#define PMSG_PWSV_SUSPEND	((struct pm_message){ .event = PM_EVENT_PWSV_SUSPEND, })
+#define PMSG_PWSV_RESTORE	((struct pm_message){ .event = PM_EVENT_PWSV_RESTORE, })
+#define PMSG_PWSV_POWEROFF	((struct pm_message){ .event = PM_EVENT_PWSV_POWEROFF, })
+#define PMSG_PWSV_RESUME	((struct pm_message){ .event = PM_EVENT_PWSV_RESUME, })
+#endif
 
 /**
  * Device run-time power management status.
@@ -590,6 +614,10 @@ struct dev_pm_info {
 	unsigned long		suspended_jiffies;
 	unsigned long		accounting_timestamp;
 #endif
+#ifdef CONFIG_POWER_SAVING_MODE
+	unsigned int pwsv_magic;
+	unsigned int pwsv_mode;	/* give current mode to driver */
+#endif
 	struct pm_subsys_data	*subsys_data;  /* Owned by the subsystem. */
 	void (*set_latency_tolerance)(struct device *, s32);
 	struct dev_pm_qos	*qos;
@@ -677,6 +705,16 @@ extern void dpm_resume_start(pm_message_t state);
 extern void dpm_resume_end(pm_message_t state);
 extern void dpm_resume_noirq(pm_message_t state);
 extern void dpm_resume_early(pm_message_t state);
+#ifdef CONFIG_POWER_SAVING_MODE
+extern void dpm_resume_end_pwsv(pm_message_t state);
+extern void dpm_poweroff_pwsv(pm_message_t state);
+extern void dpm_poweroff_pwsv_late(pm_message_t state);
+extern void dpm_suspend_pwsv(pm_message_t state);
+extern void dpm_restore_pwsv(pm_message_t state);
+extern void dpm_resume_pwsv_early(pm_message_t state);
+extern void dpm_resume_pwsv(pm_message_t state);
+extern void dpm_resuspend_pwsv(pm_message_t state);
+#endif
 extern void dpm_resume(pm_message_t state);
 extern void dpm_complete(pm_message_t state);
 
@@ -687,6 +725,15 @@ extern int dpm_suspend_noirq(pm_message_t state);
 extern int dpm_suspend_late(pm_message_t state);
 extern int dpm_suspend(pm_message_t state);
 extern int dpm_prepare(pm_message_t state);
+
+#ifdef CONFIG_PRINT_MODULENAME_PM_FAIL
+extern void __suspend_report_result_dev(const char *function, struct device *dev, void *fn, int ret);
+
+#define suspend_report_result_dev(dev, fn, ret)					\
+	do {								\
+		__suspend_report_result_dev(__func__, dev, fn, ret);		\
+	} while (0)
+#endif
 
 extern void __suspend_report_result(const char *function, void *fn, int ret);
 
@@ -769,5 +816,72 @@ enum dpm_order {
 	DPM_ORDER_PARENT_BEFORE_DEV,
 	DPM_ORDER_DEV_LAST,
 };
+
+#ifdef CONFIG_POWER_SAVING_MODE
+
+/* PWSV define */
+struct pwsv_pid {
+	int tgid;
+	struct list_head list;
+};
+
+/* Kind of power saving mode */
+enum pwsv_mode {
+	PWSV_MODE_NONE,
+	PWSV_IOT,
+	PWSV_INACT,
+	PWSV_SUSPEND,
+	PWSV_MODE_MAX,
+};
+
+/* Magic of PWSV driver */
+#define PWSV_MAGIC			0x50575356	// PWSV
+
+/* Kind of running mode */
+#define PWSV_MODE_DEFAULT		(-1)
+#define PWSV_MODE_OFF			0x0000
+#define PWSV_MODE_TV			0x0001
+#define PWSV_MODE_IOT			(1<<PWSV_IOT)		// 0x0002
+#define PWSV_MODE_INACTIVE		(1<<PWSV_INACT)		// 0x0004
+#define PWSV_MODE_SUSPEND		(1<<PWSV_SUSPEND)	// 0x0008
+
+#define PWSV_BOOTREASON_COLD_REBOOT	0x1000
+
+/* Official Boot Reason */
+#define BOOT_TYPE_WOWLAN_PULSE7		48
+#define BOOT_TYPE_IOT_KEEP_ALIVE	53
+#define BOOT_TYPE_ZIGBEE		54
+#define BOOT_TYPE_E_PHY_ANYPACKET	55
+#define BOOT_TYPE_PANEL_POWER_KEY	32
+
+/* Command from Application */
+
+#define PWSV_CMD_INACTIVE		"INACT"
+#define PWSV_CMD_IOT			"IOT"
+#define PWSV_CMD_SUSPEND		"SUSPEND"
+#define PWSV_SUBCMD_ON			"ON"
+#define PWSV_SUBCMD_OFF			"OFF"
+#define PWSV_SUBCMD_ALIVE		"ALIVE"
+
+/* Time period for power saving mode */
+#define PWSV_TIMESLICE			50 /* 50 ms */
+#define PWSV_WDT_TIMEOUT		(20*1000/PWSV_TIMESLICE) /* 20s/50ms */
+
+/*
+  pwsv_info : informations structure for each mode
+   - pwsv_thaw_pid_list : list what I should thaw before enter
+                          power saving mode actually
+   - pwsv_wdt_cnt : watchdog count for each application
+
+*/
+struct pwsv_info {
+	char *name;
+	struct list_head pwsv_thaw_pid_list;
+	spinlock_t pwsv_thaw_pid_list_lock;
+	int pwsv_wdt_cnt;
+	int pwsv_last_wdt_cnt;
+	spinlock_t pwsv_wdt_lock;
+};
+#endif
 
 #endif /* _LINUX_PM_H */

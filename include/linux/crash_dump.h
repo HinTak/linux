@@ -8,6 +8,10 @@
 
 #include <asm/pgtable.h> /* for pgprot_t */
 
+#ifdef CONFIG_CRASH_DUMP_CSYSTEM
+#include <asm/crash_dump.h> /* for crash_kernel */
+#endif
+
 #define ELFCORE_ADDR_MAX	(-1ULL)
 #define ELFCORE_ADDR_ERR	(-2ULL)
 
