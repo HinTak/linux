@@ -14,7 +14,16 @@
  */
 
 #define FIXADDR_START		0xfff00000UL
+
+#ifdef CONFIG_DTVLOGD
+#define FIXADDR_TOP		(0xfffe0000UL - PAGE_SIZE)
+/* we need fixed VA for dtvlogd. So we reduce the kernel fixmap
+ * and take that address for dtvlogd */
+#define DTVLOGD_BUFFER_VIRTUAL_ADDRESS (FIXADDR_TOP)
+#else
 #define FIXADDR_TOP		0xfffe0000UL
+#endif
+
 #define FIXADDR_SIZE		(FIXADDR_TOP - FIXADDR_START)
 
 #define FIX_KMAP_BEGIN		0

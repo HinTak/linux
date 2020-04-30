@@ -22,6 +22,8 @@
 #include <linux/memblock.h>
 #include <linux/dma-contiguous.h>
 #include <linux/sizes.h>
+#include <linux/kasan.h>
+#include <linux/bitops.h>
 
 #include <asm/mach-types.h>
 #include <asm/memblock.h>
@@ -152,61 +154,9 @@ static void __init find_limits(unsigned long *min, unsigned long *max_low,
 	*max_high = bank_pfn_end(&mi->bank[mi->nr_banks - 1]);
 }
 
-static void __init arm_bootmem_init(unsigned long start_pfn,
-	unsigned long end_pfn)
-{
-	struct memblock_region *reg;
-	unsigned int boot_pages;
-	phys_addr_t bitmap;
-	pg_data_t *pgdat;
-
-	/*
-	 * Allocate the bootmem bitmap page.  This must be in a region
-	 * of memory which has already been mapped.
-	 */
-	boot_pages = bootmem_bootmap_pages(end_pfn - start_pfn);
-	bitmap = memblock_alloc_base(boot_pages << PAGE_SHIFT, L1_CACHE_BYTES,
-				__pfn_to_phys(end_pfn));
-
-	/*
-	 * Initialise the bootmem allocator, handing the
-	 * memory banks over to bootmem.
-	 */
-	node_set_online(0);
-	pgdat = NODE_DATA(0);
-	init_bootmem_node(pgdat, __phys_to_pfn(bitmap), start_pfn, end_pfn);
-
-	/* Free the lowmem regions from memblock into bootmem. */
-	for_each_memblock(memory, reg) {
-		unsigned long start = memblock_region_memory_base_pfn(reg);
-		unsigned long end = memblock_region_memory_end_pfn(reg);
-
-		if (end >= end_pfn)
-			end = end_pfn;
-		if (start >= end)
-			break;
-
-		free_bootmem(__pfn_to_phys(start), (end - start) << PAGE_SHIFT);
-	}
-
-	/* Reserve the lowmem memblock reserved regions in bootmem. */
-	for_each_memblock(reserved, reg) {
-		unsigned long start = memblock_region_reserved_base_pfn(reg);
-		unsigned long end = memblock_region_reserved_end_pfn(reg);
-
-		if (end >= end_pfn)
-			end = end_pfn;
-		if (start >= end)
-			break;
-
-		reserve_bootmem(__pfn_to_phys(start),
-			        (end - start) << PAGE_SHIFT, BOOTMEM_DEFAULT);
-	}
-}
-
 #ifdef CONFIG_ZONE_DMA
 
-unsigned long arm_dma_zone_size __read_mostly;
+phys_addr_t arm_dma_zone_size __read_mostly;
 EXPORT_SYMBOL(arm_dma_zone_size);
 
 /*
@@ -216,6 +166,7 @@ EXPORT_SYMBOL(arm_dma_zone_size);
  * so a successful GFP_DMA allocation will always satisfy this.
  */
 phys_addr_t arm_dma_limit;
+unsigned long arm_dma_pfn_limit;
 
 static void __init arm_adjust_dma_zone(unsigned long *size, unsigned long *hole,
 	unsigned long dma_size)
@@ -235,13 +186,14 @@ void __init setup_dma_zone(struct machine_desc *mdesc)
 #ifdef CONFIG_ZONE_DMA
 	if (mdesc->dma_zone_size) {
 		arm_dma_zone_size = mdesc->dma_zone_size;
-		arm_dma_limit = PHYS_OFFSET + arm_dma_zone_size - 1;
+		arm_dma_limit = __pv_phys_offset + arm_dma_zone_size - 1;
 	} else
 		arm_dma_limit = 0xffffffff;
+	arm_dma_pfn_limit = arm_dma_limit >> PAGE_SHIFT;
 #endif
 }
 
-static void __init arm_bootmem_free(unsigned long min, unsigned long max_low,
+static void __init zone_sizes_init(unsigned long min, unsigned long max_low,
 	unsigned long max_high)
 {
 	unsigned long zone_size[MAX_NR_ZONES], zhole_size[MAX_NR_ZONES];
@@ -382,6 +334,8 @@ void __init arm_memblock_init(struct meminfo *mi, struct machine_desc *mdesc)
 	 */
 	dma_contiguous_reserve(min(arm_dma_limit, arm_lowmem_limit));
 
+	kasan_alloc_shadow();
+
 	arm_memblock_steal_permitted = false;
 	memblock_allow_resize();
 	memblock_dump_all();
@@ -394,8 +348,6 @@ void __init bootmem_init(void)
 	max_low = max_high = 0;
 
 	find_limits(&min, &max_low, &max_high);
-
-	arm_bootmem_init(min, max_low);
 
 	/*
 	 * Sparsemem tries to allocate bootmem in memory_present(),
@@ -413,18 +365,16 @@ void __init bootmem_init(void)
 	 * the sparse mem_map arrays initialized by sparse_init()
 	 * for memmap_init_zone(), otherwise all PFNs are invalid.
 	 */
-	arm_bootmem_free(min, max_low, max_high);
+	zone_sizes_init(min, max_low, max_high);
 
 	/*
 	 * This doesn't seem to be used by the Linux memory manager any
 	 * more, but is used by ll_rw_block.  If we can get rid of it, we
 	 * also get rid of some of the stuff above as well.
-	 *
-	 * Note: max_low_pfn and max_pfn reflect the number of _pages_ in
-	 * the system, not the maximum PFN.
 	 */
-	max_low_pfn = max_low - PHYS_PFN_OFFSET;
-	max_pfn = max_high - PHYS_PFN_OFFSET;
+	min_low_pfn = min;
+	max_low_pfn = max_low;
+	max_pfn = max_high;
 }
 
 /*
@@ -442,7 +392,7 @@ static inline void
 free_memmap(unsigned long start_pfn, unsigned long end_pfn)
 {
 	struct page *start_pg, *end_pg;
-	unsigned long pg, pgend;
+	phys_addr_t pg, pgend;
 
 	/*
 	 * Convert start_pfn/end_pfn to a struct page pointer.
@@ -454,8 +404,8 @@ free_memmap(unsigned long start_pfn, unsigned long end_pfn)
 	 * Convert to physical addresses, and
 	 * round start upwards and end downwards.
 	 */
-	pg = (unsigned long)PAGE_ALIGN(__pa(start_pg));
-	pgend = (unsigned long)__pa(end_pg) & PAGE_MASK;
+	pg = PAGE_ALIGN(__pa(start_pg));
+	pgend = __pa(end_pg) & PAGE_MASK;
 
 	/*
 	 * If there are free pages between these,
@@ -522,15 +472,29 @@ static void __init free_unused_memmap(struct meminfo *mi)
 #ifdef CONFIG_HIGHMEM
 static inline void free_area_high(unsigned long pfn, unsigned long end)
 {
-	for (; pfn < end; pfn++)
-		free_highmem_page(pfn_to_page(pfn));
+	while (pfn < end) {
+		struct page *page = pfn_to_page(pfn);
+		unsigned long order = min(__ffs(pfn), MAX_ORDER - 1);
+		unsigned long nr_pages = 1 << order;
+		unsigned long rem = end - pfn;
+
+		if (nr_pages > rem) {
+			order = __fls(rem);
+			nr_pages = 1 << order;
+		}
+
+		__free_pages_init(page, order);
+		totalram_pages += nr_pages;
+		totalhigh_pages += nr_pages;
+		pfn += nr_pages;
+	}
 }
 #endif
 
 static void __init free_highpages(void)
 {
 #ifdef CONFIG_HIGHMEM
-	unsigned long max_low = max_low_pfn + PHYS_PFN_OFFSET;
+	unsigned long max_low = max_low_pfn;
 	struct memblock_region *mem, *res;
 
 	/* set highmem page free */
@@ -591,7 +555,7 @@ void __init mem_init(void)
 	extern u32 itcm_end;
 #endif
 
-	max_mapnr   = pfn_to_page(max_pfn + PHYS_PFN_OFFSET) - mem_map;
+	set_max_mapnr(pfn_to_page(max_pfn) - mem_map);
 
 	/* this will put all unused low memory onto the freelists */
 	free_unused_memmap(&meminfo);
@@ -600,7 +564,7 @@ void __init mem_init(void)
 
 #ifdef CONFIG_SA1111
 	/* now that our DMA memory is actually so designated, we can free it */
-	free_reserved_area(__va(PHYS_PFN_OFFSET), swapper_pg_dir, 0, NULL);
+	free_reserved_area(__va(PHYS_OFFSET), swapper_pg_dir, 0, NULL);
 #endif
 
 	free_highpages();

@@ -587,7 +587,7 @@ static int sh_msiof_spi_txrx(struct spi_device *spi, struct spi_transfer *t)
 }
 
 static u32 sh_msiof_spi_txrx_word(struct spi_device *spi, unsigned nsecs,
-				  u32 word, u8 bits)
+				  unsigned flags, u32 word, u8 bits)
 {
 	BUG(); /* unused but needed by bitbang code */
 	return 0;

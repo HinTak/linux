@@ -25,6 +25,7 @@
 #include <asm/ptrace.h>
 #include <asm/irq_regs.h>
 
+
 struct seq_file;
 struct module;
 struct irq_desc;
@@ -375,7 +376,8 @@ extern void remove_percpu_irq(unsigned int irq, struct irqaction *act);
 
 extern void irq_cpu_online(void);
 extern void irq_cpu_offline(void);
-extern int __irq_set_affinity_locked(struct irq_data *data,  const struct cpumask *cpumask);
+extern int irq_set_affinity_locked(struct irq_data *data,
+				   const struct cpumask *cpumask, bool force);
 
 #ifdef CONFIG_GENERIC_HARDIRQS
 
@@ -757,5 +759,14 @@ extern struct msi_desc *irq_get_msi_desc(unsigned int irq);
 extern int irq_set_msi_desc(unsigned int irq, struct msi_desc *entry);
 
 #endif /* CONFIG_GENERIC_HARDIRQS */
+
+#ifdef CONFIG_PRESERVE_IRQ_AFFINITY
+void backup_irq_affinity(unsigned int irq, const struct cpumask *mask);
+void local_restore_irq_affinities(void);
+#else
+static inline void backup_irq_affinity(unsigned int irq,
+		const struct cpumask *mask) { }
+static inline void local_restore_irq_affinities(void) { }
+#endif
 
 #endif /* _LINUX_IRQ_H */

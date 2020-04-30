@@ -23,6 +23,10 @@
 #include <linux/namei.h>
 #include "fat.h"
 
+#ifndef CONFIG_VFAT_FS_DUALNAMES
+#include <linux/net.h>
+#endif
+
 /*
  * If new entry was created in the parent, it could create the 8.3
  * alias (the shortname of logname).  So, the parent may have the
@@ -581,6 +585,58 @@ xlate_to_uni(const unsigned char *name, int len, unsigned char *outname,
 	return 0;
 }
 
+#ifndef CONFIG_VFAT_FS_DUALNAMES
+/*
+ * build a 11 byte 8.3 buffer which is not a short filename. We want 11
+ * bytes which:
+ *    - will be seen as a constant string to all APIs on Linux and Windows
+ *    - cannot be matched with wildcard patterns
+ *    - cannot be used to access the file
+ *    - has a low probability of collision within a directory
+ *    - has an invalid 3 byte extension
+ *    - contains at least one non-space and non-nul byte
+ */
+static void vfat_build_dummy_83_buffer(struct inode *dir, char *msdos_name)
+{
+	u32 rand_num = net_random() & 0x3FFFFFFF;
+	int i;
+
+	/* a value of zero would leave us with only nul and spaces,
+	 * which would not work with older linux systems
+	 */
+	if (rand_num == 0)
+		rand_num = 1;
+
+	/* we start with a space followed by nul as spaces at the
+	 * start of an entry are trimmed in FAT, which means that
+	 * starting the 11 bytes with 0x20 0x00 gives us a value which
+	 * cannot be used to access the file. It also means that the
+	 * value as seen from all Windows and Linux APIs is a constant
+	 */
+	msdos_name[0] = ' ';
+	msdos_name[1] = 0;
+
+	/* we use / and 2 nul bytes for the extension. These are
+	 * invalid in FAT and mean that utilities that show the
+	 * directory show no extension, but still work via the long
+	 * name for old Linux kernels
+	 */
+	msdos_name[8] = '/';
+	msdos_name[9] = 0;
+	msdos_name[10] = 0;
+
+	/*
+	 * fill the remaining 6 bytes with random invalid values
+	 * This gives us a low collision rate, which means a low
+	 * chance of problems with chkdsk.exe and WindowsXP
+	 */
+	for (i = 2; i < 8; i++) {
+		msdos_name[i] = rand_num & 0x1F;
+		rand_num >>= 5;
+	}
+}
+#endif
+
 static int vfat_build_slots(struct inode *dir, const unsigned char *name,
 			    int len, int is_dir, int cluster,
 			    struct timespec *ts,
@@ -622,7 +678,10 @@ static int vfat_build_slots(struct inode *dir, const unsigned char *name,
 		err = 0;
 		goto shortname;
 	}
-
+#ifndef CONFIG_VFAT_FS_DUALNAMES
+	vfat_build_dummy_83_buffer(dir, msdos_name);
+	lcase = 0;
+#endif
 	/* build the entry of long file name */
 	cksum = fat_checksum(msdos_name);
 
@@ -834,6 +893,26 @@ out:
 	return err;
 }
 
+static void fat_add_busy_entry(struct super_block *sb, struct inode *inode,
+				struct fat_slot_info sinfo)
+{
+	struct msdos_sb_info *sbi = MSDOS_SB(sb);
+	struct ipos_busy_list *unlinked_ipos = NULL;
+
+	if (inode && (atomic_read(&inode->i_count))) {
+		unlinked_ipos = kzalloc(sizeof(struct ipos_busy_list),
+					 GFP_KERNEL);
+		if (unlinked_ipos) {
+			unlinked_ipos->i_pos = inode->i_ino;
+			unlinked_ipos->nr_slots = sinfo.nr_slots;
+			spin_lock(&sbi->ipos_busy_lock);
+			list_add_tail(&unlinked_ipos->ipos_list,
+					sbi->ipos_list_head);
+			spin_unlock(&sbi->ipos_busy_lock);
+		}
+	}
+}
+
 static int vfat_unlink(struct inode *dir, struct dentry *dentry)
 {
 	struct inode *inode = dentry->d_inode;
@@ -852,7 +931,10 @@ static int vfat_unlink(struct inode *dir, struct dentry *dentry)
 		goto out;
 	clear_nlink(inode);
 	inode->i_mtime = inode->i_atime = CURRENT_TIME_SEC;
-	fat_detach(inode);
+	if (MSDOS_SB(sb)->options.nfs)
+		fat_add_busy_entry(sb, inode, sinfo);
+	else
+		fat_detach(inode);
 out:
 	mutex_unlock(&MSDOS_SB(sb)->s_lock);
 
@@ -954,6 +1036,13 @@ static int vfat_rename(struct inode *old_dir, struct dentry *old_dentry,
 	new_dir->i_version++;
 
 	fat_detach(old_inode);
+	if (MSDOS_SB(sb)->options.nfs) {
+		if ((old_dentry->d_count == 1) &&
+			((fat_get_nfs_clnt_open_count(old_inode) <= 0)))
+				old_inode->i_ino = new_i_pos;
+		else
+			fat_add_busy_entry(sb, old_inode, old_sinfo);
+	}
 	fat_attach(old_inode, new_i_pos);
 	if (IS_DIRSYNC(new_dir)) {
 		err = fat_sync_inode(old_inode);

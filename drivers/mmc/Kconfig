@@ -19,6 +19,21 @@ config MMC_DEBUG
 	  This is an option for use by developers; most people should
 	  say N here.  This enables MMC core and driver debugging.
 
+config HW_DECOMP_BLK_MMC_SUBSYSTEM
+	bool "HW decompression from the MMC layer"
+	depends on MMC != n
+	depends on SDP_UNZIP || NVT_UNZIP
+	help
+		This option enables hardware decompression from MMC layer.
+		Fs layer should be aware of this special call and should
+		use it properly.
+
+config NVT_MMC_REDUCE_DELAY
+	bool "Reduce mmcdelay during powerup"
+	depends on MMC != n
+	help
+		this option will reduce mmc delay to improve booting time.
+
 if MMC
 
 source "drivers/mmc/core/Kconfig"

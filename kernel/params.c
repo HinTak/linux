@@ -96,7 +96,6 @@ static int parse_one(char *param,
 	unsigned int i;
 	int err;
 
-	/* Find parameter */
 	for (i = 0; i < num_params; i++) {
 		if (parameq(param, params[i].name)) {
 			if (params[i].level < min_level

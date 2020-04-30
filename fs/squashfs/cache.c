@@ -216,8 +216,12 @@ void squashfs_cache_delete(struct squashfs_cache *cache)
 
 	for (i = 0; i < cache->entries; i++) {
 		if (cache->entry[i].data) {
-			for (j = 0; j < cache->pages; j++)
-				kfree(cache->entry[i].data[j]);
+			for (j = 0; j < cache->pages; j++) {
+				void *d = cache->entry[i].data[j];
+				free_pages((unsigned long)d,
+					   get_order(PAGE_CACHE_SIZE));
+			}
+
 			kfree(cache->entry[i].data);
 		}
 	}
@@ -274,7 +278,8 @@ struct squashfs_cache *squashfs_cache_init(char *name, int entries,
 		}
 
 		for (j = 0; j < cache->pages; j++) {
-			entry->data[j] = kmalloc(PAGE_CACHE_SIZE, GFP_KERNEL);
+			entry->data[j] = (void *)__get_free_pages(GFP_KERNEL,
+						  get_order(PAGE_CACHE_SIZE));
 			if (entry->data[j] == NULL) {
 				ERROR("Failed to allocate %s buffer\n", name);
 				goto cleanup;

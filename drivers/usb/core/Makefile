@@ -11,5 +11,7 @@ usbcore-y += port.o
 
 usbcore-$(CONFIG_PCI)		+= hcd-pci.o
 usbcore-$(CONFIG_ACPI)		+= usb-acpi.o
+usbcore-$(CONFIG_USB_DEVICEFS)  += inode.o
+usbcore-$(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)	+= priority_devconfig.o kthreadapi.o
 
 obj-$(CONFIG_USB)		+= usbcore.o

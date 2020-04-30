@@ -52,5 +52,10 @@ int xfs_attr_list(struct xfs_inode *dp, char *buffer, int bufsize,
 int xfs_iozero(struct xfs_inode *, loff_t, size_t);
 int xfs_zero_eof(struct xfs_inode *, xfs_off_t, xfs_fsize_t);
 int xfs_free_eofblocks(struct xfs_mount *, struct xfs_inode *, bool);
+int xfs_collapse_file_space(struct xfs_inode *, xfs_off_t offset,
+				xfs_off_t len);
+#ifdef CONFIG_XFS_FS_TRUNCATE_RANGE
+int xfs_truncate_range(struct file *, loff_t, loff_t);
+#endif
 
 #endif /* _XFS_VNODEOPS_H */

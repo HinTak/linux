@@ -828,8 +828,21 @@ static struct mount *clone_mnt(struct mount *old, struct dentry *root,
 
 	mnt->mnt.mnt_flags = old->mnt.mnt_flags & ~MNT_WRITE_HOLD;
 	/* Don't allow unprivileged users to change mount flags */
-	if ((flag & CL_UNPRIVILEGED) && (mnt->mnt.mnt_flags & MNT_READONLY))
-		mnt->mnt.mnt_flags |= MNT_LOCK_READONLY;
+	if (flag & CL_UNPRIVILEGED) {
+		mnt->mnt.mnt_flags |= MNT_LOCK_ATIME;
+
+		if (mnt->mnt.mnt_flags & MNT_READONLY)
+			mnt->mnt.mnt_flags |= MNT_LOCK_READONLY;
+
+		if (mnt->mnt.mnt_flags & MNT_NODEV)
+			mnt->mnt.mnt_flags |= MNT_LOCK_NODEV;
+
+		if (mnt->mnt.mnt_flags & MNT_NOSUID)
+			mnt->mnt.mnt_flags |= MNT_LOCK_NOSUID;
+
+		if (mnt->mnt.mnt_flags & MNT_NOEXEC)
+			mnt->mnt.mnt_flags |= MNT_LOCK_NOEXEC;
+	}
 
 	atomic_inc(&sb->s_active);
 	mnt->mnt.mnt_sb = sb;
@@ -1294,6 +1307,115 @@ static inline bool may_mount(void)
 	return ns_capable(current->nsproxy->mnt_ns->user_ns, CAP_SYS_ADMIN);
 }
 
+static int __print_mount(struct vfsmount *mnt, void *arg)
+{
+	char buff[256];
+	struct path mnt_path = { .dentry = mnt->mnt_root, .mnt = mnt };
+	struct mount *r = real_mount(mnt);
+	const char *name, *devname;
+
+	name = d_path(&mnt_path, buff, sizeof(buff));
+	if (IS_ERR(name))
+		name = "(error)";
+
+	devname = r->mnt_devname;
+	if (!devname)
+		devname = "(no device)";
+
+	pr_err("devname: %s, path: %s\n", devname, name);
+
+	return 0;
+}
+
+void print_mounts(void)
+{
+	int err;
+	struct path path;
+	struct vfsmount *root_mnt;
+
+	err = kern_path("/", LOOKUP_FOLLOW, &path);
+	if (err)
+		return;
+
+	root_mnt = collect_mounts(&path);
+	path_put(&path);
+	if (IS_ERR(root_mnt))
+		return;
+
+	iterate_mounts(__print_mount, NULL, root_mnt);
+	drop_collected_mounts(root_mnt);
+}
+
+#ifdef CONFIG_FCOUNT_DEBUG
+static int __print_file_path(struct file *f, void *arg)
+{
+        char buf[256];
+        struct task_struct *p;
+        const char *path, *tsk_name;
+        long refs;
+
+        if (!file_count(f))
+                return 0;
+
+        path = d_path(&f->f_path, buf, sizeof(buf));
+        if (IS_ERR(path))
+                path = "(error)";
+        refs = atomic_long_read(&f->f_count);
+
+#ifdef CONFIG_FD_PID
+        rcu_read_lock();
+        p = pid_task(f->f_pid, PIDTYPE_PID);
+        tsk_name = (p ? p->comm : "Task struct is not available");
+        pr_alert("* %s(%ld) - %s\n", path, refs, tsk_name);
+        rcu_read_unlock();
+#else
+        (void)tsk_name;
+        (void)p;
+        pr_alert("* %s(%ld)\n", path, refs);
+#endif
+
+        return 0;
+}
+
+static void check_files_count(struct path *path, bool explicit_log)
+{
+	char buf1[64], buf2[64];
+	struct super_block *sb = path->mnt->mnt_sb;
+
+	/* Path to mount point of this dentry */
+	struct path mnt_path = {
+		.mnt	= path->mnt,
+		.dentry = path->mnt->mnt_root
+	};
+
+	const char *p  = d_path(path, buf1, sizeof(buf1));
+	const char *mp = d_path(&mnt_path, buf2, sizeof(buf2));
+
+	if (IS_ERR(p))
+		p = "(error)";
+	if (IS_ERR(mp))
+		mp = "(error)";
+
+	pr_alert("=========================================================\n");
+	pr_alert("	Umount path : %s(length:%d)\n", p, strlen(p));
+	pr_alert(" Mount point path : %s(length:%d)\n", mp, strlen(mp));
+
+	if (explicit_log) {
+		pr_alert("File Name(File Count) - Task(optional - CONFIG_FD_PID)\n");
+		pr_alert("---------------------------------------------------------\n");
+
+		iterate_sb_files(sb, __print_file_path, NULL);
+
+		pr_alert("=========================================================\n");
+
+		pr_alert("Current Mount Info\n");
+		pr_alert("---------------------------------------------------------\n");
+
+		print_mounts();
+	}
+}
+#endif
+
 /*
  * Now umount can handle mount points as well as block devices.
  * This is important for filesystems which use unnamed block devices.
@@ -1330,6 +1452,15 @@ SYSCALL_DEFINE2(umount, char __user *, name, int, flags)
 
 	retval = do_umount(mnt, flags);
 dput_and_out:
+#ifdef CONFIG_FCOUNT_DEBUG
+        if (retval) {
+                printk("\n------------------------------------------\n");
+                printk("retval : %d\n", retval);
+                printk("------------------------------------------\n");
+                check_files_count(&path, retval == -EBUSY);
+        }
+#endif
+
 	/* we mustn't call path_put() as that would clear mnt_expiry_mark */
 	dput(path.dentry);
 	mntput_no_expire(mnt);
@@ -1429,7 +1560,7 @@ struct vfsmount *collect_mounts(struct path *path)
 			 CL_COPY_ALL | CL_PRIVATE);
 	namespace_unlock();
 	if (IS_ERR(tree))
-		return NULL;
+		return ERR_CAST(tree);
 	return &tree->mnt;
 }
 
@@ -1764,9 +1895,6 @@ static int change_mount_flags(struct vfsmount *mnt, int ms_flags)
 	if (readonly_request == __mnt_is_readonly(mnt))
 		return 0;
 
-	if (mnt->mnt_flags & MNT_LOCK_READONLY)
-		return -EPERM;
-
 	if (readonly_request)
 		error = mnt_make_readonly(real_mount(mnt));
 	else
@@ -1792,6 +1920,33 @@ static int do_remount(struct path *path, int flags, int mnt_flags,
 	if (path->dentry != path->mnt->mnt_root)
 		return -EINVAL;
 
+	/* Don't allow changing of locked mnt flags.
+	 *
+	 * No locks need to be held here while testing the various
+	 * MNT_LOCK flags because those flags can never be cleared
+	 * once they are set.
+	 */
+	if ((mnt->mnt.mnt_flags & MNT_LOCK_READONLY) &&
+	    !(mnt_flags & MNT_READONLY)) {
+		return -EPERM;
+	}
+	if ((mnt->mnt.mnt_flags & MNT_LOCK_NODEV) &&
+	    !(mnt_flags & MNT_NODEV)) {
+		return -EPERM;
+	}
+	if ((mnt->mnt.mnt_flags & MNT_LOCK_NOSUID) &&
+	    !(mnt_flags & MNT_NOSUID)) {
+		return -EPERM;
+	}
+	if ((mnt->mnt.mnt_flags & MNT_LOCK_NOEXEC) &&
+	    !(mnt_flags & MNT_NOEXEC)) {
+		return -EPERM;
+	}
+	if ((mnt->mnt.mnt_flags & MNT_LOCK_ATIME) &&
+	    ((mnt->mnt.mnt_flags & MNT_ATIME_MASK) != (mnt_flags & MNT_ATIME_MASK))) {
+		return -EPERM;
+	}
+
 	err = security_sb_remount(sb, data);
 	if (err)
 		return err;
@@ -1805,7 +1960,7 @@ static int do_remount(struct path *path, int flags, int mnt_flags,
 		err = do_remount_sb(sb, flags, data, 0);
 	if (!err) {
 		br_write_lock(&vfsmount_lock);
-		mnt_flags |= mnt->mnt.mnt_flags & MNT_PROPAGATION_MASK;
+		mnt_flags |= mnt->mnt.mnt_flags & ~MNT_USER_SETTABLE_MASK;
 		mnt->mnt.mnt_flags = mnt_flags;
 		br_write_unlock(&vfsmount_lock);
 	}
@@ -1991,7 +2146,7 @@ static int do_new_mount(struct path *path, const char *fstype, int flags,
 		 */
 		if (!(type->fs_flags & FS_USERNS_DEV_MOUNT)) {
 			flags |= MS_NODEV;
-			mnt_flags |= MNT_NODEV;
+			mnt_flags |= MNT_NODEV | MNT_LOCK_NODEV;
 		}
 	}
 
@@ -2258,12 +2413,40 @@ int copy_mount_string(const void __user *data, char **where)
  * Therefore, if this magic number is present, it carries no information
  * and must be discarded.
  */
+
+#ifdef CONFIG_MOUNT_SECURITY
+/*
+ *  *  * Devices in this list will not be applied "noexec" option.
+ *   *   * All device will be applied "noexec" option to protect system security
+ *    *    * except some devices for system
+ *     *     * */
+char *allowedDEV[] = {"bml", "stl", "mmcblk", "dev/root",
+        "proc", "rootfs", "sysfs", "tmpfs", "none",
+#ifndef CONFIG_VD_RELEASE 
+        "dev/sd",       // usb device (ex: /dev/sda1, /dev/sdb1/ ...)
+#endif
+        "loop", // loopback mount in flash and usb memory
+        "END" };
+#endif
+
 long do_mount(const char *dev_name, const char *dir_name,
 		const char *type_page, unsigned long flags, void *data_page)
 {
 	struct path path;
 	int retval = 0;
 	int mnt_flags = 0;
+
+#ifdef CONFIG_MOUNT_SECURITY
+        int i = 0, numOfDev = 0;
+#endif
+
+#if defined(CONFIG_MOUNT_SECURITY)
+        if (!dev_name || !*dev_name)
+        {
+                printk("[SABSP] mount device name is not invalid!!!!!\n");
+                return -EINVAL;
+        }
+#endif
 
 	/* Discard magic */
 	if ((flags & MS_MGC_MSK) == MS_MGC_VAL)
@@ -2293,6 +2476,22 @@ long do_mount(const char *dev_name, const char *dir_name,
 	if (!(flags & MS_NOATIME))
 		mnt_flags |= MNT_RELATIME;
 
+#ifdef CONFIG_MOUNT_SECURITY
+        /* Apply MNT_NOEXEC option except some devices for system */
+        numOfDev = sizeof(allowedDEV)/sizeof(allowedDEV[0]);
+
+        for( i = 0 ; i < numOfDev  ; i++) {
+                if(strstr(dev_name, allowedDEV[i]) != NULL)
+                        break;
+        }
+
+        if( i == numOfDev ) {
+                mnt_flags |= MNT_NOEXEC;
+                mnt_flags |= MNT_NOSUID;
+                mnt_flags |= MNT_NODEV;
+        }
+#endif
+
 	/* Separate the per-mountpoint flags */
 	if (flags & MS_NOSUID)
 		mnt_flags |= MNT_NOSUID;
@@ -2309,9 +2508,30 @@ long do_mount(const char *dev_name, const char *dir_name,
 	if (flags & MS_RDONLY)
 		mnt_flags |= MNT_READONLY;
 
+	/* The default atime for remount is preservation */
+	if ((flags & MS_REMOUNT) &&
+	    ((flags & (MS_NOATIME | MS_NODIRATIME | MS_RELATIME |
+		       MS_STRICTATIME)) == 0)) {
+		mnt_flags &= ~MNT_ATIME_MASK;
+		mnt_flags |= path.mnt->mnt_flags & MNT_ATIME_MASK;
+	}
+
 	flags &= ~(MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_ACTIVE | MS_BORN |
 		   MS_NOATIME | MS_NODIRATIME | MS_RELATIME| MS_KERNMOUNT |
 		   MS_STRICTATIME);
+
+#ifdef CONFIG_MOUNT_SECURITY
+    if (flags & MS_BIND) {
+        if((strstr(dev_name, "mtd_uniro/exe") == NULL) || (strstr(dir_name, "mtd_exe") == NULL))
+            if((strstr(dev_name, "mtd_uniro/rocommon") == NULL) || (strstr(dir_name, "mtd_rocommon") == NULL))
+            {
+                flags &= ~MS_BIND;
+                printk("\033[31mERROR : BIND option was called with - %s -\033[0m\n", current->comm);
+                printk("\033[31m  BIND option can make potential problem of system security.\033[0m\n");
+                printk("\033[31m  You can't use this dangerous function on embedded system.\033[0m\n");
+            }
+    }
+#endif
 
 	if (flags & MS_REMOUNT)
 		retval = do_remount(&path, flags & ~MS_REMOUNT, mnt_flags,
@@ -2500,6 +2720,11 @@ struct dentry *mount_subtree(struct vfsmount *mnt, const char *name)
 }
 EXPORT_SYMBOL(mount_subtree);
 
+
+#ifdef CONFIG_GUESS_VDFS_TYPE
+const char *vdfs_list[] = {"vdfs4", "vdfs", "vdfs2", "vdfs1", NULL};
+#endif
+
 SYSCALL_DEFINE5(mount, char __user *, dev_name, char __user *, dir_name,
 		char __user *, type, unsigned long, flags, void __user *, data)
 {
@@ -2527,8 +2752,23 @@ SYSCALL_DEFINE5(mount, char __user *, dev_name, char __user *, dir_name,
 	if (ret < 0)
 		goto out_data;
 
-	ret = do_mount(kernel_dev, kernel_dir->name, kernel_type, flags,
-		(void *) data_page);
+#ifdef CONFIG_GUESS_VDFS_TYPE
+	/* HQ request : Jongpil Lee jongpil8017.lee@samsung.com */
+	/* in case if an user calls the mount command with "-t vdfs" param try
+	 * to mount the volume by vdfs in the following order:
+	 * vdfs4 -> vdfs3 -> vdfs2 -> vdfs1 */
+	if (kernel_type && (strlen(kernel_type) == 4) &&
+			(!memcmp(kernel_type, &"vdfs", 4))) {
+		int count = 0;
+		do {
+			ret = do_mount(kernel_dev, kernel_dir->name,
+				vdfs_list[count], flags, (void *) data_page);
+
+		} while ((vdfs_list[++count] != NULL) && ret);
+	} else
+#endif
+		ret = do_mount(kernel_dev, kernel_dir->name, kernel_type, flags,
+				(void *) data_page);
 
 	free_page(data_page);
 out_data:

@@ -918,11 +918,8 @@ static int htree_dirblock_to_tree(struct file *dir_file,
 				bh->b_data, bh->b_size,
 				(block<<EXT4_BLOCK_SIZE_BITS(dir->i_sb))
 					 + ((char *)de - bh->b_data))) {
-			/* On error, skip the f_pos to the next block. */
-			dir_file->f_pos = (dir_file->f_pos |
-					(dir->i_sb->s_blocksize - 1)) + 1;
-			brelse(bh);
-			return count;
+			/* silently ignore the rest of the block */
+			break;
 		}
 		ext4fs_dirhash(de->name, de->name_len, hinfo);
 		if ((hinfo->hash < start_hash) ||
@@ -1134,13 +1131,16 @@ static void dx_insert_block(struct dx_frame *frame, u32 hash, ext4_lblk_t block)
  * `de != NULL' is guaranteed by caller.
  */
 static inline int ext4_match (int len, const char * const name,
-			      struct ext4_dir_entry_2 * de)
+			      struct ext4_dir_entry_2 * de, bool is_case)
 {
 	if (len != de->name_len)
 		return 0;
 	if (!de->inode)
 		return 0;
-	return !memcmp(name, de->name, len);
+	if (is_case)
+		return !strnicmp(name, de->name, len);
+	else
+		return !memcmp(name, de->name, len);
 }
 
 /*
@@ -1159,6 +1159,11 @@ int search_dir(struct buffer_head *bh,
 	int de_len;
 	const char *name = d_name->name;
 	int namelen = d_name->len;
+	struct ext4_sb_info *sbi = NULL;
+	bool is_case_insensitive = 0;
+
+	sbi = dir->i_sb->s_fs_info;
+	is_case_insensitive = sbi->is_case_insensitive;
 
 	de = (struct ext4_dir_entry_2 *)search_buf;
 	dlimit = search_buf + buf_size;
@@ -1167,7 +1172,7 @@ int search_dir(struct buffer_head *bh,
 		/* do minimal checking `by hand' */
 
 		if ((char *) de + namelen <= dlimit &&
-		    ext4_match (namelen, name, de)) {
+		    ext4_match (namelen, name, de, is_case_insensitive)) {
 			/* found a match - just to be sure, do a full check */
 			if (ext4_check_dir_entry(dir, NULL, de, bh, bh->b_data,
 						 bh->b_size, offset))
@@ -1643,6 +1648,13 @@ int ext4_find_dest_de(struct inode *dir, struct inode *inode,
 	int nlen, rlen;
 	unsigned int offset = 0;
 	char *top;
+	struct ext4_sb_info *sbi = NULL;
+	bool is_case_insensitive = 0;
+
+	if(inode) {
+		sbi = inode->i_sb->s_fs_info;
+		is_case_insensitive = sbi->is_case_insensitive;
+	}
 
 	de = (struct ext4_dir_entry_2 *)buf;
 	top = buf + buf_size - reclen;
@@ -1650,7 +1662,7 @@ int ext4_find_dest_de(struct inode *dir, struct inode *inode,
 		if (ext4_check_dir_entry(dir, NULL, de, bh,
 					 buf, buf_size, offset))
 			return -EIO;
-		if (ext4_match(namelen, name, de))
+		if (ext4_match(namelen, name, de, is_case_insensitive))
 			return -EEXIST;
 		nlen = EXT4_DIR_REC_LEN(de->name_len);
 		rlen = ext4_rec_len_from_disk(de->rec_len, buf_size);

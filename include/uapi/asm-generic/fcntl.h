@@ -46,6 +46,9 @@
 #ifndef O_DIRECT
 #define O_DIRECT	00040000	/* direct disk access hint */
 #endif
+#ifdef CONFIG_BD_CACHE_ENABLED
+#define O_BDCACHE	040000000 
+#endif
 #ifndef O_LARGEFILE
 #define O_LARGEFILE	00100000
 #endif

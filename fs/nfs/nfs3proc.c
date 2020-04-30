@@ -917,6 +917,85 @@ static const struct inode_operations nfs3_file_inode_operations = {
 	.removexattr	= nfs3_removexattr,
 };
 
+static int nfs3_proc_umount(struct nfs_server *server)
+{
+	/*
+	 * dummy argument and response are assigned to UMOUNT request
+	 * to avoid BUG_ON(proc->p_arglen == 0); in net/sunrpc/clnt.c
+	 */
+	struct nfs3_umountargs	arg = {
+		.dummy		= 0,
+	};
+	struct nfs3_umountres	res;
+
+	struct rpc_message msg = {
+		.rpc_proc       = &nfs3_procedures[NFS3PROC_UMOUNT],
+		.rpc_argp       = &arg,
+		.rpc_resp       = &res,
+
+	};
+	int err;
+
+	msg.rpc_cred = authnull_ops.lookup_cred(NULL, NULL, 0);
+	dprintk("NFS call  umount\n");
+	err = rpc_call_sync(server->client, &msg,
+				RPC_TASK_SOFT | RPC_TASK_SOFTCONN);
+	put_rpccred(msg.rpc_cred);
+	dprintk("NFS reply umount: %d\n", err);
+	return err;
+}
+
+static int
+nfs3_proc_open(struct inode *inode)
+{
+	struct nfs_inode *nfsi = NFS_I(inode);
+
+	struct nfs3_openargs	arg = {
+		.fh		= NFS_FH(inode),
+		.open_count	= atomic_read(&nfsi->open_count)
+	};
+
+	struct nfs3_openres	res;
+
+	struct rpc_message msg = {
+		.rpc_proc	= &nfs3_procedures[NFS3PROC_OPEN],
+		.rpc_argp	= &arg,
+		.rpc_resp	= &res,
+	};
+	int	status;
+
+	dprintk("NFS call  open\n");
+	status = rpc_call_sync(NFS_CLIENT(inode), &msg, 0);
+	dprintk("NFS reply open: %d\n", status);
+	return status;
+}
+
+static int
+nfs3_proc_close(struct inode *inode)
+{
+	struct nfs_inode *nfsi = NFS_I(inode);
+
+	struct nfs3_closeargs	arg = {
+		.fh		= NFS_FH(inode),
+		.open_count	= atomic_read(&nfsi->open_count),
+	};
+
+	struct nfs3_closeres	res;
+
+	struct rpc_message msg = {
+		.rpc_proc	= &nfs3_procedures[NFS3PROC_CLOSE],
+		.rpc_argp	= &arg,
+		.rpc_resp	= &res,
+	};
+	int	status;
+
+	dprintk("NFS call  close\n");
+	status = rpc_call_sync(NFS_CLIENT(inode), &msg, 0);
+	dprintk("NFS reply close: %d\n", status);
+	return status;
+}
+
+
 const struct nfs_rpc_ops nfs_v3_clientops = {
 	.version	= 3,			/* protocol version */
 	.dentry_ops	= &nfs_dentry_operations,
@@ -971,4 +1050,7 @@ const struct nfs_rpc_ops nfs_v3_clientops = {
 	.free_client	= nfs_free_client,
 	.create_server	= nfs3_create_server,
 	.clone_server	= nfs3_clone_server,
+	.umount         = nfs3_proc_umount,
+	.open		= nfs3_proc_open,
+	.close		= nfs3_proc_close,
 };

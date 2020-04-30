@@ -50,4 +50,6 @@ obj-y	+= davinci/
 
 obj-$(CONFIG_ARCH_OMAP)	+= omap/
 
+obj-$(CONFIG_DVB_SDP)			+= sdp-dvb/
+
 ccflags-y += -I$(srctree)/drivers/media/i2c

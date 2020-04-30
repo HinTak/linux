@@ -20,6 +20,7 @@
 #include <linux/compat.h>
 #include <linux/uaccess.h>
 #include <linux/kernel.h>
+#include <linux/sched.h>
 #include "fat.h"
 
 /*
@@ -89,7 +90,6 @@ static int fat__get_entry(struct inode *dir, loff_t *pos,
 	unsigned long mapped_blocks;
 	int err, offset;
 
-next:
 	if (*bh)
 		brelse(*bh);
 
@@ -104,10 +104,12 @@ next:
 	*bh = sb_bread(sb, phys);
 	if (*bh == NULL) {
 		fat_msg_ratelimit(sb, KERN_ERR,
-			"Directory bread(block %llu) failed", (llu)phys);
-		/* skip this block */
-		*pos = (iblock + 1) << sb->s_blocksize_bits;
-		goto next;
+			" (%s) Directory bread(block %llu) failed",
+				current->comm, (llu)phys);
+		/* SELP fat.unplug.patch */
+		/* Block read error */
+		*pos += sizeof(struct msdos_dir_entry);
+		return -1;
 	}
 
 	offset = *pos & (sb->s_blocksize - 1);
@@ -502,18 +504,19 @@ parse_record:
 				goto end_of_dir;
 		}
 
+		len = fat_parse_short(sb, de, bufname, 0);
+
+		if (len) {
+			/* Compare shortname */
+
+			if (fat_name_match(sbi, name, name_len, bufname, len))
+				goto found;
+		}
 		/* Never prepend '.' to hidden files here.
 		 * That is done only for msdos mounts (and only when
 		 * 'dotsOK=yes'); if we are executing here, it is in the
 		 * context of a vfat mount.
 		 */
-		len = fat_parse_short(sb, de, bufname, 0);
-		if (len == 0)
-			continue;
-
-		/* Compare shortname */
-		if (fat_name_match(sbi, name, name_len, bufname, len))
-			goto found;
 
 		if (nr_slots) {
 			void *longname = unicode + FAT_MAX_UNI_CHARS;
@@ -1288,6 +1291,14 @@ int fat_add_entries(struct inode *dir, void *slots, int nr_slots,
 			goto error;
 
 		if (IS_FREE(de->name)) {
+			if (sbi->options.nfs && fat_entry_busy(sbi, pos, bh)) {
+				if (de->name[0] == FAT_ENT_FREE) {
+					de->name[0] = DELETED_FLAG;
+					mark_buffer_dirty_inode(bh, dir);
+					sync_dirty_buffer(bh);
+				}
+				goto free;
+			}
 			if (prev != bh) {
 				get_bh(bh);
 				bhs[nr_bhs] = prev = bh;
@@ -1297,6 +1308,7 @@ int fat_add_entries(struct inode *dir, void *slots, int nr_slots,
 			if (free_slots == nr_slots)
 				goto found;
 		} else {
+free:
 			for (i = 0; i < nr_bhs; i++)
 				brelse(bhs[i]);
 			prev = NULL;

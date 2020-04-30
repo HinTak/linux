@@ -20,6 +20,7 @@ header-y += netfilter_ipv4/
 header-y += netfilter_ipv6/
 header-y += usb/
 header-y += wimax/
+header-y += sf/
 
 genhdr-y += version.h
 
@@ -206,6 +207,7 @@ header-y += ixjuser.h
 header-y += jffs2.h
 header-y += joystick.h
 header-y += kd.h
+header-y += kdbus.h
 header-y += kdev_t.h
 header-y += kernel-page-flags.h
 header-y += kernel.h
@@ -421,3 +423,9 @@ header-y += x25.h
 header-y += xattr.h
 header-y += xfrm.h
 header-y += hw_breakpoint.h
+header-y += eeprom.h
+header-y += micom-msg.h
+header-y += sdp_hwmem_io.h
+header-y += sdp_ca.h
+header-y += sdp_crypto.h
+header-y += micom-av_msg.h

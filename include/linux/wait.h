@@ -15,7 +15,12 @@ int default_wake_function(wait_queue_t *wait, unsigned mode, int flags, void *ke
 struct __wait_queue {
 	unsigned int flags;
 #define WQ_FLAG_EXCLUSIVE	0x01
+
+#ifdef __cplusplus
+	void *_private;
+#else
 	void *private;
+#endif
 	wait_queue_func_t func;
 	struct list_head task_list;
 };
@@ -81,7 +86,11 @@ extern void __init_waitqueue_head(wait_queue_head_t *q, const char *name, struct
 static inline void init_waitqueue_entry(wait_queue_t *q, struct task_struct *p)
 {
 	q->flags = 0;
+#ifdef __cplusplus
+	q->_private = p;
+#else
 	q->private = p;
+#endif
 	q->func = default_wake_function;
 }
 
@@ -89,7 +98,11 @@ static inline void init_waitqueue_func_entry(wait_queue_t *q,
 					wait_queue_func_t func)
 {
 	q->flags = 0;
+#ifdef __cplusplus
+	q->_private = NULL;
+#else
 	q->private = NULL;
+#endif
 	q->func = func;
 }
 
@@ -102,9 +115,9 @@ extern void add_wait_queue(wait_queue_head_t *q, wait_queue_t *wait);
 extern void add_wait_queue_exclusive(wait_queue_head_t *q, wait_queue_t *wait);
 extern void remove_wait_queue(wait_queue_head_t *q, wait_queue_t *wait);
 
-static inline void __add_wait_queue(wait_queue_head_t *head, wait_queue_t *new)
+static inline void __add_wait_queue(wait_queue_head_t *head, wait_queue_t *_new)
 {
-	list_add(&new->task_list, &head->task_list);
+	list_add(&_new->task_list, &head->task_list);
 }
 
 /*
@@ -118,9 +131,9 @@ static inline void __add_wait_queue_exclusive(wait_queue_head_t *q,
 }
 
 static inline void __add_wait_queue_tail(wait_queue_head_t *head,
-					 wait_queue_t *new)
+					 wait_queue_t *_new)
 {
-	list_add_tail(&new->task_list, &head->task_list);
+	list_add_tail(&_new->task_list, &head->task_list);
 }
 
 static inline void __add_wait_queue_tail_exclusive(wait_queue_head_t *q,
@@ -802,6 +815,63 @@ do {									\
 	if (!(condition))						\
 		__wait_event_interruptible_lock_irq(wq, condition,	\
 						    lock, __ret, );	\
+	__ret;								\
+})
+
+#define __wait_event_interruptible_lock_irq_timeout(wq, condition,	\
+						    lock, ret)		\
+do {									\
+	DEFINE_WAIT(__wait);						\
+									\
+	for (;;) {							\
+		prepare_to_wait(&wq, &__wait, TASK_INTERRUPTIBLE);	\
+		if (condition)						\
+			break;						\
+		if (signal_pending(current)) {				\
+			ret = -ERESTARTSYS;				\
+			break;						\
+		}							\
+		spin_unlock_irq(&lock);					\
+		ret = schedule_timeout(ret);				\
+		spin_lock_irq(&lock);					\
+		if (!ret)						\
+			break;						\
+	}								\
+	finish_wait(&wq, &__wait);					\
+} while (0)
+
+/**
+ * wait_event_interruptible_lock_irq_timeout - sleep until a condition gets true or a timeout elapses.
+ *		The condition is checked under the lock. This is expected
+ *		to be called with the lock taken.
+ * @wq: the waitqueue to wait on
+ * @condition: a C expression for the event to wait for
+ * @lock: a locked spinlock_t, which will be released before schedule()
+ *	  and reacquired afterwards.
+ * @timeout: timeout, in jiffies
+ *
+ * The process is put to sleep (TASK_INTERRUPTIBLE) until the
+ * @condition evaluates to true or signal is received. The @condition is
+ * checked each time the waitqueue @wq is woken up.
+ *
+ * wake_up() has to be called after changing any variable that could
+ * change the result of the wait condition.
+ *
+ * This is supposed to be called while holding the lock. The lock is
+ * dropped before going to sleep and is reacquired afterwards.
+ *
+ * The function returns 0 if the @timeout elapsed, -ERESTARTSYS if it
+ * was interrupted by a signal, and the remaining jiffies otherwise
+ * if the condition evaluated to true before the timeout elapsed.
+ */
+#define wait_event_interruptible_lock_irq_timeout(wq, condition, lock,	\
+						  timeout)		\
+({									\
+	int __ret = timeout;						\
+									\
+	if (!(condition))						\
+		__wait_event_interruptible_lock_irq_timeout(		\
+					wq, condition, lock, __ret);	\
 	__ret;								\
 })
 

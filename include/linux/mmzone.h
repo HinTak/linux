@@ -39,9 +39,13 @@ enum {
 	MIGRATE_UNMOVABLE,
 	MIGRATE_RECLAIMABLE,
 	MIGRATE_MOVABLE,
+#ifdef CONFIG_CMA_APP_ALLOC
+	/* New type of pcp lists to cache CMA pages for selected processes */
+	MIGRATE_CMA,
+#endif
 	MIGRATE_PCPTYPES,	/* the number of types on the pcp lists */
 	MIGRATE_RESERVE = MIGRATE_PCPTYPES,
-#ifdef CONFIG_CMA
+#if defined(CONFIG_CMA) && !(defined(CONFIG_CMA_APP_ALLOC))
 	/*
 	 * MIGRATE_CMA migration type is designed to mimic the way
 	 * ZONE_MOVABLE works.  Only movable pages can be allocated
@@ -706,7 +710,10 @@ typedef struct pglist_data {
 #ifdef CONFIG_MEMCG
 	struct page_cgroup *node_page_cgroup;
 #endif
+#if defined(CONFIG_PAGE_OWNER) && !defined(CONFIG_SPARSEMEM)
+	struct pageowner *node_page_owner;
 #endif
+#endif /* CONFIG_FLAT_NODE_MEM_MAP */
 #ifndef CONFIG_NO_BOOTMEM
 	struct bootmem_data *bdata;
 #endif
@@ -1109,7 +1116,14 @@ struct mem_section {
 	 * section. (see memcontrol.h/page_cgroup.h about this.)
 	 */
 	struct page_cgroup *page_cgroup;
-	unsigned long pad;
+	unsigned long pad[3];
+#ifndef CONFIG_PAGE_OWNER
+	unsigned long pad1[2];
+#endif
+#endif
+#ifdef CONFIG_PAGE_OWNER
+	struct pageowner *page_owner;
+	unsigned long owner_pad;
 #endif
 };
 

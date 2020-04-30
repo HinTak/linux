@@ -38,6 +38,7 @@ static int arch_timer_ppi[MAX_TIMER_PPI];
 static struct clock_event_device __percpu *arch_timer_evt;
 
 static bool arch_timer_use_virtual = true;
+static bool arch_timer_c3stop;
 
 /*
  * Architected system timer support.
@@ -125,7 +126,9 @@ static int arch_timer_set_next_event_phys(unsigned long evt,
 
 static int __cpuinit arch_timer_setup(struct clock_event_device *clk)
 {
-	clk->features = CLOCK_EVT_FEAT_ONESHOT | CLOCK_EVT_FEAT_C3STOP;
+	clk->features = CLOCK_EVT_FEAT_ONESHOT;
+	if (arch_timer_c3stop)
+		clk->features |= CLOCK_EVT_FEAT_C3STOP;
 	clk->name = "arch_sys_timer";
 	clk->rating = 450;
 	if (arch_timer_use_virtual) {
@@ -174,10 +177,11 @@ static int arch_timer_available(void)
 		arch_timer_rate = freq;
 	}
 
-	pr_info_once("Architected local timer running at %lu.%02luMHz (%s).\n",
+	pr_info_once("Architected local timer running at %lu.%02luMHz (%s, %s).\n",
 		     (unsigned long)arch_timer_rate / 1000000,
 		     (unsigned long)(arch_timer_rate / 10000) % 100,
-		     arch_timer_use_virtual ? "virt" : "phys");
+		     arch_timer_use_virtual ? "virt" : "phys",
+		     arch_timer_c3stop ? "c3stop" : "always-on");
 	return 0;
 }
 
@@ -186,27 +190,19 @@ u32 arch_timer_get_rate(void)
 	return arch_timer_rate;
 }
 
-/*
- * Some external users of arch_timer_read_counter (e.g. sched_clock) may try to
- * call it before it has been initialised. Rather than incur a performance
- * penalty checking for initialisation, provide a default implementation that
- * won't lead to time appearing to jump backwards.
- */
-static u64 arch_timer_read_zero(void)
+u64 arch_timer_read_counter(void)
 {
-	return 0;
+	return arch_counter_get_cntvct();
 }
-
-u64 (*arch_timer_read_counter)(void) = arch_timer_read_zero;
 
 static cycle_t arch_counter_read(struct clocksource *cs)
 {
-	return arch_timer_read_counter();
+	return arch_counter_get_cntvct();
 }
 
 static cycle_t arch_counter_read_cc(const struct cyclecounter *cc)
 {
-	return arch_timer_read_counter();
+	return arch_counter_get_cntvct();
 }
 
 static struct clocksource clocksource_counter = {
@@ -287,7 +283,7 @@ static int __init arch_timer_register(void)
 	cyclecounter.mult = clocksource_counter.mult;
 	cyclecounter.shift = clocksource_counter.shift;
 	timecounter_init(&timecounter, &cyclecounter,
-			 arch_counter_get_cntpct());
+			 arch_counter_get_cntvct());
 
 	if (arch_timer_use_virtual) {
 		ppi = arch_timer_ppi[VIRT_PPI];
@@ -376,10 +372,7 @@ static void __init arch_timer_init(struct device_node *np)
 		}
 	}
 
-	if (arch_timer_use_virtual)
-		arch_timer_read_counter = arch_counter_get_cntvct;
-	else
-		arch_timer_read_counter = arch_counter_get_cntpct;
+	arch_timer_c3stop = !of_property_read_bool(np, "always-on");
 
 	arch_timer_register();
 	arch_timer_arch_init();

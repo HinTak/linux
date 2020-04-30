@@ -58,7 +58,7 @@
 #include <linux/crc-itu-t.h>
 #include <linux/log2.h>
 #include <asm/byteorder.h>
-
+#include "ecma_167.h"
 #include "udf_sb.h"
 #include "udf_i.h"
 
@@ -77,6 +77,8 @@
 #define UDF_DEFAULT_BLOCKSIZE 2048
 
 enum { UDF_MAX_LINKS = 0xffff };
+static int timeouts    = 0;
+static int read_errors = 0;
 
 /* These are the "meat" - everything else is stuffing */
 static int udf_fill_super(struct super_block *, void *, int);
@@ -94,6 +96,843 @@ static unsigned int udf_count_free(struct super_block *);
 static int udf_statfs(struct dentry *, struct kstatfs *);
 static int udf_show_options(struct seq_file *, struct dentry *);
 
+#if 1 //by gyu
+#define CACHED_METADATA_BDROM 1
+/*#define NON_CACHED_METADATA_BDROM 1*/
+
+#define SB_READ_CACHE_MIN (0x10)
+#define SB_READ_CACHE_MAX (0x2000)
+#define SB_READ_CACHE_LIMIT (0x1000)
+#define SB_READ_CACHE_MAGIC_NUM (0xdeadbeef)
+#define BH_ACCESS_AFTER_CACHE_FULL (3)
+#define BH_ACCESS_IS_UNREADABLE (2)
+#define BH_ACCESS_IS_NON_MDATA (1)
+typedef struct
+{
+        int m_policy;
+        int sb_descriptor_validity[SB_READ_CACHE_MAX];
+        int sb_descriptor_identity[SB_READ_CACHE_MAX];
+        int sb_access_count[SB_READ_CACHE_MAX];
+}
+bdrom_cache_map;
+typedef struct{
+	void * sb_array[SB_READ_CACHE_MAX];
+	void* p_latest_buffer_head;
+	bdrom_cache_map m_dollarMap;
+	int m_isCacheFull_01;
+	int m_magicNumber;
+	int m_isBdRom_01;
+	int m_nPhysicalReads;
+} bdrom_metadata_cache;
+static bdrom_metadata_cache g_sb_read_cache;
+
+#if defined (CACHED_METADATA_BDROM)
+void udf_release_data(struct buffer_head *bh);
+
+void bdrom_update_call_counts(int pos_012)
+{
+	static int thousand[10] = {0,0,0,0,0, 0,0,0,0,0};
+	static int n_calls[10] = {0,0,0,0,0, 0,0,0,0,0};
+	static int units[10] = {10000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000};
+	int n;
+        int start = 1;
+        n_calls[pos_012]++;
+        if( n_calls[pos_012] >= units[pos_012] )
+        {
+               thousand[pos_012]++;
+               n_calls[pos_012] = 0;
+               for( n = 0; n < 10; n++ )
+               {
+                       if( (thousand[n] >= 1) || (n_calls[n] >= 1) )
+                       {
+                               if( start == 1 )
+                               {
+                                       printk("\n\n\n###################################################\n");
+                                       start = 0;
+                               }
+                               printk("Function[%d] called %d x %d + %d.\n", n, thousand[n], units[n], n_calls[n]);
+                       }
+               }
+               if( start == 0 )
+               {
+                       printk("###################################################\n\n\n\n");
+               }
+        }
+}
+/*#define BDROM_CACHE_POLICY_SIMPLE __simpler_sb_bread*/
+/*#define BDROM_CACHE_POLICY_SMART __intelligent_sb_bread*/
+#define BDROM_CACHE_POLICY_INTELLIGENT __more_intelligent_sb_bread
+inline int bdrom_get_policy(void)
+{
+       #ifdef BDROM_CACHE_POLICY_SIMPLE
+               return 0;
+       #endif
+       #ifdef BDROM_CACHE_POLICY_SMART
+               return 1;
+       #endif
+       #ifdef BDROM_CACHE_POLICY_INTELLIGENT
+               return 2;
+       #endif
+}
+
+inline int bdrom_metadata_cache_check_bh(void* p_obj)
+{
+       int block_nr;
+       if( (((unsigned int)p_obj) & (unsigned int)0xFFFFfffc) == (unsigned int)0 )
+       {
+               return -1;
+       }
+       block_nr = ((struct buffer_head *)p_obj)->b_blocknr;
+       if( (block_nr > SB_READ_CACHE_MAX) || (block_nr < 0) )
+       {
+               return -1;
+       }
+       return block_nr;
+}
+inline int bdrom_metadata_cache_is_mine(bdrom_metadata_cache* p_this, void* p_obj)
+{
+	int n;
+       int block_nr;
+       if( (block_nr = bdrom_metadata_cache_check_bh(p_obj)) == -1 )
+       {
+               return 0;
+       }
+       if( p_this->p_latest_buffer_head == p_obj )
+       {
+               return 1;
+       }
+       if( p_obj == p_this->sb_array[block_nr] )
+       {
+               return 1;
+       }
+       if( (((unsigned int)p_this->sb_array[block_nr]) & (unsigned int)0xFFFFfffc) == (unsigned int)0 )
+       {
+               return 0;
+       }
+      // printk("bdrom_metadata_cache_is_mine::If you see this, it's a performance defect L1.\n");
+      // printk("bdrom_metadata_cache_is_mine::If you see this, it's a performance defect L2.\n");
+       for( n = SB_READ_CACHE_MIN; n < SB_READ_CACHE_MAX; n++ )
+       {
+               if( p_this->sb_array[n] == p_obj ) return 1;
+       }
+       return 0;
+}
+int bdrom_metadata_cache_cleanup(bdrom_metadata_cache* p_this)
+{
+       int n;
+       int nCachedSlots, nEmptySlots;
+	struct buffer_head *bh = NULL;
+
+	if(p_this->m_magicNumber != SB_READ_CACHE_MAGIC_NUM)
+		return 0;
+	invalidate_bh_lrus();
+	nCachedSlots = nEmptySlots = 0;
+	if((p_this->m_isBdRom_01 == 1) && (p_this->m_magicNumber == SB_READ_CACHE_MAGIC_NUM)){
+		printk("bdrom_metadata_cache_cleanup::bdrom = true.\n");
+               if( (p_this->m_isCacheFull_01 == 1) || (p_this->m_nPhysicalReads > 0) )
+               {
+                       udf_debug("bdrom_metadata_cache_cleanup::entering the for loop...\n");
+                       for( n = SB_READ_CACHE_MIN; n < SB_READ_CACHE_MAX; n++ )
+                       {
+                               if( bdrom_metadata_cache_check_bh(p_this->sb_array[n]) != -1 )
+                               {
+                                       bh = p_this->sb_array[n];
+                                       while (atomic_read(&bh->b_count))
+                                       brelse(bh);
+                                       p_this->sb_array[n] = (void*)0;
+                                       nCachedSlots++;
+                               }
+                               else if( p_this->sb_array[n] == (void*)BH_ACCESS_IS_NON_MDATA)
+                               {
+                                       nEmptySlots++;
+                               }
+                               else {
+                                       nEmptySlots++;
+                               }
+                               if( p_this->m_dollarMap.m_policy == 2 )
+                               {
+
+                                       if( bdrom_metadata_cache_check_bh(p_this->sb_array[n]) != -1 )
+                                       {
+                                               udf_debug("LBN[%d] - ACCESSED[%d] - validity[%d], ID[0x%x] - CACHED!!\n",
+                                                       n, p_this->m_dollarMap.sb_access_count[n],
+                                                       p_this->m_dollarMap.sb_descriptor_validity[n],
+                                                       p_this->m_dollarMap.sb_descriptor_identity[n]
+                                               );
+                                       }
+                                       else if( p_this->m_dollarMap.sb_access_count[n] > 0 ){
+                                               udf_debug("LBN[%d] - ACCESSED[%d] - validity[%d], ID[0x%x]\n",
+                                                       n, p_this->m_dollarMap.sb_access_count[n],
+                                                       p_this->m_dollarMap.sb_descriptor_validity[n],
+                                                       p_this->m_dollarMap.sb_descriptor_identity[n]
+                                               );
+                                       }
+
+                                       p_this->m_dollarMap.sb_access_count[n] = 0;
+                                       p_this->m_dollarMap.sb_descriptor_validity[n] = 0;
+                                       p_this->m_dollarMap.sb_descriptor_identity[n] = 0;
+                               }
+				p_this->sb_array[n] = (void*)0;
+			}
+                       p_this->m_isCacheFull_01 = 0;
+                       p_this->m_nPhysicalReads = 0;
+                       //printk("\n\n############################################\n");
+                       udf_debug("Cached:Empty = %d:%d, ratio = %d\n",
+                               nCachedSlots, nEmptySlots, 100*nCachedSlots/(nCachedSlots + nEmptySlots)
+                       );
+                       printk("############################################\n\n");
+                       return 1;
+		}
+	}
+	printk("Skipping operations for non BD-ROM discs.\n");
+	return 0;
+}
+
+int bdrom_cache_map_init(bdrom_cache_map* p_this)
+{
+       int n;
+       p_this->m_policy = bdrom_get_policy();
+       if( p_this->m_policy == 2 )
+       {
+               for( n = SB_READ_CACHE_MIN; n < SB_READ_CACHE_MAX; n++ )
+               {
+                       p_this->sb_access_count[n] = 0;
+                       p_this->sb_descriptor_validity[n] = 0;
+                       p_this->sb_descriptor_identity[n] = 0;
+               }
+               return 2;
+       }
+       return -1;
+}
+
+int bdrom_metadata_cache_on_init_udf(bdrom_metadata_cache *p_this, int is_bdrom_01)
+{
+	int n;
+
+	if(p_this->m_magicNumber != SB_READ_CACHE_MAGIC_NUM){
+		p_this->m_magicNumber  = SB_READ_CACHE_MAGIC_NUM;
+		printk("bdrom_metadata_cache_on_init_udf::init. data structure.\n");
+		for(n = SB_READ_CACHE_MIN; n < SB_READ_CACHE_MAX; n++){
+			p_this->sb_array[n] = (void*)0;
+		}
+		bdrom_cache_map_init(&p_this->m_dollarMap);
+	}
+	p_this->p_latest_buffer_head = (void*)0;
+	p_this->m_isCacheFull_01 = 0;
+	p_this->m_nPhysicalReads = 0;
+	p_this->m_isBdRom_01 = is_bdrom_01;
+	bdrom_metadata_cache_cleanup(p_this);
+	return 0;
+}
+
+#define SB_READ_CACHE_TIMEOUT_IN_SECONDS 10
+void *__simpler_sb_bread(struct super_block *sb, int lbn)
+{
+	int n, m;
+	void *p_ret;
+
+	if((g_sb_read_cache.m_isBdRom_01 == 1) && 
+           (g_sb_read_cache.m_magicNumber == SB_READ_CACHE_MAGIC_NUM) &&
+           (lbn < SB_READ_CACHE_MAX) && (lbn >= SB_READ_CACHE_MIN)){
+		if(g_sb_read_cache.m_isCacheFull_01 == 0){
+			for(n = SB_READ_CACHE_MIN; n < SB_READ_CACHE_MAX; n++){
+				udf_debug("_sb_bread() - reading block[%d]\n", n);
+				g_sb_read_cache.sb_array[n] = sb_bread(sb, n);
+				if (!(g_sb_read_cache.sb_array[n])){
+					printk("_sb_bread() - Error reading block[%d]\n", n);
+					for(m = 0; m < n; m++){
+						udf_release_data(g_sb_read_cache.sb_array[m]);
+					}
+					for(m = n; m < SB_READ_CACHE_MAX; m++){
+						g_sb_read_cache.sb_array[m] = (void*)0;
+					}
+					g_sb_read_cache.m_isCacheFull_01 = 1;
+					return (void*)0;
+				}
+			}
+			g_sb_read_cache.m_isCacheFull_01 = 1;
+		}
+
+                /*printk("_sb_bread::cache-hit-LBN(%d), buff-head(%d)\n", lbn, (int)g_sb_read_cache.sb_array[lbn]);*/
+                if(g_sb_read_cache.sb_array[lbn] != (void*)0){
+			return g_sb_read_cache.sb_array[lbn];
+		}
+	}
+	p_ret = sb_bread(sb, lbn);
+	/*printk("_sb_bread::cache-miss-LBN(%d), buff-head(%d)\n", lbn, (int)p_ret);*/
+	return p_ret;
+}
+
+void* __intelligent_sb_bread(struct super_block *sb, int lbn)
+{
+	int n, m, n_next;
+	void* p_ret;
+	struct buffer_head* bh;
+	if((g_sb_read_cache.m_isBdRom_01 == 1) &&
+	   (g_sb_read_cache.m_magicNumber == SB_READ_CACHE_MAGIC_NUM) &&
+	   (lbn < SB_READ_CACHE_MAX) && (lbn >= SB_READ_CACHE_MIN)){
+		if(g_sb_read_cache.m_isCacheFull_01 == 0){
+			struct timeval t1, t2;
+			printk("_sb_bread() - reading block[%d]\n", lbn);
+			do_gettimeofday(&t1);
+			for(n = SB_READ_CACHE_MIN; n < SB_READ_CACHE_MAX; n++){
+				//printk("_sb_bread() - reading cache block[%d]\n", n);
+				g_sb_read_cache.sb_array[n] = sb_bread(sb, n);
+				do_gettimeofday(&t2);
+                                if (!(g_sb_read_cache.sb_array[n])){
+					printk("_sb_bread() - Error reading cache block %d\n", n);
+					n_next = n +0x10;
+					for(m = n; m < n_next; m++){
+						g_sb_read_cache.sb_array[m] = (void*)0;
+					}
+					n = n_next;
+					if ((t2.tv_sec - t1.tv_sec) > SB_READ_CACHE_TIMEOUT_IN_SECONDS){
+						printk(KERN_ERR "_sb_bread() - Timed out reading cache block %d\n", lbn);
+						for( m = n; m < SB_READ_CACHE_MAX; m++ ){
+							g_sb_read_cache.sb_array[m] = (void*)0;
+						}
+						g_sb_read_cache.m_isCacheFull_01 = 1;
+						return (void*)0;
+					} else {
+						printk("_sb_read::spent %d seconds while reading cache blocks...",
+										(int) (t2.tv_sec - t1.tv_sec));
+					}
+				}
+			}
+			for( n = SB_READ_CACHE_MIN; n < SB_READ_CACHE_MAX; n++ )
+                                        {
+                                                bh = (struct buffer_head *)g_sb_read_cache.sb_array[n];
+                                                udf_debug("__intelligent_sb_bread::bh[%d]->b_blocknr = %llu\n", n, bh->b_blocknr);
+                                        }
+			g_sb_read_cache.m_isCacheFull_01 = 1;
+		}
+		/*printk("_sb_bread::cache-hit-LBN(%d), buff-head(%d)\n", lbn, (int)g_sb_read_cache.sb_array[lbn]);*/
+		if(g_sb_read_cache.sb_array[lbn] != (void*)0){
+			return g_sb_read_cache.sb_array[lbn];
+		}
+	}
+	p_ret = sb_bread(sb, lbn);
+	/*printk("_sb_bread::cache-miss-LBN(%d), buff-head(%d)\n", lbn, (int)p_ret);*/
+	return p_ret;
+}
+
+int bdrom_metadata_cache_get_read_area_V01(
+	bdrom_metadata_cache* p_this, int given_lbn, int* read_from_lbn, int* read_until_lbn ){
+	if( (given_lbn < SB_READ_CACHE_MAX) && (given_lbn >= SB_READ_CACHE_MIN) )
+	{
+		if( given_lbn < SB_READ_CACHE_MAX*2/8 )
+		{
+			*read_from_lbn = SB_READ_CACHE_MIN;
+			*read_until_lbn = SB_READ_CACHE_MAX*2/8 -1;
+			return (*read_until_lbn)-(*read_from_lbn)+1;
+		}
+		if( given_lbn < SB_READ_CACHE_MAX*3/8 )
+		{
+			*read_from_lbn = SB_READ_CACHE_MAX*2/8;
+			*read_until_lbn = SB_READ_CACHE_MAX*3/8 -1;
+			return (*read_until_lbn)-(*read_from_lbn)+1;
+		}
+		if( given_lbn < SB_READ_CACHE_MAX*4/8 )
+		{
+			*read_from_lbn = SB_READ_CACHE_MAX*3/8;
+			*read_until_lbn = SB_READ_CACHE_MAX*4/8 -1;
+			return (*read_until_lbn)-(*read_from_lbn)+1;
+		}
+		if( given_lbn < SB_READ_CACHE_MAX*5/8 )
+		{
+			*read_from_lbn = SB_READ_CACHE_MAX*4/8;
+			*read_until_lbn = SB_READ_CACHE_MAX*5/8 -1;
+			return (*read_until_lbn)-(*read_from_lbn)+1;
+		}
+		if( given_lbn < SB_READ_CACHE_MAX*6/8 )
+		{
+			*read_from_lbn = SB_READ_CACHE_MAX*5/8;
+			*read_until_lbn = SB_READ_CACHE_MAX*6/8 -1;
+			return (*read_until_lbn)-(*read_from_lbn)+1;
+		}
+		if( given_lbn < SB_READ_CACHE_MAX*7/8 )
+		{
+			*read_from_lbn = SB_READ_CACHE_MAX*6/8;
+			*read_until_lbn = SB_READ_CACHE_MAX*7/8 -1;
+			return (*read_until_lbn)-(*read_from_lbn)+1;
+		}
+		if( given_lbn < SB_READ_CACHE_MAX )
+		{
+			*read_from_lbn = SB_READ_CACHE_MAX*7/8;
+			*read_until_lbn = SB_READ_CACHE_MAX -1;
+			return (*read_until_lbn)-(*read_from_lbn)+1;
+		}
+	}
+	return 0;
+}
+int bdrom_metadata_cache_get_read_area_V02(
+	bdrom_metadata_cache* p_this, int given_lbn, int* read_from_lbn, int* read_until_lbn)
+{
+	int start, until;
+	if( (given_lbn < SB_READ_CACHE_MAX) && (given_lbn >= SB_READ_CACHE_MIN) )
+	{
+		start = given_lbn & 0xfffffff0;
+		until = start + 255;
+		if( until >= SB_READ_CACHE_MAX )
+		{
+			until = SB_READ_CACHE_MAX-1;
+		}
+		*read_from_lbn = start;
+		*read_until_lbn = until;
+		return until - start + 1;
+	}
+	return 0;
+}
+
+int bdrom_metadata_cache_get_read_area_V03(
+	bdrom_metadata_cache* p_this, int given_lbn, int* read_from_lbn, int* read_until_lbn)
+{
+	int start, until;
+	if( (given_lbn < SB_READ_CACHE_MAX) && (given_lbn >= SB_READ_CACHE_MIN) )
+	{
+		start = given_lbn & 0xfffffc00;
+		until = start + 0x3ff;
+		if( start == 0x00000000 )
+		{
+			start = SB_READ_CACHE_MIN;
+		}
+		if( until >= SB_READ_CACHE_MAX )
+		{
+			until = SB_READ_CACHE_MAX-1;
+		}
+		*read_from_lbn = start;
+		*read_until_lbn = until;
+		return until - start + 1;
+	}
+	return 0;
+}
+
+int bdrom_metadata_cache_get_read_area(
+	bdrom_metadata_cache* p_this, int given_lbn, int* read_from_lbn, int* read_until_lbn)
+{
+	return bdrom_metadata_cache_get_read_area_V03(
+		p_this, given_lbn, read_from_lbn, read_until_lbn);
+}
+
+int bdrom_metadata_cache_update_reads(bdrom_metadata_cache* p_this, int n_lbs_read)
+{
+	p_this->m_nPhysicalReads += n_lbs_read;
+	udf_debug("p_this->m_nPhysicalReads = %d\n", p_this->m_nPhysicalReads);
+	if( p_this->m_nPhysicalReads == (SB_READ_CACHE_MAX-SB_READ_CACHE_MIN+1) )
+	{
+		p_this->m_isCacheFull_01 = 1;
+		return 1;
+	}
+	return 0;
+}
+int udf_is_valid_tag(uint16_t ident)
+{
+	switch(ident)
+	{
+		case TAG_IDENT_FSD:
+			return 1;
+		case TAG_IDENT_FID:
+			return 2;
+		case TAG_IDENT_AED:
+			return 3;
+		case TAG_IDENT_IE:
+			return 4;
+		case TAG_IDENT_TE:
+			return 5;
+		case TAG_IDENT_FE:
+			return 6;
+		case TAG_IDENT_EAHD:
+			return 7;
+		case TAG_IDENT_USE:
+			return 8;
+		case TAG_IDENT_SBD:
+			return 9;
+		case TAG_IDENT_PIE:
+			return 10;
+		case TAG_IDENT_EFE:
+			return 11;
+		default:
+			return 0;
+	}
+	return -1;
+}
+/*
+ ** crc.c
+ **
+ ** PURPOSE
+ **      Routines to generate, calculate, and test a 16-bit CRC.
+ **
+ ** DESCRIPTION
+ **      The CRC code was devised by Don P. Mitchell of AT&T Bell Laboratories
+ **      and Ned W. Rhodes of Software Systems Group. It has been published in
+ **      "Design and Validation of Computer Protocols", Prentice Hall,
+ **      Englewood Cliffs, NJ, 1991, Chapter 3, ISBN 0-13-539925-4.
+ **
+ **      Copyright is held by AT&T.
+ **
+ **      AT&T gives permission for the free use of the CRC source code.
+ **
+ ** CONTACTS
+ **      E-mail regarding any portion of the Linux UDF file system should be
+ **      directed to the development team mailing list (run by majordomo):
+ **              linux_udf@hpesjro.fc.hp.com
+ **
+ ** COPYRIGHT
+ **      This file is distributed under the terms of the GNU General Public
+ **      License (GPL). Copies of the GPL can be obtained from:
+ **              ftp://prep.ai.mit.edu/pub/gnu/GPL
+ **      Each contributing author retains all rights to their own work.
+ **/
+ 
+#include "udfdecl.h"
+ 
+static uint16_t crc_table[256] = {
+        0x0000U, 0x1021U, 0x2042U, 0x3063U, 0x4084U, 0x50a5U, 0x60c6U, 0x70e7U,
+        0x8108U, 0x9129U, 0xa14aU, 0xb16bU, 0xc18cU, 0xd1adU, 0xe1ceU, 0xf1efU,
+        0x1231U, 0x0210U, 0x3273U, 0x2252U, 0x52b5U, 0x4294U, 0x72f7U, 0x62d6U,
+        0x9339U, 0x8318U, 0xb37bU, 0xa35aU, 0xd3bdU, 0xc39cU, 0xf3ffU, 0xe3deU,
+        0x2462U, 0x3443U, 0x0420U, 0x1401U, 0x64e6U, 0x74c7U, 0x44a4U, 0x5485U,
+        0xa56aU, 0xb54bU, 0x8528U, 0x9509U, 0xe5eeU, 0xf5cfU, 0xc5acU, 0xd58dU,
+        0x3653U, 0x2672U, 0x1611U, 0x0630U, 0x76d7U, 0x66f6U, 0x5695U, 0x46b4U,
+        0xb75bU, 0xa77aU, 0x9719U, 0x8738U, 0xf7dfU, 0xe7feU, 0xd79dU, 0xc7bcU,
+        0x48c4U, 0x58e5U, 0x6886U, 0x78a7U, 0x0840U, 0x1861U, 0x2802U, 0x3823U,
+        0xc9ccU, 0xd9edU, 0xe98eU, 0xf9afU, 0x8948U, 0x9969U, 0xa90aU, 0xb92bU,
+        0x5af5U, 0x4ad4U, 0x7ab7U, 0x6a96U, 0x1a71U, 0x0a50U, 0x3a33U, 0x2a12U,
+        0xdbfdU, 0xcbdcU, 0xfbbfU, 0xeb9eU, 0x9b79U, 0x8b58U, 0xbb3bU, 0xab1aU,
+        0x6ca6U, 0x7c87U, 0x4ce4U, 0x5cc5U, 0x2c22U, 0x3c03U, 0x0c60U, 0x1c41U,
+        0xedaeU, 0xfd8fU, 0xcdecU, 0xddcdU, 0xad2aU, 0xbd0bU, 0x8d68U, 0x9d49U,
+        0x7e97U, 0x6eb6U, 0x5ed5U, 0x4ef4U, 0x3e13U, 0x2e32U, 0x1e51U, 0x0e70U,
+        0xff9fU, 0xefbeU, 0xdfddU, 0xcffcU, 0xbf1bU, 0xaf3aU, 0x9f59U, 0x8f78U,
+        0x9188U, 0x81a9U, 0xb1caU, 0xa1ebU, 0xd10cU, 0xc12dU, 0xf14eU, 0xe16fU,
+        0x1080U, 0x00a1U, 0x30c2U, 0x20e3U, 0x5004U, 0x4025U, 0x7046U, 0x6067U,
+        0x83b9U, 0x9398U, 0xa3fbU, 0xb3daU, 0xc33dU, 0xd31cU, 0xe37fU, 0xf35eU,
+        0x02b1U, 0x1290U, 0x22f3U, 0x32d2U, 0x4235U, 0x5214U, 0x6277U, 0x7256U,
+        0xb5eaU, 0xa5cbU, 0x95a8U, 0x8589U, 0xf56eU, 0xe54fU, 0xd52cU, 0xc50dU,
+        0x34e2U, 0x24c3U, 0x14a0U, 0x0481U, 0x7466U, 0x6447U, 0x5424U, 0x4405U,
+        0xa7dbU, 0xb7faU, 0x8799U, 0x97b8U, 0xe75fU, 0xf77eU, 0xc71dU, 0xd73cU,
+        0x26d3U, 0x36f2U, 0x0691U, 0x16b0U, 0x6657U, 0x7676U, 0x4615U, 0x5634U,
+        0xd94cU, 0xc96dU, 0xf90eU, 0xe92fU, 0x99c8U, 0x89e9U, 0xb98aU, 0xa9abU,
+        0x5844U, 0x4865U, 0x7806U, 0x6827U, 0x18c0U, 0x08e1U, 0x3882U, 0x28a3U,
+        0xcb7dU, 0xdb5cU, 0xeb3fU, 0xfb1eU, 0x8bf9U, 0x9bd8U, 0xabbbU, 0xbb9aU,
+        0x4a75U, 0x5a54U, 0x6a37U, 0x7a16U, 0x0af1U, 0x1ad0U, 0x2ab3U, 0x3a92U,
+        0xfd2eU, 0xed0fU, 0xdd6cU, 0xcd4dU, 0xbdaaU, 0xad8bU, 0x9de8U, 0x8dc9U,
+        0x7c26U, 0x6c07U, 0x5c64U, 0x4c45U, 0x3ca2U, 0x2c83U, 0x1ce0U, 0x0cc1U,
+        0xef1fU, 0xff3eU, 0xcf5dU, 0xdf7cU, 0xaf9bU, 0xbfbaU, 0x8fd9U, 0x9ff8U,
+        0x6e17U, 0x7e36U, 0x4e55U, 0x5e74U, 0x2e93U, 0x3eb2U, 0x0ed1U, 0x1ef0U
+};
+ 
+uint16_t
+udf_crc(uint8_t *data, uint32_t size, uint16_t crc)
+{
+        while (size--)
+                crc = crc_table[(crc >> 8 ^ *(data++)) & 0xffU] ^ (crc << 8);
+ 
+        return crc;
+}
+ 
+int udf_identify_descriptor(struct super_block *sb, struct buffer_head *bh, uint16_t *ident)
+{
+	struct tag *tag_p;
+	register uint8_t checksum;
+	register int i;
+	int cs_correct = 1;
+	int crc_crrect = 0;
+	int version_crrect = 1;
+
+	if (!bh)
+	{
+		printk("[udf_identify_descriptor] bh == NULL\n");
+		return -1;
+	}
+	tag_p = (struct tag *)(bh->b_data);
+
+	*ident = le16_to_cpu(tag_p->tagIdent);
+
+	checksum = 0U;
+	for (i = 0; i < 4; i++)
+	{
+		checksum += (uint8_t)(bh->b_data[i]);
+	}
+	for (i = 5; i < 16; i++)
+	{
+		checksum += (uint8_t)(bh->b_data[i]);
+	}
+	if (checksum != tag_p->tagChecksum)
+	{
+		/*printk(KERN_ERR "[udf_identify_descriptor] tag checksum failed block\n");*/
+		cs_correct = 0; /*-2*/
+	}
+
+	/* Verify the tag version */
+	if (le16_to_cpu(tag_p->descVersion) != 0x0002U &&
+		le16_to_cpu(tag_p->descVersion) != 0x0003U)
+	{
+		/*printk("[udf_identify_descriptor] tag version 0x%04x != 0x0002 || 0x0003\n",
+			  le16_to_cpu(tag_p->descVersion));*/
+		version_crrect = 0;/*-3*/
+	}
+
+	/* Verify the descriptor CRC */
+	if (le16_to_cpu(tag_p->descCRCLength) + sizeof(struct tag) > sb->s_blocksize ||
+		le16_to_cpu(tag_p->descCRC) == udf_crc(bh->b_data + sizeof(struct tag),
+			le16_to_cpu(tag_p->descCRCLength), 0))
+	{
+		crc_crrect = 1;
+	}
+	/*
+	else{
+			printk("[udf_identify_descriptor] Crc failure : crc = %d, crclen = %d\n",
+			le16_to_cpu(tag_p->descCRC), le16_to_cpu(tag_p->descCRCLength));
+	}*/
+	if( (cs_correct == 1) && (version_crrect == 0) )
+	{
+		return -3;
+	}
+	if( (cs_correct == 0) && (version_crrect == 1) )
+	{
+		return -4;
+	}
+	if( (cs_correct == 1) && (version_crrect == 1) && (crc_crrect == 1) )
+	{
+		return 1;
+	}
+	if( (cs_correct == 0) && (version_crrect == 0) && (crc_crrect == 0) )
+	{
+		return 2;
+	}
+	return -4;
+}
+
+int udf_ok_2_cache(uint16_t ident, int validity)
+{
+	if( (ident == 0x0000) && (validity == -3) )
+	{
+		return 0;
+	}
+	if( (ident == 0x504d) && (validity == -4) )
+	{
+		return 0;
+	}
+	return 1;
+}
+
+int bdrom_metadata_cache_is_ok_2_cache_more_blks(bdrom_metadata_cache* p_this)
+{
+	if( p_this->m_isCacheFull_01 == 1 )
+	{
+		udf_debug("_sb_bread() - cache full(1).\n");
+		return 0;
+	}
+	if( p_this->m_nPhysicalReads >= SB_READ_CACHE_LIMIT )
+	{
+		udf_debug("_sb_bread() - cache full(2).\n");
+		return 0;
+	}
+	return 1;
+}
+
+void udf_release_data_brcm(struct buffer_head *bh) //by gyu
+{
+       if (bh)
+               brelse(bh);
+}
+
+void bdrom_metadata_cache_clean_preload_cache(bdrom_metadata_cache* p_this)
+{
+	int n;
+	for( n = SB_READ_CACHE_MIN; n < SB_READ_CACHE_MAX; n++ ){
+		if( bdrom_metadata_cache_check_bh(p_this->sb_array[n]) != -1 )
+			udf_release_data_brcm(p_this->sb_array[n]);
+		if( p_this->m_dollarMap.m_policy == 2 ){
+			p_this->m_dollarMap.sb_access_count[n] = 0;
+			p_this->m_dollarMap.sb_descriptor_validity[n] = 0;
+			p_this->m_dollarMap.sb_descriptor_identity[n] = 0;
+		}
+                p_this->sb_array[n] = (void*)BH_ACCESS_AFTER_CACHE_FULL;
+	}
+        p_this->m_isCacheFull_01 = 1;
+        p_this->m_nPhysicalReads = 0;
+}
+
+void bdrom_metadata_cache_halt_caching(bdrom_metadata_cache* p_this)
+{
+	if( p_this->m_isCacheFull_01 == 1 ){
+		printk("bdrom_metadata_cache_halt_caching::abort...\n");
+                return;
+	}
+        bdrom_metadata_cache_clean_preload_cache(p_this);
+}
+
+void* __more_intelligent_sb_bread(struct super_block *sb, int lbn)
+{
+	uint16_t ident;
+	int n, m, n_next;
+	int n_lbs_2_read, read_from, read_until, n_lbs_read = 0;
+	void* p_ret;
+	int ok_2_cache;
+	if( (g_sb_read_cache.m_isBdRom_01 == 1) && (g_sb_read_cache.m_magicNumber == SB_READ_CACHE_MAGIC_NUM) )
+	{
+		if( (lbn < SB_READ_CACHE_MAX) && (lbn >= SB_READ_CACHE_MIN) )
+		{
+			if( g_sb_read_cache.m_isCacheFull_01 == 0 )
+			{
+				struct timeval t1, t2;
+				if( bdrom_metadata_cache_check_bh(g_sb_read_cache.sb_array[lbn]) != -1 )
+				{
+					/*printk("M _sb_bread() - reading block [%d] from MEM\n", lbn);*/
+					g_sb_read_cache.m_dollarMap.sb_access_count[lbn]++;
+					g_sb_read_cache.p_latest_buffer_head = g_sb_read_cache.sb_array[lbn];
+					return g_sb_read_cache.sb_array[lbn];
+				}
+				n_lbs_2_read = bdrom_metadata_cache_get_read_area(
+					&g_sb_read_cache, lbn, &read_from, &read_until
+				);
+				if( n_lbs_2_read == 0 )
+				{
+					udf_debug("_sb_bread::error handling At-LBN(%d)\n", lbn);
+					p_ret = sb_bread(sb, lbn);
+					g_sb_read_cache.m_dollarMap.sb_access_count[lbn]++;
+					return p_ret;
+				}
+
+				if( bdrom_metadata_cache_is_ok_2_cache_more_blks(&g_sb_read_cache) == 0 )
+				{
+					udf_debug("_sb_bread::cache-full At-LBN(%d)\n", lbn);
+					g_sb_read_cache.m_isCacheFull_01 = 1;
+					p_ret = sb_bread(sb, lbn);
+					g_sb_read_cache.sb_array[lbn] = (void*)BH_ACCESS_AFTER_CACHE_FULL;
+					/*Means that the corresponding sector was accessed after cache full*/
+					g_sb_read_cache.m_dollarMap.sb_access_count[lbn]++;
+					return p_ret;
+				}
+
+				udf_debug("###### Batch reading (%d ~ %d) ########\n", read_from, read_until);
+				do_gettimeofday(&t1);
+				
+				/*read ahead all blocks */
+				for( n = read_from; n <= read_until; n++ )
+					sb_breadahead(sb, n );
+
+				for( n = read_from; n <= read_until; n++ )
+				{
+					if( g_sb_read_cache.sb_array[n] == (void*)0 )
+					{
+						/*printk("B _sb_bread() - caching LBN[%d]\n", n);*/
+						g_sb_read_cache.sb_array[n] = sb_bread(sb, n);
+						do_gettimeofday(&t2);
+                                                if (!(g_sb_read_cache.sb_array[n]) )
+                                                {
+                                                	if ( (t2.tv_sec - t1.tv_sec) > SB_READ_CACHE_TIMEOUT_IN_SECONDS )
+                                                        {
+                                                        	bdrom_metadata_cache_halt_caching(&g_sb_read_cache);
+                                                                if( n == lbn )
+                                                                	return (void*)0;
+                                                                //else if( lbn == non cached or full or read error...)
+                                                                p_ret = sb_bread(sb, lbn);
+                                                                g_sb_read_cache.m_dollarMap.sb_access_count[lbn]++;
+                                                                return p_ret;
+                                                         }
+                                                         n_next = ((n + 0x10) & ~0xF) -1;
+                                                         for( m = n; m <= n_next; m++ ){
+                                                         	g_sb_read_cache.sb_array[m] = (void*)BH_ACCESS_IS_UNREADABLE;
+								// Means scratchy blocks, skip them
+							 }
+							 n = n_next;
+							 continue;
+                                                 }
+						g_sb_read_cache.m_dollarMap.sb_descriptor_validity[n] =
+                                                        udf_identify_descriptor(sb, (struct buffer_head*)g_sb_read_cache.sb_array[n], &ident);
+                                                g_sb_read_cache.m_dollarMap.sb_descriptor_identity[n] = ident;
+                                                ok_2_cache = udf_ok_2_cache(
+                                                        g_sb_read_cache.m_dollarMap.sb_descriptor_identity[n],
+                                                        g_sb_read_cache.m_dollarMap.sb_descriptor_validity[n]
+                                                );
+                                                if( ok_2_cache == 0 && (lbn != n))
+                                                {
+                                                        udf_release_data_brcm(g_sb_read_cache.sb_array[n]);
+                                                        g_sb_read_cache.sb_array[n] = (void*)BH_ACCESS_IS_NON_MDATA;
+                                                        /*Means that the corresponding sector is not a useful i-node block*/
+                                                }
+						if( g_sb_read_cache.sb_array[n] != (void*)BH_ACCESS_IS_NON_MDATA )
+                                                {
+                                                        n_lbs_read++;
+                                                }
+						 
+					}
+				}
+				bdrom_metadata_cache_update_reads(&g_sb_read_cache, n_lbs_read);
+			}
+			if( bdrom_metadata_cache_check_bh(g_sb_read_cache.sb_array[lbn]) != -1 )
+			{
+				udf_debug("M _sb_bread() - reading block [%d] from MEM\n", lbn);
+				g_sb_read_cache.m_dollarMap.sb_access_count[lbn]++;
+				g_sb_read_cache.p_latest_buffer_head = g_sb_read_cache.sb_array[lbn];
+				return g_sb_read_cache.sb_array[lbn];
+			}
+		}
+	}
+	//printk("_sb_bread::cache-miss-LBN(%d)\n", lbn);
+	p_ret = sb_bread(sb, lbn);
+	return p_ret;
+}
+
+void* _sb_bread(struct super_block *sb, int lbn)
+{
+	int policy = bdrom_get_policy();
+	switch(policy)
+	{
+		case 0:
+			return __simpler_sb_bread(sb, lbn);
+		case 1:
+			return __intelligent_sb_bread(sb, lbn);
+		case 2:
+			return __more_intelligent_sb_bread(sb, lbn);
+		default:
+			printk("_sb_bread::unexpected corner case-1 reached.\n");
+			return __simpler_sb_bread(sb, lbn);
+	}
+	//printk("_sb_bread::unexpected corner case-2 reached.\n");
+	return __simpler_sb_bread(sb, lbn);
+}
+
+void udf_release_data(struct buffer_head *bh)
+{
+	if(!bh)
+		return;
+	if((g_sb_read_cache.m_isBdRom_01 == 1) &&
+	   (g_sb_read_cache.m_magicNumber == SB_READ_CACHE_MAGIC_NUM)){
+		if(bdrom_metadata_cache_is_mine(&g_sb_read_cache, (void*)bh) == 1){
+			/*printk("udf_release_data::cached-buff-head(%d)\n", (int)bh);*/
+			return;
+		}
+	}
+	brelse(bh);
+	return;
+}
+#endif
+
+#if defined (NON_CACHED_METADATA_BDROM)
+int bdrom_metadata_cache_on_init_udf(bdrom_metadata_cache *p_this, int is_bdrom_01)
+{
+	return 0;
+}
+
+int bdrom_metadata_cache_cleanup(bdrom_metadata_cache *p_this)
+{
+	return 0;
+}
+
+void *_sb_bread(struct super_block *sb, int lbn)
+{
+	return sb_bread(sb, lbn);
+}
+
+void udf_release_data(struct buffer_head *bh)
+{
+	brelse(bh);
+}
+#endif
+#endif //by gyu
 struct logicalVolIntegrityDescImpUse *udf_sb_lvidiu(struct udf_sb_info *sbi)
 {
 	struct logicalVolIntegrityDesc *lvid =
@@ -135,8 +974,9 @@ static struct inode *udf_alloc_inode(struct super_block *sb)
 	ei->i_next_alloc_goal = 0;
 	ei->i_strat4096 = 0;
 	init_rwsem(&ei->i_data_sem);
-	ei->cached_extent.lstart = -1;
-	spin_lock_init(&ei->i_extent_cache_lock);
+	atomic_set(&ei->extent_desc_cache.ref_count, 0);
+	memset(&ei->recent_access, 0, sizeof(udf_extent_cache));
+	ei->recent_access.udf_pos.block_id = -1;
 
 	return &ei->vfs_inode;
 }
@@ -212,6 +1052,7 @@ struct udf_options {
 	umode_t fmode;
 	umode_t dmode;
 	struct nls_table *nls_map;
+	unsigned int bdrom; //by gyu
 };
 
 static int __init init_udf_fs(void)
@@ -269,7 +1110,7 @@ static void udf_sb_free_bitmap(struct udf_bitmap *bitmap)
 
 	for (i = 0; i < nr_groups; i++)
 		if (bitmap->s_block_bitmap[i])
-			brelse(bitmap->s_block_bitmap[i]);
+			udf_release_data(bitmap->s_block_bitmap[i]);
 
 	if (size <= PAGE_SIZE)
 		kfree(bitmap);
@@ -292,7 +1133,7 @@ static void udf_free_partition(struct udf_part_map *map)
 		udf_sb_free_bitmap(map->s_fspace.s_bitmap);
 	if (map->s_partition_type == UDF_SPARABLE_MAP15)
 		for (i = 0; i < 4; i++)
-			brelse(map->s_type_specific.s_sparing.s_spar_map[i]);
+			udf_release_data(map->s_type_specific.s_sparing.s_spar_map[i]);
 	else if (map->s_partition_type == UDF_METADATA_MAP25) {
 		mdata = &map->s_type_specific.s_metadata;
 		iput(mdata->s_metadata_fe);
@@ -434,7 +1275,7 @@ enum {
 	Opt_anchor, Opt_volume, Opt_partition, Opt_fileset,
 	Opt_rootdir, Opt_utf8, Opt_iocharset,
 	Opt_err, Opt_uforget, Opt_uignore, Opt_gforget, Opt_gignore,
-	Opt_fmode, Opt_dmode
+	Opt_fmode, Opt_dmode, Opt_bdrom //by gyu
 };
 
 static const match_table_t tokens = {
@@ -465,6 +1306,7 @@ static const match_table_t tokens = {
 	{Opt_iocharset,	"iocharset=%s"},
 	{Opt_fmode,     "mode=%o"},
 	{Opt_dmode,     "dmode=%o"},
+	{Opt_bdrom, 	"bdrom"}, //by gyu
 	{Opt_err,	NULL}
 };
 
@@ -616,6 +1458,12 @@ static int udf_parse_options(char *options, struct udf_options *uopt,
 				return 0;
 			uopt->dmode = option & 0777;
 			break;
+#if 1 //by gyu
+		case Opt_bdrom:
+			printk("bdrom option identified.\n");
+			uopt->bdrom = 1;
+			break;
+#endif //by gyu
 		default:
 			pr_err("bad mount option \"%s\" or missing value\n", p);
 			return 0;
@@ -629,6 +1477,12 @@ static int udf_remount_fs(struct super_block *sb, int *flags, char *options)
 	struct udf_options uopt;
 	struct udf_sb_info *sbi = UDF_SB(sb);
 	int error = 0;
+
+	if (sbi->s_lvid_bh) {
+		int write_rev = le16_to_cpu(udf_sb_lvidiu(sbi)->minUDFWriteRev);
+		if (write_rev > UDF_MAX_WRITE_VERSION && !(*flags & MS_RDONLY))
+			return -EACCES;
+	}
 
 	uopt.flags = sbi->s_flags;
 	uopt.uid   = sbi->s_uid;
@@ -648,12 +1502,6 @@ static int udf_remount_fs(struct super_block *sb, int *flags, char *options)
 	sbi->s_fmode = uopt.fmode;
 	sbi->s_dmode = uopt.dmode;
 	write_unlock(&sbi->s_cred_lock);
-
-	if (sbi->s_lvid_bh) {
-		int write_rev = le16_to_cpu(udf_sb_lvidiu(sbi)->minUDFWriteRev);
-		if (write_rev > UDF_MAX_WRITE_VERSION)
-			*flags |= MS_RDONLY;
-	}
 
 	if ((*flags & MS_RDONLY) == (sb->s_flags & MS_RDONLY))
 		goto out_unlock;
@@ -702,7 +1550,7 @@ static loff_t udf_check_vsd(struct super_block *sb)
 					      (sector & (sb->s_blocksize - 1)));
 
 		if (vsd->stdIdent[0] == 0) {
-			brelse(bh);
+			udf_release_data(bh);
 			break;
 		} else if (!strncmp(vsd->stdIdent, VSD_STD_ID_CD001,
 				    VSD_STD_ID_LEN)) {
@@ -732,7 +1580,7 @@ static loff_t udf_check_vsd(struct super_block *sb)
 			; /* nothing */
 		else if (!strncmp(vsd->stdIdent, VSD_STD_ID_TEA01,
 				    VSD_STD_ID_LEN)) {
-			brelse(bh);
+			udf_release_data(bh);
 			break;
 		} else if (!strncmp(vsd->stdIdent, VSD_STD_ID_NSR02,
 				    VSD_STD_ID_LEN))
@@ -740,7 +1588,7 @@ static loff_t udf_check_vsd(struct super_block *sb)
 		else if (!strncmp(vsd->stdIdent, VSD_STD_ID_NSR03,
 				    VSD_STD_ID_LEN))
 			nsr03 = sector;
-		brelse(bh);
+		udf_release_data(bh);
 	}
 
 	if (nsr03)
@@ -769,7 +1617,7 @@ static int udf_find_fileset(struct super_block *sb,
 		if (!bh) {
 			return 1;
 		} else if (ident != TAG_IDENT_FSD) {
-			brelse(bh);
+			udf_release_data(bh);
 			return 1;
 		}
 
@@ -811,7 +1659,7 @@ static int udf_find_fileset(struct super_block *sb,
 						((le32_to_cpu(sp->numOfBytes) +
 						  sizeof(struct spaceBitmapDesc)
 						  - 1) >> sb->s_blocksize_bits);
-					brelse(bh);
+					udf_release_data(bh);
 					break;
 				}
 				case TAG_IDENT_FSD:
@@ -819,7 +1667,7 @@ static int udf_find_fileset(struct super_block *sb,
 					break;
 				default:
 					newfileset.logicalBlockNum++;
-					brelse(bh);
+					udf_release_data(bh);
 					bh = NULL;
 					break;
 				}
@@ -837,33 +1685,44 @@ static int udf_find_fileset(struct super_block *sb,
 
 		sbi->s_partition = fileset->partitionReferenceNum;
 		udf_load_fileset(sb, bh, root);
-		brelse(bh);
+		udf_release_data(bh);
 		return 0;
 	}
 	return 1;
 }
 
+/*
+ * Load primary Volume Descriptor Sequence
+ *
+ * Return <0 on error, 0 on success. -EAGAIN is special meaning next sequence
+ * should be tried.
+ */
 static int udf_load_pvoldesc(struct super_block *sb, sector_t block)
 {
 	struct primaryVolDesc *pvoldesc;
 	struct ustr *instr, *outstr;
 	struct buffer_head *bh;
 	uint16_t ident;
-	int ret = 1;
+	int ret = -ENOMEM;
 
 	instr = kmalloc(sizeof(struct ustr), GFP_NOFS);
 	if (!instr)
-		return 1;
+		return -ENOMEM;
 
 	outstr = kmalloc(sizeof(struct ustr), GFP_NOFS);
 	if (!outstr)
 		goto out1;
 
 	bh = udf_read_tagged(sb, block, block, &ident);
-	if (!bh)
+	if (!bh) {
+		ret = -EAGAIN;
 		goto out2;
+	}
 
-	BUG_ON(ident != TAG_IDENT_PVD);
+	if (ident != TAG_IDENT_PVD) {
+		ret = -EIO;
+		goto out_bh;
+	}
 
 	pvoldesc = (struct primaryVolDesc *)bh->b_data;
 
@@ -889,8 +1748,9 @@ static int udf_load_pvoldesc(struct super_block *sb, sector_t block)
 		if (udf_CS0toUTF8(outstr, instr))
 			udf_debug("volSetIdent[] = '%s'\n", outstr->u_name);
 
-	brelse(bh);
 	ret = 0;
+out_bh:
+	udf_release_data(bh);
 out2:
 	kfree(outstr);
 out1:
@@ -926,7 +1786,10 @@ static int udf_load_metadata_files(struct super_block *sb, int partition)
 	struct udf_part_map *map;
 	struct udf_meta_data *mdata;
 	struct kernel_lb_addr addr;
+	int mdata_number_iscorrect=0;
+	int i;
 
+restart:
 	map = &sbi->s_partmaps[partition];
 	mdata = &map->s_type_specific.s_metadata;
 
@@ -936,6 +1799,17 @@ static int udf_load_metadata_files(struct super_block *sb, int partition)
 
 	mdata->s_metadata_fe = udf_find_metadata_inode_efe(sb,
 		mdata->s_meta_file_loc, map->s_partition_num);
+	
+	if (mdata->s_metadata_fe == NULL && !mdata_number_iscorrect){
+		for (i = 0; i < sbi->s_partitions ; i++)
+			if(sbi->s_partmaps[i].s_partition_type == UDF_TYPE1_MAP15  ||
+			   sbi->s_partmaps[i].s_partition_type == UDF_SPARABLE_MAP15)
+				break;
+		udf_debug("Correct Metadata Partition number from: %d, to %d\n",sbi->s_partmaps[i].s_partition_num, i);
+		sbi->s_partmaps[partition].s_partition_num = i;
+		mdata_number_iscorrect=1;
+		goto restart;
+	}
 
 	if (mdata->s_metadata_fe == NULL) {
 		/* mirror file entry */
@@ -947,7 +1821,7 @@ static int udf_load_metadata_files(struct super_block *sb, int partition)
 
 		if (mdata->s_mirror_fe == NULL) {
 			udf_err(sb, "Both metadata and mirror metadata inode efe can not found\n");
-			goto error_exit;
+			return -EIO;
 		}
 	}
 
@@ -964,23 +1838,18 @@ static int udf_load_metadata_files(struct super_block *sb, int partition)
 			  addr.logicalBlockNum, addr.partitionReferenceNum);
 
 		mdata->s_bitmap_fe = udf_iget(sb, &addr);
-
 		if (mdata->s_bitmap_fe == NULL) {
 			if (sb->s_flags & MS_RDONLY)
 				udf_warn(sb, "bitmap inode efe not found but it's ok since the disc is mounted read-only\n");
 			else {
 				udf_err(sb, "bitmap inode efe not found and attempted read-write mount\n");
-				goto error_exit;
+				return -EIO;
 			}
 		}
 	}
 
 	udf_debug("udf_load_metadata_files Ok\n");
-
 	return 0;
-
-error_exit:
-	return 1;
 }
 
 static void udf_load_fileset(struct super_block *sb, struct buffer_head *bh,
@@ -1069,7 +1938,7 @@ static int udf_fill_partdesc_info(struct super_block *sb,
 		if (!map->s_uspace.s_table) {
 			udf_debug("cannot load unallocSpaceTable (part %d)\n",
 				  p_index);
-			return 1;
+			return -EIO;
 		}
 		map->s_partition_flags |= UDF_PART_FLAG_UNALLOC_TABLE;
 		udf_debug("unallocSpaceTable (part %d) @ %ld\n",
@@ -1079,7 +1948,7 @@ static int udf_fill_partdesc_info(struct super_block *sb,
 	if (phd->unallocSpaceBitmap.extLength) {
 		struct udf_bitmap *bitmap = udf_sb_alloc_bitmap(sb, p_index);
 		if (!bitmap)
-			return 1;
+			return -ENOMEM;
 		map->s_uspace.s_bitmap = bitmap;
 		bitmap->s_extPosition = le32_to_cpu(
 				phd->unallocSpaceBitmap.extPosition);
@@ -1102,7 +1971,7 @@ static int udf_fill_partdesc_info(struct super_block *sb,
 		if (!map->s_fspace.s_table) {
 			udf_debug("cannot load freedSpaceTable (part %d)\n",
 				  p_index);
-			return 1;
+			return -EIO;
 		}
 
 		map->s_partition_flags |= UDF_PART_FLAG_FREED_TABLE;
@@ -1113,7 +1982,7 @@ static int udf_fill_partdesc_info(struct super_block *sb,
 	if (phd->freedSpaceBitmap.extLength) {
 		struct udf_bitmap *bitmap = udf_sb_alloc_bitmap(sb, p_index);
 		if (!bitmap)
-			return 1;
+			return -ENOMEM;
 		map->s_fspace.s_bitmap = bitmap;
 		bitmap->s_extPosition = le32_to_cpu(
 				phd->freedSpaceBitmap.extPosition);
@@ -1165,7 +2034,7 @@ static int udf_load_vat(struct super_block *sb, int p_index, int type1_index)
 		udf_find_vat_block(sb, p_index, type1_index, blocks - 1);
 	}
 	if (!sbi->s_vat_inode)
-		return 1;
+		return -EIO;
 
 	if (map->s_partition_type == UDF_VIRTUAL_MAP15) {
 		map->s_type_specific.s_virtual.s_start_offset = 0;
@@ -1177,7 +2046,7 @@ static int udf_load_vat(struct super_block *sb, int p_index, int type1_index)
 			pos = udf_block_map(sbi->s_vat_inode, 0);
 			bh = sb_bread(sb, pos);
 			if (!bh)
-				return 1;
+				return -EIO;
 			vat20 = (struct virtualAllocationTable20 *)bh->b_data;
 		} else {
 			vat20 = (struct virtualAllocationTable20 *)
@@ -1190,11 +2059,17 @@ static int udf_load_vat(struct super_block *sb, int p_index, int type1_index)
 			(sbi->s_vat_inode->i_size -
 				map->s_type_specific.s_virtual.
 					s_start_offset) >> 2;
-		brelse(bh);
+		udf_release_data(bh);
 	}
 	return 0;
 }
 
+/*
+ * Load partition descriptor block
+ *
+ * Returns <0 on error, 0 on success, -EAGAIN is special - try next descriptor
+ * sequence.
+ */
 static int udf_load_partdesc(struct super_block *sb, sector_t block)
 {
 	struct buffer_head *bh;
@@ -1204,13 +2079,15 @@ static int udf_load_partdesc(struct super_block *sb, sector_t block)
 	int i, type1_idx;
 	uint16_t partitionNumber;
 	uint16_t ident;
-	int ret = 0;
+	int ret;
 
 	bh = udf_read_tagged(sb, block, block, &ident);
 	if (!bh)
-		return 1;
-	if (ident != TAG_IDENT_PD)
+		return -EAGAIN;
+	if (ident != TAG_IDENT_PD) {
+		ret = 0;
 		goto out_bh;
+	}
 
 	p = (struct partitionDesc *)bh->b_data;
 	partitionNumber = le16_to_cpu(p->partitionNumber);
@@ -1229,10 +2106,13 @@ static int udf_load_partdesc(struct super_block *sb, sector_t block)
 	if (i >= sbi->s_partitions) {
 		udf_debug("Partition (%d) not found in partition map\n",
 			  partitionNumber);
+		ret = 0;
 		goto out_bh;
 	}
 
 	ret = udf_fill_partdesc_info(sb, p, i);
+	if (ret < 0)
+		goto out_bh;
 
 	/*
 	 * Now rescan for VIRTUAL or METADATA partitions when SPARABLE and
@@ -1249,35 +2129,40 @@ static int udf_load_partdesc(struct super_block *sb, sector_t block)
 			break;
 	}
 
-	if (i >= sbi->s_partitions)
+	if (i >= sbi->s_partitions) {
+		ret = 0;
 		goto out_bh;
+	}
 
 	ret = udf_fill_partdesc_info(sb, p, i);
-	if (ret)
+	if (ret < 0)
 		goto out_bh;
 
 	if (map->s_partition_type == UDF_METADATA_MAP25) {
 		ret = udf_load_metadata_files(sb, i);
-		if (ret) {
+		if (ret < 0) {
 			udf_err(sb, "error loading MetaData partition map %d\n",
 				i);
 			goto out_bh;
 		}
 	} else {
-		ret = udf_load_vat(sb, i, type1_idx);
-		if (ret)
-			goto out_bh;
 		/*
-		 * Mark filesystem read-only if we have a partition with
-		 * virtual map since we don't handle writing to it (we
-		 * overwrite blocks instead of relocating them).
+		 * If we have a partition with virtual map, we don't handle
+		 * writing to it (we overwrite blocks instead of relocating
+		 * them).
 		 */
-		sb->s_flags |= MS_RDONLY;
-		pr_notice("Filesystem marked read-only because writing to pseudooverwrite partition is not implemented\n");
+		if (!(sb->s_flags & MS_RDONLY)) {
+			ret = -EACCES;
+			goto out_bh;
+		}
+		ret = udf_load_vat(sb, i, type1_idx);
+		if (ret < 0)
+			goto out_bh;
 	}
+	ret = 0;
 out_bh:
 	/* In case loading failed, we handle cleanup in udf_fill_super */
-	brelse(bh);
+	udf_release_data(bh);
 	return ret;
 }
 
@@ -1319,7 +2204,7 @@ static int udf_load_sparable_map(struct super_block *sb,
 			    strlen(UDF_ID_SPARING)) ||
 		    sizeof(*st) + le16_to_cpu(st->reallocationTableLen) >
 							sb->s_blocksize) {
-			brelse(bh);
+			udf_release_data(bh);
 			continue;
 		}
 
@@ -1340,11 +2225,11 @@ static int udf_load_logicalvol(struct super_block *sb, sector_t block,
 	uint16_t ident;
 	struct buffer_head *bh;
 	unsigned int table_len;
-	int ret = 0;
+	int ret;
 
 	bh = udf_read_tagged(sb, block, block, &ident);
 	if (!bh)
-		return 1;
+		return -EAGAIN;
 	BUG_ON(ident != TAG_IDENT_LVD);
 	lvd = (struct logicalVolDesc *)bh->b_data;
 	table_len = le32_to_cpu(lvd->mapTableLength);
@@ -1352,7 +2237,7 @@ static int udf_load_logicalvol(struct super_block *sb, sector_t block,
 		udf_err(sb, "error loading logical volume descriptor: "
 			"Partition table too long (%u > %lu)\n", table_len,
 			sb->s_blocksize - sizeof(*lvd));
-		ret = 1;
+		ret = -EIO;
 		goto out_bh;
 	}
 
@@ -1396,11 +2281,10 @@ static int udf_load_logicalvol(struct super_block *sb, sector_t block,
 			} else if (!strncmp(upm2->partIdent.ident,
 						UDF_ID_SPARABLE,
 						strlen(UDF_ID_SPARABLE))) {
-				if (udf_load_sparable_map(sb, map,
-				    (struct sparablePartitionMap *)gpm) < 0) {
-					ret = 1;
+				ret = udf_load_sparable_map(sb, map,
+					(struct sparablePartitionMap *)gpm);
+				if (ret < 0)
 					goto out_bh;
-				}
 			} else if (!strncmp(upm2->partIdent.ident,
 						UDF_ID_METADATA,
 						strlen(UDF_ID_METADATA))) {
@@ -1465,9 +2349,9 @@ static int udf_load_logicalvol(struct super_block *sb, sector_t block,
 	}
 	if (lvd->integritySeqExt.extLength)
 		udf_load_logicalvolint(sb, leea_to_cpu(lvd->integritySeqExt));
-
+	ret = 0;
 out_bh:
-	brelse(bh);
+	udf_release_data(bh);
 	return ret;
 }
 
@@ -1494,31 +2378,27 @@ static void udf_load_logicalvolint(struct super_block *sb, struct kernel_extent_
 				leea_to_cpu(lvid->nextIntegrityExt));
 
 		if (sbi->s_lvid_bh != bh)
-			brelse(bh);
+			udf_release_data(bh);
 		loc.extLength -= sb->s_blocksize;
 		loc.extLocation++;
 	}
 	if (sbi->s_lvid_bh != bh)
-		brelse(bh);
+		udf_release_data(bh);
 }
 
 /*
- * udf_process_sequence
+ * Process a main/reserve volume descriptor sequence.
+ *   @block		First block of first extent of the sequence.
+ *   @lastblock		Lastblock of first extent of the sequence.
+ *   @fileset		There we store extent containing root fileset
  *
- * PURPOSE
- *	Process a main/reserve volume descriptor sequence.
- *
- * PRE-CONDITIONS
- *	sb			Pointer to _locked_ superblock.
- *	block			First block of first extent of the sequence.
- *	lastblock		Lastblock of first extent of the sequence.
- *
- * HISTORY
- *	July 1, 1997 - Andrew E. Mileski
- *	Written, tested, and released.
+ * Returns <0 on error, 0 on success. -EAGAIN is special - try next descriptor
+ * sequence
  */
-static noinline int udf_process_sequence(struct super_block *sb, long block,
-				long lastblock, struct kernel_lb_addr *fileset)
+static noinline int udf_process_sequence(
+		struct super_block *sb,
+		sector_t block, sector_t lastblock,
+		struct kernel_lb_addr *fileset)
 {
 	struct buffer_head *bh = NULL;
 	struct udf_vds_record vds[VDS_POS_LENGTH];
@@ -1529,6 +2409,7 @@ static noinline int udf_process_sequence(struct super_block *sb, long block,
 	uint32_t vdsn;
 	uint16_t ident;
 	long next_s = 0, next_e = 0;
+	int ret;
 
 	memset(vds, 0, sizeof(struct udf_vds_record) * VDS_POS_LENGTH);
 
@@ -1543,7 +2424,7 @@ static noinline int udf_process_sequence(struct super_block *sb, long block,
 			udf_err(sb,
 				"Block %llu of volume descriptor sequence is corrupted or we could not read it\n",
 				(unsigned long long)block);
-			return 1;
+			return -EAGAIN;
 		}
 
 		/* Process each descriptor (ISO 13346 3/8.3-8.4) */
@@ -1608,7 +2489,7 @@ static noinline int udf_process_sequence(struct super_block *sb, long block,
 				done = 1;
 			break;
 		}
-		brelse(bh);
+		udf_release_data(bh);
 	}
 	/*
 	 * Now read interesting descriptors again and process them
@@ -1616,14 +2497,19 @@ static noinline int udf_process_sequence(struct super_block *sb, long block,
 	 */
 	if (!vds[VDS_POS_PRIMARY_VOL_DESC].block) {
 		udf_err(sb, "Primary Volume Descriptor not found!\n");
-		return 1;
+		return -EAGAIN;
 	}
-	if (udf_load_pvoldesc(sb, vds[VDS_POS_PRIMARY_VOL_DESC].block))
-		return 1;
+	ret = udf_load_pvoldesc(sb, vds[VDS_POS_PRIMARY_VOL_DESC].block);
+	if (ret < 0)
+		return ret;
 
-	if (vds[VDS_POS_LOGICAL_VOL_DESC].block && udf_load_logicalvol(sb,
-	    vds[VDS_POS_LOGICAL_VOL_DESC].block, fileset))
-		return 1;
+	if (vds[VDS_POS_LOGICAL_VOL_DESC].block) {
+		ret = udf_load_logicalvol(sb,
+					  vds[VDS_POS_LOGICAL_VOL_DESC].block,
+					  fileset);
+		if (ret < 0)
+			return ret;
+	}
 
 	if (vds[VDS_POS_PARTITION_DESC].block) {
 		/*
@@ -1632,19 +2518,27 @@ static noinline int udf_process_sequence(struct super_block *sb, long block,
 		 */
 		for (block = vds[VDS_POS_PARTITION_DESC].block;
 		     block < vds[VDS_POS_TERMINATING_DESC].block;
-		     block++)
-			if (udf_load_partdesc(sb, block))
-				return 1;
+		     block++) {
+			ret = udf_load_partdesc(sb, block);
+			if (ret < 0)
+				return ret;
+		}
 	}
 
 	return 0;
 }
 
+/*
+ * Load Volume Descriptor Sequence described by anchor in bh
+ *
+ * Returns <0 on error, 0 on success
+ */
 static int udf_load_sequence(struct super_block *sb, struct buffer_head *bh,
 			     struct kernel_lb_addr *fileset)
 {
 	struct anchorVolDescPtr *anchor;
-	long main_s, main_e, reserve_s, reserve_e;
+	sector_t main_s, main_e, reserve_s, reserve_e;
+	int ret;
 
 	anchor = (struct anchorVolDescPtr *)bh->b_data;
 
@@ -1662,18 +2556,26 @@ static int udf_load_sequence(struct super_block *sb, struct buffer_head *bh,
 
 	/* Process the main & reserve sequences */
 	/* responsible for finding the PartitionDesc(s) */
-	if (!udf_process_sequence(sb, main_s, main_e, fileset))
-		return 1;
+	ret = udf_process_sequence(sb, main_s, main_e, fileset);
+	if (ret != -EAGAIN)
+		return ret;
 	udf_sb_free_partitions(sb);
-	if (!udf_process_sequence(sb, reserve_s, reserve_e, fileset))
-		return 1;
-	udf_sb_free_partitions(sb);
-	return 0;
+	ret = udf_process_sequence(sb, reserve_s, reserve_e, fileset);
+	if (ret < 0) {
+		udf_sb_free_partitions(sb);
+		/* No sequence was OK, return -EIO */
+		if (ret == -EAGAIN)
+			ret = -EIO;
+	}
+	return ret;
 }
 
 /*
  * Check whether there is an anchor block in the given block and
  * load Volume Descriptor Sequence if so.
+ *
+ * Returns <0 on error, 0 on success, -EAGAIN is special - try next anchor
+ * block
  */
 static int udf_check_anchor_block(struct super_block *sb, sector_t block,
 				  struct kernel_lb_addr *fileset)
@@ -1681,37 +2583,57 @@ static int udf_check_anchor_block(struct super_block *sb, sector_t block,
 	struct buffer_head *bh;
 	uint16_t ident;
 	int ret;
+	struct timeval t1, t2;
 
 	if (UDF_QUERY_FLAG(sb, UDF_FLAG_VARCONV) &&
 	    udf_fixed_to_variable(block) >=
 	    sb->s_bdev->bd_inode->i_size >> sb->s_blocksize_bits)
-		return 0;
+		return -EAGAIN;
 
+	jiffies_to_timeval(jiffies, &t1);
 	bh = udf_read_tagged(sb, block, block, &ident);
+	jiffies_to_timeval(jiffies, &t2);
+	if (!bh && ((t2.tv_sec - t1.tv_sec) > 2)) {
+        	timeouts++;
+                udf_debug("%s: udf_read_tagged timeout block %d\n",
+                          __FUNCTION__, (int)block);
+        }
+        else if (!bh) {
+                read_errors++;
+                udf_debug("%s: udf_read_tagged error block %d\n",
+                          __FUNCTION__, (int)block);
+        }
 	if (!bh)
-		return 0;
+		return -EAGAIN;
 	if (ident != TAG_IDENT_AVDP) {
-		brelse(bh);
-		return 0;
+		udf_release_data(bh);
+		return -EAGAIN;
 	}
 	ret = udf_load_sequence(sb, bh, fileset);
-	brelse(bh);
+	udf_release_data(bh);
 	return ret;
 }
 
-/* Search for an anchor volume descriptor pointer */
-static sector_t udf_scan_anchors(struct super_block *sb, sector_t lastblock,
-				 struct kernel_lb_addr *fileset)
+/*
+ * Search for an anchor volume descriptor pointer.
+ *
+ * Returns < 0 on error, 0 on success. -EAGAIN is special - try next set
+ * of anchors.
+ */
+static int udf_scan_anchors(struct super_block *sb, sector_t *lastblock,
+			    struct kernel_lb_addr *fileset)
 {
 	sector_t last[6];
 	int i;
 	struct udf_sb_info *sbi = UDF_SB(sb);
 	int last_count = 0;
+	int ret;
 
 	/* First try user provided anchor */
 	if (sbi->s_anchor) {
-		if (udf_check_anchor_block(sb, sbi->s_anchor, fileset))
-			return lastblock;
+		ret = udf_check_anchor_block(sb, sbi->s_anchor, fileset);
+		if (ret != -EAGAIN)
+			return ret;
 	}
 	/*
 	 * according to spec, anchor is in either:
@@ -1720,39 +2642,58 @@ static sector_t udf_scan_anchors(struct super_block *sb, sector_t lastblock,
 	 *     lastblock
 	 *  however, if the disc isn't closed, it could be 512.
 	 */
-	if (udf_check_anchor_block(sb, sbi->s_session + 256, fileset))
-		return lastblock;
+	ret = udf_check_anchor_block(sb, sbi->s_session + 256, fileset);
+	if (ret != -EAGAIN)
+		return ret;
 	/*
 	 * The trouble is which block is the last one. Drives often misreport
 	 * this so we try various possibilities.
 	 */
-	last[last_count++] = lastblock;
-	if (lastblock >= 1)
-		last[last_count++] = lastblock - 1;
-	last[last_count++] = lastblock + 1;
-	if (lastblock >= 2)
-		last[last_count++] = lastblock - 2;
-	if (lastblock >= 150)
-		last[last_count++] = lastblock - 150;
-	if (lastblock >= 152)
-		last[last_count++] = lastblock - 152;
+	last[last_count++] = *lastblock;
+	if (*lastblock >= 1)
+		last[last_count++] = *lastblock - 1;
+	last[last_count++] = *lastblock + 1;
+	if (*lastblock >= 2)
+		last[last_count++] = *lastblock - 2;
+	if (*lastblock >= 150)
+		last[last_count++] = *lastblock - 150;
+	if (*lastblock >= 152)
+		last[last_count++] = *lastblock - 152;
 
 	for (i = 0; i < last_count; i++) {
 		if (last[i] >= sb->s_bdev->bd_inode->i_size >>
 				sb->s_blocksize_bits)
 			continue;
-		if (udf_check_anchor_block(sb, last[i], fileset))
-			return last[i];
+		ret = udf_check_anchor_block(sb, last[i], fileset);
+		if (ret != -EAGAIN) {
+			if (!ret)
+				*lastblock = last[i];
+			return ret;
+		}
+		if ((timeouts > 2) || (read_errors > 12)) {
+                        udf_debug("%s: error limit1\n",
+                                  __FUNCTION__);
+                        timeouts = read_errors = 0;
+                        break;
+                }
 		if (last[i] < 256)
 			continue;
-		if (udf_check_anchor_block(sb, last[i] - 256, fileset))
-			return last[i];
+		ret = udf_check_anchor_block(sb, last[i] - 256, fileset);
+		if (ret != -EAGAIN) {
+			if (!ret)
+				*lastblock = last[i];
+			return ret;
+		}
+		if ((timeouts > 2) || (read_errors > 12)) {
+                        udf_debug("%s: error limit2\n",
+                                  __FUNCTION__);
+                        timeouts = read_errors = 0;
+                        break;
+                }
 	}
 
 	/* Finally try block 512 in case media is open */
-	if (udf_check_anchor_block(sb, sbi->s_session + 512, fileset))
-		return last[0];
-	return 0;
+	return udf_check_anchor_block(sb, sbi->s_session + 512, fileset);
 }
 
 /*
@@ -1760,54 +2701,61 @@ static sector_t udf_scan_anchors(struct super_block *sb, sector_t lastblock,
  * area specified by it. The function expects sbi->s_lastblock to be the last
  * block on the media.
  *
- * Return 1 if ok, 0 if not found.
- *
+ * Return <0 on error, 0 if anchor found. -EAGAIN is special meaning anchor
+ * was not found.
  */
 static int udf_find_anchor(struct super_block *sb,
 			   struct kernel_lb_addr *fileset)
 {
-	sector_t lastblock;
 	struct udf_sb_info *sbi = UDF_SB(sb);
+	sector_t lastblock = sbi->s_last_block;
+	int ret;
 
-	lastblock = udf_scan_anchors(sb, sbi->s_last_block, fileset);
-	if (lastblock)
+	timeouts = read_errors = 0;
+
+	ret = udf_scan_anchors(sb, &lastblock, fileset);
+	if (ret != -EAGAIN)
 		goto out;
 
 	/* No anchor found? Try VARCONV conversion of block numbers */
 	UDF_SET_FLAG(sb, UDF_FLAG_VARCONV);
+	lastblock = udf_variable_to_fixed(sbi->s_last_block);
 	/* Firstly, we try to not convert number of the last block */
-	lastblock = udf_scan_anchors(sb,
-				udf_variable_to_fixed(sbi->s_last_block),
-				fileset);
-	if (lastblock)
+	ret = udf_scan_anchors(sb, &lastblock, fileset);
+	if (ret != -EAGAIN)
 		goto out;
 
+	lastblock = sbi->s_last_block;
 	/* Secondly, we try with converted number of the last block */
-	lastblock = udf_scan_anchors(sb, sbi->s_last_block, fileset);
-	if (!lastblock) {
+	ret = udf_scan_anchors(sb, &lastblock, fileset);
+	if (ret < 0) {
 		/* VARCONV didn't help. Clear it. */
 		UDF_CLEAR_FLAG(sb, UDF_FLAG_VARCONV);
-		return 0;
 	}
 out:
-	sbi->s_last_block = lastblock;
-	return 1;
+	if (ret == 0)
+		sbi->s_last_block = lastblock;
+	return ret;
 }
 
 /*
  * Check Volume Structure Descriptor, find Anchor block and load Volume
- * Descriptor Sequence
+ * Descriptor Sequence.
+ *
+ * Returns < 0 on error, 0 on success. -EAGAIN is special meaning anchor
+ * block was not found.
  */
 static int udf_load_vrs(struct super_block *sb, struct udf_options *uopt,
 			int silent, struct kernel_lb_addr *fileset)
 {
 	struct udf_sb_info *sbi = UDF_SB(sb);
 	loff_t nsr_off;
+	int ret;
 
 	if (!sb_set_blocksize(sb, uopt->blocksize)) {
 		if (!silent)
 			udf_warn(sb, "Bad block size\n");
-		return 0;
+		return -EINVAL;
 	}
 	sbi->s_last_block = uopt->lastblock;
 	if (!uopt->novrs) {
@@ -1828,12 +2776,13 @@ static int udf_load_vrs(struct super_block *sb, struct udf_options *uopt,
 
 	/* Look for anchor block and load Volume Descriptor Sequence */
 	sbi->s_anchor = uopt->anchor;
-	if (!udf_find_anchor(sb, fileset)) {
-		if (!silent)
+	ret = udf_find_anchor(sb, fileset);
+	if (ret < 0) {
+		if (!silent && ret == -EAGAIN)
 			udf_warn(sb, "No anchor found\n");
-		return 0;
+		return ret;
 	}
-	return 1;
+	return 0;
 }
 
 static void udf_open_lvid(struct super_block *sb)
@@ -1939,7 +2888,7 @@ u64 lvid_get_unique_id(struct super_block *sb)
 
 static int udf_fill_super(struct super_block *sb, void *options, int silent)
 {
-	int ret;
+	int ret = -EINVAL;
 	struct inode *inode = NULL;
 	struct udf_options uopt;
 	struct kernel_lb_addr rootdir, fileset;
@@ -1951,6 +2900,7 @@ static int udf_fill_super(struct super_block *sb, void *options, int silent)
 	uopt.umask = 0;
 	uopt.fmode = UDF_INVALID_MODE;
 	uopt.dmode = UDF_INVALID_MODE;
+	uopt.bdrom = 0;
 
 	sbi = kzalloc(sizeof(struct udf_sb_info), GFP_KERNEL);
 	if (!sbi)
@@ -1962,7 +2912,7 @@ static int udf_fill_super(struct super_block *sb, void *options, int silent)
 
 	if (!udf_parse_options((char *)options, &uopt, false))
 		goto error_out;
-
+	bdrom_metadata_cache_on_init_udf(&g_sb_read_cache, uopt.bdrom); //by gyu
 	if (uopt.flags & (1 << UDF_FLAG_UTF8) &&
 	    uopt.flags & (1 << UDF_FLAG_NLS_MAP)) {
 		udf_err(sb, "utf8 cannot be combined with iocharset\n");
@@ -2011,7 +2961,7 @@ static int udf_fill_super(struct super_block *sb, void *options, int silent)
 	} else {
 		uopt.blocksize = bdev_logical_block_size(sb->s_bdev);
 		ret = udf_load_vrs(sb, &uopt, silent, &fileset);
-		if (!ret && uopt.blocksize != UDF_DEFAULT_BLOCKSIZE) {
+		if (ret == -EAGAIN && uopt.blocksize != UDF_DEFAULT_BLOCKSIZE) {
 			if (!silent)
 				pr_notice("Rescanning with blocksize %d\n",
 					  UDF_DEFAULT_BLOCKSIZE);
@@ -2021,8 +2971,11 @@ static int udf_fill_super(struct super_block *sb, void *options, int silent)
 			ret = udf_load_vrs(sb, &uopt, silent, &fileset);
 		}
 	}
-	if (!ret) {
-		udf_warn(sb, "No partition found (1)\n");
+	if (ret < 0) {
+		if (ret == -EAGAIN) {
+			udf_warn(sb, "No partition found (1)\n");
+			ret = -EINVAL;
+		}
 		goto error_out;
 	}
 
@@ -2040,9 +2993,13 @@ static int udf_fill_super(struct super_block *sb, void *options, int silent)
 			udf_err(sb, "minUDFReadRev=%x (max is %x)\n",
 				le16_to_cpu(lvidiu->minUDFReadRev),
 				UDF_MAX_READ_VERSION);
+			ret = -EINVAL;
 			goto error_out;
-		} else if (minUDFWriteRev > UDF_MAX_WRITE_VERSION)
-			sb->s_flags |= MS_RDONLY;
+		} else if (minUDFWriteRev > UDF_MAX_WRITE_VERSION &&
+			   !(sb->s_flags & MS_RDONLY)) {
+			ret = -EACCES;
+			goto error_out;
+		}
 
 		sbi->s_udfrev = minUDFWriteRev;
 
@@ -2054,17 +3011,20 @@ static int udf_fill_super(struct super_block *sb, void *options, int silent)
 
 	if (!sbi->s_partitions) {
 		udf_warn(sb, "No partition found (2)\n");
+		ret = -EINVAL;
 		goto error_out;
 	}
 
 	if (sbi->s_partmaps[sbi->s_partition].s_partition_flags &
-			UDF_PART_FLAG_READ_ONLY) {
-		pr_notice("Partition marked readonly; forcing readonly mount\n");
-		sb->s_flags |= MS_RDONLY;
+			UDF_PART_FLAG_READ_ONLY &&
+	    !(sb->s_flags & MS_RDONLY)) {
+		ret = -EACCES;
+		goto error_out;
 	}
 
 	if (udf_find_fileset(sb, &fileset, &rootdir)) {
 		udf_warn(sb, "No fileset found\n");
+		ret = -EINVAL;
 		goto error_out;
 	}
 
@@ -2086,6 +3046,7 @@ static int udf_fill_super(struct super_block *sb, void *options, int silent)
 	if (!inode) {
 		udf_err(sb, "Error in udf_iget, block=%d, partition=%d\n",
 		       rootdir.logicalBlockNum, rootdir.partitionReferenceNum);
+		ret = -EIO;
 		goto error_out;
 	}
 
@@ -2093,6 +3054,7 @@ static int udf_fill_super(struct super_block *sb, void *options, int silent)
 	sb->s_root = d_make_root(inode);
 	if (!sb->s_root) {
 		udf_err(sb, "Couldn't allocate root dentry\n");
+		ret = -ENOMEM;
 		goto error_out;
 	}
 	sb->s_maxbytes = MAX_LFS_FILESIZE;
@@ -2108,12 +3070,13 @@ error_out:
 #endif
 	if (!(sb->s_flags & MS_RDONLY))
 		udf_close_lvid(sb);
-	brelse(sbi->s_lvid_bh);
+	udf_release_data(sbi->s_lvid_bh);
+	bdrom_metadata_cache_cleanup(&g_sb_read_cache);
 	udf_sb_free_partitions(sb);
 	kfree(sbi);
 	sb->s_fs_info = NULL;
 
-	return -EINVAL;
+	return ret;
 }
 
 void _udf_err(struct super_block *sb, const char *function,
@@ -2162,7 +3125,8 @@ static void udf_put_super(struct super_block *sb)
 #endif
 	if (!(sb->s_flags & MS_RDONLY))
 		udf_close_lvid(sb);
-	brelse(sbi->s_lvid_bh);
+	udf_release_data(sbi->s_lvid_bh);
+	bdrom_metadata_cache_cleanup(&g_sb_read_cache);
 	udf_sb_free_partitions(sb);
 	kfree(sb->s_fs_info);
 	sb->s_fs_info = NULL;
@@ -2235,7 +3199,7 @@ static unsigned int udf_count_free_bitmap(struct super_block *sb,
 		udf_err(sb, "udf_count_free failed\n");
 		goto out;
 	} else if (ident != TAG_IDENT_SBD) {
-		brelse(bh);
+		udf_release_data(bh);
 		udf_err(sb, "udf_count_free failed\n");
 		goto out;
 	}
@@ -2251,7 +3215,7 @@ static unsigned int udf_count_free_bitmap(struct super_block *sb,
 					cur_bytes * 8);
 		bytes -= cur_bytes;
 		if (bytes) {
-			brelse(bh);
+			udf_release_data(bh);
 			newblock = udf_get_lb_pblock(sb, &loc, ++block);
 			bh = udf_tread(sb, newblock);
 			if (!bh) {
@@ -2262,7 +3226,7 @@ static unsigned int udf_count_free_bitmap(struct super_block *sb,
 			ptr = (uint8_t *)bh->b_data;
 		}
 	}
-	brelse(bh);
+	udf_release_data(bh);
 out:
 	return accum;
 }
@@ -2284,7 +3248,7 @@ static unsigned int udf_count_free_table(struct super_block *sb,
 	while ((etype = udf_next_aext(table, &epos, &eloc, &elen, 1)) != -1)
 		accum += (elen >> table->i_sb->s_blocksize_bits);
 
-	brelse(epos.bh);
+	udf_release_data(epos.bh);
 	mutex_unlock(&UDF_SB(sb)->s_alloc_mutex);
 
 	return accum;

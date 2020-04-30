@@ -23,6 +23,7 @@
 
 #include <linux/rwsem.h>
 
+
 #define MAX_TOPO_LEVEL		6
 
 /* This file contains declarations of usbcore internals that are mostly
@@ -50,6 +51,7 @@
 #define USB_PID_STALL			0x1e
 #define USB_PID_MDATA			0x0f	/* USB 2.0 */
 
+
 /*-------------------------------------------------------------------------*/
 
 /*
@@ -66,6 +68,7 @@
  */
 
 /*-------------------------------------------------------------------------*/
+
 
 struct usb_hcd {
 
@@ -87,11 +90,17 @@ struct usb_hcd {
 #ifdef CONFIG_PM_RUNTIME
 	struct work_struct	wakeup_work;	/* for remote wakeup */
 #endif
-
 	/*
 	 * hardware info/state
 	 */
 	const struct hc_driver	*driver;	/* hw-specific hooks */
+
+#if defined(CONFIG_USB_NT72668_HCD)
+	unsigned long porcd;
+	unsigned long porcd2;
+	unsigned long modem_dongle;
+	unsigned long nvt_flag;
+#endif
 
 	/*
 	 * OTG and some Host controllers need software interaction with phys;
@@ -110,6 +119,9 @@ struct usb_hcd {
 #define HCD_FLAG_WAKEUP_PENDING		4	/* root hub is resuming? */
 #define HCD_FLAG_RH_RUNNING		5	/* root hub is running? */
 #define HCD_FLAG_DEAD			6	/* controller has died? */
+#if defined(CONFIG_USB_NT72668_HCD)
+#define HCD_FLAG_NRY			7
+#endif
 
 	/* The flags can be tested using these macros; they are likely to
 	 * be slightly faster than test_bit().
@@ -171,6 +183,7 @@ struct usb_hcd {
 
 #define	HC_IS_RUNNING(state) ((state) & __ACTIVE)
 #define	HC_IS_SUSPENDED(state) ((state) & __SUSPEND)
+
 
 	/* more shared queuing code would be good; it should support
 	 * smarter scheduling, handle transaction translators, etc;
@@ -347,6 +360,9 @@ struct hc_driver {
 		 * address is set
 		 */
 	int	(*update_device)(struct usb_hcd *, struct usb_device *);
+#if defined(CONFIG_USB_NT72668_HCD)
+	void	(*port_nc) (struct usb_hcd *);
+#endif
 	int	(*set_usb2_hw_lpm)(struct usb_hcd *, struct usb_device *, int);
 	/* USB 3.0 Link Power Management */
 		/* Returns the USB3 hub-encoded value for the U1/U2 timeout. */
@@ -358,6 +374,9 @@ struct hc_driver {
 	int	(*disable_usb3_lpm_timeout)(struct usb_hcd *,
 			struct usb_device *, enum usb3_link_state state);
 	int	(*find_raw_port_number)(struct usb_hcd *, int);
+#ifdef SAMSUNG_PATCH_OHCI_HANG_RECOVERY_DURING_KILL_URB
+	int	(*unlink_pending_urb)(struct usb_hcd *, struct urb*, int);
+#endif
 };
 
 extern int usb_hcd_link_urb_to_ep(struct usb_hcd *hcd, struct urb *urb);
@@ -367,6 +386,17 @@ extern void usb_hcd_unlink_urb_from_ep(struct usb_hcd *hcd, struct urb *urb);
 
 extern int usb_hcd_submit_urb(struct urb *urb, gfp_t mem_flags);
 extern int usb_hcd_unlink_urb(struct urb *urb, int status);
+#ifdef SAMSUNG_PATCH_OHCI_HANG_RECOVERY_DURING_KILL_URB
+extern int usb_unlink_pending_urbs(struct urb *urb);
+#endif
+
+#ifdef SAMSUNG_USB_FULL_SPEED_BT_MODIFY_GIVEBACK_URB
+extern void usb_hcd_prepare_urb_for_giveback(struct usb_hcd *hcd, struct urb *urb,
+                int status);
+extern void usb_hcd_full_speed_giveback_urb(struct usb_hcd *hcd, struct urb *urb,
+                int status);
+#endif
+
 extern void usb_hcd_giveback_urb(struct usb_hcd *hcd, struct urb *urb,
 		int status);
 extern int usb_hcd_map_urb_for_dma(struct usb_hcd *hcd, struct urb *urb,
@@ -410,7 +440,7 @@ extern int usb_hcd_pci_probe(struct pci_dev *dev,
 extern void usb_hcd_pci_remove(struct pci_dev *dev);
 extern void usb_hcd_pci_shutdown(struct pci_dev *dev);
 
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM
 extern const struct dev_pm_ops usb_hcd_pci_pm_ops;
 #endif
 #endif /* CONFIG_PCI */
@@ -601,6 +631,24 @@ static inline void usb_hcd_resume_root_hub(struct usb_hcd *hcd)
 	return;
 }
 #endif /* CONFIG_PM_RUNTIME */
+
+#ifdef CONFIG_USB_DEVICEFS
+
+/*
+ *  * these are expected to be called from the USB core/hub thread
+ *   * with the kernel lock held
+ *    */
+extern void usbfs_update_special(void);
+extern int usbfs_init(void);
+extern void usbfs_cleanup(void);
+
+#else /* CONFIG_USB_DEVICEFS */
+
+static inline void usbfs_update_special(void) {}
+static inline int usbfs_init(void) { return 0; }
+static inline void usbfs_cleanup(void) { }
+
+#endif /* CONFIG_USB_DEVICEFS */
 
 /*-------------------------------------------------------------------------*/
 

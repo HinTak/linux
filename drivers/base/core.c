@@ -304,8 +304,15 @@ static int dev_uevent(struct kset *kset, struct kobject *kobj,
 	if (dev->type && dev->type->name)
 		add_uevent_var(env, "DEVTYPE=%s", dev->type->name);
 
+	/*
+	 * dev->driver is set NULL under dev->udev_mutex so it should be
+	 * checked within dev->udev_mutex. This prevents a race between
+	 * dev_uevent and __device_release_driver.
+	 */
+	mutex_lock(&dev->udev_mutex);
 	if (dev->driver)
 		add_uevent_var(env, "DRIVER=%s", dev->driver->name);
+	mutex_unlock(&dev->udev_mutex);
 
 	/* Add common DT information about the device */
 	of_device_uevent(dev, env);
@@ -698,6 +705,7 @@ void device_initialize(struct device *dev)
 	kobject_init(&dev->kobj, &device_ktype);
 	INIT_LIST_HEAD(&dev->dma_pools);
 	mutex_init(&dev->mutex);
+	mutex_init(&dev->udev_mutex);
 	lockdep_set_novalidate_class(&dev->mutex);
 	spin_lock_init(&dev->devres_lock);
 	INIT_LIST_HEAD(&dev->devres_head);
@@ -1839,7 +1847,7 @@ EXPORT_SYMBOL_GPL(device_move);
  */
 void device_shutdown(void)
 {
-	struct device *dev;
+	struct device *dev, *parent;
 
 	spin_lock(&devices_kset->list_lock);
 	/*
@@ -1856,7 +1864,7 @@ void device_shutdown(void)
 		 * prevent it from being freed because parent's
 		 * lock is to be held
 		 */
-		get_device(dev->parent);
+		parent = get_device(dev->parent);
 		get_device(dev);
 		/*
 		 * Make sure the device is off the kset list, in the
@@ -1866,8 +1874,8 @@ void device_shutdown(void)
 		spin_unlock(&devices_kset->list_lock);
 
 		/* hold lock to avoid race with probe/release */
-		if (dev->parent)
-			device_lock(dev->parent);
+		if (parent)
+			device_lock(parent);
 		device_lock(dev);
 
 		/* Don't allow any more runtime suspends */
@@ -1885,11 +1893,11 @@ void device_shutdown(void)
 		}
 
 		device_unlock(dev);
-		if (dev->parent)
-			device_unlock(dev->parent);
+		if (parent)
+			device_unlock(parent);
 
 		put_device(dev);
-		put_device(dev->parent);
+		put_device(parent);
 
 		spin_lock(&devices_kset->list_lock);
 	}

@@ -114,14 +114,24 @@
 /* Number of isochronous URBs. */
 #define UVC_URBS		5
 /* Maximum number of packets per URB. */
-#define UVC_MAX_PACKETS		32
+#define UVC_MAX_PACKETS		(64*4)
 /* Maximum number of video buffers. */
 #define UVC_MAX_VIDEO_BUFFERS	32
 /* Maximum status buffer size in bytes of interrupt URB. */
 #define UVC_MAX_STATUS_SIZE	16
 
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+#define UVC_CTRL_TVCAM_UNIT	        0x06
+#define UVC_CTRL_TVCAM_SET_SELECTOR 0x0E
+#define UVC_CTRL_TVCAM_SET_PAUSE    0xE0
+#define UVC_CTRL_TVCAM_SET_RESUME   0xE1
+
+#define UVC_CTRL_CONTROL_TIMEOUT	3000
+#define UVC_CTRL_STREAMING_TIMEOUT	5000
+#else
 #define UVC_CTRL_CONTROL_TIMEOUT	300
 #define UVC_CTRL_STREAMING_TIMEOUT	5000
+#endif
 
 /* Maximum allowed number of control mappings per device */
 #define UVC_MAX_CONTROL_MAPPINGS	1024
@@ -238,7 +248,10 @@ struct uvc_entity {
 	char name[64];
 
 	/* Media controller-related fields. */
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
 	struct video_device *vdev;
+	struct video_device *vdev_sub;
+#endif
 	struct v4l2_subdev subdev;
 	unsigned int num_pads;
 	unsigned int num_links;
@@ -429,6 +442,9 @@ struct uvc_streaming {
 	struct list_head list;
 	struct uvc_device *dev;
 	struct video_device *vdev;
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+	struct video_device *vdev_sub;
+#endif
 	struct uvc_video_chain *chain;
 	atomic_t active;
 
@@ -454,6 +470,13 @@ struct uvc_streaming {
 	/* Buffers queue. */
 	unsigned int frozen : 1;
 	struct uvc_video_queue queue;
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+	struct uvc_video_queue queue_sub;
+	struct uvc_buffer *buf_video_curr;
+	atomic_t state_main;
+	atomic_t state_sub;
+	int product_id;
+#endif
 	void (*decode) (struct urb *urb, struct uvc_streaming *video,
 			struct uvc_buffer *buf);
 
@@ -582,6 +605,9 @@ extern unsigned int uvc_clock_param;
 extern unsigned int uvc_no_drop_param;
 extern unsigned int uvc_trace_param;
 extern unsigned int uvc_timeout_param;
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+extern unsigned int uvc_security_cam_param;
+#endif
 
 #define uvc_trace(flag, msg...) \
 	do { \
@@ -648,7 +674,12 @@ extern void uvc_mc_cleanup_entity(struct uvc_entity *entity);
 extern int uvc_video_init(struct uvc_streaming *stream);
 extern int uvc_video_suspend(struct uvc_streaming *stream);
 extern int uvc_video_resume(struct uvc_streaming *stream, int reset);
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+extern int uvc_video_enable(struct uvc_streaming *stream,
+		struct uvc_video_queue *queue, int enable);
+#else
 extern int uvc_video_enable(struct uvc_streaming *stream, int enable);
+#endif
 extern int uvc_probe_video(struct uvc_streaming *stream,
 		struct uvc_streaming_control *probe);
 extern int uvc_query_ctrl(struct uvc_device *dev, __u8 query, __u8 unit,
@@ -701,6 +732,9 @@ extern int uvc_ctrl_set(struct uvc_video_chain *chain,
 
 extern int uvc_xu_ctrl_query(struct uvc_video_chain *chain,
 		struct uvc_xu_control_query *xqry);
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+extern int uvc_xu_ctrl_tvcam_init(struct uvc_device *dev);
+#endif
 
 /* Utility functions */
 extern void uvc_simplify_fraction(uint32_t *numerator, uint32_t *denominator,

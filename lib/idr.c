@@ -250,7 +250,7 @@ static int sub_alloc(struct idr *idp, int *starting_id, struct idr_layer **pa,
 			id = (id | ((1 << (IDR_BITS * l)) - 1)) + 1;
 
 			/* if already at the top layer, we need to grow */
-			if (id >= 1 << (idp->layers * IDR_BITS)) {
+			if (id > idr_max(idp->layers)) {
 				*starting_id = id;
 				return -EAGAIN;
 			}
@@ -618,26 +618,27 @@ void __idr_remove_all(struct idr *idp)
 	struct idr_layer **paa = &pa[0];
 
 	n = idp->layers * IDR_BITS;
-	p = idp->top;
+	*paa = idp->top;
 	rcu_assign_pointer(idp->top, NULL);
 	max = idr_max(idp->layers);
 
 	id = 0;
 	while (id >= 0 && id <= max) {
+		p = *paa;
 		while (n > IDR_BITS && p) {
 			n -= IDR_BITS;
-			*paa++ = p;
 			p = p->ary[(id >> n) & IDR_MASK];
+			*++paa = p;
 		}
 
 		bt_mask = id;
 		id += 1 << n;
 		/* Get the highest bit that the above add changed from 0->1. */
 		while (n < fls(id ^ bt_mask)) {
-			if (p)
-				free_layer(idp, p);
+			if (*paa)
+				free_layer(idp, *paa);
 			n += IDR_BITS;
-			p = *--paa;
+			--paa;
 		}
 	}
 	idp->layers = 0;
@@ -721,15 +722,16 @@ int idr_for_each(struct idr *idp,
 	struct idr_layer **paa = &pa[0];
 
 	n = idp->layers * IDR_BITS;
-	p = rcu_dereference_raw(idp->top);
+	*paa = rcu_dereference_raw(idp->top);
 	max = idr_max(idp->layers);
 
 	id = 0;
 	while (id >= 0 && id <= max) {
+		p = *paa;
 		while (n > 0 && p) {
 			n -= IDR_BITS;
-			*paa++ = p;
 			p = rcu_dereference_raw(p->ary[(id >> n) & IDR_MASK]);
+			*++paa = p;
 		}
 
 		if (p) {
@@ -741,7 +743,7 @@ int idr_for_each(struct idr *idp,
 		id += 1 << n;
 		while (n < fls(id)) {
 			n += IDR_BITS;
-			p = *--paa;
+			--paa;
 		}
 	}
 
@@ -769,17 +771,18 @@ void *idr_get_next(struct idr *idp, int *nextidp)
 	int n, max;
 
 	/* find first ent */
-	p = rcu_dereference_raw(idp->top);
+	p = *paa = rcu_dereference_raw(idp->top);
 	if (!p)
 		return NULL;
 	n = (p->layer + 1) * IDR_BITS;
 	max = idr_max(p->layer + 1);
 
 	while (id >= 0 && id <= max) {
+		p = *paa;
 		while (n > 0 && p) {
 			n -= IDR_BITS;
-			*paa++ = p;
 			p = rcu_dereference_raw(p->ary[(id >> n) & IDR_MASK]);
+			*++paa = p;
 		}
 
 		if (p) {
@@ -797,7 +800,7 @@ void *idr_get_next(struct idr *idp, int *nextidp)
 		id = round_up(id + 1, 1 << n);
 		while (n < fls(id)) {
 			n += IDR_BITS;
-			p = *--paa;
+			--paa;
 		}
 	}
 	return NULL;
@@ -829,12 +832,10 @@ void *idr_replace(struct idr *idp, void *ptr, int id)
 	if (!p)
 		return ERR_PTR(-EINVAL);
 
-	n = (p->layer+1) * IDR_BITS;
-
-	if (id >= (1 << n))
+	if (id > idr_max(p->layer + 1))
 		return ERR_PTR(-EINVAL);
 
-	n -= IDR_BITS;
+	n = p->layer * IDR_BITS;
 	while ((n > 0) && p) {
 		p = p->ary[(id >> n) & IDR_MASK];
 		n -= IDR_BITS;

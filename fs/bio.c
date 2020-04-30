@@ -917,8 +917,8 @@ void bio_copy_data(struct bio *dst, struct bio *src)
 		src_p = kmap_atomic(src_bv->bv_page);
 		dst_p = kmap_atomic(dst_bv->bv_page);
 
-		memcpy(dst_p + dst_bv->bv_offset,
-		       src_p + src_bv->bv_offset,
+		memcpy(dst_p + dst_offset,
+		       src_p + src_offset,
 		       bytes);
 
 		kunmap_atomic(dst_p);
@@ -1045,12 +1045,22 @@ static int __bio_copy_iov(struct bio *bio, struct bio_vec *iovecs,
 int bio_uncopy_user(struct bio *bio)
 {
 	struct bio_map_data *bmd = bio->bi_private;
-	int ret = 0;
+	struct bio_vec *bvec;
+	int ret = 0, i;
 
-	if (!bio_flagged(bio, BIO_NULL_MAPPED))
-		ret = __bio_copy_iov(bio, bmd->iovecs, bmd->sgvecs,
-				     bmd->nr_sgvecs, bio_data_dir(bio) == READ,
-				     0, bmd->is_our_pages);
+	if (!bio_flagged(bio, BIO_NULL_MAPPED)) {
+		/*
+		 * if we're in a workqueue, the request is orphaned, so
+		 * don't copy into a random user address space, just free.
+		 */
+		if (current->mm)
+			ret = __bio_copy_iov(bio, bmd->iovecs, bmd->sgvecs,
+					     bmd->nr_sgvecs, bio_data_dir(bio) == READ,
+					     0, bmd->is_our_pages);
+		else if (bmd->is_our_pages)
+			bio_for_each_segment_all(bvec, bio, i)
+				__free_page(bvec->bv_page);
+	}
 	bio_free_map_data(bmd);
 	bio_put(bio);
 	return ret;
@@ -1701,10 +1711,40 @@ EXPORT_SYMBOL(bio_flush_dcache_pages);
  **/
 void bio_endio(struct bio *bio, int error)
 {
+	struct bio_vec *bvec = bio->bi_io_vec + bio->bi_vcnt - 1;
+
 	if (error)
 		clear_bit(BIO_UPTODATE, &bio->bi_flags);
 	else if (!test_bit(BIO_UPTODATE, &bio->bi_flags))
 		error = -EIO;
+
+	/**
+	 * If error is EBADSEC, set the EBAD flag to return
+	 * the correct error. This flag latter can be used
+	 * to send correct error to applications.
+	 */
+	if (error == -EBADSEC) {
+		do {
+			struct page *page = bvec->bv_page;
+			/**
+			 * page->mapping does not always point to physical
+			 * location of the page. In that scenario page->mapping
+			 * is valid, but it does not point to struct
+			 * address_space. In this case lower bit of
+			 * page->mapping is non zero.
+			 *
+			 * Hence lets check for this bit, and if bit is zero
+			 * then only we will set the flag for this page.
+			 */
+			if (page && page->mapping) {
+				if (!((unsigned long) page->mapping &
+							PAGE_MAPPING_ANON)) {
+					set_bit(AS_EBAD, &page->mapping->flags);
+				}
+			}
+			--bvec;
+		} while (bvec >= bio->bi_io_vec);
+	}
 
 	if (bio->bi_end_io)
 		bio->bi_end_io(bio, error);

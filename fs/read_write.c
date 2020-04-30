@@ -392,8 +392,15 @@ ssize_t do_sync_write(struct file *filp, const char __user *buf, size_t len, lof
 	kiocb.ki_nbytes = len;
 
 	ret = filp->f_op->aio_write(&kiocb, &iov, 1, kiocb.ki_pos);
+
+        /* Check for the Bad sector Error flag */
+        if (test_and_clear_bit(AS_EBAD, &filp->f_mapping->flags)
+                                                && ret == -EIO)
+                ret = -EBADSEC;
+
 	if (-EIOCBQUEUED == ret)
 		ret = wait_on_sync_kiocb(&kiocb);
+
 	*ppos = kiocb.ki_pos;
 	return ret;
 }
@@ -427,9 +434,81 @@ ssize_t __kernel_write(struct file *file, const char *buf, size_t count, loff_t 
 	return ret;
 }
 
+#ifdef CONFIG_NOTIFY_FILE_WRITE
+#include <linux/genhd.h>
+#include <linux/root_dev.h>
+struct dentry *notify_write_prev_dentry = NULL;
+
+#ifdef CONFIG_DEBUG_FS
+#include <linux/debugfs.h>
+static u32 is_notify_wr_access = 1;
+
+static int __init init_notify_wr_acc_debugfs(void)
+{
+	debugfs_create_bool("notify_write_access", 0644, NULL,
+			&is_notify_wr_access);
+	return 0;
+}
+late_initcall(init_notify_wr_acc_debugfs);
+#endif
+
+void notify_write_access(struct super_block *sb, struct dentry *dentry)
+{
+	const char *blk_name = sb->s_id;
+	char *tmp;
+	const char *fpath;
+	struct inode *inode = dentry->d_inode;
+
+#ifdef CONFIG_DEBUG_FS
+	if (!is_notify_wr_access)
+		return;
+#endif
+
+	if (!sb->s_bdev || (sb->s_bdev->bd_dev != ROOT_DEV) || !(sb->s_flags & MS_RDONLY))
+		return;
+
+	if (notify_write_prev_dentry == dentry)
+		return;
+
+	// if FIFO mode, No error
+	if( inode && S_ISFIFO(inode->i_mode) )
+		return;
+
+	notify_write_prev_dentry = dentry;
+
+	tmp = (char *) __get_free_page(GFP_TEMPORARY);
+	if (!tmp) {
+		pr_err("%s:%d Not enough memory to print full path",
+				__FILE__, __LINE__);
+		fpath = dentry->d_name.name;
+	} else {
+		fpath = dentry_path(dentry, tmp, PAGE_SIZE);
+		if (IS_ERR(fpath)) {
+			pr_err("%s:%d Can not print full path due to err %ld",
+					__FILE__, __LINE__, PTR_ERR(fpath));
+			fpath = dentry->d_name.name;
+		}
+	}
+
+	pr_err("Prohibited-write: file \"%s\" <%s> is modified by "
+			"%s PID=%d; parent is %s PID=%d\n",
+			fpath, blk_name,
+			current->comm, task_pid_nr(current),
+			current->parent->comm, task_pid_nr(current->parent));
+
+	if (tmp)
+		free_page((unsigned long)tmp);
+}
+#else
+#define notify_write_access(sb, dentry)
+#endif
+
 ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_t *pos)
 {
 	ssize_t ret;
+	loff_t orig_pos = *pos;
+
+	notify_write_access(file->f_mapping->host->i_sb, file->f_path.dentry);
 
 	if (!(file->f_mode & FMODE_WRITE))
 		return -EBADF;
@@ -452,6 +531,21 @@ ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_
 		}
 		inc_syscw(current);
 		file_end_write(file);
+	}
+
+	if (ret < 0) {
+		char *path, buf[128];
+		unsigned long len;
+		path = d_path(&file->f_path, buf, sizeof(buf));
+		len = sizeof(buf) - (unsigned long)(path - buf);
+		if (!IS_ERR(path) && strnstr(path, "/mtd_", len)) {
+			printk(KERN_ERR "\n================================\n");
+			printk(KERN_ERR "ERROR: vfs_write: ret %d, path %s, "
+				   "pos %llu, count %u, app %s, pid %u\n",
+				   ret, path, orig_pos, count, current->comm,
+				   (unsigned)current->pid);
+			printk(KERN_ERR "================================\n");
+		}
 	}
 
 	return ret;
@@ -761,12 +855,31 @@ EXPORT_SYMBOL(vfs_readv);
 ssize_t vfs_writev(struct file *file, const struct iovec __user *vec,
 		   unsigned long vlen, loff_t *pos)
 {
+	ssize_t ret;
+	loff_t orig_pos = *pos;
+
 	if (!(file->f_mode & FMODE_WRITE))
 		return -EBADF;
 	if (!file->f_op || (!file->f_op->aio_write && !file->f_op->write))
 		return -EINVAL;
 
-	return do_readv_writev(WRITE, file, vec, vlen, pos);
+	ret = do_readv_writev(WRITE, file, vec, vlen, pos);
+	if (ret < 0) {
+		char *path, buf[128];
+		unsigned long len;
+		path = d_path(&file->f_path, buf, sizeof(buf));
+		len = sizeof(buf) - (unsigned long)(path - buf);
+		if (!IS_ERR(path) && strnstr(path, "/mtd_", len)) {
+			printk(KERN_ERR "\n================================\n");
+			printk(KERN_ERR "ERROR: vfs_writev: ret %d, path %s, "
+			       "pos %llu, vlen %lu, app %s, pid %u\n",
+			       ret, path, orig_pos, vlen, current->comm,
+			       (unsigned)current->pid);
+			printk(KERN_ERR "================================\n");
+		}
+	}
+
+	return ret;
 }
 
 EXPORT_SYMBOL(vfs_writev);
@@ -947,9 +1060,9 @@ out:
 	return ret;
 }
 
-COMPAT_SYSCALL_DEFINE3(readv, unsigned long, fd,
+COMPAT_SYSCALL_DEFINE3(readv, compat_ulong_t, fd,
 		const struct compat_iovec __user *,vec,
-		unsigned long, vlen)
+		compat_ulong_t, vlen)
 {
 	struct fd f = fdget(fd);
 	ssize_t ret;
@@ -983,9 +1096,9 @@ COMPAT_SYSCALL_DEFINE4(preadv64, unsigned long, fd,
 	return ret;
 }
 
-COMPAT_SYSCALL_DEFINE5(preadv, unsigned long, fd,
+COMPAT_SYSCALL_DEFINE5(preadv, compat_ulong_t, fd,
 		const struct compat_iovec __user *,vec,
-		unsigned long, vlen, u32, pos_low, u32, pos_high)
+		compat_ulong_t, vlen, u32, pos_low, u32, pos_high)
 {
 	loff_t pos = ((loff_t)pos_high << 32) | pos_low;
 	return compat_sys_preadv64(fd, vec, vlen, pos);
@@ -1013,9 +1126,9 @@ out:
 	return ret;
 }
 
-COMPAT_SYSCALL_DEFINE3(writev, unsigned long, fd,
+COMPAT_SYSCALL_DEFINE3(writev, compat_ulong_t, fd,
 		const struct compat_iovec __user *, vec,
-		unsigned long, vlen)
+		compat_ulong_t, vlen)
 {
 	struct fd f = fdget(fd);
 	ssize_t ret;
@@ -1049,9 +1162,9 @@ COMPAT_SYSCALL_DEFINE4(pwritev64, unsigned long, fd,
 	return ret;
 }
 
-COMPAT_SYSCALL_DEFINE5(pwritev, unsigned long, fd,
+COMPAT_SYSCALL_DEFINE5(pwritev, compat_ulong_t, fd,
 		const struct compat_iovec __user *,vec,
-		unsigned long, vlen, u32, pos_low, u32, pos_high)
+		compat_ulong_t, vlen, u32, pos_low, u32, pos_high)
 {
 	loff_t pos = ((loff_t)pos_high << 32) | pos_low;
 	return compat_sys_pwritev64(fd, vec, vlen, pos);

@@ -769,6 +769,9 @@ int __video_register_device(struct video_device *vdev, int type, int nr,
 	int minor_offset = 0;
 	int minor_cnt = VIDEO_NUM_DEVICES;
 	const char *name_base;
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+	int nr_ = nr;
+#endif
 
 	/* A minor value of -1 marks this video device as never
 	   having been registered */
@@ -867,12 +870,23 @@ int __video_register_device(struct video_device *vdev, int type, int nr,
 		return -ENFILE;
 	}
 #endif
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+	if (nr_ == CONFIG_USB_VIDEO_TV_CAMERA_MAIN && nr_ != nr) {
+		printk(KERN_ERR "change camera main node %d\n", nr);
+		nr = nr_;
+	}
+	if (nr_ == CONFIG_USB_VIDEO_TV_CAMERA_SUB && nr_ != nr) {
+		printk(KERN_ERR "change camera sub node  %d\n", nr);
+		nr = nr_;
+	}
+#endif
 	vdev->minor = i + minor_offset;
 	vdev->num = nr;
 	devnode_set(vdev);
 
 	/* Should not happen since we thought this minor was free */
 	WARN_ON(video_device[vdev->minor] != NULL);
+	video_device[vdev->minor] = vdev;
 	vdev->index = get_index(vdev);
 	mutex_unlock(&videodev_lock);
 
@@ -902,6 +916,12 @@ int __video_register_device(struct video_device *vdev, int type, int nr,
 		vdev->dev.parent = vdev->parent;
 	dev_set_name(&vdev->dev, "%s%d", name_base, vdev->num);
 	ret = device_register(&vdev->dev);
+
+
+	// rany.kwon@samsung.com: add debug log for v4l2 device mapping
+	printk(KERN_INFO "V4L2 dev map '%s%d' => '%s'\n", name_base, vdev->num, vdev->name);
+
+
 	if (ret < 0) {
 		printk(KERN_ERR "%s: device_register failed\n", __func__);
 		goto cleanup;
@@ -936,9 +956,6 @@ int __video_register_device(struct video_device *vdev, int type, int nr,
 #endif
 	/* Part 6: Activate this minor. The char device can now be used. */
 	set_bit(V4L2_FL_REGISTERED, &vdev->flags);
-	mutex_lock(&videodev_lock);
-	video_device[vdev->minor] = vdev;
-	mutex_unlock(&videodev_lock);
 
 	return 0;
 
@@ -946,6 +963,7 @@ cleanup:
 	mutex_lock(&videodev_lock);
 	if (vdev->cdev)
 		cdev_del(vdev->cdev);
+	video_device[vdev->minor] = NULL;
 	devnode_clear(vdev);
 	mutex_unlock(&videodev_lock);
 	/* Mark this video device as never having been registered. */

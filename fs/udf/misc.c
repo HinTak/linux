@@ -29,6 +29,8 @@
 #include "udf_i.h"
 #include "udf_sb.h"
 
+void *_sb_bread(struct super_block *sb, int lbn);
+
 struct buffer_head *udf_tgetblk(struct super_block *sb, int block)
 {
 	if (UDF_QUERY_FLAG(sb, UDF_FLAG_VARCONV))
@@ -40,9 +42,9 @@ struct buffer_head *udf_tgetblk(struct super_block *sb, int block)
 struct buffer_head *udf_tread(struct super_block *sb, int block)
 {
 	if (UDF_QUERY_FLAG(sb, UDF_FLAG_VARCONV))
-		return sb_bread(sb, udf_fixed_to_variable(block));
+		return _sb_bread(sb, udf_fixed_to_variable(block));
 	else
-		return sb_bread(sb, block);
+		return _sb_bread(sb, block);
 }
 
 struct genericFormat *udf_add_extendedattr(struct inode *inode, uint32_t size,
@@ -254,7 +256,7 @@ struct buffer_head *udf_read_tagged(struct super_block *sb, uint32_t block,
 		  le16_to_cpu(tag_p->descCRC),
 		  le16_to_cpu(tag_p->descCRCLength));
 error_out:
-	brelse(bh);
+	udf_release_data(bh);
 	return NULL;
 }
 

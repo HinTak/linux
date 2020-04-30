@@ -13,6 +13,7 @@
 #include <linux/kobject.h>
 
 #include <linux/kmemleak.h>
+#include <linux/kasan.h>
 
 enum stat_item {
 	ALLOC_FASTPATH,		/* Allocation from cpu slab */
@@ -74,6 +75,7 @@ struct kmem_cache {
 	int object_size;	/* The size of an object without meta data */
 	int offset;		/* Free pointer offset. */
 	int cpu_partial;	/* Number of per cpu partial objects to keep around */
+
 	struct kmem_cache_order_objects oo;
 
 	/* Allocation and freeing of slabs */
@@ -115,6 +117,7 @@ kmalloc_order(size_t size, gfp_t flags, unsigned int order)
 	flags |= (__GFP_COMP | __GFP_KMEMCG);
 	ret = (void *) __get_free_pages(flags, order);
 	kmemleak_alloc(ret, size, 1, flags);
+	kasan_kmalloc_large(ret, size);
 	return ret;
 }
 
@@ -163,12 +166,15 @@ static __always_inline void *kmalloc(size_t size, gfp_t flags)
 
 		if (!(flags & GFP_DMA)) {
 			int index = kmalloc_index(size);
+			void *ret;
 
 			if (!index)
 				return ZERO_SIZE_PTR;
 
-			return kmem_cache_alloc_trace(kmalloc_caches[index],
+			ret = kmem_cache_alloc_trace(kmalloc_caches[index],
 					flags, size);
+			kasan_kmalloc(kmalloc_caches[index], ret, size);
+			return ret;
 		}
 	}
 	return __kmalloc(size, flags);
@@ -197,12 +203,15 @@ static __always_inline void *kmalloc_node(size_t size, gfp_t flags, int node)
 	if (__builtin_constant_p(size) &&
 		size <= KMALLOC_MAX_CACHE_SIZE && !(flags & GFP_DMA)) {
 		int index = kmalloc_index(size);
+		void *ret;
 
 		if (!index)
 			return ZERO_SIZE_PTR;
 
-		return kmem_cache_alloc_node_trace(kmalloc_caches[index],
+		ret = kmem_cache_alloc_node_trace(kmalloc_caches[index],
 			       flags, node, size);
+		kasan_kmalloc(kmalloc_caches[index], ret, size);
+		return ret;
 	}
 	return __kmalloc_node(size, flags, node);
 }

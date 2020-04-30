@@ -16,11 +16,25 @@
 #include <linux/kmod.h>
 #include <linux/kobj_map.h>
 #include <linux/mutex.h>
+
+#ifdef CONFIG_KDEBUGD_COUNTER_MONITOR
+#include <kdebugd/kdebugd.h>
+#include <linux/time.h>
+#include <kdebugd/sec_diskusage.h>
+#endif
+
 #include <linux/idr.h>
 #include <linux/log2.h>
 #include <linux/pm_runtime.h>
+#include <linux/freezer.h>
 
 #include "blk.h"
+
+#ifdef CONFIG_FS_SEL_READAHEAD
+extern bool create_readahead_proc(const char *name);
+extern void remove_readahead_proc(const char *name);
+extern bool get_readahead_entry(const char *name);
+#endif
 
 static DEFINE_MUTEX(block_class_lock);
 struct kobject *block_depr;
@@ -28,10 +42,10 @@ struct kobject *block_depr;
 /* for extended dynamic devt allocation, currently only one major is used */
 #define NR_EXT_DEVT		(1 << MINORBITS)
 
-/* For extended devt allocation.  ext_devt_mutex prevents look up
+/* For extended devt allocation.  ext_devt_lock prevents look up
  * results from going away underneath its user.
  */
-static DEFINE_MUTEX(ext_devt_mutex);
+static DEFINE_SPINLOCK(ext_devt_lock);
 static DEFINE_IDR(ext_devt_idr);
 
 static struct device_type disk_type;
@@ -420,9 +434,13 @@ int blk_alloc_devt(struct hd_struct *part, dev_t *devt)
 	}
 
 	/* allocate ext devt */
-	mutex_lock(&ext_devt_mutex);
-	idx = idr_alloc(&ext_devt_idr, part, 0, NR_EXT_DEVT, GFP_KERNEL);
-	mutex_unlock(&ext_devt_mutex);
+	idr_preload(GFP_KERNEL);
+
+	spin_lock(&ext_devt_lock);
+	idx = idr_alloc(&ext_devt_idr, part, 0, NR_EXT_DEVT, GFP_NOWAIT);
+	spin_unlock(&ext_devt_lock);
+
+	idr_preload_end();
 	if (idx < 0)
 		return idx == -ENOSPC ? -EBUSY : idx;
 
@@ -441,15 +459,13 @@ int blk_alloc_devt(struct hd_struct *part, dev_t *devt)
  */
 void blk_free_devt(dev_t devt)
 {
-	might_sleep();
-
 	if (devt == MKDEV(0, 0))
 		return;
 
 	if (MAJOR(devt) == BLOCK_EXT_MAJOR) {
-		mutex_lock(&ext_devt_mutex);
+		spin_lock(&ext_devt_lock);
 		idr_remove(&ext_devt_idr, blk_mangle_minor(MINOR(devt)));
-		mutex_unlock(&ext_devt_mutex);
+		spin_unlock(&ext_devt_lock);
 	}
 }
 
@@ -512,7 +528,7 @@ static void register_disk(struct gendisk *disk)
 
 	ddev->parent = disk->driverfs_dev;
 
-	dev_set_name(ddev, disk->disk_name);
+	dev_set_name(ddev, "%s", disk->disk_name);
 
 	/* delay uevents, until we scanned partition table */
 	dev_set_uevent_suppress(ddev, 1);
@@ -527,6 +543,10 @@ static void register_disk(struct gendisk *disk)
 			return;
 		}
 	}
+
+#ifdef CONFIG_FS_SEL_READAHEAD
+	create_readahead_proc(dev_name(ddev));
+#endif
 
 	/*
 	 * avoid probable deadlock caused by allocating memory with
@@ -646,6 +666,10 @@ void del_gendisk(struct gendisk *disk)
 	}
 	disk_part_iter_exit(&piter);
 
+#ifdef CONFIG_FS_SEL_READAHEAD
+	remove_readahead_proc(dev_name(disk_to_dev(disk)));
+#endif
+
 	invalidate_partition(disk, 0);
 	set_capacity(disk, 0);
 	disk->flags &= ~GENHD_FL_UP;
@@ -665,9 +689,26 @@ void del_gendisk(struct gendisk *disk)
 		sysfs_remove_link(block_depr, dev_name(disk_to_dev(disk)));
 	pm_runtime_set_memalloc_noio(disk_to_dev(disk), false);
 	device_del(disk_to_dev(disk));
-	blk_free_devt(disk_to_dev(disk)->devt);
 }
 EXPORT_SYMBOL(del_gendisk);
+
+#ifdef CONFIG_FS_SEL_READAHEAD
+bool disk_name_from_dev(dev_t dev)
+{
+	struct block_device *bdev = bdget(dev);
+	char buff[BDEVNAME_SIZE] = {0};
+	bool pstate = false;
+	if (bdev) {
+		if (MAJOR(dev)) {
+			bdevname(bdev, buff);
+			pstate = get_readahead_entry(buff);
+		}
+		bdput(bdev);
+	}
+	return pstate;
+}
+EXPORT_SYMBOL(disk_name_from_dev);
+#endif
 
 /**
  * get_gendisk - get partitioning information for a given device
@@ -690,13 +731,13 @@ struct gendisk *get_gendisk(dev_t devt, int *partno)
 	} else {
 		struct hd_struct *part;
 
-		mutex_lock(&ext_devt_mutex);
+		spin_lock(&ext_devt_lock);
 		part = idr_find(&ext_devt_idr, blk_mangle_minor(MINOR(devt)));
 		if (part && get_disk(part_to_disk(part))) {
 			*partno = part->partno;
 			disk = part_to_disk(part);
 		}
-		mutex_unlock(&ext_devt_mutex);
+		spin_unlock(&ext_devt_lock);
 	}
 
 	return disk;
@@ -1098,6 +1139,7 @@ static void disk_release(struct device *dev)
 {
 	struct gendisk *disk = dev_to_disk(dev);
 
+	blk_free_devt(dev->devt);
 	disk_release_events(disk);
 	kfree(disk->random);
 	disk_replace_part_tbl(disk, NULL);
@@ -1367,7 +1409,8 @@ int invalidate_partition(struct gendisk *disk, int partno)
 	int res = 0;
 	struct block_device *bdev = bdget_disk(disk, partno);
 	if (bdev) {
-		fsync_bdev(bdev);
+		if(!(check_freezing() && MAJOR(bdev->bd_dev) == SCSI_DISK0_MAJOR))
+			fsync_bdev(bdev);
 		res = __invalidate_device(bdev, true);
 		bdput(bdev);
 	}
@@ -1832,3 +1875,23 @@ static void disk_release_events(struct gendisk *disk)
 	WARN_ON_ONCE(disk->ev && disk->ev->block != 1);
 	kfree(disk->ev);
 }
+
+#ifdef CONFIG_KDEBUGD_COUNTER_MONITOR
+
+void sec_diskusage_update(struct sec_diskdata *pdisk_data)
+{
+       struct class_dev_iter iter;
+       struct device *dev;
+
+       mutex_lock(&block_class_lock);
+       class_dev_iter_init(&iter, &block_class, NULL, &disk_type);
+       while ((dev = class_dev_iter_next(&iter))) {
+		struct gendisk *disk = dev_to_disk(dev);
+
+		BUG_ON(!disk);
+		sec_diskstats_dump_entry(disk, pdisk_data);
+       }
+       class_dev_iter_exit(&iter);
+       mutex_unlock(&block_class_lock);
+}
+#endif

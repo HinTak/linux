@@ -1,3 +1,5 @@
+KASAN_SANITIZE_core.o := n
+
 ifdef CONFIG_FUNCTION_TRACER
 CFLAGS_REMOVE_clock.o = -pg
 endif

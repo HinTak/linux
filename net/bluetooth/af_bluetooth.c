@@ -221,8 +221,6 @@ int bt_sock_recvmsg(struct kiocb *iocb, struct socket *sock,
 	if (flags & (MSG_OOB))
 		return -EOPNOTSUPP;
 
-	msg->msg_namelen = 0;
-
 	skb = skb_recv_datagram(sk, flags, noblock, &err);
 	if (!skb) {
 		if (sk->sk_shutdown & RCV_SHUTDOWN)
@@ -286,8 +284,6 @@ int bt_sock_stream_recvmsg(struct kiocb *iocb, struct socket *sock,
 
 	if (flags & MSG_OOB)
 		return -EOPNOTSUPP;
-
-	msg->msg_namelen = 0;
 
 	BT_DBG("sk %p size %zu", sk, size);
 
@@ -666,6 +662,7 @@ static int __init bt_init(void)
 {
 	int err;
 
+	BT_INFO("[Subsystem]: Start HCI Bluetooth initialization");
 	BT_INFO("Core ver %s", VERSION);
 
 	err = bt_sysfs_init();
@@ -694,6 +691,7 @@ static int __init bt_init(void)
 		goto sock_err;
 	}
 
+	BT_INFO("[Subsystem]: Finished HCI Bluetooth initialization");
 	return 0;
 
 sock_err:
@@ -718,6 +716,8 @@ static void __exit bt_exit(void)
 	sock_unregister(PF_BLUETOOTH);
 
 	bt_sysfs_cleanup();
+
+	BT_INFO("[Subsystem]: Exited HCI Bluetooth");
 }
 
 subsys_initcall(bt_init);

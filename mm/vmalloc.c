@@ -28,9 +28,16 @@
 #include <linux/kmemleak.h>
 #include <linux/atomic.h>
 #include <linux/llist.h>
+#include <linux/kasan.h>
+
 #include <asm/uaccess.h>
 #include <asm/tlbflush.h>
 #include <asm/shmparam.h>
+
+#ifdef CONFIG_KDML
+#include "kdml/kdml.h"
+#include "kdml/kdml_trace.h"
+#endif
 
 struct vfree_deferred {
 	struct llist_head list;
@@ -268,6 +275,7 @@ EXPORT_SYMBOL(vmalloc_to_pfn);
 #define VM_LAZY_FREE	0x01
 #define VM_LAZY_FREEING	0x02
 #define VM_VM_AREA	0x04
+#define VM_VB_AREA	0x08
 
 static DEFINE_SPINLOCK(vmap_area_lock);
 /* Export for kexec only */
@@ -281,6 +289,184 @@ static unsigned long cached_vstart;
 static unsigned long cached_align;
 
 static unsigned long vmap_area_pcpu_hole;
+
+#ifdef CONFIG_MODULESUSED_PLUS
+extern const unsigned long addr_modules_start;
+extern const unsigned long addr_modules_end;
+atomic_long_t current_modules_used = ATOMIC_LONG_INIT(0);
+unsigned long modules_peak;
+#endif
+
+extern int seq_printk(struct seq_file *m, const char *f, ...);
+#ifdef CONFIG_VMALLOCUSED_PLUS
+atomic_long_t current_vmalloc_used = ATOMIC_LONG_INIT(0);
+unsigned long vmalloc_peak;
+
+static bool varea_is_cma(unsigned long vaddr)
+{
+	extern unsigned long cma_remap_vaddr[];
+	extern unsigned int cma_remap_num;
+	unsigned int i;
+
+	for (i = 0; i < cma_remap_num; i++) {
+		if (vaddr == cma_remap_vaddr[i])
+			return true;
+	}
+
+	return false;
+}
+
+static bool varea_is_module(unsigned long vaddr)
+{
+#ifdef CONFIG_MODULESUSED_PLUS
+	if (vaddr >= addr_modules_start && vaddr < addr_modules_end)
+		return true;
+#endif
+	return false;
+}
+
+static void current_vmalloc_cnt_add(unsigned long size)
+{
+	unsigned long cvu;
+
+	cvu = atomic_long_add_return((long)size, &current_vmalloc_used);
+	if (cvu > vmalloc_peak)
+		vmalloc_peak = cvu;
+}
+
+static void current_vmalloc_add_varea(struct vmap_area *va)
+{
+#ifdef CONFIG_MODULESUSED_PLUS
+	/* Modules have their own statistics */
+	if (varea_is_module(va->va_start)) {
+		unsigned long cmu;
+
+		cmu = atomic_long_add_return((long)(va->va_end - va->va_start),
+					     &current_modules_used);
+		if (cmu > modules_peak)
+			modules_peak = cmu;
+		return;
+	}
+#endif
+	/* Skip accounting of CMA areas */
+	if (varea_is_cma(va->va_start))
+		return;
+
+	current_vmalloc_cnt_add(va->va_end - va->va_start);
+}
+
+static void current_vmalloc_sub_varea(struct vmap_area *va)
+{
+	/* Skip varea if it was lazily freed */
+	if (va->flags & (VM_LAZY_FREE | VM_LAZY_FREEING))
+		return;
+
+#ifdef CONFIG_MODULESUSED_PLUS
+	/* Modules have their own statistics */
+	if (varea_is_module(va->va_start)) {
+		atomic_long_sub((long)(va->va_end - va->va_start),
+				&current_modules_used);
+		return;
+	}
+#endif
+	/* Skip accounting of CMA areas */
+	if (varea_is_cma(va->va_start))
+		return;
+
+	atomic_long_sub((long)(va->va_end - va->va_start),
+			&current_vmalloc_used);
+}
+
+void seq_printk_vmalloc_statistics(struct seq_file *m,
+		struct vmalloc_info *vm_info, struct vmalloc_usedinfo *vm_used)
+{
+	struct vmalloc_usedinfo vmallocused;
+	struct vmalloc_info vmi;
+
+	if (NULL == vm_info)
+		get_vmalloc_info(&vmi);
+	else
+		vmi = *vm_info;
+	if (NULL == vm_used) {
+		memset(&vmallocused, 0, sizeof(struct vmalloc_usedinfo));
+		get_vmallocused(&vmallocused);
+	} else {
+		vmallocused = *vm_used;
+	}
+	seq_printk(m,
+		"VmallocTotal:   %8lu kB\n"
+		"VmallocUsed:    %8lu kB [%8lu kB vm_map_ram, "
+		"%8lu kB ioremap, %8lu kB vmalloc, %8lu kB vmap, "
+		"%8lu kB usermap, %8lu kB vpages, %8lu kB overlapped]\n"
+		"VmallocPeak:    %8lu kB\n"
+		"VmallocChunk:   %8lu kB @ %#x\n",
+		(unsigned long)VMALLOC_TOTAL >> 10,
+		vmi.used >> 10,
+		vmallocused.vmapramsize >> 10,
+		vmallocused.ioremapsize >> 10,
+		vmallocused.vmallocsize >> 10,
+		vmallocused.vmapsize >> 10,
+		vmallocused.usermapsize >> 10,
+		vmallocused.vpagessize >> 10,
+		vmallocused.overlappedsize >> 10,
+		vmalloc_peak >> 10,
+		vmi.largest_chunk >> 10,
+		vmi.largest_chunk_addr);
+	if (NULL == m)
+		dump_stack();
+}
+#ifdef CONFIG_MODULESUSED_PLUS
+void seq_printk_module_statistics(struct seq_file *m,
+		struct vmalloc_info *vm_info, struct vmalloc_usedinfo *vm_used)
+{
+	struct vmalloc_usedinfo vmallocused;
+	struct vmalloc_info vmi;
+
+	if (NULL == vm_info)
+		get_vmalloc_info(&vmi);
+	else
+		vmi = *vm_info;
+	if (NULL == vm_used) {
+		memset(&vmallocused, 0, sizeof(struct vmalloc_usedinfo));
+		get_vmallocused(&vmallocused);
+	} else {
+		vmallocused = *vm_used;
+	}
+	seq_printk(m,
+		"ModulesTotal:   %8lu kB\n"
+		"ModulesUsed:    %8lu kB\n"
+		"ModulesChunk:   %8lu kB\n"
+		"ModulesPeak:    %8lu kB\n",
+		(addr_modules_end - addr_modules_start) >> 10,
+		vmallocused.modulessize >> 10,
+		vmi.largest_modules_chunk >> 10,
+		modules_peak >> 10);
+	if (NULL == m)
+		dump_stack();
+}
+#endif /* #ifdef CONFIG_MODULESUSED_PLUS */
+
+#else
+void seq_printk_vmalloc_statistics(struct seq_file *m,
+		struct vmalloc_info *vm_info, void *vm_used)
+{
+	struct vmalloc_info vmi;
+
+	if (NULL == vm_info)
+		get_vmalloc_info(&vmi);
+	else
+		vmi = *vm_info;
+	seq_printk(m,
+		"VmallocTotal:   %8lu kB\n"
+		"VmallocChunk:   %8lu kB\n",
+		vmi.used >> 10,
+		vmi.largest_chunk >> 10);
+	if (NULL == m)
+		dump_stack();
+}
+void seq_printk_module_statistics(struct seq_file *m,
+		struct vmalloc_info *vm_info, void *vm_used) {}
+#endif /* #ifdef CONFIG_VMALLOCUSED_PLUS */
 
 static struct vmap_area *__find_vmap_area(unsigned long addr)
 {
@@ -323,6 +509,9 @@ static void __insert_vmap_area(struct vmap_area *va)
 	rb_link_node(&va->rb_node, parent, p);
 	rb_insert_color(&va->rb_node, &vmap_area_root);
 
+#ifdef CONFIG_VMALLOCUSED_PLUS
+	current_vmalloc_add_varea(va);
+#endif
 	/* address-sort this list */
 	tmp = rb_prev(&va->rb_node);
 	if (tmp) {
@@ -334,6 +523,7 @@ static void __insert_vmap_area(struct vmap_area *va)
 }
 
 static void purge_vmap_area_lazy(void);
+static void __get_vmalloc_info(struct vmalloc_info *vmi);
 
 /*
  * Allocate a region of KVA of the specified size and alignment, within the
@@ -349,6 +539,7 @@ static struct vmap_area *alloc_vmap_area(unsigned long size,
 	unsigned long addr;
 	int purged = 0;
 	struct vmap_area *first;
+	struct vmalloc_info vmi;
 
 	BUG_ON(!size);
 	BUG_ON(size & ~PAGE_MASK);
@@ -388,12 +579,12 @@ nocache:
 		addr = ALIGN(first->va_end, align);
 		if (addr < vstart)
 			goto nocache;
-		if (addr + size - 1 < addr)
+		if (addr + size < addr)
 			goto overflow;
 
 	} else {
 		addr = ALIGN(vstart, align);
-		if (addr + size - 1 < addr)
+		if (addr + size < addr)
 			goto overflow;
 
 		n = vmap_area_root.rb_node;
@@ -420,7 +611,7 @@ nocache:
 		if (addr + cached_hole_size < first->va_start)
 			cached_hole_size = first->va_start - addr;
 		addr = ALIGN(first->va_end, align);
-		if (addr + size - 1 < addr)
+		if (addr + size < addr)
 			goto overflow;
 
 		if (list_is_last(&first->list, &vmap_area_list))
@@ -448,16 +639,32 @@ found:
 	return va;
 
 overflow:
+	if (purged)
+		__get_vmalloc_info(&vmi);
 	spin_unlock(&vmap_area_lock);
 	if (!purged) {
 		purge_vmap_area_lazy();
 		purged = 1;
 		goto retry;
 	}
-	if (printk_ratelimit())
-		printk(KERN_WARNING
-			"vmap allocation for size %lu failed: "
-			"use vmalloc=<size> to increase size.\n", size);
+	if (printk_ratelimit()) {
+#ifdef CONFIG_MODULESUSED_PLUS
+		if (varea_is_module(vstart)) {
+			pr_warn("module allocation for size %lu "
+				"with align %lu failed: "
+				"change MODULES_VADDR to increase size.\n",
+				size, align);
+			seq_printk_module_statistics(NULL, &vmi, NULL);
+		} else
+#endif
+		{
+			pr_warn("vmap allocation for size %lu "
+				"with align %lu failed: "
+				"use vmalloc=<size> to increase size.\n",
+				size, align);
+			seq_printk_vmalloc_statistics(NULL, &vmi, NULL);
+		}
+	}
 	kfree(va);
 	return ERR_PTR(-EBUSY);
 }
@@ -485,6 +692,9 @@ static void __free_vmap_area(struct vmap_area *va)
 	RB_CLEAR_NODE(&va->rb_node);
 	list_del_rcu(&va->list);
 
+#ifdef CONFIG_VMALLOCUSED_PLUS
+	current_vmalloc_sub_varea(va);
+#endif
 	/*
 	 * Track the highest possible candidate for pcpu area
 	 * allocation.  Areas outside of vmalloc area can be returned
@@ -534,6 +744,12 @@ static void vmap_debug_free_range(unsigned long start, unsigned long end)
 	vunmap_page_range(start, end);
 	flush_tlb_kernel_range(start, end);
 #endif
+#ifdef CONFIG_KDML
+	/* common between vfree and unmap */
+	trace_vfree_kdml(_RET_IP_, (void *)start);
+#endif
+
+	kasan_vfree(start, end - start);
 }
 
 /*
@@ -666,6 +882,9 @@ static void purge_vmap_area_lazy(void)
  */
 static void free_vmap_area_noflush(struct vmap_area *va)
 {
+#ifdef CONFIG_VMALLOCUSED_PLUS
+	current_vmalloc_sub_varea(va);
+#endif
 	va->flags |= VM_LAZY_FREE;
 	atomic_add((va->va_end - va->va_start) >> PAGE_SHIFT, &vmap_lazy_nr);
 	if (unlikely(atomic_read(&vmap_lazy_nr) > lazy_max_pages()))
@@ -754,8 +973,7 @@ struct vmap_block {
 	struct vmap_area *va;
 	struct vmap_block_queue *vbq;
 	unsigned long free, dirty;
-	DECLARE_BITMAP(alloc_map, VMAP_BBMAP_BITS);
-	DECLARE_BITMAP(dirty_map, VMAP_BBMAP_BITS);
+	unsigned long dirty_min, dirty_max; /*< dirty range */
 	struct list_head free_list;
 	struct rcu_head rcu_head;
 	struct list_head purge;
@@ -786,13 +1004,30 @@ static unsigned long addr_to_vb_idx(unsigned long addr)
 	return addr;
 }
 
-static struct vmap_block *new_vmap_block(gfp_t gfp_mask)
+static void *vmap_block_vaddr(unsigned long va_start, unsigned long pages_off)
+{
+	unsigned long addr = va_start + (pages_off << PAGE_SHIFT);
+	BUG_ON(addr_to_vb_idx(addr) != addr_to_vb_idx(va_start));
+	return (void *)addr;
+}
+
+/**
+ * new_vmap_block - allocates new vmap_block and occupies 2^order pages in this
+ *                  block. Of course pages number can't exceed VMAP_BBMAP_BITS
+ * @order:    how many 2^order pages should be occupied in newly allocated block
+ * @gfp_mask: flags for the page level allocator
+ * @addr:     output virtual address of a newly allocator block
+ *
+ * Returns: address of virtual space in a block or ERR_PTR
+ */
+static void *new_vmap_block(unsigned int order, gfp_t gfp_mask)
 {
 	struct vmap_block_queue *vbq;
 	struct vmap_block *vb;
 	struct vmap_area *va;
 	unsigned long vb_idx;
 	int node, err;
+	void *vaddr;
 
 	node = numa_node_id();
 
@@ -816,12 +1051,15 @@ static struct vmap_block *new_vmap_block(gfp_t gfp_mask)
 		return ERR_PTR(err);
 	}
 
+	vaddr = vmap_block_vaddr(va->va_start, 0);
 	spin_lock_init(&vb->lock);
 	vb->va = va;
-	vb->free = VMAP_BBMAP_BITS;
+	/* At least something should be left free */
+	BUG_ON(VMAP_BBMAP_BITS <= (1UL << order));
+	vb->free = VMAP_BBMAP_BITS - (1UL << order);
 	vb->dirty = 0;
-	bitmap_zero(vb->alloc_map, VMAP_BBMAP_BITS);
-	bitmap_zero(vb->dirty_map, VMAP_BBMAP_BITS);
+	vb->dirty_min = VMAP_BBMAP_BITS;
+	vb->dirty_max = 0;
 	INIT_LIST_HEAD(&vb->free_list);
 
 	vb_idx = addr_to_vb_idx(va->va_start);
@@ -831,18 +1069,32 @@ static struct vmap_block *new_vmap_block(gfp_t gfp_mask)
 	BUG_ON(err);
 	radix_tree_preload_end();
 
+	spin_lock(&vmap_area_lock);
+	va->vm = (struct vm_struct *)vb;
+	va->flags |= VM_VB_AREA;
+#ifdef CONFIG_VMALLOCUSED_PLUS
+	/*
+	 * This new varea has become a special vmap block. It's empty and
+	 * will not contribute to current_vmalloc_used yet.
+	 */
+	if (VMAP_BBMAP_BITS == vb->free + vb->dirty)
+		atomic_long_sub((long)VMAP_BLOCK_SIZE, &current_vmalloc_used);
+#endif
+	spin_unlock(&vmap_area_lock);
+
 	vbq = &get_cpu_var(vmap_block_queue);
 	vb->vbq = vbq;
 	spin_lock(&vbq->lock);
-	list_add_rcu(&vb->free_list, &vbq->free);
+	list_add_tail_rcu(&vb->free_list, &vbq->free);
 	spin_unlock(&vbq->lock);
 	put_cpu_var(vmap_block_queue);
 
-	return vb;
+	return vaddr;
 }
 
 static void free_vmap_block(struct vmap_block *vb)
 {
+	struct vmap_area *va = vb->va;
 	struct vmap_block *tmp;
 	unsigned long vb_idx;
 
@@ -852,7 +1104,19 @@ static void free_vmap_block(struct vmap_block *vb)
 	spin_unlock(&vmap_block_tree_lock);
 	BUG_ON(tmp != vb);
 
-	free_vmap_area_noflush(vb->va);
+	spin_lock(&vmap_area_lock);
+	va->vm = NULL;
+	va->flags &= ~VM_VB_AREA;
+#ifdef CONFIG_VMALLOCUSED_PLUS
+	/*
+	 * Area is no longer considered as a special vmap block.
+	 * Treat it as an ordinary varea that consumes all its space from now.
+	 */
+	current_vmalloc_cnt_add(VMAP_BLOCK_SIZE);
+#endif
+	spin_unlock(&vmap_area_lock);
+
+	free_vmap_area_noflush(va);
 	kfree_rcu(vb, rcu_head);
 }
 
@@ -873,8 +1137,8 @@ static void purge_fragmented_blocks(int cpu)
 		if (vb->free + vb->dirty == VMAP_BBMAP_BITS && vb->dirty != VMAP_BBMAP_BITS) {
 			vb->free = 0; /* prevent further allocs after releasing lock */
 			vb->dirty = VMAP_BBMAP_BITS; /* prevent purging it again */
-			bitmap_fill(vb->alloc_map, VMAP_BBMAP_BITS);
-			bitmap_fill(vb->dirty_map, VMAP_BBMAP_BITS);
+			vb->dirty_min = 0;
+			vb->dirty_max = VMAP_BBMAP_BITS;
 			spin_lock(&vbq->lock);
 			list_del_rcu(&vb->free_list);
 			spin_unlock(&vbq->lock);
@@ -891,11 +1155,6 @@ static void purge_fragmented_blocks(int cpu)
 	}
 }
 
-static void purge_fragmented_blocks_thiscpu(void)
-{
-	purge_fragmented_blocks(smp_processor_id());
-}
-
 static void purge_fragmented_blocks_allcpus(void)
 {
 	int cpu;
@@ -904,13 +1163,26 @@ static void purge_fragmented_blocks_allcpus(void)
 		purge_fragmented_blocks(cpu);
 }
 
+#ifdef CONFIG_VMALLOCUSED_PLUS
+static bool varea_is_unused_map_ram(struct vmap_area *va)
+{
+	if (va->flags & VM_VB_AREA) {
+		struct vmap_block *vb = (struct vmap_block *)va->vm;
+		long int used = (VMAP_BBMAP_BITS - vb->free - vb->dirty);
+
+		if (0 == used)
+			return true;
+	}
+	return false;
+}
+#endif
+
 static void *vb_alloc(unsigned long size, gfp_t gfp_mask)
 {
 	struct vmap_block_queue *vbq;
 	struct vmap_block *vb;
-	unsigned long addr = 0;
+	void *vaddr = NULL;
 	unsigned int order;
-	int purge = 0;
 
 	BUG_ON(size & ~PAGE_MASK);
 	BUG_ON(size > PAGE_SIZE*VMAP_MAX_ALLOC);
@@ -924,56 +1196,44 @@ static void *vb_alloc(unsigned long size, gfp_t gfp_mask)
 	}
 	order = get_order(size);
 
-again:
 	rcu_read_lock();
 	vbq = &get_cpu_var(vmap_block_queue);
 	list_for_each_entry_rcu(vb, &vbq->free, free_list) {
-		int i;
+		unsigned long pages_nr;
 
 		spin_lock(&vb->lock);
-		if (vb->free < 1UL << order)
-			goto next;
-
-		i = bitmap_find_free_region(vb->alloc_map,
-						VMAP_BBMAP_BITS, order);
-
-		if (i < 0) {
-			if (vb->free + vb->dirty == VMAP_BBMAP_BITS) {
-				/* fragmented and no outstanding allocations */
-				BUG_ON(vb->dirty != VMAP_BBMAP_BITS);
-				purge = 1;
-			}
-			goto next;
+		if (vb->free < (1UL << order)) {
+			spin_unlock(&vb->lock);
+			continue;
 		}
-		addr = vb->va->va_start + (i << PAGE_SHIFT);
-		BUG_ON(addr_to_vb_idx(addr) !=
-				addr_to_vb_idx(vb->va->va_start));
+
+#ifdef CONFIG_VMALLOCUSED_PLUS
+		/* Count block that was empty prior to allocation in it */
+		if (VMAP_BBMAP_BITS == vb->free + vb->dirty)
+			current_vmalloc_cnt_add(VMAP_BLOCK_SIZE);
+#endif
+
+		pages_nr = VMAP_BBMAP_BITS - vb->free;
+		vaddr = vmap_block_vaddr(vb->va->va_start, pages_nr);
 		vb->free -= 1UL << order;
 		if (vb->free == 0) {
 			spin_lock(&vbq->lock);
 			list_del_rcu(&vb->free_list);
 			spin_unlock(&vbq->lock);
 		}
+
 		spin_unlock(&vb->lock);
 		break;
-next:
-		spin_unlock(&vb->lock);
 	}
-
-	if (purge)
-		purge_fragmented_blocks_thiscpu();
 
 	put_cpu_var(vmap_block_queue);
 	rcu_read_unlock();
 
-	if (!addr) {
-		vb = new_vmap_block(gfp_mask);
-		if (IS_ERR(vb))
-			return vb;
-		goto again;
-	}
+	/* Allocate new block if nothing was found */
+	if (!vaddr)
+		vaddr = new_vmap_block(order, gfp_mask);
 
-	return (void *)addr;
+	return vaddr;
 }
 
 static void vb_free(const void *addr, unsigned long size)
@@ -991,6 +1251,7 @@ static void vb_free(const void *addr, unsigned long size)
 	order = get_order(size);
 
 	offset = (unsigned long)addr & (VMAP_BLOCK_SIZE - 1);
+	offset >>= PAGE_SHIFT;
 
 	vb_idx = addr_to_vb_idx((unsigned long)addr);
 	rcu_read_lock();
@@ -1001,9 +1262,17 @@ static void vb_free(const void *addr, unsigned long size)
 	vunmap_page_range((unsigned long)addr, (unsigned long)addr + size);
 
 	spin_lock(&vb->lock);
-	BUG_ON(bitmap_allocate_region(vb->dirty_map, offset >> PAGE_SHIFT, order));
+
+	/* Expand dirty range */
+	vb->dirty_min = min(vb->dirty_min, offset);
+	vb->dirty_max = max(vb->dirty_max, offset + (1UL << order));
 
 	vb->dirty += 1UL << order;
+#ifdef CONFIG_VMALLOCUSED_PLUS
+	/* Don't count block that has become empty after freeing */
+	if (vb->dirty + vb->free == VMAP_BBMAP_BITS)
+		atomic_long_sub((long)VMAP_BLOCK_SIZE, &current_vmalloc_used);
+#endif
 	if (vb->dirty == VMAP_BBMAP_BITS) {
 		BUG_ON(vb->free);
 		spin_unlock(&vb->lock);
@@ -1040,28 +1309,18 @@ void vm_unmap_aliases(void)
 
 		rcu_read_lock();
 		list_for_each_entry_rcu(vb, &vbq->free, free_list) {
-			int i;
-
 			spin_lock(&vb->lock);
-			i = find_first_bit(vb->dirty_map, VMAP_BBMAP_BITS);
-			while (i < VMAP_BBMAP_BITS) {
+			if (vb->dirty) {
+				unsigned long va_start = vb->va->va_start;
 				unsigned long s, e;
-				int j;
-				j = find_next_zero_bit(vb->dirty_map,
-					VMAP_BBMAP_BITS, i);
 
-				s = vb->va->va_start + (i << PAGE_SHIFT);
-				e = vb->va->va_start + (j << PAGE_SHIFT);
+				s = va_start + (vb->dirty_min << PAGE_SHIFT);
+				e = va_start + (vb->dirty_max << PAGE_SHIFT);
+
+				start = min(s, start);
+				end   = max(e, end);
+
 				flush = 1;
-
-				if (s < start)
-					start = s;
-				if (e > end)
-					end = e;
-
-				i = j;
-				i = find_next_bit(vb->dirty_map,
-							VMAP_BBMAP_BITS, i);
 			}
 			spin_unlock(&vb->lock);
 		}
@@ -1097,6 +1356,11 @@ void vm_unmap_ram(const void *mem, unsigned int count)
 }
 EXPORT_SYMBOL(vm_unmap_ram);
 
+#ifndef CONFIG_VD_RELEASE
+/* Dump vmallocinfo to printk */
+static void vmallocinfo_dump_printk(void);
+#endif
+
 /**
  * vm_map_ram - map pages linearly into kernel virtual address (vmalloc space)
  * @pages: an array of pointers to the pages to be mapped
@@ -1111,27 +1375,43 @@ void *vm_map_ram(struct page **pages, unsigned int count, int node, pgprot_t pro
 	unsigned long size = count << PAGE_SHIFT;
 	unsigned long addr;
 	void *mem;
+	int err;
 
 	if (likely(count <= VMAP_MAX_ALLOC)) {
 		mem = vb_alloc(size, GFP_KERNEL);
-		if (IS_ERR(mem))
-			return NULL;
+		if (IS_ERR(mem)) {
+			pr_err("vm_map_ram: failed #1, err %ld, size %lu\n",
+			       PTR_ERR(mem), size);
+			goto error;
+		}
 		addr = (unsigned long)mem;
 	} else {
 		struct vmap_area *va;
 		va = alloc_vmap_area(size, PAGE_SIZE,
 				VMALLOC_START, VMALLOC_END, node, GFP_KERNEL);
-		if (IS_ERR(va))
-			return NULL;
+		if (IS_ERR(va)) {
+			pr_err("vm_map_ram: failed #2, err %ld, size %lu\n",
+			       PTR_ERR(va), size);
+			goto error;
+		}
 
 		addr = va->va_start;
 		mem = (void *)addr;
 	}
-	if (vmap_page_range(addr, addr + size, prot, pages) < 0) {
+	err = vmap_page_range(addr, addr + size, prot, pages);
+	if (err < 0) {
 		vm_unmap_ram(mem, count);
-		return NULL;
+		pr_err("vm_map_ram: failed #3, err %d, size %lu\n",
+		       err, size);
+		goto error;
 	}
+	kasan_vmalloc_nopageguard(addr, size);
 	return mem;
+error:
+#ifndef CONFIG_VD_RELEASE
+	vmallocinfo_dump_printk();
+#endif
+	return NULL;
 }
 EXPORT_SYMBOL(vm_map_ram);
 
@@ -1193,6 +1473,10 @@ void __init vmalloc_init(void)
 	struct vm_struct *tmp;
 	int i;
 
+#ifdef CONFIG_MODULESUSED_PLUS
+	void init_addr_modules(void);
+	init_addr_modules();
+#endif
 	for_each_possible_cpu(i) {
 		struct vmap_block_queue *vbq;
 		struct vfree_deferred *p;
@@ -1308,6 +1592,7 @@ static void setup_vmalloc_vm(struct vm_struct *vm, struct vmap_area *va,
 	vm->caller = caller;
 	va->vm = vm;
 	va->flags |= VM_VM_AREA;
+	kasan_vmalloc(va->va_start, va->va_end - va->va_start);
 	spin_unlock(&vmap_area_lock);
 }
 
@@ -1416,8 +1701,23 @@ struct vm_struct *get_vm_area(unsigned long size, unsigned long flags)
 struct vm_struct *get_vm_area_caller(unsigned long size, unsigned long flags,
 				const void *caller)
 {
+#ifdef CONFIG_KDML
+	struct vm_struct *area;
+	area = __get_vm_area_node(size, 1, flags, VMALLOC_START, VMALLOC_END,
+				  NUMA_NO_NODE, GFP_KERNEL, caller);
+	/* this function is called from functions other than vmalloc
+	 * where pages are not required to be allocated
+	 */
+	if (area)
+		trace_vmalloc_kdml(area->addr, size, GFP_KERNEL, caller,
+				KDML_VMALLOC_TYPE_MAP);
+
+	return area;
+#else
+
 	return __get_vm_area_node(size, 1, flags, VMALLOC_START, VMALLOC_END,
 				  NUMA_NO_NODE, GFP_KERNEL, caller);
+#endif
 }
 
 /**
@@ -1648,9 +1948,24 @@ static void *__vmalloc_area_node(struct vm_struct *area, gfp_t gfp_mask,
 	return area->addr;
 
 fail:
-	warn_alloc_failed(gfp_mask, order,
-			  "vmalloc: allocation failure, allocated %ld of %ld bytes\n",
-			  (area->nr_pages*PAGE_SIZE), area->size);
+#ifdef CONFIG_MODULESUSED_PLUS
+	if (varea_is_module((unsigned long) area->addr)) {
+
+		warn_alloc_failed(gfp_mask, order,
+			"modules: allocation failure, allocated "
+			"%ld of %ld bytes\n",
+			(area->nr_pages*PAGE_SIZE), area->size);
+		seq_printk_module_statistics(NULL, NULL, NULL);
+	} else
+#endif
+	{
+		warn_alloc_failed(gfp_mask, order,
+			"vmalloc: allocation failure, allocated "
+			"%ld of %ld bytes\n",
+			(area->nr_pages*PAGE_SIZE), area->size);
+		seq_printk_vmalloc_statistics(NULL, NULL, NULL);
+	}
+
 	vfree(area->addr);
 	return NULL;
 }
@@ -1704,13 +2019,31 @@ void *__vmalloc_node_range(unsigned long size, unsigned long align,
 	 * references to the virtual address of the vmalloc'ed block.
 	 */
 	kmemleak_alloc(addr, real_size, 3, gfp_mask);
+#ifdef CONFIG_KDML
+	/*  we keep here to track only vmalloc
+	 __get_vm_area_node is common place for vmalloc and ioremap
+	 */
+	trace_vmalloc_kdml(addr, size, gfp_mask, caller,
+			KDML_VMALLOC_TYPE_VMALLOC);
+#endif
 
 	return addr;
 
 fail:
+#ifdef CONFIG_MODULESUSED_PLUS
+	if (varea_is_module(start)) {
+		warn_alloc_failed(gfp_mask, 0,
+			"modules: allocation failure: %lu bytes\n",
+			real_size);
+		seq_printk_module_statistics(NULL, NULL, NULL);
+		return NULL;
+	}
+#endif
 	warn_alloc_failed(gfp_mask, 0,
 			  "vmalloc: allocation failure: %lu bytes\n",
 			  real_size);
+	seq_printk_vmalloc_statistics(NULL, NULL, NULL);
+
 	return NULL;
 }
 
@@ -2547,6 +2880,88 @@ void pcpu_free_vm_areas(struct vm_struct **vms, int nr_vms)
 #endif	/* CONFIG_SMP */
 
 #ifdef CONFIG_PROC_FS
+#ifdef CONFIG_VMALLOCUSED_PLUS
+/**
+ * Function to retrieve values for VmallocUsed fields
+ * @pvmallocused: poiner to hold all parameter values in VmallocUsed
+ *
+ */
+void get_vmallocused(struct vmalloc_usedinfo *pvmallocused)
+{
+	unsigned long overlap_flag;
+	struct vmap_area *va;
+	struct vm_struct *vm;
+
+	spin_lock(&vmap_area_lock);
+	list_for_each_entry(va, &vmap_area_list, list) {
+		unsigned long addr = va->va_start;
+
+		overlap_flag = 0;
+		/*
+		 * Some archs keep another range for modules in vmalloc space
+		 */
+#ifndef CONFIG_VMALLOCUSED_PLUS
+		if (addr < VMALLOC_START)
+			continue;
+#endif
+		if (addr >= VMALLOC_END)
+			break;
+
+		if (va->flags & (VM_LAZY_FREE | VM_LAZY_FREEING))
+			continue;
+
+		/* Don't account vm_map_run with used=0 in VmallocUsed */
+		if (varea_is_unused_map_ram(va))
+			continue;
+
+		if (!(va->flags & VM_VM_AREA)) { 
+			pvmallocused->vmapramsize += (va->va_end - va->va_start);
+			continue;
+		}
+		vm = va->vm;
+
+		if (varea_is_module(addr)) {
+			pvmallocused->modulessize += vm->size;
+			/* we count modules separately */
+			continue;
+		}
+
+		if (varea_is_cma(addr)) {
+			pvmallocused->cma_size += vm->size;
+			/* we count CMA areas separately */
+			continue;
+		}
+
+		if (vm->flags & VM_IOREMAP) { 
+			pvmallocused->ioremapsize += vm->size;
+			overlap_flag++;
+		}
+		if (vm->flags & VM_ALLOC) { 
+			pvmallocused->vmallocsize += vm->size;
+			overlap_flag++;
+		}
+		if (vm->flags & VM_MAP) { 
+			pvmallocused->vmapsize += vm->size;
+			overlap_flag++;
+		}
+		if (vm->flags & VM_USERMAP) { 
+			pvmallocused->usermapsize += vm->size;
+			overlap_flag++;
+		}
+		if (vm->flags & VM_VPAGES) { 
+			pvmallocused->vpagessize += vm->size;
+			overlap_flag++;
+		}
+
+		/* if vm is having more than one type set */
+		if (overlap_flag > 1)
+			pvmallocused->overlappedsize += ((overlap_flag - 1) * vm->size);
+	}
+	spin_unlock(&vmap_area_lock);
+}
+EXPORT_SYMBOL(get_vmallocused);
+#endif
+
 static void *s_start(struct seq_file *m, loff_t *pos)
 	__acquires(&vmap_area_lock)
 {
@@ -2617,43 +3032,53 @@ static int s_show(struct seq_file *m, void *p)
 		return 0;
 
 	if (!(va->flags & VM_VM_AREA)) {
-		seq_printf(m, "0x%pK-0x%pK %7ld vm_map_ram\n",
+		seq_printk(m, "0x%pK-0x%pK %7ld vm_map_ram",
 			(void *)va->va_start, (void *)va->va_end,
 					va->va_end - va->va_start);
+
+		if (va->flags & VM_VB_AREA) {
+			struct vmap_block *vb = (struct vmap_block *)va->vm;
+
+			seq_printk(m, " used=%ld", (VMAP_BBMAP_BITS -
+					vb->free - vb->dirty) << PAGE_SHIFT);
+		}
+
+		seq_printk(m, "\n");
 		return 0;
 	}
 
 	v = va->vm;
 
-	seq_printf(m, "0x%pK-0x%pK %7ld",
+	seq_printk(m, "0x%pK-0x%pK %7ld",
 		v->addr, v->addr + v->size, v->size);
 
 	if (v->caller)
-		seq_printf(m, " %pS", v->caller);
+		seq_printk(m, " %pS", v->caller);
 
 	if (v->nr_pages)
-		seq_printf(m, " pages=%d", v->nr_pages);
+		seq_printk(m, " pages=%d", v->nr_pages);
 
 	if (v->phys_addr)
-		seq_printf(m, " phys=%llx", (unsigned long long)v->phys_addr);
+		seq_printk(m, " phys=%llx", (unsigned long long)v->phys_addr);
 
 	if (v->flags & VM_IOREMAP)
-		seq_printf(m, " ioremap");
+		seq_printk(m, " ioremap");
 
 	if (v->flags & VM_ALLOC)
-		seq_printf(m, " vmalloc");
+		seq_printk(m, " vmalloc");
 
 	if (v->flags & VM_MAP)
-		seq_printf(m, " vmap");
+		seq_printk(m, " vmap");
 
 	if (v->flags & VM_USERMAP)
-		seq_printf(m, " user");
+		seq_printk(m, " user");
 
 	if (v->flags & VM_VPAGES)
-		seq_printf(m, " vpages");
+		seq_printk(m, " vpages");
 
-	show_numa_info(m, v);
-	seq_putc(m, '\n');
+	if (m)
+		show_numa_info(m, v);
+	seq_printk(m, "\n");
 	return 0;
 }
 
@@ -2697,22 +3122,49 @@ static int __init proc_vmalloc_init(void)
 }
 module_init(proc_vmalloc_init);
 
-void get_vmalloc_info(struct vmalloc_info *vmi)
+#ifndef CONFIG_VD_RELEASE
+/* Dump vmallocinfo to printk */
+static void vmallocinfo_dump_printk(void)
+{
+	struct vmap_area *va;
+
+	spin_lock(&vmap_area_lock);
+
+	list_for_each_entry(va, &vmap_area_list, list)
+		s_show(NULL, va);
+
+	spin_unlock(&vmap_area_lock);
+}
+#endif /* CONFIG_VD_RELEASE */
+
+/* Must be called only with vmap_area_lock taken */
+static void __get_vmalloc_info(struct vmalloc_info *vmi)
 {
 	struct vmap_area *va;
 	unsigned long free_area_size;
 	unsigned long prev_end;
 
+#ifdef CONFIG_MODULESUSED_PLUS
+	unsigned long prev_end_modules;
+#endif
 	vmi->used = 0;
 	vmi->largest_chunk = 0;
+	vmi->largest_chunk_addr = VMALLOC_START;
 
 	prev_end = VMALLOC_START;
 
-	spin_lock(&vmap_area_lock);
+#ifdef CONFIG_MODULESUSED_PLUS
+	vmi->largest_modules_chunk = 0;
+	prev_end_modules = addr_modules_start;
+#endif
 
 	if (list_empty(&vmap_area_list)) {
 		vmi->largest_chunk = VMALLOC_TOTAL;
-		goto out;
+#ifdef CONFIG_MODULESUSED_PLUS
+		vmi->largest_modules_chunk = addr_modules_end -
+						addr_modules_start;
+#endif
+		return;
 	}
 
 	list_for_each_entry(va, &vmap_area_list, list) {
@@ -2721,27 +3173,72 @@ void get_vmalloc_info(struct vmalloc_info *vmi)
 		/*
 		 * Some archs keep another range for modules in vmalloc space
 		 */
+#ifndef CONFIG_VMALLOCUSED_PLUS
 		if (addr < VMALLOC_START)
 			continue;
+#endif
 		if (addr >= VMALLOC_END)
 			break;
 
 		if (va->flags & (VM_LAZY_FREE | VM_LAZY_FREEING))
 			continue;
 
+#ifdef CONFIG_MODULESUSED_PLUS
+		if (varea_is_module(addr)) {
+			unsigned long mod_area_size = addr - prev_end_modules;
+
+			if (vmi->largest_modules_chunk < mod_area_size)
+				vmi->largest_modules_chunk = mod_area_size;
+			prev_end_modules = va->va_end;
+		}
+#endif
+#ifdef CONFIG_VMALLOCUSED_PLUS
+		/* Don't account vm_map_run with used=0 in VmallocUsed */
+		if (varea_is_unused_map_ram(va))
+			continue;
+
+		/* Don't account kernel modules in VmallocUsed */
+		if (varea_is_module(addr))
+			continue;
+
+		/* Don't account CMA areas in VmallocUsed */
+		if (varea_is_cma(addr))
+			continue;
+#endif
 		vmi->used += (va->va_end - va->va_start);
 
+#ifdef CONFIG_VMALLOCUSED_PLUS
+		free_area_size = (addr > VMALLOC_START) ? (addr-prev_end) : 0;
+#else
 		free_area_size = addr - prev_end;
-		if (vmi->largest_chunk < free_area_size)
+#endif
+		if (vmi->largest_chunk < free_area_size) {
 			vmi->largest_chunk = free_area_size;
-
+			vmi->largest_chunk_addr = prev_end;
+		}
+#ifdef CONFIG_VMALLOCUSED_PLUS
+		prev_end = (addr >= VMALLOC_START) ? (va->va_end) : prev_end;
+#else
 		prev_end = va->va_end;
+#endif
 	}
 
-	if (VMALLOC_END - prev_end > vmi->largest_chunk)
+	if (VMALLOC_END - prev_end > vmi->largest_chunk) {
 		vmi->largest_chunk = VMALLOC_END - prev_end;
+		vmi->largest_chunk_addr = prev_end;
+	}
 
-out:
+#ifdef CONFIG_MODULESUSED_PLUS
+	if (addr_modules_end - prev_end_modules > vmi->largest_modules_chunk)
+		vmi->largest_modules_chunk = addr_modules_end -
+						prev_end_modules;
+#endif
+}
+
+void get_vmalloc_info(struct vmalloc_info *vmi)
+{
+	spin_lock(&vmap_area_lock);
+	__get_vmalloc_info(vmi);
 	spin_unlock(&vmap_area_lock);
 }
 #endif

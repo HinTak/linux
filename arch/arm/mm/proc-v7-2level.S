@@ -45,6 +45,9 @@ ENTRY(cpu_v7_switch_mm)
 	ALT_UP(orr	r0, r0, #TTB_FLAGS_UP)
 #ifdef CONFIG_ARM_ERRATA_430973
 	mcr	p15, 0, r2, c7, c5, 6		@ flush BTAC/BTB
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 #endif
 #ifdef CONFIG_PID_IN_CONTEXTIDR
 	mrc	p15, 0, r2, c13, c0, 1		@ read current context ID
@@ -90,28 +93,24 @@ ENTRY(cpu_v7_set_pte_ext)
 
 	tst	r1, #L_PTE_USER
 	orrne	r3, r3, #PTE_EXT_AP1
-#ifdef CONFIG_CPU_USE_DOMAINS
-	@ allow kernel read/write access to read-only user pages
-	tstne	r3, #PTE_EXT_APX
-	bicne	r3, r3, #PTE_EXT_APX | PTE_EXT_AP0
-#endif
 
 	tst	r1, #L_PTE_XN
 	orrne	r3, r3, #PTE_EXT_XN
 
 	tst	r1, #L_PTE_YOUNG
 	tstne	r1, #L_PTE_VALID
-#ifndef CONFIG_CPU_USE_DOMAINS
 	eorne	r1, r1, #L_PTE_NONE
 	tstne	r1, #L_PTE_NONE
-#endif
 	moveq	r3, #0
 
  ARM(	str	r3, [r0, #2048]! )
  THUMB(	add	r0, r0, #2048 )
  THUMB(	str	r3, [r0] )
-	ALT_SMP(mov	pc,lr)
+	ALT_SMP(W(nop))
 	ALT_UP (mcr	p15, 0, r0, c7, c10, 1)		@ flush_pte
+#ifdef CONFIG_ARCH_SDP1406
+	ALT_UP (isb)
+#endif
 #endif
 	mov	pc, lr
 ENDPROC(cpu_v7_set_pte_ext)
@@ -153,11 +152,17 @@ ENDPROC(cpu_v7_set_pte_ext)
 	 */
 	.macro	v7_ttb_setup, zero, ttbr0, ttbr1, tmp
 	mcr	p15, 0, \zero, c2, c0, 2	@ TTB control register
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 	ALT_SMP(orr	\ttbr0, \ttbr0, #TTB_FLAGS_SMP)
 	ALT_UP(orr	\ttbr0, \ttbr0, #TTB_FLAGS_UP)
 	ALT_SMP(orr	\ttbr1, \ttbr1, #TTB_FLAGS_SMP)
 	ALT_UP(orr	\ttbr1, \ttbr1, #TTB_FLAGS_UP)
 	mcr	p15, 0, \ttbr1, c2, c0, 1	@ load TTB1
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 	.endm
 
 	__CPUINIT

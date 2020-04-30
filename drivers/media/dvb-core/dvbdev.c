@@ -47,14 +47,14 @@ static DEFINE_MUTEX(dvbdev_register_lock);
 
 static const char * const dnames[] = {
 	"video", "audio", "sec", "frontend", "demux", "dvr", "ca",
-	"net", "osd"
+	"net", "osd", "dvr_hdr", "hcas", "atsc30dmx"
 };
 
 #ifdef CONFIG_DVB_DYNAMIC_MINORS
 #define MAX_DVB_MINORS		256
 #define DVB_MAX_IDS		MAX_DVB_MINORS
 #else
-#define DVB_MAX_IDS		4
+#define DVB_MAX_IDS		6
 #define nums2minor(num,type,id)	((num << 6) | (id << 4) | type)
 #define MAX_DVB_MINORS		(DVB_MAX_ADAPTERS*64)
 #endif
@@ -114,19 +114,27 @@ int dvb_generic_open(struct inode *inode, struct file *file)
 {
 	struct dvb_device *dvbdev = file->private_data;
 
-	if (!dvbdev)
+	if (!dvbdev) {
+		pr_err("[%s][%d] error\n", __func__, __LINE__); 
 		return -ENODEV;
+	}
 
-	if (!dvbdev->users)
+	if (!dvbdev->users) {
+		pr_err("[%s][%d] error\n", __func__, __LINE__); 
 		return -EBUSY;
+	}
 
 	if ((file->f_flags & O_ACCMODE) == O_RDONLY) {
-		if (!dvbdev->readers)
+		if (!dvbdev->readers) {
+			pr_err("[%s][%d] error\n", __func__, __LINE__); 
 			return -EBUSY;
+		}
 		dvbdev->readers--;
 	} else {
-		if (!dvbdev->writers)
+		if (!dvbdev->writers) {
+			pr_err("[%s][%d] WR flag multi open error\n", __func__, __LINE__); 
 			return -EBUSY;
+		}
 		dvbdev->writers--;
 	}
 

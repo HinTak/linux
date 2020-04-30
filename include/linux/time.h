@@ -2,7 +2,9 @@
 #define _LINUX_TIME_H
 
 # include <linux/cache.h>
+#ifndef __cplusplus
 # include <linux/seqlock.h>
+#endif
 # include <linux/math64.h>
 #include <uapi/linux/time.h>
 

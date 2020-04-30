@@ -31,8 +31,22 @@
 #include <linux/cpuidle.h>
 #include "../base.h"
 #include "power.h"
+#include <trace/early.h>
+
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME) 
+#include <linux/priority_devconfig.h>
+struct instant_resume_control instant_ctrl;
+EXPORT_SYMBOL_GPL(instant_ctrl);
+#endif
 
 typedef int (*pm_callback_t)(struct device *);
+
+void PM_IRQ_CHECK(int line, const char* func, const char *dev)
+{
+	if(irqs_disabled())
+		printk(KERN_ERR "PM-ERROR:%d:%s:%s\n", line,
+				func, dev);
+}
 
 /*
  * The entries in the dpm_list list are in a depth first order, simply
@@ -49,6 +63,15 @@ static LIST_HEAD(dpm_prepared_list);
 static LIST_HEAD(dpm_suspended_list);
 static LIST_HEAD(dpm_late_early_list);
 static LIST_HEAD(dpm_noirq_list);
+#ifdef CONFIG_IOTMODE
+static LIST_HEAD(dpm_suspended_iot_list);
+static LIST_HEAD(dpm_suspended_iot_resume_early_list);
+static LIST_HEAD(dpm_suspended_iot_resume_list);
+#define IOT_MAGIC		0x105D106D
+#define TV_MODE         1
+#define IOT_MODE	2
+extern int iotmode;
+#endif
 
 struct suspend_stats suspend_stats;
 static DEFINE_MUTEX(dpm_list_mtx);
@@ -217,6 +240,12 @@ static void dpm_wait_for_children(struct device *dev, bool async)
 static pm_callback_t pm_op(const struct dev_pm_ops *ops, pm_message_t state)
 {
 	switch (state.event) {
+#ifdef CONFIG_IOTMODE
+	case PM_EVENT_IOTPOWEROFF:
+		return ops->poweroff_noirq;
+	case PM_EVENT_IOTRESUME:
+		return ops->iot_resume;
+#endif
 #ifdef CONFIG_SUSPEND
 	case PM_EVENT_SUSPEND:
 		return ops->suspend;
@@ -252,6 +281,10 @@ static pm_callback_t pm_late_early_op(const struct dev_pm_ops *ops,
 				      pm_message_t state)
 {
 	switch (state.event) {
+#ifdef CONFIG_IOTMODE
+	case PM_EVENT_IOTRESUME:
+		return ops->iot_resume_early;
+#endif
 #ifdef CONFIG_SUSPEND
 	case PM_EVENT_SUSPEND:
 		return ops->suspend_late;
@@ -352,6 +385,7 @@ static void dpm_show_time(ktime_t starttime, pm_message_t state, char *info)
 	ktime_t calltime;
 	u64 usecs64;
 	int usecs;
+        char hwc_buf[256];
 
 	calltime = ktime_get();
 	usecs64 = ktime_to_ns(ktime_sub(calltime, starttime));
@@ -359,9 +393,17 @@ static void dpm_show_time(ktime_t starttime, pm_message_t state, char *info)
 	usecs = usecs64;
 	if (usecs == 0)
 		usecs = 1;
+#if !defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
 	pr_info("PM: %s%s%s of devices complete after %ld.%03ld msecs\n",
+#else
+	printk(KERN_EMERG"PM: %s%s%s of devices complete after %ld.%03ld msecs\n",
+#endif
 		info ?: "", info ? " " : "", pm_verb(state.event),
 		usecs / USEC_PER_MSEC, usecs % USEC_PER_MSEC);
+
+        snprintf(hwc_buf, 256, "PM: %s%s%s of devices complete after %ld.%03ld msecs%c",info ?: "", info ? " " : "", pm_verb(state.event),
+                usecs / USEC_PER_MSEC, usecs % USEC_PER_MSEC, '\0');
+        trace_early_message(hwc_buf);
 }
 
 static int dpm_run_callback(pm_callback_t cb, struct device *dev,
@@ -447,7 +489,6 @@ static void dpm_resume_noirq(pm_message_t state)
 	while (!list_empty(&dpm_noirq_list)) {
 		struct device *dev = to_device(dpm_noirq_list.next);
 		int error;
-
 		get_device(dev);
 		list_move_tail(&dev->power.entry, &dpm_late_early_list);
 		mutex_unlock(&dpm_list_mtx);
@@ -459,7 +500,7 @@ static void dpm_resume_noirq(pm_message_t state)
 			dpm_save_failed_dev(dev_name(dev));
 			pm_dev_err(dev, state, " noirq", error);
 		}
-
+		PM_IRQ_CHECK(__LINE__, __func__, dev_name(dev));	/* nobody cared issue check */
 		mutex_lock(&dpm_list_mtx);
 		put_device(dev);
 	}
@@ -528,7 +569,6 @@ static void dpm_resume_early(pm_message_t state)
 	while (!list_empty(&dpm_late_early_list)) {
 		struct device *dev = to_device(dpm_late_early_list.next);
 		int error;
-
 		get_device(dev);
 		list_move_tail(&dev->power.entry, &dpm_suspended_list);
 		mutex_unlock(&dpm_list_mtx);
@@ -541,6 +581,7 @@ static void dpm_resume_early(pm_message_t state)
 			pm_dev_err(dev, state, " early", error);
 		}
 
+		PM_IRQ_CHECK(__LINE__, __func__, dev_name(dev));	/* nobody cared issue check */
 		mutex_lock(&dpm_list_mtx);
 		put_device(dev);
 	}
@@ -651,6 +692,9 @@ static void async_resume(void *data, async_cookie_t cookie)
 	int error;
 
 	error = device_resume(dev, pm_transition, true);
+
+	PM_IRQ_CHECK(__LINE__, __func__, dev_name(dev));	/* nobody cared issue check */
+
 	if (error)
 		pm_dev_err(dev, pm_transition, " async", error);
 	put_device(dev);
@@ -704,6 +748,7 @@ void dpm_resume(pm_message_t state)
 				pm_dev_err(dev, state, "", error);
 			}
 
+			PM_IRQ_CHECK(__LINE__, __func__, dev_name(dev));	/* nobody cared issue check */
 			mutex_lock(&dpm_list_mtx);
 		}
 		if (!list_empty(&dev->power.entry))
@@ -712,8 +757,183 @@ void dpm_resume(pm_message_t state)
 	}
 	mutex_unlock(&dpm_list_mtx);
 	async_synchronize_full();
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+	instant_ctrl.access_once = true;
+	if(instant_ctrl.iot_func)
+		complete_all(&instant_ctrl.kernel_resume_end);
+#endif
 	dpm_show_time(starttime, state, NULL);
 }
+
+#ifdef CONFIG_IOTMODE
+
+
+/**
+ * dpm_prepare_iot - Prepare all non-sysdev devices for a system PM transition.
+ * @state: PM transition of the system being carried out.
+ *
+ * Execute the ->prepare() callback(s) for all devices.
+ */
+void dpm_prepare_iot(pm_message_t state)
+{
+        might_sleep();
+
+        mutex_lock(&dpm_list_mtx);
+        while (!list_empty(&dpm_list)) {
+                struct device *dev = to_device(dpm_list.next);
+		struct dev_pm_ops *pm = 0;
+		bool move_list = false;
+                get_device(dev);
+
+                if (dev->driver){
+                        pm = (struct dev_pm_ops *)dev->driver->pm;
+                }
+		
+                if(iotmode == IOT_MODE){
+                        if (pm && (pm->magic == IOT_MAGIC )){
+                                if (!list_empty(&dev->power.entry)){
+                                        list_move(&dev->power.entry, &dpm_suspended_iot_list);
+					move_list = true;
+                                }
+                        }
+                }
+		
+                if ((!move_list) && (!list_empty(&dev->power.entry)))
+                        list_move_tail(&dev->power.entry, &dpm_prepared_list);
+
+                put_device(dev);
+        }
+        mutex_unlock(&dpm_list_mtx);
+}
+
+/**
+ * dpm_poweroff_iot - Execute "poweroff_noirq" callbacks for non-sysdev devices at iot status.
+ * @state: PM transition of the system being carried out.
+ *
+ * Execute the appropriate "poweroff_noirq" callback for all devices whose status
+ * indicates that they are suspended.
+ */
+void dpm_poweroff_iot(pm_message_t state)
+{
+        struct device *dev;
+        char *info = NULL;
+	int error;
+
+	pm_callback_t callback = NULL;
+
+        might_sleep();
+
+        mutex_lock(&dpm_list_mtx);
+        while (!list_empty(&dpm_suspended_iot_list)) {
+                dev = to_device(dpm_suspended_iot_list.next);
+                get_device(dev);
+
+		mutex_unlock(&dpm_list_mtx);
+		if (dev->driver && dev->driver->pm) {
+			info = "driver ";
+			callback = pm_op(dev->driver->pm, state);
+		}
+		error = dpm_run_callback(callback, dev, state, info);
+		if (error) {
+			suspend_stats.failed_resume++;
+			dpm_save_failed_step(SUSPEND_RESUME);
+			dpm_save_failed_dev(dev_name(dev));
+			pm_dev_err(dev, state, "", error);
+		}
+		mutex_lock(&dpm_list_mtx);
+		
+                if (!list_empty(&dev->power.entry))
+                        list_move_tail(&dev->power.entry, &dpm_suspended_iot_resume_early_list);
+        }
+        mutex_unlock(&dpm_list_mtx);
+}
+
+/**
+ * dpm_resume_iot_early - Execute "iot_resume_early" callbacks for non-sysdev devices at iot status.
+ * @state: PM transition of the system being carried out.
+ *
+ * Execute the appropriate "iot_resume_early" callback for all devices whose status
+ * indicates that they are resume.
+ */
+void dpm_resume_iot_early(pm_message_t state)
+{
+        struct device *dev;
+        char *info = NULL;
+        int error;
+
+        pm_callback_t callback = NULL;
+        might_sleep();
+
+        mutex_lock(&dpm_list_mtx);
+        while (!list_empty(&dpm_suspended_iot_resume_early_list)) {
+                dev = to_device(dpm_suspended_iot_resume_early_list.next);
+                get_device(dev);
+
+		mutex_unlock(&dpm_list_mtx);
+		if (dev->driver && dev->driver->pm) {
+			info = "early driver ";
+			callback = pm_late_early_op(dev->driver->pm, state);
+		}
+
+		error = dpm_run_callback(callback, dev, state, info);
+		if (error) {
+			suspend_stats.failed_resume++;
+			dpm_save_failed_step(SUSPEND_RESUME);
+			dpm_save_failed_dev(dev_name(dev));
+			pm_dev_err(dev, state, "", error);
+		}
+		mutex_lock(&dpm_list_mtx);
+
+                if (!list_empty(&dev->power.entry))
+                        list_move_tail(&dev->power.entry, &dpm_suspended_iot_resume_list);
+        }
+        mutex_unlock(&dpm_list_mtx);
+}
+
+/**
+ * dpm_resume_iot - Execute "iot_resume" callbacks for non-sysdev devices at iot status.
+ * @state: PM transition of the system being carried out.
+ *
+ * Execute the appropriate "iot_resume" callback for all devices whose status
+ * indicates that they are resume.
+ */
+void dpm_resume_iot(pm_message_t state)
+{
+        struct device *dev;
+        char *info = NULL;
+        int error;
+
+        pm_callback_t callback = NULL;
+
+        might_sleep();
+
+        mutex_lock(&dpm_list_mtx);
+        while (!list_empty(&dpm_suspended_iot_resume_list)) {
+                dev = to_device(dpm_suspended_iot_resume_list.next);
+                get_device(dev);
+
+		mutex_unlock(&dpm_list_mtx);
+		if (dev->driver && dev->driver->pm) {
+			info = "driver ";
+			callback = pm_op(dev->driver->pm, state);
+		}
+		error = dpm_run_callback(callback, dev, state, info);
+		if (error) {
+			suspend_stats.failed_resume++;
+			dpm_save_failed_step(SUSPEND_RESUME);
+			dpm_save_failed_dev(dev_name(dev));
+			pm_dev_err(dev, state, "", error);
+		}
+		mutex_lock(&dpm_list_mtx);
+
+                if (!list_empty(&dev->power.entry))
+                        list_move_tail(&dev->power.entry, &dpm_prepared_list);
+                put_device(dev);
+        }
+        mutex_unlock(&dpm_list_mtx);
+}
+
+#endif
 
 /**
  * device_complete - Complete a PM transition for given device.
@@ -784,6 +1004,8 @@ void dpm_complete(pm_message_t state)
 
 		device_complete(dev, state);
 
+		PM_IRQ_CHECK(__LINE__, __func__, dev_name(dev));	/* nobody cared issue check */
+
 		mutex_lock(&dpm_list_mtx);
 		put_device(dev);
 	}
@@ -800,12 +1022,31 @@ void dpm_complete(pm_message_t state)
  */
 void dpm_resume_end(pm_message_t state)
 {
+#ifdef CONFIG_SAMSUNG_USB_PARALLEL_RESUME
+	if(instant_ctrl.iot_func)
+		instant_ctrl.iot_func();
+#endif
 	dpm_resume(state);
 	dpm_complete(state);
 }
 EXPORT_SYMBOL_GPL(dpm_resume_end);
 
-
+#ifdef CONFIG_IOTMODE
+/**
+ * dpm_resume_end_iot - Execute "resume" callbacks and complete system transition.
+ * @state: PM transition of the system being carried out.
+ *
+ * Execute "iot_resume" callbacks for all devices and complete the PM transition of
+ * the system.
+ */
+void dpm_resume_end_iot(pm_message_t state)
+{
+	dpm_resume_iot_early(state);
+        dpm_resume_iot(state);
+	dpm_complete(PMSG_RESUME);
+}
+EXPORT_SYMBOL_GPL(dpm_resume_end_iot);
+#endif
 /*------------------------- Suspend routines -------------------------*/
 
 /**
@@ -1324,6 +1565,9 @@ int dpm_prepare(pm_message_t state)
 int dpm_suspend_start(pm_message_t state)
 {
 	int error;
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+        int i = 0;
+#endif
 
 	error = dpm_prepare(state);
 	if (error) {
@@ -1331,6 +1575,13 @@ int dpm_suspend_start(pm_message_t state)
 		dpm_save_failed_step(SUSPEND_PREPARE);
 	} else
 		error = dpm_suspend(state);
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+        for(i = 0; i < MAX_INSTANT_TREES; i++){
+		if(instant_ctrl.instant_tree[i]){
+			instant_ctrl.instant_tree[i]->state = INSTANT_STATE_COLDBOOT;
+		}
+        }
+#endif
 	return error;
 }
 EXPORT_SYMBOL_GPL(dpm_suspend_start);

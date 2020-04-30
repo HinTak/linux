@@ -34,6 +34,11 @@ static DEFINE_RAW_SPINLOCK(l2x0_lock);
 static u32 l2x0_way_mask;	/* Bitmask of active ways */
 static u32 l2x0_size;
 static unsigned long sync_reg_offset = L2X0_CACHE_SYNC;
+#ifdef CONFIG_CACHE_L2X0_DISABLE_SECURE_SUPPORT
+l2x0_disable_sec_fn l2x0_disable_sec;
+EXPORT_SYMBOL(l2x0_disable_sec);
+#endif
+
 
 /* Aurora don't have the cache ID register available, so we have to
  * pass it though the device tree */
@@ -283,13 +288,19 @@ static void l2x0_flush_range(unsigned long start, unsigned long end)
 	raw_spin_unlock_irqrestore(&l2x0_lock, flags);
 }
 
+
 static void l2x0_disable(void)
 {
 	unsigned long flags;
 
 	raw_spin_lock_irqsave(&l2x0_lock, flags);
 	__l2x0_flush_all();
+#ifdef CONFIG_CACHE_L2X0_DISABLE_SECURE_SUPPORT
+	if (l2x0_disable_sec)
+		l2x0_disable_sec();
+#else
 	writel_relaxed(0, l2x0_base + L2X0_CTRL);
+#endif
 	dsb();
 	raw_spin_unlock_irqrestore(&l2x0_lock, flags);
 }

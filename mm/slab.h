@@ -162,6 +162,8 @@ static inline const char *cache_name(struct kmem_cache *s)
 
 static inline struct kmem_cache *cache_from_memcg(struct kmem_cache *s, int idx)
 {
+	if (!s->memcg_params)
+		return NULL;
 	return s->memcg_params->memcg_caches[idx];
 }
 
@@ -238,6 +240,13 @@ static inline struct kmem_cache *cache_from_obj(struct kmem_cache *s, void *x)
 	WARN_ON_ONCE(1);
 	return s;
 }
+
+void slab_err(struct kmem_cache *s, struct page *page, const char *fmt, ...);
+void object_err(struct kmem_cache *s, struct page *page,
+		u8 *object, char *reason);
+
+size_t __ksize(const void *obj);
+
 #endif
 
 

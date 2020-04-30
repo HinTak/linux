@@ -31,13 +31,35 @@
 #include <linux/slab.h>
 #include <linux/swap.h>
 #include <linux/mm_types.h>
+#include <linux/list.h>
+#include <linux/proc_fs.h>
+#include <linux/uaccess.h>
+#include <linux/time.h>
+#include <linux/seq_file.h>
 #include <linux/dma-contiguous.h>
 
 struct cma {
 	unsigned long	base_pfn;
 	unsigned long	count;
 	unsigned long	*bitmap;
+#ifdef CONFIG_CMA_DEBUG
+	struct list_head buffers_list;
+	struct mutex	list_lock;
+#endif
 };
+
+#ifdef CONFIG_CMA_DEBUG
+struct cma_buffer {
+	unsigned long pfn;
+	unsigned long count;
+	pid_t pid;
+	char comm[TASK_COMM_LEN];
+	uint64_t latency;
+	unsigned long trace_entries[16];
+	unsigned int nr_entries;
+	struct list_head list;
+};
+#endif
 
 struct cma *dma_contiguous_default_area;
 
@@ -180,6 +202,11 @@ static __init struct cma *cma_create_area(unsigned long base_pfn,
 	if (ret)
 		goto error;
 
+#ifdef CONFIG_CMA_DEBUG
+	INIT_LIST_HEAD(&cma->buffers_list);
+	mutex_init(&cma->list_lock);
+#endif
+
 	pr_debug("%s: returned %p\n", __func__, (void *)cma);
 	return cma;
 
@@ -292,6 +319,88 @@ err:
 	return base;
 }
 
+#ifdef CONFIG_CMA_DEBUG
+/**
+ * cma_buffer_list_add() - add a new entry to a list of allocated buffers
+ * @dev:   Pointer to the device structure.
+ * @pfn:   Base PFN of the allocated buffer.
+ * @count: Number of allocated pages.
+ *
+ * This function adds a new entry to the list of allocated contiguous memory
+ * buffers in a CMA area. It uses the CMA area specificated by the device
+ * if available or the default global one otherwise.
+ */
+static int cma_buffer_list_add(struct device *dev, unsigned long pfn,
+		int count, int64_t latency)
+{
+	struct cma *cma = dev_get_cma_area(dev);
+	struct cma_buffer *cmabuf;
+	struct stack_trace trace;
+
+	cmabuf = kmalloc(sizeof(struct cma_buffer), GFP_KERNEL);
+	if (!cmabuf)
+		return -ENOMEM;
+
+	trace.nr_entries = 0;
+	trace.max_entries = ARRAY_SIZE(cmabuf->trace_entries);
+	trace.entries = &cmabuf->trace_entries[0];
+	trace.skip = 0;
+	save_stack_trace(&trace);
+
+	cmabuf->pfn = pfn;
+	cmabuf->count = count;
+	cmabuf->pid = task_pid_nr(current);
+	cmabuf->nr_entries = trace.nr_entries;
+	get_task_comm(cmabuf->comm, current);
+	cmabuf->latency = div_s64(latency, NSEC_PER_USEC);
+
+	mutex_lock(&cma->list_lock);
+	list_add_tail(&cmabuf->list, &cma->buffers_list);
+	mutex_unlock(&cma->list_lock);
+
+	return 0;
+}
+
+/**
+ * cma_buffer_list_del() - delete an entry from a list of allocated buffers
+ * @dev:   Pointer to device for which the pages were allocated.
+ * @pfn:   Base PFN of the released buffer.
+ *
+ * This function deletes a list entry added by cma_buffer_list_add().
+ */
+static void cma_buffer_list_del(struct device *dev, unsigned long pfn)
+{
+	struct cma *cma = dev_get_cma_area(dev);
+	struct cma_buffer *cmabuf;
+
+	mutex_lock(&cma->list_lock);
+
+	list_for_each_entry(cmabuf, &cma->buffers_list, list)
+		if (cmabuf->pfn == pfn) {
+			list_del(&cmabuf->list);
+			kfree(cmabuf);
+			goto out;
+		}
+
+	pr_err("%s(pfn %lu): couldn't find buffers list entry\n",
+			__func__, pfn);
+
+out:
+	mutex_unlock(&cma->list_lock);
+	return;
+}
+#else
+static int cma_buffer_list_add(struct device *dev, unsigned long pfn,
+		int count, int64_t latency)
+{
+	return 0;
+}
+
+static void cma_buffer_list_del(struct device *dev, unsigned long pfn)
+{
+}
+#endif /* CONFIG_CMA_DEBUG */
+
 /**
  * dma_alloc_from_contiguous() - allocate pages from contiguous area
  * @dev:   Pointer to device for which the allocation is performed.
@@ -309,10 +418,14 @@ struct page *dma_alloc_from_contiguous(struct device *dev, int count,
 	unsigned long mask, pfn, pageno, start = 0;
 	struct cma *cma = dev_get_cma_area(dev);
 	struct page *page = NULL;
+	struct timespec ts1, ts2;
+	int64_t latency;
 	int ret;
 
 	if (!cma || !cma->count)
 		return NULL;
+
+	getnstimeofday(&ts1);
 
 	if (align > CONFIG_CMA_ALIGNMENT)
 		align = CONFIG_CMA_ALIGNMENT;
@@ -340,6 +453,8 @@ struct page *dma_alloc_from_contiguous(struct device *dev, int count,
 			page = pfn_to_page(pfn);
 			break;
 		} else if (ret != -EBUSY) {
+			pr_warn_ratelimited("%s(): alloc_contig_range returned %d\n",
+					    __func__, ret);
 			break;
 		}
 		pr_debug("%s(): memory range at %p is busy, retrying\n",
@@ -349,6 +464,20 @@ struct page *dma_alloc_from_contiguous(struct device *dev, int count,
 	}
 
 	mutex_unlock(&cma_mutex);
+
+	getnstimeofday(&ts2);
+	latency = timespec_to_ns(&ts2) - timespec_to_ns(&ts1);
+
+	if (page) {
+		ret = cma_buffer_list_add(dev, pfn, count, latency);
+		if (ret) {
+			pr_warn("%s(): cma_buffer_list_add() returned %d\n",
+					__func__, ret);
+			dma_release_from_contiguous(dev, page, count);
+			page = NULL;
+		}
+	}
+
 	pr_debug("%s(): returned %p\n", __func__, page);
 	return page;
 }
@@ -386,5 +515,183 @@ bool dma_release_from_contiguous(struct device *dev, struct page *pages,
 	free_contig_range(pfn, count);
 	mutex_unlock(&cma_mutex);
 
+	cma_buffer_list_del(dev, pfn);
+
 	return true;
 }
+
+#ifdef CONFIG_CMA_DEBUG
+/**
+ * cma_get_num_pages() - get number of pages
+ * @cma: region to check
+ *
+ * This function returns count of all pages in cma region.
+ */
+unsigned long cma_get_num_pages(struct cma *cma)
+{
+	if (!cma)
+		return 0;
+	return cma->count;
+}
+
+/**
+ * cma_get_used_pages() - get number of used pages
+ * @cma: region to check
+ *
+ * This function returns number of used pages in cma region.
+ */
+unsigned long cma_get_used_pages(struct cma *cma)
+{
+	unsigned long ret = 0;
+
+	if (!cma)
+		return 0;
+
+	mutex_lock(&cma_mutex);
+	/* pages counter is smaller than sizeof(int) */
+	ret = bitmap_weight(cma->bitmap, (int)cma->count);
+	mutex_unlock(&cma_mutex);
+
+	return ret;
+}
+
+/**
+ * cma_get_maxchunk_pages() - get the biggest free chunk
+ * @cma: region to check
+ *
+ * This function returns number of pages inside biggest chunk in cma region.
+ */
+unsigned long cma_get_maxchunk_pages(struct cma *cma)
+{
+	unsigned long maxchunk = 0;
+	unsigned long start, end = 0;
+
+	if (!cma)
+		return 0;
+
+	mutex_lock(&cma_mutex);
+	for (;;) {
+		start = find_next_zero_bit(cma->bitmap, cma->count, end);
+		if (start >= cma->count)
+			break;
+		end = find_next_bit(cma->bitmap, cma->count, start);
+		maxchunk = max(end-start, maxchunk);
+	}
+	mutex_unlock(&cma_mutex);
+
+	return maxchunk;
+}
+
+static void *s_start(struct seq_file *m, loff_t *pos)
+{
+	loff_t n = *pos;
+	/* TODO: support for custom CMA areas */
+	struct cma *cma = dma_contiguous_default_area;
+	struct cma_buffer *cmabuf;
+
+#define K(x) ((x) << (PAGE_SHIFT - 10))
+	seq_printf(m, "CMARegion stat: %8lu kB total, %8lu kB used, "
+		"%8lu kB max contiguous chunk\n\n",
+		K(cma_get_num_pages(cma)),
+		K(cma_get_used_pages(cma)),
+		K(cma_get_maxchunk_pages(cma)));
+#undef K
+	mutex_lock(&cma->list_lock);
+	cmabuf = list_first_entry(&cma->buffers_list, typeof(*cmabuf), list);
+	while (n > 0 && &cmabuf->list != &cma->buffers_list) {
+		n--;
+		cmabuf = list_next_entry(cmabuf, list);
+	}
+	if (!n && &cmabuf->list != &cma->buffers_list)
+		return cmabuf;
+
+	return 0;
+}
+
+static void *s_next(struct seq_file *m, void *p, loff_t *pos)
+{
+	struct cma *cma = dma_contiguous_default_area;
+	struct cma_buffer *cmabuf = p, *next;
+
+	++*pos;
+	next = list_next_entry(cmabuf, list);
+	if (&next->list != &cma->buffers_list)
+		return next;
+
+	return 0;
+}
+
+static void s_stop(struct seq_file *m, void *p)
+{
+	struct cma *cma = dma_contiguous_default_area;
+	mutex_unlock(&cma->list_lock);
+}
+
+extern void seq_print_stack_trace(struct seq_file *m,
+				struct stack_trace *trace, int spaces);
+
+static int s_show(struct seq_file *m, void *p)
+{
+	struct cma_buffer *cmabuf = p;
+	struct stack_trace trace;
+
+	seq_printf(m, "0x%llx - 0x%llx (%lu kB), "
+			"allocated by pid %u (%s), "
+			"latency %lld us\n",
+			(unsigned long long)PFN_PHYS(cmabuf->pfn),
+			(unsigned long long)PFN_PHYS(cmabuf->pfn + cmabuf->count),
+			(cmabuf->count * PAGE_SIZE) >> 10,
+			cmabuf->pid, cmabuf->comm, cmabuf->latency);
+
+	trace.nr_entries = cmabuf->nr_entries;
+	trace.entries = &cmabuf->trace_entries[0];
+
+	seq_print_stack_trace(m, &trace, 0);
+
+	seq_putc(m, '\n');
+
+	return 0;
+}
+
+static const struct seq_operations cmainfo_op = {
+	.start = s_start,
+	.next = s_next,
+	.stop = s_stop,
+	.show = s_show,
+};
+
+static int cmainfo_open(struct inode *inode, struct file *file)
+{
+	unsigned int *ptr = NULL;
+	int ret;
+
+	if (IS_ENABLED(CONFIG_NUMA)) {
+		ptr = kmalloc(nr_node_ids * sizeof(unsigned int), GFP_KERNEL);
+		if (ptr == NULL)
+			return -ENOMEM;
+	}
+	ret = seq_open(file, &cmainfo_op);
+	if (!ret) {
+		struct seq_file *m = file->private_data;
+		m->private = ptr;
+	} else
+		kfree(ptr);
+
+	return ret;
+}
+
+static const struct file_operations proc_cmainfo_operations = {
+	.open		= cmainfo_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release_private,
+};
+
+static int __init proc_cmainfo_init(void)
+{
+	proc_create("cmainfo", S_IRUSR, NULL, &proc_cmainfo_operations);
+	return 0;
+}
+
+module_init(proc_cmainfo_init);
+#endif /* CONFIG_CMA_DEBUG */

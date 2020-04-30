@@ -25,7 +25,7 @@ INITRD_PHYS := $(initrd_phys-y)
 
 export ZRELADDR INITRD_PHYS PARAMS_PHYS
 
-targets := Image zImage xipImage bootpImage uImage
+targets := Image zImage xipImage bootpImage uImage uzImage
 
 ifeq ($(CONFIG_XIP_KERNEL),y)
 
@@ -75,7 +75,12 @@ if [ $(words $(UIMAGE_LOADADDR)) -ne 1 ]; then \
 	false; \
 fi
 
-$(obj)/uImage:	$(obj)/zImage FORCE
+$(obj)/uzImage:	$(obj)/zImage FORCE
+	@$(check_for_multiple_loadaddr)
+	$(call if_changed,uimage)
+	@$(kecho) '  Image $@ is ready'
+
+$(obj)/uImage:	$(obj)/Image FORCE
 	@$(check_for_multiple_loadaddr)
 	$(call if_changed,uimage)
 	@$(kecho) '  Image $@ is ready'
@@ -106,6 +111,10 @@ zinstall: $(obj)/zImage
 uinstall: $(obj)/uImage
 	$(CONFIG_SHELL) $(srctree)/$(src)/install.sh $(KERNELRELEASE) \
 	$(obj)/uImage System.map "$(INSTALL_PATH)"
+
+uzinstall: $(obj)/uzImage
+	$(CONFIG_SHELL) $(srctree)/$(src)/install.sh $(KERNELRELEASE) \
+	$(obj)/uzImage System.map "$(INSTALL_PATH)"
 
 zi:
 	$(CONFIG_SHELL) $(srctree)/$(src)/install.sh $(KERNELRELEASE) \

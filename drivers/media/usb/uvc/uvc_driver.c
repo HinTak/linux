@@ -37,6 +37,20 @@ static unsigned int uvc_quirks_param = -1;
 unsigned int uvc_trace_param;
 unsigned int uvc_timeout_param = UVC_CTRL_STREAMING_TIMEOUT;
 
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+int uvc_main_streaming = 0;
+int uvc_sub_streaming = 0;
+unsigned int uvc_security_cam_param = 0;
+int plugin_flag = 0;
+int idVendor  = 0;
+int idProduct = 0;
+
+#define CHECK_USB_VIDEO_TV_CAMERA(idVendor, idProduct, tvcam) \
+	if (idVendor == 0x04e8 && (idProduct >= 0x2058 && idProduct < 0x206c)) { \
+		tvcam = 1; \
+	}
+#endif
+
 /* ------------------------------------------------------------------------
  * Video formats
  */
@@ -1632,6 +1646,14 @@ static void uvc_delete(struct uvc_device *dev)
 			video_device_release(entity->vdev);
 			entity->vdev = NULL;
 		}
+
+#ifdef CONFIG_CONFIG_USB_VIDEO_TV_CAMERA
+		if (entity->vdev_sub) {
+			video_device_release(entity->vdev_sub);
+			entity->vdev_sub = NULL;
+		}
+#endif
+
 		kfree(entity);
 	}
 
@@ -1682,6 +1704,13 @@ static void uvc_unregister_video(struct uvc_device *dev)
 		video_unregister_device(stream->vdev);
 		stream->vdev = NULL;
 
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+		if (stream->vdev_sub == NULL)
+			continue;
+
+		video_unregister_device(stream->vdev_sub);
+		stream->vdev_sub = NULL;
+#endif
 		uvc_debugfs_cleanup_stream(stream);
 	}
 
@@ -1692,23 +1721,69 @@ static void uvc_unregister_video(struct uvc_device *dev)
 		uvc_delete(dev);
 }
 
-static int uvc_register_video(struct uvc_device *dev,
-		struct uvc_streaming *stream)
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+static int _uvc_register_video(struct uvc_device *dev,
+		struct uvc_streaming *stream, int minor)
 {
 	struct video_device *vdev;
-	int ret;
+	int ret = 0;
 
-	/* Initialize the streaming interface with default streaming
-	 * parameters.
+	/* Register the device with V4L. */
+	vdev = video_device_alloc();
+	if (vdev == NULL) {
+		uvc_printk(KERN_ERR, "Failed to allocate video device (%d).\n",
+			   ret);
+		return -ENOMEM;
+	}
+
+	/* We already hold a reference to dev->udev. The video device will be
+	 * unregistered before the reference is released, so we don't need to
+	 * get another one.
 	 */
-	ret = uvc_video_init(stream);
+	vdev->v4l2_dev = &dev->vdev;
+	vdev->fops = &uvc_fops;
+	vdev->release = uvc_release;
+	vdev->prio = &stream->chain->prio;
+	set_bit(V4L2_FL_USE_FH_PRIO, &vdev->flags);
+	if (stream->type == V4L2_BUF_TYPE_VIDEO_OUTPUT)
+		vdev->vfl_dir = VFL_DIR_TX;
+	strlcpy(vdev->name, dev->name, sizeof vdev->name);
+
+	/* Set the driver data before calling video_register_device, otherwise
+	 * uvc_v4l2_open might race us.
+	 */
+	if (minor != CONFIG_USB_VIDEO_TV_CAMERA_SUB)
+		stream->vdev = vdev;
+	else
+		stream->vdev_sub = vdev;
+	video_set_drvdata(vdev, stream);
+
+	ret = video_register_device(vdev, VFL_TYPE_GRABBER, minor);
 	if (ret < 0) {
-		uvc_printk(KERN_ERR, "Failed to initialize the device "
-			"(%d).\n", ret);
+		uvc_printk(KERN_ERR, "Failed to register video device (%d).\n",
+			   ret);
+		if (minor != CONFIG_USB_VIDEO_TV_CAMERA_SUB)
+			stream->vdev = vdev;
+		else
+			stream->vdev_sub = vdev;
+		video_device_release(vdev);
 		return ret;
 	}
 
-	uvc_debugfs_init_stream(stream);
+	atomic_inc(&dev->nstreams);
+
+	if (minor != CONFIG_USB_VIDEO_TV_CAMERA_SUB)
+		uvc_main_streaming = vdev->minor;
+	else
+		uvc_sub_streaming = vdev->minor;
+	return ret;
+}
+#else
+static int _uvc_register_video(struct uvc_device *dev,
+		struct uvc_streaming *stream, int minor)
+{
+	struct video_device *vdev;
+	int ret = 0;
 
 	/* Register the device with V4L. */
 	vdev = video_device_alloc();
@@ -1737,21 +1812,79 @@ static int uvc_register_video(struct uvc_device *dev,
 	stream->vdev = vdev;
 	video_set_drvdata(vdev, stream);
 
-	ret = video_register_device(vdev, VFL_TYPE_GRABBER, -1);
+	ret = video_register_device(vdev, VFL_TYPE_GRABBER, minor);
 	if (ret < 0) {
 		uvc_printk(KERN_ERR, "Failed to register video device (%d).\n",
 			   ret);
-		stream->vdev = NULL;
+		stream->vdev = vdev;
 		video_device_release(vdev);
 		return ret;
 	}
+	return ret;
+}
+#endif
+
+static int uvc_register_video(struct uvc_device *dev,
+		struct uvc_streaming *stream)
+{
+	int ret;
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+	int tvcam = 0;
+	idVendor  = le16_to_cpu(dev->udev->descriptor.idVendor);
+	idProduct = le16_to_cpu(dev->udev->descriptor.idProduct);
+
+	CHECK_USB_VIDEO_TV_CAMERA(idVendor, idProduct, tvcam);
+	if (tvcam == 1)
+		stream->product_id = idProduct;
+	else
+		stream->product_id = 0;
+#endif
+
+	/* Initialize the streaming interface with default streaming
+	 * parameters.
+	 */
+	ret = uvc_video_init(stream);
+	if (ret < 0) {
+		uvc_printk(KERN_ERR, "Failed to initialize the device "
+			"(%d).\n", ret);
+		return ret;
+	}
+
+	uvc_debugfs_init_stream(stream);
+
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+	uvc_main_streaming = 0;
+	uvc_sub_streaming = 0;
+
+	if (stream->product_id != 0) {
+		ret = _uvc_register_video(dev, stream, CONFIG_USB_VIDEO_TV_CAMERA_MAIN);
+		if (ret < 0)
+			return ret;
+
+		ret = _uvc_register_video(dev, stream, CONFIG_USB_VIDEO_TV_CAMERA_SUB);
+		if (ret < 0)
+			return ret;
+
+		uvc_xu_ctrl_tvcam_init(dev);
+	} else {
+		ret = _uvc_register_video(dev, stream, -1);
+		if (ret < 0)
+			return ret;
+	}
+
+	printk("REGISTERED [%d,%d]\n", uvc_main_streaming, uvc_sub_streaming);
+#else
+	ret = _uvc_register_video(dev, stream, -1);
+	if (ret < 0)
+		return ret;
+#endif
+
 
 	if (stream->type == V4L2_BUF_TYPE_VIDEO_CAPTURE)
 		stream->chain->caps |= V4L2_CAP_VIDEO_CAPTURE;
 	else
 		stream->chain->caps |= V4L2_CAP_VIDEO_OUTPUT;
 
-	atomic_inc(&dev->nstreams);
 	return 0;
 }
 
@@ -1782,6 +1915,10 @@ static int uvc_register_terms(struct uvc_device *dev,
 			return ret;
 
 		term->vdev = stream->vdev;
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+		term->vdev_sub = stream->vdev_sub;
+#endif
+
 	}
 
 	return 0;
@@ -1819,6 +1956,18 @@ static int uvc_probe(struct usb_interface *intf,
 	struct usb_device *udev = interface_to_usbdev(intf);
 	struct uvc_device *dev;
 	int ret;
+
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+	int tvcam = 0;
+	idVendor  = le16_to_cpu(udev->descriptor.idVendor);
+	idProduct = le16_to_cpu(udev->descriptor.idProduct);
+
+	CHECK_USB_VIDEO_TV_CAMERA(idVendor, idProduct, tvcam);
+	if (plugin_flag == 1 && tvcam == 1) {
+		uvc_trace(UVC_TRACE_PROBE, "Already probed (idProduct = %04x)\n", idProduct);
+		return -EINVAL;
+	}
+#endif
 
 	if (id->idVendor && id->idProduct)
 		uvc_trace(UVC_TRACE_PROBE, "Probing known UVC device %s "
@@ -1914,7 +2063,11 @@ static int uvc_probe(struct usb_interface *intf,
 	}
 
 	uvc_trace(UVC_TRACE_PROBE, "UVC device initialized.\n");
-	usb_enable_autosuspend(udev);
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+	/*usb_enable_autosuspend(udev);*/
+	if (tvcam)
+		plugin_flag = 1;
+#endif
 	return 0;
 
 error:
@@ -1925,6 +2078,9 @@ error:
 static void uvc_disconnect(struct usb_interface *intf)
 {
 	struct uvc_device *dev = usb_get_intfdata(intf);
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+	int tvcam = 0;
+#endif
 
 	/* Set the USB interface data to NULL. This can be done outside the
 	 * lock, as there's no other reader.
@@ -1937,7 +2093,14 @@ static void uvc_disconnect(struct usb_interface *intf)
 
 	dev->state |= UVC_DEV_DISCONNECTED;
 
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+	idVendor  = le16_to_cpu(dev->udev->descriptor.idVendor);
+	idProduct = le16_to_cpu(dev->udev->descriptor.idProduct);
 	uvc_unregister_video(dev);
+	CHECK_USB_VIDEO_TV_CAMERA(idVendor, idProduct, tvcam);
+	if (tvcam == 1) 
+		plugin_flag = 0;
+#endif
 }
 
 static int uvc_suspend(struct usb_interface *intf, pm_message_t message)
@@ -2041,6 +2204,10 @@ module_param_named(trace, uvc_trace_param, uint, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(trace, "Trace level bitmask");
 module_param_named(timeout, uvc_timeout_param, uint, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(timeout, "Streaming control requests timeout");
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+module_param_named(camera_on_off, uvc_security_cam_param, uint, S_IRUGO|S_IWUSR);
+MODULE_PARM_DESC(camera_on_off, "Security option for camera");
+#endif
 
 /* ------------------------------------------------------------------------
  * Driver initialization and cleanup

@@ -38,6 +38,33 @@
 
 #include "mm.h"
 
+#ifdef CMA_DEFAULT_REGION
+#error Unexpected situation CMA_DEFAULT_REGION defined
+#endif
+
+#ifdef CONFIG_CMA
+	#ifdef CONFIG_CMA_SIZE_SEL_MIN
+		#if (CONFIG_CMA_SIZE_MBYTES != 0 && CONFIG_CMA_SIZE_PERCENTAGE != 0)
+			#define CMA_DEFAULT_REGION 1
+		#endif
+	#elif defined(CONFIG_CMA_SIZE_SEL_MAX)
+		#if (CONFIG_CMA_SIZE_MBYTES > 0 || CONFIG_CMA_SIZE_PERCENTAGE > 0)
+			#define CMA_DEFAULT_REGION 1
+		#endif
+	#elif defined(CONFIG_CMA_SIZE_MBYTES)
+		#if (CONFIG_CMA_SIZE_MBYTES > 0)
+			#define CMA_DEFAULT_REGION 1
+		#endif
+	#elif defined(CONFIG_CMA_SIZE_PERCENTAGE)
+		#if (CONFIG_CMA_SIZE_PERCENTAGE > 0)
+			#define CMA_DEFAULT_REGION 1
+		#endif
+	#endif
+#endif
+#ifndef CMA_DEFAULT_REGION
+	#define CMA_DEFAULT_REGION 0
+#endif
+
 /*
  * The DMA API is built upon the notion of "buffer ownership".  A buffer
  * is either exclusively owned by the CPU (and therefore may be accessed
@@ -159,7 +186,7 @@ EXPORT_SYMBOL(arm_coherent_dma_ops);
 
 static u64 get_coherent_dma_mask(struct device *dev)
 {
-	u64 mask = (u64)arm_dma_limit;
+	u64 mask = (u64)DMA_BIT_MASK(32);
 
 	if (dev) {
 		mask = dev->coherent_dma_mask;
@@ -173,10 +200,30 @@ static u64 get_coherent_dma_mask(struct device *dev)
 			return 0;
 		}
 
-		if ((~mask) & (u64)arm_dma_limit) {
-			dev_warn(dev, "coherent DMA mask %#llx is smaller "
-				 "than system GFP_DMA mask %#llx\n",
-				 mask, (u64)arm_dma_limit);
+		/*
+		 * If the mask allows for more memory than we can address,
+		 * and we actually have that much memory, then fail the
+		 * allocation.
+		 */
+		if (sizeof(mask) != sizeof(dma_addr_t) &&
+		    mask > (dma_addr_t)~0 &&
+		    dma_to_pfn(dev, ~0) > arm_dma_pfn_limit) {
+			dev_warn(dev, "Coherent DMA mask %#llx is larger than dma_addr_t allows\n",
+				 mask);
+			dev_warn(dev, "Driver did not use or check the return value from dma_set_coherent_mask()?\n");
+			return 0;
+		}
+
+		/*
+		 * Now check that the mask, when translated to a PFN,
+		 * fits within the allowable addresses which we can
+		 * allocate.
+		 */
+		if (dma_to_pfn(dev, mask) < arm_dma_pfn_limit) {
+			dev_warn(dev, "Coherent DMA mask %#llx (pfn %#lx-%#lx) covers a smaller range of system memory than the DMA zone pfn 0x0-%#lx\n",
+				 mask,
+				 dma_to_pfn(dev, 0), dma_to_pfn(dev, mask) + 1,
+				 arm_dma_pfn_limit + 1);
 			return 0;
 		}
 	}
@@ -358,7 +405,7 @@ static int __init atomic_pool_init(void)
 	if (!pages)
 		goto no_pages;
 
-	if (IS_ENABLED(CONFIG_CMA))
+	if (CMA_DEFAULT_REGION)
 		ptr = __alloc_from_contiguous(NULL, pool->size, prot, &page,
 					      atomic_pool_init);
 	else
@@ -402,6 +449,11 @@ static struct dma_contig_early_reserve dma_mmu_remap[MAX_CMA_AREAS] __initdata;
 
 static int dma_mmu_remap_num __initdata;
 
+#ifdef CONFIG_VMALLOCUSED_PLUS
+unsigned long cma_remap_vaddr[MAX_CMA_AREAS];
+unsigned int cma_remap_num;
+#endif
+
 void __init dma_contiguous_early_fixup(phys_addr_t base, unsigned long size)
 {
 	dma_mmu_remap[dma_mmu_remap_num].base = base;
@@ -423,17 +475,30 @@ void __init dma_contiguous_remap(void)
 		if (start >= end)
 			continue;
 
+#ifdef CONFIG_VMALLOCUSED_PLUS
+		cma_remap_vaddr[cma_remap_num] = __phys_to_virt(start);
+		cma_remap_num++;
+#endif
 		map.pfn = __phys_to_pfn(start);
 		map.virtual = __phys_to_virt(start);
 		map.length = end - start;
 		map.type = MT_MEMORY_DMA_READY;
 
 		/*
-		 * Clear previous low-memory mapping
+		 * Clear previous low-memory mapping to ensure that the
+		 * TLB does not see any conflicting entries, then flush
+		 * the TLB of the old entries before creating new mappings.
+		 *
+		 * This ensures that any speculatively loaded TLB entries
+		 * (even though they may be rare) can not cause any problems,
+		 * and ensures that this code is architecturally compliant.
 		 */
-		for (addr = __phys_to_virt(start); addr < __phys_to_virt(end);
+		for (addr = __phys_to_virt(start); addr < __phys_to_virt(end - 1) + 1;
 		     addr += PMD_SIZE)
 			pmd_clear(pmd_off_k(addr));
+
+		flush_tlb_kernel_range(__phys_to_virt(start),
+				       __phys_to_virt(end));
 
 		iotable_init(&map, 1);
 	}
@@ -670,7 +735,7 @@ static void *__dma_alloc(struct device *dev, size_t size, dma_addr_t *handle,
 		addr = __alloc_simple_buffer(dev, size, gfp, &page);
 	else if (!(gfp & __GFP_WAIT))
 		addr = __alloc_from_pool(size, &page);
-	else if (!IS_ENABLED(CONFIG_CMA))
+	else if (size == PAGE_SIZE || !CMA_DEFAULT_REGION)
 		addr = __alloc_remap_buffer(dev, size, gfp, prot, &page, caller);
 	else
 		addr = __alloc_from_contiguous(dev, size, prot, &page, caller);
@@ -759,7 +824,7 @@ static void __arm_dma_free(struct device *dev, size_t size, void *cpu_addr,
 		__dma_free_buffer(page, size);
 	} else if (__free_from_pool(cpu_addr, size)) {
 		return;
-	} else if (!IS_ENABLED(CONFIG_CMA)) {
+	} else if (size == PAGE_SIZE || !CMA_DEFAULT_REGION) {
 		__dma_free_remap(cpu_addr, size);
 		__dma_free_buffer(page, size);
 	} else {
@@ -994,8 +1059,27 @@ void arm_dma_sync_sg_for_device(struct device *dev, struct scatterlist *sg,
  */
 int dma_supported(struct device *dev, u64 mask)
 {
-	if (mask < (u64)arm_dma_limit)
+	unsigned long limit;
+
+	/*
+	 * If the mask allows for more memory than we can address,
+	 * and we actually have that much memory, then we must
+	 * indicate that DMA to this device is not supported.
+	 */
+	if (sizeof(mask) != sizeof(dma_addr_t) &&
+	    mask > (dma_addr_t)~0 &&
+	    dma_to_pfn(dev, ~0) > arm_dma_pfn_limit)
 		return 0;
+
+	/*
+	 * Translate the device's DMA mask to a PFN limit.  This
+	 * PFN number includes the page which we can DMA to.
+	 */
+	limit = dma_to_pfn(dev, mask);
+
+	if (limit < arm_dma_pfn_limit)
+		return 0;
+
 	return 1;
 }
 EXPORT_SYMBOL(dma_supported);
@@ -1311,7 +1395,7 @@ static void *arm_iommu_alloc_attrs(struct device *dev, size_t size,
 	*handle = DMA_ERROR_CODE;
 	size = PAGE_ALIGN(size);
 
-	if (gfp & GFP_ATOMIC)
+	if (!(gfp & __GFP_WAIT))
 		return __iommu_alloc_atomic(dev, size, handle);
 
 	pages = __iommu_alloc_buffer(dev, size, gfp, attrs);

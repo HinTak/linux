@@ -94,3 +94,12 @@ config XFS_DEBUG
 	  not useful unless you are debugging a particular problem.
 
 	  Say N unless you are an XFS developer, or you play one on TV.
+
+config XFS_FS_TRUNCATE_RANGE
+	bool "XFS truncate range support"
+	depends on XFS_FS
+	default y
+	help
+	 Additional function of truncate range supported. User can cut off the file
+	 from start offset to end offset by system call. The remained portions of
+	 the file is combined after cutting is done.

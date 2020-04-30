@@ -4,6 +4,7 @@ config ARM
 	select ARCH_BINFMT_ELF_RANDOMIZE_PIE
 	select ARCH_HAS_ATOMIC64_DEC_IF_POSITIVE
 	select ARCH_HAVE_CUSTOM_GPIO_H
+	select ARCH_SUPPORTS_ATOMIC_RMW
 	select ARCH_HAS_TICK_BROADCAST if GENERIC_CLOCKEVENTS_BROADCAST
 	select ARCH_WANT_IPC_PARSE_VERSION
 	select BUILDTIME_EXTABLE_SORT if MMU
@@ -19,8 +20,8 @@ config ARM
 	select GENERIC_STRNCPY_FROM_USER
 	select GENERIC_STRNLEN_USER
 	select HARDIRQS_SW_RESEND
-	select HAVE_AOUT
 	select HAVE_ARCH_JUMP_LABEL if !XIP_KERNEL
+	select HAVE_ARCH_KASAN
 	select HAVE_ARCH_KGDB
 	select HAVE_ARCH_SECCOMP_FILTER
 	select HAVE_ARCH_TRACEHOOK
@@ -57,6 +58,7 @@ config ARM
 	select SYS_SUPPORTS_APM_EMULATION
 	select HAVE_MOD_ARCH_SPECIFIC if ARM_UNWIND
 	select MODULES_USE_ELF_REL
+	select NO_BOOTMEM
 	select CLONE_BACKWARDS
 	select OLD_SIGSUSPEND3
 	select OLD_SIGACTION
@@ -138,6 +140,9 @@ config EISA
 config SBUS
 	bool
 
+config KERNEL_MODE_NEON
+	def_bool n
+
 config STACKTRACE_SUPPORT
 	bool
 	default y
@@ -213,7 +218,8 @@ config VECTORS_BASE
 	default DRAM_BASE if REMAP_VECTORS_TO_RAM
 	default 0x00000000
 	help
-	  The base address of exception vectors.
+	  The base address of exception vectors.  This must be two pages
+	  in size.
 
 config ARM_PATCH_PHYS_VIRT
 	bool "Patch physical to virtual translations at runtime" if EMBEDDED
@@ -287,6 +293,30 @@ choice
 	default ARCH_VERSATILE if !MMU
 	default ARCH_MULTIPLATFORM if MMU
 
+config ARCH_SDP
+	bool "Samsung DTV Platform"
+	select ARCH_HAS_HOLES_MEMORYMODEL
+	select ARCH_SPARSEMEM_ENABLE
+	select ARCH_FLATMEM_ENABLE
+	select ARM_AMBA
+	select ARM_GIC
+	select CPU_V7
+	select CLKDEV_LOOKUP
+	select COMMON_CLK
+	select GENERIC_CLOCKEVENTS
+	select HAVE_CLK
+	select HAVE_SMP
+	select MULTI_IRQ_HANDLER
+	select NEED_MACH_MEMORY_H
+	select AUTO_ZRELADDR
+	select ARCH_HAS_CPUFREQ
+	select MIGHT_HAVE_CACHE_L2X0
+	select HAVE_ARM_SCU if SMP
+	select HAVE_ARM_TWD if LOCAL_TIMERS
+	select PCI if ARCH_SDP1404
+	help
+	  Support for Samsung DTV platforms based on SDPxxxx.
+
 config ARCH_MULTIPLATFORM
 	bool "Allow multiple platforms to be selected"
 	depends on MMU
@@ -296,6 +326,40 @@ config ARCH_MULTIPLATFORM
 	select MULTI_IRQ_HANDLER
 	select SPARSE_IRQ
 	select USE_OF
+
+config ARCH_NVT_V7
+	bool "Novatek DTV Platform"
+	depends on MMU
+	select ARCH_HAS_HOLES_MEMORYMODEL
+	select USE_OF
+	select CPU_V7
+	select ARCH_FLATMEM_ENABLE
+	select ARCH_SPARSEMEM_ENABLE
+	select HAVE_ARM_TWD if SMP
+	select HAVE_ARM_SCU
+	select ARM_GLOBAL_TIMER
+	select SERIAL_OF_PLATFORM
+
+config NVT_CLEAN_ONBOOT
+	bool "Zero out onboot content"
+	depends on ARCH_NVT_V7
+	help
+	  Enable this option to zero out onboot content
+
+if NVT_CLEAN_ONBOOT
+config NVT_ONBOOT_ADDR
+	hex "Physical address of onboot"
+
+config NVT_ONBOOT_SIZE
+	hex "Size of onboot"
+endif
+
+config NVT_UART_16550A
+	bool "Novatek UART device"
+	default y
+	depends on ARCH_NVT_V7
+	help
+	  Novatek UART device
 
 config ARCH_INTEGRATOR
 	bool "ARM Ltd. Integrator family"
@@ -922,6 +986,8 @@ source "arch/arm/mach-bcm/Kconfig"
 
 source "arch/arm/mach-bcm2835/Kconfig"
 
+source "arch/arm/mach-sdp/Kconfig"
+
 source "arch/arm/mach-clps711x/Kconfig"
 
 source "arch/arm/mach-cns3xxx/Kconfig"
@@ -1018,6 +1084,7 @@ source "arch/arm/mach-ux500/Kconfig"
 source "arch/arm/mach-versatile/Kconfig"
 
 source "arch/arm/mach-vexpress/Kconfig"
+source "arch/arm/mach-nvt72668/Kconfig"
 source "arch/arm/plat-versatile/Kconfig"
 
 source "arch/arm/mach-virt/Kconfig"
@@ -1053,10 +1120,30 @@ config PLAT_PXA
 config PLAT_VERSATILE
 	bool
 
+config PLAT_NOVATEK
+	bool
+
 config ARM_TIMER_SP804
 	bool
 	select CLKSRC_MMIO
 	select CLKSRC_OF if OF
+
+config PLAT_TIZEN
+	bool "Platform Specific Flag - Tizen"
+	default y
+	help
+	 This config is used to enable TIZEN platform.
+	 If this CONFIG is enabled, then kernel is compiled for
+	 TIZEN Platform.
+
+config PLAT_TIZEN_SBB
+	bool "Platform Specific Flag - Tizen(SBB)"
+	depends on PLAT_TIZEN
+	default n
+	help
+	 This config is used to enable TIZEN(SBB) platform.
+	 If this CONFIG is enabled, then kernel is compiled for
+	 TIZEN(SBB) Platform.
 
 source arch/arm/mm/Kconfig
 
@@ -1343,8 +1430,8 @@ config ARM_ERRATA_775420
 	 This option enables the workaround for the 775420 Cortex-A9 (r2p2,
 	 r2p6,r2p8,r2p10,r3p0) erratum. In case a date cache maintenance
 	 operation aborts with MMU exception, it might cause the processor
-	 to deadlock. This workaround puts DSB before executing ISB if
-	 an abort may occur on cache maintenance.
+	 to deadlock. This workaround puts DSB before executing ISB at the
+         beginning of the abort exception handler.
 
 config ARM_ERRATA_798181
 	bool "ARM errata: TLBI/DSB failure on Cortex-A15"
@@ -1356,6 +1443,42 @@ config ARM_ERRATA_798181
 	  which sends an IPI to the CPUs that are running the same ASID
 	  as the one being invalidated.
 
+config ARM_ERRATA_830076
+	bool "ARM errata: TLBI/DSB failure on Cortex-A12"
+	depends on CPU_V7 && SMP
+	select ARM_ERRATA_798181
+	help
+	  On Cortex-A12 the TLBI*IS/DSB operations are not
+	  adequately shooting down all use of the old entries. This
+	  option enables the Linux kernel workaround for this erratum
+	  which sends an IPI to the CPUs that are running the same ASID
+	  as the one being invalidated.
+	  This workaround exploits ARM_ERRATA_798181's code.
+
+config ARM_ERRATA_830077
+	bool "ARM errata: CPU might execute stale instructions following broadcast ICI operations"
+	depends on CPU_V7
+	help
+	  On Cortex-A12, A code-modifying sequence might fail to synchronize
+	  instruction fetches of other CPUs with store instructions
+	  of the CPU that executes the code-modifying sequence,
+	  leading to execution of stale instructions. Add dummy ICIMVA after ICIs.
+
+config ARM_ERRATA_830079
+	bool "ARM errata: Instructions might be fetched from unauthorized memory region when MMU off"
+	depends on CPU_V7
+	help
+	  On Cortex-A12, when disabling the MMU, a limit number of instructions might be
+	  fetched from the target of a branch executed before MMU was stopped.
+
+config ARM_ERRATA_821423
+	bool "ARM errata: A Load targetting Non Cached Memory might hang"
+	depends on CPU_V7
+	help
+	  On Cortex-A12, A Non Cached Normal Memory Load operation might be stalled forever
+	  inside the L2 cache because of a stream of NM_NC stored from the same CPU,
+	  preventin further Non Cached Loads from other CPUs to complete until the
+	  stream of NM_NC stores ends.
 endmenu
 
 source "arch/arm/common/Kconfig"
@@ -1433,6 +1556,23 @@ config HAVE_SMP
 	  The only effect of this option is to make the SMP-related
 	  options available to the user for configuration.
 
+config BD_CACHE_ENABLED
+	bool "BD Cache Enable"
+	default y
+	help    
+	   Blu-ray cache enable/disable.If BD_CACHE is enable it :-
+	   Implements readpages address space operation for UDF,
+	   Increased VM_MAX_READAHEAD to 512K from 128K
+	   Increased ATA_MAX_SECTORS to 1024 from 256
+
+config SSIF_EXT_CACHE
+       bool "BD UDF Extents Cache (for 3D BD)"
+       default y
+       help
+         The 3D Blu-ray has many extents. So it make slow read problem when play it.
+         This problem also occur even we play 3D Blu-ray with 2D mode.
+         So remember last accessed inode to enhance read performance of 3D Blu-ray.
+
 config SMP
 	bool "Symmetric Multi-Processing"
 	depends on CPU_V6K || CPU_V7
@@ -1494,6 +1634,151 @@ config SCHED_SMT
 	  MultiThreading at a cost of slightly increased overhead in some
 	  places. If unsure say N here.
 
+choice
+	prompt "HMP Scheduler"
+	default VD_HMP
+	help
+	  Which HMP scheduler needed
+
+config VD_HMP
+	bool "VD_HMP load balancing enhancements for ARM big.LITTLE"
+	select SCHED_MC
+	help
+	  Uses VD_HMP load balancing algorithm between A7 and A15 CPU domains.
+
+config SCHED_HMP
+	bool "(EXPERIMENTAL) Heterogenous multiprocessor scheduling"
+	depends on FAIR_GROUP_SCHED && !SCHED_AUTOGROUP
+	select DISABLE_CPU_SCHED_DOMAIN_BALANCE
+	select SCHED_MC
+	help
+	  Experimental scheduler optimizations for heterogeneous platforms.
+	  Attempts to introspectively select task affinity to optimize power
+	  and performance. Basic support for multiple (>2) cpu types is in place,
+	  but it has only been tested with two types of cpus.
+	  There is currently no support for migration of task groups, hence
+	  !SCHED_AUTOGROUP. Furthermore, normal load-balancing must be disabled
+	  between cpus of different type (DISABLE_CPU_SCHED_DOMAIN_BALANCE).
+
+config NO_HMP
+	bool "Don't use HMP Schedulers"
+
+endchoice
+
+config VD_HMP_DEBUG
+	bool "Additional VD_HMP runtime debug checks"
+	depends on VD_HMP
+	default n
+
+config VD_HMP_A7_FIRST_DEFAULT
+	bool "If set, then VD_HMP will use A7 first policy by default"
+	default n
+	depends on VD_HMP
+
+config HMP_FAST_CPU_MASK
+	string "Fast (Cortex-A15) CPU mask for VD_HMP"
+	default ""
+	depends on VD_HMP
+
+config HMP_SLOW_CPU_MASK
+	string "Slow (Cortex-A7) CPU mask for VD_HMP"
+	default ""
+	depends on VD_HMP
+
+config DISABLE_CPU_SCHED_DOMAIN_BALANCE
+	bool "(EXPERIMENTAL) Disable CPU level scheduler load-balancing"
+	depends on SCHED_HMP
+	help
+	  Disables scheduler load-balancing at CPU sched domain level.
+
+config SCHED_HMP_PRIO_FILTER
+	bool "(EXPERIMENTAL) Filter HMP migrations by task priority"
+	depends on SCHED_HMP
+	default n
+	help
+	  Enables task priority based HMP migration filter. Any task with
+	  a NICE value above the threshold will always be on low-power cpus
+	  with less compute capacity.
+
+config SCHED_HMP_PRIO_FILTER_VAL
+	int "NICE priority threshold"
+	default 5
+	depends on SCHED_HMP_PRIO_FILTER
+
+config SCHED_HMP_FAST_CPU_MASK
+	string "HMP scheduler fast CPU list"
+	depends on SCHED_HMP
+	default "0-3"
+	help
+          Leave empty to use device tree information.
+	  Specify the cpuids of the fast CPUs in the system as a list string,
+	  e.g. cpuid 0+1 should be specified as 0-1.
+
+config SCHED_HMP_SLOW_CPU_MASK
+	string "HMP scheduler slow CPU list"
+	depends on SCHED_HMP
+	default "4-7"
+	help
+	  Leave empty to use device tree information.
+	  Specify the cpuids of the slow CPUs in the system as a list string,
+	  e.g. cpuid 0+1 should be specified as 0-1.
+
+config HMP_VARIABLE_SCALE
+	bool "Allows changing the load tracking scale through sysfs"
+	depends on SCHED_HMP
+	default y
+	help
+	  When turned on, this option exports the thresholds and load average
+	  period value for the load tracking patches through sysfs.
+	  The values can be modified to change the rate of load accumulation
+	  and the thresholds used for HMP migration.
+	  The load_avg_period_ms is the time in ms to reach a load average of
+	  0.5 for an idle task of 0 load average ratio that start a busy loop.
+	  The up_threshold and down_threshold is the value to go to a faster
+	  CPU or to go back to a slower cpu.
+	  The {up,down}_threshold are devided by 1024 before being compared
+	  to the load average.
+	  For examples, with load_avg_period_ms = 128 and up_threshold = 512,
+	  a running task with a load of 0 will be migrated to a bigger CPU after
+	  128ms, because after 128ms its load_avg_ratio is 0.5 and the real
+	  up_threshold is 0.5.
+	  This patch has the same behavior as changing the Y of the load
+	  average computation to
+	        (1002/1024)^(LOAD_AVG_PERIOD/load_avg_period_ms)
+	  but it remove intermadiate overflows in computation.
+
+config HMP_FREQUENCY_INVARIANT_SCALE
+	bool "(EXPERIMENTAL) Frequency-Invariant Tracked Load for HMP"
+	depends on HMP_VARIABLE_SCALE && CPU_FREQ
+	default y
+	help
+	  Scales the current load contribution in line with the frequency
+	  of the CPU that the task was executed on.
+	  In this version, we use a simple linear scale derived from the
+	  maximum frequency reported by CPUFreq.
+	  Restricting tracked load to be scaled by the CPU's frequency
+	  represents the consumption of possible compute capacity
+	  (rather than consumption of actual instantaneous capacity as
+	  normal) and allows the HMP migration's simple threshold
+	  migration strategy to interact more predictably with CPUFreq's
+	  asynchronous compute capacity changes.
+
+config HMP_REAL_HEAVIEST_PICK
+	bool "Heaviest task searching change for HMP"
+	depends on SCHED_HMP
+	default y
+	help
+		Heaviest task search all of the cfs runqueues.
+		android basically 3 scheduling group.
+		previous checking only current se runqueue.
+
+config HMP_DEBUG
+	bool "Debug feature for HMP"
+	depends on SCHED_HMP
+	default n
+	help
+		Debug feature for HMP.
+
 config HAVE_ARM_SCU
 	bool
 	help
@@ -1520,6 +1805,13 @@ config MCPM
 	  This option provides the common power management infrastructure
 	  for (multi-)cluster based systems, such as big.LITTLE based
 	  systems.
+
+config BIG_LITTLE
+	bool "big.LITTLE support (Experimental)"
+	depends on CPU_V7 && SMP
+	select MCPM
+	help
+	  This option enables support for the big.LITTLE architecture.
 
 choice
 	prompt "Memory split"
@@ -1557,6 +1849,15 @@ config HOTPLUG_CPU
 	  Say Y here to experiment with turning CPUs off and on.  CPUs
 	  can be controlled through /sys/devices/system/cpu.
 
+config PRESERVE_IRQ_AFFINITY
+	bool "Restore IRQ affinities when CPU comes online"
+	depends on HOTPLUG_CPU
+	default y
+	help
+	  If some CPU goes offline, manually setted IRQ affinities could change.
+	  When CPU comes online, all relevant IRQs will be re-affined to it
+	  if you will say Y here.
+
 config ARM_PSCI
 	bool "Support for the ARM Power State Coordination Interface (PSCI)"
 	depends on CPU_V7
@@ -1588,6 +1889,7 @@ config ARCH_NR_GPIO
 	default 352 if ARCH_VT8500
 	default 288 if ARCH_SUNXI
 	default 264 if MACH_H4700
+	default 512 if ARCH_SDP
 	default 0
 	help
 	  Maximum number of GPIOs in the system.
@@ -1598,10 +1900,12 @@ source kernel/Kconfig.preempt
 
 config HZ
 	int
+	default 250 if ARCH_NVT_V7
 	default 200 if ARCH_EBSA110 || ARCH_S3C24XX || ARCH_S5P64X0 || \
 		ARCH_S5PV210 || ARCH_EXYNOS4
 	default AT91_TIMER_HZ if ARCH_AT91
 	default SHMOBILE_TIMER_HZ if ARCH_SHMOBILE
+	default 250 if ARCH_SDP
 	default 100
 
 config SCHED_HRTICK
@@ -1693,6 +1997,9 @@ config ARCH_HAS_HOLES_MEMORYMODEL
 config ARCH_SPARSEMEM_ENABLE
 	bool
 
+config ARCH_FLATMEM_ENABLE
+	bool
+
 config ARCH_SPARSEMEM_DEFAULT
 	def_bool ARCH_SPARSEMEM_ENABLE
 
@@ -1723,6 +2030,24 @@ config HIGHPTE
 	bool "Allocate 2nd-level pagetables from highmem"
 	depends on HIGHMEM
 
+config MODULES_USE_LONG_CALLS
+	bool "Build modules with long-calls"
+	depends on MMU && MODULES
+	depends on !FUNCTION_TRACER
+	help
+	  By default, kernel modules use short-calls ("bl" instruction) which
+	  has limited jump distance (+/- 32MB). That's why modules are loaded
+	  just below kernel text.
+
+	  After enabling this option, kernel modules will be built using
+	  long-calls ("blx" instruction) and 32MB jump distance limitation
+	  will no longer apply.
+
+	  Currently this option is incompatible with CONFIG_FUNCTION_TRACER.
+	  Compiler emits short-calls to mcount() even with -mlong-calls.
+	  Most likely this is a bug in GCC, but anyway ftrace doesn't have
+	  support for patching long-calls of mcount.
+
 config HW_PERF_EVENTS
 	bool "Enable hardware performance counter support for perf events"
 	depends on PERF_EVENTS
@@ -1734,7 +2059,7 @@ config HW_PERF_EVENTS
 source "mm/Kconfig"
 
 config FORCE_MAX_ZONEORDER
-	int "Maximum zone order" if ARCH_SHMOBILE
+	int "Maximum zone order" if (ARCH_SHMOBILE || ARCH_SDP)
 	range 11 64 if ARCH_SHMOBILE
 	default "12" if SOC_AM33XX
 	default "9" if SA1111
@@ -2072,6 +2397,7 @@ config AUTO_ZRELADDR
 	  0xf8000000. This assumes the zImage being placed in the first 128MB
 	  from start of memory.
 
+
 endmenu
 
 menu "CPU Power Management"
@@ -2197,6 +2523,12 @@ config NEON
 	  Say Y to include support code for NEON, the ARMv7 Advanced SIMD
 	  Extension.
 
+config KERNEL_MODE_NEON
+	bool "Support for NEON in kernel mode"
+	depends on NEON && AEABI
+	help
+	  Say Y to include support for NEON in kernel mode.
+
 endmenu
 
 menu "Userspace binary formats"
@@ -2230,6 +2562,12 @@ config ARM_CPU_SUSPEND
 
 endmenu
 
+config HW_DECOMPRESSOR
+	bool "Platform has hardware decompressor"
+	depends on (ARCH_NVT_V7 || ARCH_SDP)
+
+source "arch/arm/Kconfig.Secure"
+
 source "net/Kconfig"
 
 source "drivers/Kconfig"
@@ -2237,6 +2575,8 @@ source "drivers/Kconfig"
 source "fs/Kconfig"
 
 source "arch/arm/Kconfig.debug"
+
+source "arch/Kconfig.VDLP"
 
 source "security/Kconfig"
 

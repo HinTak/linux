@@ -321,4 +321,35 @@ config IR_GPIO_CIR
 	   To compile this driver as a module, choose M here: the module will
 	   be called gpio-ir-recv.
 
+
+config SBB_INTERFACE
+        tristate "Sbb interface driver"
+        ---help---
+          Say Y if you want to use sbb interface driver.
+          To compile this driver as a module, choose M here: the module will
+          be called sbb-interface.
+
+config VIRTUAL_RC
+        tristate "Virtual RC driver for SBB"
+        ---help---
+          Say Y if you want to use sbb interface driver.
+          To compile this driver as a module, choose M here: the module will
+          be called virtual-rc.
+
+
+config KERNEL_TCP_SOCKET
+        tristate "kernel socket driver"
+        ---help---
+          Say Y if you want to use kernel socket driver.
+          To compile this driver as a module, choose M here: the module will
+          be called kernel-tcp-socket.
+
+config RC_WT61P807
+	tristate "Remote Control Driver for WT61P807"
+	depends on RC_CORE
+	depends on MFD_SDP_MICOM
+	---help---
+	   Say Y here if you want support for the remote control driver.
+	   for WT61P807.
+
 endif #RC_DEVICES

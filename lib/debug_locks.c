@@ -38,7 +38,7 @@ int debug_locks_off(void)
 {
 	if (__debug_locks_off()) {
 		if (!debug_locks_silent) {
-			console_verbose();
+			console_default();
 			return 1;
 		}
 	}

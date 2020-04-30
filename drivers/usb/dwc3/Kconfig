@@ -40,6 +40,27 @@ config USB_DWC3_DUAL_ROLE
 
 endchoice
 
+config SAMSUNG_USB_DWC3_PERFORMANCE
+	bool "Performance Improvement In DWC3 Driver"
+	depends on USB_DWC3
+	help
+	  Performance enahancement options for samsung EVK gadget
+
+config SAMSUNG_USB_DWC3_KICKTX_XFERCOMPLETE
+	bool "Kick Transfer Early"
+	depends on SAMSUNG_USB_DWC3_PERFORMANCE
+	default y
+	help
+	  Prepare trb and submit the request for next transfer, on previous
+	  transfer's transfer complete event.
+
+config SAMSUNG_USB_DWC3_NO_THREADED_ISR
+	bool "Replace threaded ISR by regular ISR"
+	depends on SAMSUNG_USB_DWC3_PERFORMANCE
+	default y
+	help
+	  Replace threaded interrupt handler of dwc3 driver by regular interrupt handler.
+
 config USB_DWC3_DEBUG
 	bool "Enable Debugging Messages"
 	help

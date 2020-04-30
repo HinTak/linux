@@ -226,4 +226,7 @@
 /* Rocketport EXPRESS/INFINITY */
 #define PORT_RP2	102
 
+/* SDP */
+#define PORT_SDP	103
+
 #endif /* _UAPILINUX_SERIAL_CORE_H */

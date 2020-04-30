@@ -23,6 +23,7 @@
 
 #include <linux/list.h>
 #include <linux/dvb/ca.h>
+#include <linux/dvb/ca_tztv.h>
 
 #include "dvbdev.h"
 
@@ -62,6 +63,8 @@ struct dvb_ca_en50221 {
 	int (*slot_reset)(struct dvb_ca_en50221* ca, int slot);
 	int (*slot_shutdown)(struct dvb_ca_en50221* ca, int slot);
 	int (*slot_ts_enable)(struct dvb_ca_en50221* ca, int slot);
+	void (*slot_set_frontend_source)(struct dvb_ca_en50221 *sdp_ca, int slot,ca_set_frontend_t source);
+	void (*slot_set_ts_route_mode)(struct dvb_ca_en50221 *sdp_ca, int slot,ca_set_route_mode_t mode);
 
 	/*
 	* Poll slot status.

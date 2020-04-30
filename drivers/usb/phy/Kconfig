@@ -210,4 +210,10 @@ config USB_ULPI_VIEWPORT
 	  Provides read/write operations to the ULPI phy register set for
 	  controllers with a viewport register (e.g. Chipidea/ARC controllers).
 
+config USB_HAWK_PHY
+	tristate "Hawk USB 3.0 PHY support"
+	depends on ARCH_SDP
+	help
+		Enable this to support Hawk platform USB3 phy device.
+
 endif # USB_PHY

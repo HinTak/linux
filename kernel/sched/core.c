@@ -74,6 +74,15 @@
 #include <linux/binfmts.h>
 #include <linux/context_tracking.h>
 
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+void show_kernel_patch_version(void);
+#endif
+
+#ifdef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
+#include <linux/irqflags.h>
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
+
 #include <asm/switch_to.h>
 #include <asm/tlb.h>
 #include <asm/irq_regs.h>
@@ -86,8 +95,29 @@
 #include "../workqueue_internal.h"
 #include "../smpboot.h"
 
+#ifdef CONFIG_KDEBUGD
+#include <kdebugd/kdebugd.h>
+#include <kdebugd/sec_topthread.h>
+#include <linux/sort.h>     /* For sort() */
+#endif
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/sched.h>
+
+#ifdef CONFIG_VD_HMP
+/* cpumask for A15 cpus */
+static DECLARE_BITMAP(cpu_fastest_bits, CONFIG_NR_CPUS);
+struct cpumask *cpu_fastest_mask = to_cpumask(cpu_fastest_bits);
+
+/* cpumask for A7 cpus */
+static DECLARE_BITMAP(cpu_slowest_bits, CONFIG_NR_CPUS);
+struct cpumask *cpu_slowest_mask = to_cpumask(cpu_slowest_bits);
+
+struct cpumask *cpu_primary_mask;
+struct cpumask *cpu_secondary_mask;
+
+extern unsigned int sysctl_sched_vd_hmp_policy;
+#endif
 
 void start_bandwidth_timer(struct hrtimer *period_timer, ktime_t period)
 {
@@ -1235,7 +1265,7 @@ out:
 		 * leave kernel.
 		 */
 		if (p->mm && printk_ratelimit()) {
-			printk_sched("process %d (%s) no longer affine to cpu%d\n",
+			printk_deferred("process %d (%s) no longer affine to cpu%d\n",
 					task_pid_nr(p), p->comm, cpu);
 		}
 	}
@@ -1487,7 +1517,13 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	unsigned long flags;
 	int cpu, success = 0;
 
-	smp_wmb();
+	/*
+	 * If we are going to wake up a thread waiting for CONDITION we
+	 * need to ensure that CONDITION=1 done by the caller can not be
+	 * reordered with p->state check below. This pairs with mb() in
+	 * set_current_state() the waiting thread does.
+	 */
+	smp_mb__before_spinlock();
 	raw_spin_lock_irqsave(&p->pi_lock, flags);
 	if (!(p->state & state))
 		goto out;
@@ -1607,6 +1643,11 @@ static void __sched_fork(struct task_struct *p)
 	p->se.prev_sum_exec_runtime	= 0;
 	p->se.nr_migrations		= 0;
 	p->se.vruntime			= 0;
+#ifdef CONFIG_VD_HMP
+	p->se.druntime			= 0;
+	p->se.last_migration		= jiffies;
+	p->se.migrate_candidate		= 0;
+#endif
 	INIT_LIST_HEAD(&p->se.group_node);
 
 /*
@@ -1615,8 +1656,13 @@ static void __sched_fork(struct task_struct *p)
  * load-balance).
  */
 #if defined(CONFIG_SMP) && defined(CONFIG_FAIR_GROUP_SCHED)
+#ifdef CONFIG_SCHED_HMP
+	p->se.avg.hmp_last_up_migration = 0;
+	p->se.avg.hmp_last_down_migration = 0;
+#else
 	p->se.avg.runnable_avg_period = 0;
 	p->se.avg.runnable_avg_sum = 0;
+#endif
 #endif
 #ifdef CONFIG_SCHEDSTATS
 	memset(&p->se.statistics, 0, sizeof(p->se.statistics));
@@ -2041,6 +2087,13 @@ unsigned long nr_running(void)
 
 	return sum;
 }
+
+#ifdef CONFIG_SCHED_HMP
+unsigned long nr_running_cpu(unsigned int cpu)
+{
+	return cpu_rq(cpu)->nr_running;
+}
+#endif
 
 unsigned long long nr_context_switches(void)
 {
@@ -2808,7 +2861,11 @@ void __kprobes add_preempt_count(int val)
 	DEBUG_LOCKS_WARN_ON((preempt_count() & PREEMPT_MASK) >=
 				PREEMPT_MASK - 10);
 #endif
+#ifndef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
 	if (preempt_count() == val)
+#else
+	if (check_preempt_trace() && preempt_count() == val)
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
 		trace_preempt_off(CALLER_ADDR0, get_parent_ip(CALLER_ADDR1));
 }
 EXPORT_SYMBOL(add_preempt_count);
@@ -2829,7 +2886,11 @@ void __kprobes sub_preempt_count(int val)
 		return;
 #endif
 
+#ifndef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
 	if (preempt_count() == val)
+#else
+	if (check_preempt_trace() && preempt_count() == val)
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
 		trace_preempt_on(CALLER_ADDR0, get_parent_ip(CALLER_ADDR1));
 	preempt_count() -= val;
 }
@@ -2847,6 +2908,9 @@ static noinline void __schedule_bug(struct task_struct *prev)
 
 	printk(KERN_ERR "BUG: scheduling while atomic: %s/%d/0x%08x\n",
 		prev->comm, prev->pid, preempt_count());
+#ifdef CONFIG_VDLP_VERSION_INFO
+	show_kernel_patch_version();
+#endif
 
 	debug_show_held_locks(prev);
 	print_modules();
@@ -2910,6 +2974,46 @@ pick_next_task(struct rq *rq)
 	BUG(); /* the idle class will always have a runnable task */
 }
 
+#ifndef CONFIG_SMP
+#ifdef CONFIG_MEMORY_VALIDATOR
+
+static inline void memory_value_watcher(struct task_struct *prev)
+{
+	if (prev && kdbg_mem_watcher.watching && kdbg_mem_watcher.tgid == prev->tgid) {
+		mm_segment_t fs;
+		unsigned int buffer;
+
+		fs = get_fs();
+		set_fs(KERNEL_DS);
+
+		if (!access_ok(VERIFY_READ, (unsigned long *)kdbg_mem_watcher.u_addr,
+					sizeof(unsigned long *))) {
+			set_fs(fs);
+			return;
+		}
+		__get_user(buffer, (unsigned long *)kdbg_mem_watcher.u_addr);
+		set_fs(fs);
+
+		if (kdbg_mem_watcher.buff != buffer) {
+
+			kdbg_mem_watcher.watching = 0;
+
+			printk("==============================================================================\n");
+			printk(" Memory Corruption DETECTED.........!!!!!!!!!!!!!!!!!!\n");
+			printk("==============================================================================\n");
+			printk(" Original : PID:%d value:0x%08x (addr:0x%08x)\n", kdbg_mem_watcher.pid, kdbg_mem_watcher.buff, kdbg_mem_watcher.u_addr);
+			printk(" NOW      : PID:%d value:0x%08x \n" , prev->pid, buffer);
+			printk("          : PID:%d PC:0x%08x\n" , prev->pid, (unsigned)KSTK_EIP(prev));
+			printk("------------------------------------------------------------------------------\n");
+			printk("Caution: The PC value could get invalid-value.\n");
+			printk("         So don't trust that value :)\n");
+			printk("==============================================================================\n");
+		}
+	}
+}
+#endif
+#endif /*CONFIG_SMP*/
+
 /*
  * __schedule() is the main scheduler function.
  *
@@ -2966,6 +3070,12 @@ need_resched:
 	if (sched_feat(HRTICK))
 		hrtick_clear(rq);
 
+	/*
+	 * Make sure that signal_pending_state()->signal_pending() below
+	 * can't be reordered with __set_current_state(TASK_INTERRUPTIBLE)
+	 * done by the caller to avoid the race with signal_wake_up().
+	 */
+	smp_mb__before_spinlock();
 	raw_spin_lock_irq(&rq->lock);
 
 	switch_count = &prev->nivcsw;
@@ -3006,6 +3116,23 @@ need_resched:
 		rq->nr_switches++;
 		rq->curr = next;
 		++*switch_count;
+
+#ifdef CONFIG_KDEBUGD_COUNTER_MONITOR
+		per_cpu(sec_topthread_ctx_cnt, cpu)++;
+#endif
+		/* For kdebugd - schedule history logger */
+#if defined(CONFIG_KDEBUGD_MISC)
+#if defined(CONFIG_SCHED_HISTORY)
+		if (next->mm) /* for excepting kernel thread */
+			schedule_history(next, cpu);
+#endif
+#ifndef CONFIG_SMP
+#ifdef CONFIG_MEMORY_VALIDATOR
+		/* For meory Value Watcher*/
+		memory_value_watcher(prev);
+#endif
+#endif /*CONFIG_SMP*/
+#endif
 
 		context_switch(rq, prev, next); /* unlocks the rq */
 		/*
@@ -3813,6 +3940,10 @@ static struct task_struct *find_process_by_pid(pid_t pid)
 	return pid ? find_task_by_vpid(pid) : current;
 }
 
+#ifdef CONFIG_SCHED_HMP
+extern struct cpumask hmp_slow_cpu_mask;
+#endif
+
 /* Actually do priority change: must hold rq lock. */
 static void
 __setscheduler(struct rq *rq, struct task_struct *p, int policy, int prio)
@@ -3822,8 +3953,13 @@ __setscheduler(struct rq *rq, struct task_struct *p, int policy, int prio)
 	p->normal_prio = normal_prio(p);
 	/* we are holding p->pi_lock already */
 	p->prio = rt_mutex_getprio(p);
-	if (rt_prio(p->prio))
+	if (rt_prio(p->prio)) {
 		p->sched_class = &rt_sched_class;
+#ifdef CONFIG_SCHED_HMP
+		if (cpumask_equal(&p->cpus_allowed, cpu_all_mask))
+			do_set_cpus_allowed(p, &hmp_slow_cpu_mask);
+#endif
+	}
 	else
 		p->sched_class = &fair_sched_class;
 	set_load_weight(p);
@@ -4643,8 +4779,9 @@ void sched_show_task(struct task_struct *p)
 	unsigned state;
 
 	state = p->state ? __ffs(p->state) + 1 : 0;
-	printk(KERN_INFO "%-15.15s %c", p->comm,
-		state < sizeof(stat_nam) - 1 ? stat_nam[state] : '?');
+	printk(KERN_ERR "%-15.15s %c", p->comm,
+		state < sizeof(TASK_STATE_TO_CHAR_STR) - 1 ? stat_nam[state] : '?');
+
 #if BITS_PER_LONG == 32
 	if (state == TASK_RUNNING)
 		printk(KERN_CONT " running  ");
@@ -4659,6 +4796,7 @@ void sched_show_task(struct task_struct *p)
 #ifdef CONFIG_DEBUG_STACK_USAGE
 	free = stack_not_used(p);
 #endif
+
 	rcu_read_lock();
 	ppid = task_pid_nr(rcu_dereference(p->real_parent));
 	rcu_read_unlock();
@@ -4666,9 +4804,16 @@ void sched_show_task(struct task_struct *p)
 		task_pid_nr(p), ppid,
 		(unsigned long)task_thread_info(p)->flags);
 
-	print_worker_info(KERN_INFO, p);
-	show_stack(p, NULL);
+		print_worker_info(KERN_INFO, p);
+		show_stack(p, NULL);
 }
+
+#ifdef CONFIG_TASK_STATE_BACKTRACE
+void wrap_show_task(struct task_struct *tsk)
+{
+	sched_show_task(tsk);
+}
+#endif
 
 void show_state_filter(unsigned long state_filter)
 {
@@ -4726,6 +4871,10 @@ void __cpuinit init_idle(struct task_struct *idle, int cpu)
 	raw_spin_lock_irqsave(&rq->lock, flags);
 
 	__sched_fork(idle);
+#ifdef CONFIG_SCHED_HMP
+	idle->se.avg.runnable_avg_period = 0;
+	idle->se.avg.runnable_avg_sum = 0;
+#endif
 	idle->state = TASK_RUNNING;
 	idle->se.exec_start = sched_clock();
 
@@ -5258,7 +5407,6 @@ static int __cpuinit sched_cpu_active(struct notifier_block *nfb,
 				      unsigned long action, void *hcpu)
 {
 	switch (action & ~CPU_TASKS_FROZEN) {
-	case CPU_STARTING:
 	case CPU_DOWN_FAILED:
 		set_cpu_active((long)hcpu, true);
 		return NOTIFY_OK;
@@ -6589,6 +6737,53 @@ static int build_sched_domains(const struct cpumask *cpu_map,
 		sd = *per_cpu_ptr(d.sd, i);
 		cpu_attach_domain(sd, d.rd, i);
 	}
+
+#ifdef CONFIG_VD_HMP
+	for (i = nr_cpumask_bits - 1; i >= 0; i--) {
+		if (!cpumask_test_cpu(i, cpu_map))
+			continue;
+
+		for (sd = *per_cpu_ptr(d.sd, i); sd; sd = sd->parent) {
+			struct sched_group *sg;
+			sd->a7_group = NULL;
+			sd->a15_group = NULL;
+			sd->primary_group = NULL;
+			sd->secondary_group = NULL;
+
+			/* Process only HMP domains */
+			if (!(sd->flags & SD_HMP_BALANCE))
+				continue;
+
+			/*
+			 * Process sched groups of this domain.
+			 * Attach sg to hmp domains.
+			 */
+			sg = sd->groups;
+			do {
+				if (!sg->sgp)
+					goto next_sg;
+
+				if (cpumask_intersects(sched_group_cpus(sg),
+							cpu_fastest_mask)) {
+					sd->a15_group = sg;
+					if (sysctl_sched_vd_hmp_policy == 1)
+						sd->secondary_group = sg;
+					else
+						sd->primary_group = sg;
+				} else {
+					sd->a7_group = sg;
+					if (sysctl_sched_vd_hmp_policy == 1)
+						sd->primary_group = sg;
+					else
+						sd->secondary_group = sg;
+				}
+next_sg:
+				sg = sg->next;
+			} while (sg != sd->groups);
+		}
+	}
+#endif /* CONFIG_VD_HMP */
+
 	rcu_read_unlock();
 
 	ret = 0;
@@ -7040,6 +7235,10 @@ void __init sched_init(void)
 #endif
 		init_rq_hrtick(rq);
 		atomic_set(&rq->nr_iowait, 0);
+#ifdef CONFIG_VD_HMP
+		rq->druntime_sum = 0;
+		rq->nr_hmp_tasks = 0;
+#endif
 	}
 
 	set_load_weight(&init_task);
@@ -7112,6 +7311,9 @@ void __might_sleep(const char *file, int line, int preempt_offset)
 		"in_atomic(): %d, irqs_disabled(): %d, pid: %d, name: %s\n",
 			in_atomic(), irqs_disabled(),
 			current->pid, current->comm);
+#ifdef CONFIG_VDLP_VERSION_INFO
+	show_kernel_patch_version();
+#endif
 
 	debug_show_held_locks(current);
 	if (irqs_disabled())
@@ -7800,7 +8002,12 @@ static int tg_set_cfs_bandwidth(struct task_group *tg, u64 period, u64 quota)
 
 	runtime_enabled = quota != RUNTIME_INF;
 	runtime_was_enabled = cfs_b->quota != RUNTIME_INF;
-	account_cfs_bandwidth_used(runtime_enabled, runtime_was_enabled);
+	/*
+	 * If we need to toggle cfs_bandwidth_used, off->on must occur
+	 * before making related changes, and on->off must occur afterwards
+	 */
+	if (runtime_enabled && !runtime_was_enabled)
+		cfs_bandwidth_usage_inc();
 	raw_spin_lock_irq(&cfs_b->lock);
 	cfs_b->period = ns_to_ktime(period);
 	cfs_b->quota = quota;
@@ -7826,6 +8033,8 @@ static int tg_set_cfs_bandwidth(struct task_group *tg, u64 period, u64 quota)
 			unthrottle_cfs_rq(cfs_rq);
 		raw_spin_unlock_irq(&rq->lock);
 	}
+	if (runtime_was_enabled && !runtime_enabled)
+		cfs_bandwidth_usage_dec();
 out_unlock:
 	mutex_unlock(&cfs_constraints_mutex);
 

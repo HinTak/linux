@@ -8,6 +8,14 @@
 #include <linux/swap.h>
 #include <linux/swapops.h>
 #include <asm/uaccess.h>
+#include <linux/vmalloc.h>
+
+/**
+* @brief Include Security Framework security operations
+* @author Maksym Koshel (m.koshel@samsung.com)
+* @date Sep 20, 2014
+*/
+#include <linux/sf_security.h>
 
 #include "internal.h"
 
@@ -107,97 +115,6 @@ void *memdup_user(const void __user *src, size_t len)
 }
 EXPORT_SYMBOL(memdup_user);
 
-static __always_inline void *__do_krealloc(const void *p, size_t new_size,
-					   gfp_t flags)
-{
-	void *ret;
-	size_t ks = 0;
-
-	if (p)
-		ks = ksize(p);
-
-	if (ks >= new_size)
-		return (void *)p;
-
-	ret = kmalloc_track_caller(new_size, flags);
-	if (ret && p)
-		memcpy(ret, p, ks);
-
-	return ret;
-}
-
-/**
- * __krealloc - like krealloc() but don't free @p.
- * @p: object to reallocate memory for.
- * @new_size: how many bytes of memory are required.
- * @flags: the type of memory to allocate.
- *
- * This function is like krealloc() except it never frees the originally
- * allocated buffer. Use this if you don't want to free the buffer immediately
- * like, for example, with RCU.
- */
-void *__krealloc(const void *p, size_t new_size, gfp_t flags)
-{
-	if (unlikely(!new_size))
-		return ZERO_SIZE_PTR;
-
-	return __do_krealloc(p, new_size, flags);
-
-}
-EXPORT_SYMBOL(__krealloc);
-
-/**
- * krealloc - reallocate memory. The contents will remain unchanged.
- * @p: object to reallocate memory for.
- * @new_size: how many bytes of memory are required.
- * @flags: the type of memory to allocate.
- *
- * The contents of the object pointed to are preserved up to the
- * lesser of the new and old sizes.  If @p is %NULL, krealloc()
- * behaves exactly like kmalloc().  If @new_size is 0 and @p is not a
- * %NULL pointer, the object pointed to is freed.
- */
-void *krealloc(const void *p, size_t new_size, gfp_t flags)
-{
-	void *ret;
-
-	if (unlikely(!new_size)) {
-		kfree(p);
-		return ZERO_SIZE_PTR;
-	}
-
-	ret = __do_krealloc(p, new_size, flags);
-	if (ret && p != ret)
-		kfree(p);
-
-	return ret;
-}
-EXPORT_SYMBOL(krealloc);
-
-/**
- * kzfree - like kfree but zero memory
- * @p: object to free memory of
- *
- * The memory of the object @p points to is zeroed before freed.
- * If @p is %NULL, kzfree() does nothing.
- *
- * Note: this function zeroes the whole allocated buffer which can be a good
- * deal bigger than the requested buffer size passed to kmalloc(). So be
- * careful when using this function in performance sensitive code.
- */
-void kzfree(const void *p)
-{
-	size_t ks;
-	void *mem = (void *)p;
-
-	if (unlikely(ZERO_OR_NULL_PTR(mem)))
-		return;
-	ks = ksize(mem);
-	memset(mem, 0, ks);
-	kfree(mem);
-}
-EXPORT_SYMBOL(kzfree);
-
 /*
  * strndup_user - duplicate an existing string from user space
  * @s: The string to duplicate
@@ -262,32 +179,26 @@ static int vm_is_stack_for_task(struct task_struct *t,
  * just check in the current task. Returns the pid of the task that
  * the vma is stack for.
  */
-pid_t vm_is_stack(struct task_struct *task,
-		  struct vm_area_struct *vma, int in_group)
+struct task_struct * vm_is_stack(struct task_struct *task,
+				 struct vm_area_struct *vma, int in_group)
 {
-	pid_t ret = 0;
-
 	if (vm_is_stack_for_task(task, vma))
-		return task->pid;
+		return task;
 
 	if (in_group) {
 		struct task_struct *t;
 		rcu_read_lock();
-		if (!pid_alive(task))
-			goto done;
-
-		t = task;
-		do {
+		for_each_thread(task, t) {
 			if (vm_is_stack_for_task(t, vma)) {
-				ret = t->pid;
-				goto done;
+				get_task_struct(t);
+				rcu_read_unlock();
+				return t;
 			}
-		} while_each_thread(task, t);
-done:
+		}
 		rcu_read_unlock();
 	}
 
-	return ret;
+	return NULL;
 }
 
 #if defined(CONFIG_MMU) && !defined(HAVE_ARCH_PICK_MMAP_LAYOUT)
@@ -361,12 +272,21 @@ unsigned long vm_mmap_pgoff(struct file *file, unsigned long addr,
 
 	ret = security_mmap_file(file, prot, flag);
 	if (!ret) {
-		down_write(&mm->mmap_sem);
-		ret = do_mmap_pgoff(file, addr, len, prot, flag, pgoff,
-				    &populate);
-		up_write(&mm->mmap_sem);
-		if (populate)
-			mm_populate(ret, populate);
+		/**
+		* @brief Call of the Security Framework routine for mmap
+		* @author Maksym Koshel (m.koshel@samsung.com)
+		* @date Sep 20, 2014
+		*/
+		ret = (unsigned int)sf_security_mmap_file(file, prot, flag);
+		if (0 == ret)
+		{
+			down_write(&mm->mmap_sem);
+			ret = do_mmap_pgoff(file, addr, len, prot, flag, pgoff,
+				&populate);
+			up_write(&mm->mmap_sem);
+			if (populate)
+				mm_populate(ret, populate);
+		}
 	}
 	return ret;
 }
@@ -383,6 +303,15 @@ unsigned long vm_mmap(struct file *file, unsigned long addr,
 	return vm_mmap_pgoff(file, addr, len, prot, flag, offset >> PAGE_SHIFT);
 }
 EXPORT_SYMBOL(vm_mmap);
+
+void kvfree(const void *addr)
+{
+	if (is_vmalloc_addr(addr))
+		vfree(addr);
+	else
+		kfree(addr);
+}
+EXPORT_SYMBOL(kvfree);
 
 struct address_space *page_mapping(struct page *page)
 {

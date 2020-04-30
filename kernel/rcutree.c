@@ -59,6 +59,11 @@
 
 #include "rcu.h"
 
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+void show_kernel_patch_version(void);
+#endif
+
 /* Data structures. */
 
 static struct lock_class_key rcu_node_class[RCU_NUM_LVLS];
@@ -841,6 +846,10 @@ static void rcu_dump_cpu_stacks(struct rcu_state *rsp)
 	}
 }
 
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+extern void show_irq(void);
+#endif
+
 static void print_other_cpu_stall(struct rcu_state *rsp)
 {
 	int cpu;
@@ -861,6 +870,13 @@ static void print_other_cpu_stall(struct rcu_state *rsp)
 	rsp->jiffies_stall = jiffies + 3 * rcu_jiffies_till_stall_check() + 3;
 	raw_spin_unlock_irqrestore(&rnp->lock, flags);
 
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+	show_irq();
+#endif
+#ifdef CONFIG_VDLP_VERSION_INFO
+	show_kernel_patch_version();
+#endif
+
 	/*
 	 * OK, time to rat on our buddy...
 	 * See Documentation/RCU/stallwarn.txt for info on how to debug
@@ -868,6 +884,14 @@ static void print_other_cpu_stall(struct rcu_state *rsp)
 	 */
 	printk(KERN_ERR "INFO: %s detected stalls on CPUs/tasks:",
 	       rsp->name);
+#ifdef CONFIG_PRINT_SMC_HISTORY_PRINT
+	printk(KERN_ERR "[SABSP] CONFIG_PRINT_SMC_HISTORY_PRINT is enabled!! \n");
+	if ( print_smc_info_sec )
+		print_smc_info_sec();
+#else
+	printk(KERN_ERR "[SABSP] CONFIG_PRINT_SMC_HISTORY_PRINT is NOT!! enabled\n");
+#endif
+
 	print_cpu_stall_info_begin();
 	rcu_for_each_leaf_node(rsp, rnp) {
 		raw_spin_lock_irqsave(&rnp->lock, flags);
@@ -917,12 +941,27 @@ static void print_cpu_stall(struct rcu_state *rsp)
 	struct rcu_node *rnp = rcu_get_root(rsp);
 	long totqlen = 0;
 
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+	show_irq();
+#endif
+#ifdef CONFIG_VDLP_VERSION_INFO
+	show_kernel_patch_version();
+#endif
+
 	/*
 	 * OK, time to rat on ourselves...
 	 * See Documentation/RCU/stallwarn.txt for info on how to debug
 	 * RCU CPU stall warnings.
 	 */
 	printk(KERN_ERR "INFO: %s self-detected stall on CPU", rsp->name);
+#ifdef CONFIG_PRINT_SMC_HISTORY_PRINT
+	printk(KERN_ERR "[SABSP] CONFIG_PRINT_SMC_HISTORY_PRINT is enabled!! \n");
+	if ( print_smc_info_sec )
+		print_smc_info_sec();
+#else
+	printk(KERN_ERR "[SABSP] CONFIG_PRINT_SMC_HISTORY_PRINT is NOT!! enabled\n");
+#endif
+
 	print_cpu_stall_info_begin();
 	print_cpu_stall_info(rsp, smp_processor_id());
 	print_cpu_stall_info_end();

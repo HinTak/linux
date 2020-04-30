@@ -10,6 +10,53 @@
 #include <linux/export.h>
 #include <linux/kallsyms.h>
 #include <linux/stacktrace.h>
+#include <linux/seq_file.h>
+
+void seq_print_stack_trace(struct seq_file *m, struct stack_trace *trace,
+		int spaces)
+{
+	int i;
+
+	if (WARN_ON(!trace->entries))
+		return;
+
+	for (i = 0; i < trace->nr_entries; i++) {
+		unsigned long ip = trace->entries[i];
+		seq_printf(m, "%*c[<%p>] %pS\n", 1 + spaces, ' ',
+				(void *) ip, (void *) ip);
+	}
+}
+EXPORT_SYMBOL_GPL(seq_print_stack_trace);
+
+int snprint_stack_trace(char *buf, int buf_len, struct stack_trace *trace,
+			int spaces)
+{
+	int ret = 0;
+	int i;
+
+	if (WARN_ON(!trace->entries))
+		return 0;
+
+	for (i = 0; i < trace->nr_entries; i++) {
+		unsigned long ip = trace->entries[i];
+		int printed = snprintf(buf, buf_len, "%*c[<%p>] %pS\n",
+				1 + spaces, ' ',
+				(void *) ip, (void *) ip);
+		/* snprintf() return the number of bytes that would have been
+		 * written if n had been sufficiently large, or a negative
+		 * value if an encoding error occurred (ISO C99) */
+		if (unlikely(printed < 0))
+			return 0;
+		if (unlikely(printed >= buf_len))
+			return 0;
+		buf_len -= printed;
+		ret += printed;
+		buf += printed;
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(snprint_stack_trace);
 
 void print_stack_trace(struct stack_trace *trace, int spaces)
 {

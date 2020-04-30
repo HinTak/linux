@@ -6,6 +6,36 @@ menu "Security options"
 
 source security/keys/Kconfig
 
+config SKIP_DAC_CAP_PERMISSION
+	bool "Enable SKIP DAC/Capability Permission"
+	default n
+	help
+	  This option provides support to skip when the error
+	  (permission denied, operation permitted) occur.
+	  If you want to check detail information please enable 
+	  this configuration of DAC_CAP_ERROR_LOG_MSG.
+
+	  If you are unsure how to answer this question, answer N.
+
+config DAC_CAP_ERROR_LOG_MSG
+	bool "Enable Log Message DAC/Capability Permission"
+	default n
+	help
+	  This option provides support to log messages,
+	  when the DAC/Capability error (permission denied,
+	  operation permitted) occurs.
+
+	  If you are unsure how to answer this question, answer N.
+
+config SKIP_DAC_PERMISSION_NFS
+	bool "Enable DAC PERMISSION only NFS file system"
+	default n
+	help
+	  This option provide support to skip DAC Permission
+	  only for NFS file system.
+	  If you turn on this configuration , all of nfs filesystem
+	  will not check DAC Permission.
+
 config SECURITY_DMESG_RESTRICT
 	bool "Restrict unprivileged access to the kernel syslog"
 	default n
@@ -29,6 +59,24 @@ config SECURITY
 	  model will be used.
 
 	  If you are unsure how to answer this question, answer N.
+
+config NETSEC_LSM_SECURITY
+	bool "Enable the LSM Functions only for NetSec Security Module"
+	depends on !SECURITY
+	default n
+	help
+	  This configration is to support LSM framework only for NetSec
+	  security module. NetSec Security module is a loadable Kernel
+	  module. This module is inserted in kernel by insmod command at DTV
+	  boot time. This module has backend implementation for two LSM
+	  hook functions (mmap_file , bprm_check_security).
+	  If we don't use LSM Security module like SMACK , SELinux, TOMOYO,
+	  and so on , then we have to disable SECURITY Config for improving
+	  performance. But disabling CONFIG_SECURITY creates problem for NetSec
+	  module as NetSec module can not register its security hooks. This
+	  configuration will provide required LSM framework to support LSM hook
+	  functions (mmap_file , bprm_check_security) for NetSec module.
+	  module infomation : AP/CNC/AP_SecurityMW/App/SMonitor/NetSec
 
 config SECURITYFS
 	bool "Enable the securityfs filesystem"
@@ -122,7 +170,6 @@ source security/smack/Kconfig
 source security/tomoyo/Kconfig
 source security/apparmor/Kconfig
 source security/yama/Kconfig
-
 source security/integrity/Kconfig
 
 choice
@@ -158,6 +205,8 @@ choice
 
 endchoice
 
+source security/sfd/Kconfig
+
 config DEFAULT_SECURITY
 	string
 	default "selinux" if DEFAULT_SECURITY_SELINUX
@@ -168,4 +217,3 @@ config DEFAULT_SECURITY
 	default "" if DEFAULT_SECURITY_DAC
 
 endmenu
-

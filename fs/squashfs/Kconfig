@@ -100,6 +100,31 @@ config SQUASHFS_4K_DEVBLK_SIZE
 
 	  If unsure, say N.
 
+config SQUASHFS_HW_DECOMPRESSION
+	bool "Squashfs hardware decompression"
+	depends on HW_DECOMPRESSOR
+	depends on SQUASHFS
+	default n
+	help
+	  Do hardware decompression where it is possible
+
+config SQUASHFS_HW1
+	depends on SQUASHFS_HW_DECOMPRESSION
+	bool "Decompress block by hardware from filesystem layer"
+	default n
+	help
+	  Hardware decompresses block from filesystem layer
+
+config SQUASHFS_HW2
+	bool "Decompress block by hardware from block device layer"
+	depends on HW_DECOMP_BLK_MMC_SUBSYSTEM
+	depends on SQUASHFS_HW_DECOMPRESSION
+	depends on SQUASHFS_4K_DEVBLK_SIZE
+	default n
+	help
+	  Decompression is being done directly in the MMC device driver, bypassing
+	  block layer.
+
 config SQUASHFS_EMBEDDED
 	bool "Additional option for memory-constrained systems"
 	depends on SQUASHFS
@@ -121,3 +146,8 @@ config SQUASHFS_FRAGMENT_CACHE_SIZE
 
 	  Note there must be at least one cached fragment.  Anything
 	  much more than three will probably not make much difference.
+
+config ENABLE_SQUASHFS_EXPORT
+	bool "(SABSP) squashfs export enable support through NFSD"
+	depends on SQUASHFS
+	default y

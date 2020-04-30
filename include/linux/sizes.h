@@ -35,6 +35,7 @@
 #define SZ_4M				0x00400000
 #define SZ_8M				0x00800000
 #define SZ_16M				0x01000000
+#define SZ_28M				0x01c00000
 #define SZ_32M				0x02000000
 #define SZ_64M				0x04000000
 #define SZ_128M				0x08000000

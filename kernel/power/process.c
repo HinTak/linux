@@ -21,7 +21,14 @@
 /* 
  * Timeout for stopping processes
  */
-unsigned int __read_mostly freeze_timeout_msecs = 20 * MSEC_PER_SEC;
+unsigned int __read_mostly freeze_timeout_msecs = 10 * MSEC_PER_SEC;
+
+#ifdef CONFIG_SLP_LOWMEM_NOTIFY
+extern bool dump_tasks_once_lv2;
+#endif
+
+extern int Is_always_Ready(void);
+extern void machine_restart_standby(char *cmd);
 
 static int try_to_freeze_tasks(bool user_only)
 {
@@ -121,17 +128,27 @@ int freeze_processes(void)
 
 	printk("Freezing user space processes ... ");
 	pm_freezing = true;
+
 	error = try_to_freeze_tasks(true);
 	if (!error) {
 		printk("done.");
 		__usermodehelper_set_disable_depth(UMH_DISABLED);
 		oom_killer_disable();
+#ifdef CONFIG_SLP_LOWMEM_NOTIFY
+		dump_tasks_once_lv2 = false;
+#endif
 	}
 	printk("\n");
 	BUG_ON(in_atomic());
 
-	if (error)
+	if (error){
+		printk(KERN_ERR "Task freezing failed - cold power off\n");
+                if(Is_always_Ready())
+                        machine_restart_standby("Suspend fail - reboot\n");
+                else
+                        pm_power_off();
 		thaw_processes();
+	}
 	return error;
 }
 
@@ -156,25 +173,27 @@ int freeze_kernel_threads(void)
 	printk("\n");
 	BUG_ON(in_atomic());
 
-	if (error)
+	if (error){
+		printk(KERN_ERR "Task freezing failed - cold power off\n");
+                if(Is_always_Ready())
+                        machine_restart_standby("Suspend fail - reboot\n");
+                else
+                        pm_power_off();
 		thaw_kernel_threads();
+	}
 	return error;
 }
 
-void thaw_processes(void)
+#ifdef CONFIG_IOTMODE
+#define TV_MODE    1
+extern int iotmode;
+static void thaw_processes_finish(void)
 {
-	struct task_struct *g, *p;
+        struct task_struct *g, *p;
 
-	if (pm_freezing)
-		atomic_dec(&system_freezing_cnt);
-	pm_freezing = false;
-	pm_nosig_freezing = false;
+	pm_iot_freezing = false;
 
-	oom_killer_enable();
-
-	printk("Restarting tasks ... ");
-
-	thaw_workqueues();
+        printk("Restarting tasks ... ");
 
 	read_lock(&tasklist_lock);
 	do_each_thread(g, p) {
@@ -182,11 +201,72 @@ void thaw_processes(void)
 	} while_each_thread(g, p);
 	read_unlock(&tasklist_lock);
 
+}
+void thaw_processes_prepare(void)
+{
+
+	if(pm_iot_freezing){
+		thaw_processes_finish();
+		return;
+	}
+
+        if (pm_freezing)
+                atomic_dec(&system_freezing_cnt);
+        pm_freezing = false;
+        pm_nosig_freezing = false;
+
+        oom_killer_enable();
+
+        __usermodehelper_set_disable_depth(UMH_FREEZING);
+        thaw_workqueues();
+
+	if(iotmode != TV_MODE){
+		pm_iot_freezing = true;
+	}else{
+		thaw_processes_finish();
+	}
 	usermodehelper_enable();
 
 	schedule();
+}
+void thaw_processes_iot(void)
+{
+	pm_iot_freezing = false;
+}
+void thaw_processes(void)
+{
+	thaw_processes_prepare();
 	printk("done.\n");
 }
+#else
+void thaw_processes(void)
+{
+        struct task_struct *g, *p;
+
+        if (pm_freezing)
+                atomic_dec(&system_freezing_cnt);
+        pm_freezing = false;
+        pm_nosig_freezing = false;
+
+        oom_killer_enable();
+
+        printk("Restarting tasks ... ");
+
+        __usermodehelper_set_disable_depth(UMH_FREEZING);
+        thaw_workqueues();
+
+        read_lock(&tasklist_lock);
+        do_each_thread(g, p) {
+                __thaw_task(p);
+        } while_each_thread(g, p);
+        read_unlock(&tasklist_lock);
+
+        usermodehelper_enable();
+
+        schedule();
+        printk("done.\n");
+}
+#endif
 
 void thaw_kernel_threads(void)
 {

@@ -20,6 +20,7 @@
 
 #include <asm/sockios.h>
 
+
 /* Linux-specific socket ioctls */
 #define SIOCINQ		FIONREAD
 #define SIOCOUTQ	TIOCOUTQ        /* output queue size (not sent + not acked) */
@@ -65,6 +66,7 @@
 #define SIOCDIFADDR	0x8936		/* delete PA address		*/
 #define	SIOCSIFHWBROADCAST	0x8937	/* set hardware broadcast addr	*/
 #define SIOCGIFCOUNT	0x8938		/* get number of devices */
+
 
 #define SIOCGIFBR	0x8940		/* Bridging support		*/
 #define SIOCSIFBR	0x8941		/* Set bridging options 	*/
@@ -139,6 +141,7 @@
  */
  
 #define SIOCDEVPRIVATE	0x89F0	/* to 89FF */
+
 
 /*
  *	These 16 ioctl calls are protocol private

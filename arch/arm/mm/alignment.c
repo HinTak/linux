@@ -39,6 +39,7 @@
  * This code is not portable to processors with late data abort handling.
  */
 #define CODING_BITS(i)	(i & 0x0e000000)
+#define COND_BITS(i)	(i & 0xf0000000)
 
 #define LDST_I_BIT(i)	(i & (1 << 26))		/* Immediate constant	*/
 #define LDST_P_BIT(i)	(i & (1 << 24))		/* Preindex		*/
@@ -93,6 +94,7 @@ static bool cpu_is_v6_unaligned(void)
 	return cpu_architecture() >= CPU_ARCH_ARMv6 && (cr_alignment & CR_U);
 }
 
+#ifndef CONFIG_DISABLE_UNALIGNED_ACCESS
 static int safe_usermode(int new_usermode, bool warn)
 {
 	/*
@@ -113,6 +115,7 @@ static int safe_usermode(int new_usermode, bool warn)
 
 	return new_usermode;
 }
+#endif
 
 #ifdef CONFIG_PROC_FS
 static const char *usermode_action[] = {
@@ -153,8 +156,13 @@ static ssize_t alignment_proc_write(struct file *file, const char __user *buffer
 	if (count > 0) {
 		if (get_user(mode, buffer))
 			return -EFAULT;
-		if (mode >= '0' && mode <= '5')
-			ai_usermode = safe_usermode(mode - '0', true);
+		if (mode >= '0' && mode <= '5') {
+			/* forbids user to change alignment policy by /proc/cpu/alignment
+			 * access, VDLP 2.x 2011-08-18 */
+			printk(KERN_ALERT "##### VDLinux Warning msg, Pid [%d], comm :%s,"
+				" VD forbids user to change unaligned access policy. (%d)\n",
+				task_pid_nr(current), current->comm, (mode - '0'));
+		}
 	}
 	return count;
 }
@@ -757,6 +765,11 @@ do_alignment(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 	if (interrupts_enabled(regs))
 		local_irq_enable();
 
+#ifdef CONFIG_ACCURATE_COREDUMP
+	if (user_mode(regs) && (ai_usermode & UM_SIGNAL))
+		early_coredump_wait(SIGBUS);
+#endif
+
 	instrptr = instruction_pointer(regs);
 
 	if (thumb_mode(regs)) {
@@ -812,6 +825,8 @@ do_alignment(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 		break;
 
 	case 0x04000000:	/* ldr or str immediate */
+		if (COND_BITS(instr) == 0xf0000000) /* NEON VLDn, VSTn */
+			goto bad;
 		offset.un = OFFSET_BITS(instr);
 		handler = do_alignment_ldrstr;
 		break;
@@ -921,7 +936,14 @@ do_alignment(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 		si.si_errno = 0;
 		si.si_code = BUS_ADRALN;
 		si.si_addr = (void __user *)addr;
-
+		set_flag_block_sigkill(current, si.si_signo);
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+		/* add unaligned access bus error msg, VDLP 2011-08-18 */
+		printk(KERN_ALERT "##### Unaligned access bus error: Pid [%d], comm: %s, PC=0x%08lx Instr=0x%0*lx\n",
+		       task_pid_nr(current), current->comm, instrptr,
+		       isize << 1, isize == 2 ? tinstr : instr);
+		dump_info(current, regs, 0);
+#endif
 		force_sig_info(si.si_signo, &si, current);
 	} else {
 		/*
@@ -963,10 +985,15 @@ static int __init alignment_init(void)
 
 #ifdef CONFIG_CPU_CP15
 	if (cpu_is_v6_unaligned()) {
+#ifdef CONFIG_DISABLE_UNALIGNED_ACCESS
+		/* VDLinux, disable unaligned accesss support, 2010.11.18 */
+		ai_usermode = UM_SIGNAL;
+#else		/* original codes */
 		cr_alignment &= ~CR_A;
 		cr_no_alignment &= ~CR_A;
 		set_cr(cr_alignment);
 		ai_usermode = safe_usermode(ai_usermode, false);
+#endif
 	}
 #endif
 

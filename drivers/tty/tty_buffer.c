@@ -427,9 +427,11 @@ static void flush_to_ldisc(struct work_struct *work)
 	tty = port->itty;
 	if (tty == NULL)
 		return;
+	else if (!tty->driver_data)
+		return;
 
 	disc = tty_ldisc_ref(tty);
-	if (disc == NULL)	/*  !TTY_LDISC */
+	if (disc == NULL)
 		return;
 
 	spin_lock_irqsave(&buf->lock, flags);
@@ -523,6 +525,46 @@ void tty_flip_buffer_push(struct tty_port *port)
 		schedule_work(&buf->work);
 }
 EXPORT_SYMBOL(tty_flip_buffer_push);
+
+#ifdef CONFIG_UART_BROADCAST
+extern struct list_head broadcast_tty_list;
+extern void tty_B_lock(void);
+extern void tty_B_unlock(void);
+
+void broadcast_tty_flip_buffer_push(void)
+{
+	struct tty_struct *btty = NULL;
+
+	tty_B_lock();
+	if(!list_empty(&broadcast_tty_list))
+	{
+		list_for_each_entry(btty, &broadcast_tty_list, list)
+		{
+			tty_flip_buffer_push(btty->port);
+		}
+	}
+	tty_B_unlock();
+}
+EXPORT_SYMBOL(broadcast_tty_flip_buffer_push);
+
+#include <linux/tty_flip.h>
+void push_char_delayed_tty( unsigned char ch )
+{
+	struct tty_struct *btty = NULL;
+
+	tty_B_lock();
+	if(!list_empty(&broadcast_tty_list))
+	{
+		list_for_each_entry(btty, &broadcast_tty_list, list)
+		{
+			tty_insert_flip_char(btty->port, ch, TTY_NORMAL);
+		}
+	}
+	tty_B_unlock();
+}
+EXPORT_SYMBOL(push_char_delayed_tty);
+#endif
+
 
 /**
  *	tty_buffer_init		-	prepare a tty buffer structure

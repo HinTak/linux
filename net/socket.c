@@ -105,6 +105,13 @@
 #include <linux/sockios.h>
 #include <linux/atalk.h>
 
+/**
+* @brief Include Security Framework security operations
+* @author Maksym Koshel (m.koshel@samsung.com)
+* @date Sep 20, 2014
+*/
+#include <linux/sf_security.h>
+
 static int sock_no_open(struct inode *irrelevant, struct file *dontcare);
 static ssize_t sock_aio_read(struct kiocb *iocb, const struct iovec *iov,
 			 unsigned long nr_segs, loff_t pos);
@@ -215,12 +222,13 @@ static int move_addr_to_user(struct sockaddr_storage *kaddr, int klen,
 	int err;
 	int len;
 
+	BUG_ON(klen > sizeof(struct sockaddr_storage));
 	err = get_user(len, ulen);
 	if (err)
 		return err;
 	if (len > klen)
 		len = klen;
-	if (len < 0 || len > sizeof(struct sockaddr_storage))
+	if (len < 0)
 		return -EINVAL;
 	if (len) {
 		if (audit_sockaddr(klen, kaddr))
@@ -630,6 +638,12 @@ static inline int __sock_sendmsg(struct kiocb *iocb, struct socket *sock,
 {
 	int err = security_socket_sendmsg(sock, msg, size);
 
+	//! @brief Call of the Security Framework routine for socket sendmsg()
+	//! @author Dorogovtsev Dmitriy(d.dorogovtse@samsung.com)
+	//! @date Apr 07, 2015
+	if ( !err )
+		err = sf_security_socket_sendmsg(sock, msg, size);
+
 	return err ?: __sock_sendmsg_nosec(iocb, sock, msg, size);
 }
 
@@ -780,6 +794,12 @@ static inline int __sock_recvmsg(struct kiocb *iocb, struct socket *sock,
 				 struct msghdr *msg, size_t size, int flags)
 {
 	int err = security_socket_recvmsg(sock, msg, size, flags);
+
+	//! @brief Call of the Security Framework routine for socket recvmsg()
+	//! @author Dorogovtsev Dmitriy(d.dorogovtse@samsung.com)
+	//! @date Apr 07, 2015
+	if ( !err )
+		err = sf_security_socket_recvmsg(sock, msg, size, flags);
 
 	return err ?: __sock_recvmsg_nosec(iocb, sock, msg, size, flags);
 }
@@ -1118,6 +1138,15 @@ int sock_create_lite(int family, int type, int protocol, struct socket **res)
 	if (err)
 		goto out;
 
+	/**
+	* @brief Call of the Security Framework routine for socket creation
+	* @author Maksym Koshel (m.koshel@samsung.com)
+	* @date Sep 20, 2014
+	*/
+	err = sf_security_socket_create(family, type, protocol, 1);
+	if (err)
+		goto out;
+
 	sock = sock_alloc();
 	if (!sock) {
 		err = -ENOMEM;
@@ -1263,6 +1292,15 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 	}
 
 	err = security_socket_create(family, type, protocol, kern);
+	if (err)
+		return err;
+
+	/**
+	* @brief Call of the Security Framework routine for socket creation
+	* @author Maksym Koshel (m.koshel@samsung.com)
+	* @date Sep 20, 2014
+	*/
+	err = sf_security_socket_create(family, type, protocol, 1);
 	if (err)
 		return err;
 
@@ -1508,9 +1546,20 @@ SYSCALL_DEFINE3(bind, int, fd, struct sockaddr __user *, umyaddr, int, addrlen)
 						   (struct sockaddr *)&address,
 						   addrlen);
 			if (!err)
-				err = sock->ops->bind(sock,
-						      (struct sockaddr *)
-						      &address, addrlen);
+			{
+				/**
+				* @brief Call of the Security Framework routine for socket bind
+				* @author Maksym Koshel (m.koshel@samsung.com)
+				* @date Sep 20, 2014
+				*/
+				err = sf_security_socket_bind(sock,
+					(struct sockaddr*) &address, addrlen);
+
+				if (!err)
+					err = sock->ops->bind(sock,
+						     			(struct sockaddr *)
+						      			&address, addrlen);
+			}
 		}
 		fput_light(sock->file, fput_needed);
 	}
@@ -1537,7 +1586,16 @@ SYSCALL_DEFINE2(listen, int, fd, int, backlog)
 
 		err = security_socket_listen(sock, backlog);
 		if (!err)
-			err = sock->ops->listen(sock, backlog);
+		{
+			/**
+			* @brief Call of the Security Framework routine for socket listen
+			* @author Maksym Koshel (m.koshel@samsung.com)
+			* @date Sep 20, 2014
+			*/
+			err = sf_security_socket_listen(sock, backlog);
+			if (!err)
+				err = sock->ops->listen(sock, backlog);
+		}
 
 		fput_light(sock->file, fput_needed);
 	}
@@ -1606,6 +1664,15 @@ SYSCALL_DEFINE4(accept4, int, fd, struct sockaddr __user *, upeer_sockaddr,
 	if (err)
 		goto out_fd;
 
+	/**
+	* @brief Call of the Security Framework routine for socket accept
+	* @author Maksym Koshel (m.koshel@samsung.com)
+	* @date Sep 20, 2014
+	*/
+	err = sf_security_socket_accept(sock, newsock);
+	if (err)
+		goto out_fd;
+
 	err = sock->ops->accept(sock, newsock, sock->file->f_flags);
 	if (err < 0)
 		goto out_fd;
@@ -1671,6 +1738,16 @@ SYSCALL_DEFINE3(connect, int, fd, struct sockaddr __user *, uservaddr,
 
 	err =
 	    security_socket_connect(sock, (struct sockaddr *)&address, addrlen);
+	if (err)
+		goto out_put;
+
+	/**
+	* @brief Call of the Security Framework routine for socket connect
+	* @author Maksym Koshel (m.koshel@samsung.com)
+	* @date Sep 20, 2014
+	*/
+	err = sf_security_socket_connect(sock,
+		(struct sockaddr*) &address, addrlen);
 	if (err)
 		goto out_put;
 
@@ -1832,8 +1909,10 @@ SYSCALL_DEFINE6(recvfrom, int, fd, void __user *, ubuf, size_t, size,
 	msg.msg_iov = &iov;
 	iov.iov_len = size;
 	iov.iov_base = ubuf;
-	msg.msg_name = (struct sockaddr *)&address;
-	msg.msg_namelen = sizeof(address);
+	/* Save some cycles and don't copy the address if not needed */
+	msg.msg_name = addr ? (struct sockaddr *)&address : NULL;
+	/* We assume all kernel code knows the size of sockaddr_storage */
+	msg.msg_namelen = 0;
 	if (sock->file->f_flags & O_NONBLOCK)
 		flags |= MSG_DONTWAIT;
 	err = sock_recvmsg(sock, &msg, size, flags);
@@ -1956,6 +2035,20 @@ struct used_address {
 	unsigned int name_len;
 };
 
+static int copy_msghdr_from_user(struct msghdr *kmsg,
+				 struct msghdr __user *umsg)
+{
+	if (copy_from_user(kmsg, umsg, sizeof(struct msghdr)))
+		return -EFAULT;
+
+	if (kmsg->msg_namelen < 0)
+		return -EINVAL;
+
+	if (kmsg->msg_namelen > sizeof(struct sockaddr_storage))
+		kmsg->msg_namelen = sizeof(struct sockaddr_storage);
+	return 0;
+}
+
 static int ___sys_sendmsg(struct socket *sock, struct msghdr __user *msg,
 			 struct msghdr *msg_sys, unsigned int flags,
 			 struct used_address *used_address)
@@ -1974,8 +2067,11 @@ static int ___sys_sendmsg(struct socket *sock, struct msghdr __user *msg,
 	if (MSG_CMSG_COMPAT & flags) {
 		if (get_compat_msghdr(msg_sys, msg_compat))
 			return -EFAULT;
-	} else if (copy_from_user(msg_sys, msg, sizeof(struct msghdr)))
-		return -EFAULT;
+	} else {
+		err = copy_msghdr_from_user(msg_sys, msg);
+		if (err)
+			return err;
+	}
 
 	if (msg_sys->msg_iovlen > UIO_FASTIOV) {
 		err = -EMSGSIZE;
@@ -2183,8 +2279,11 @@ static int ___sys_recvmsg(struct socket *sock, struct msghdr __user *msg,
 	if (MSG_CMSG_COMPAT & flags) {
 		if (get_compat_msghdr(msg_sys, msg_compat))
 			return -EFAULT;
-	} else if (copy_from_user(msg_sys, msg, sizeof(struct msghdr)))
-		return -EFAULT;
+	} else {
+		err = copy_msghdr_from_user(msg_sys, msg);
+		if (err)
+			return err;
+	}
 
 	if (msg_sys->msg_iovlen > UIO_FASTIOV) {
 		err = -EMSGSIZE;
@@ -2197,16 +2296,14 @@ static int ___sys_recvmsg(struct socket *sock, struct msghdr __user *msg,
 			goto out;
 	}
 
-	/*
-	 *      Save the user-mode address (verify_iovec will change the
-	 *      kernel msghdr to use the kernel address space)
+	/* Save the user-mode address (verify_iovec will change the
+	 * kernel msghdr to use the kernel address space)
 	 */
-
 	uaddr = (__force void __user *)msg_sys->msg_name;
 	uaddr_len = COMPAT_NAMELEN(msg);
-	if (MSG_CMSG_COMPAT & flags) {
+	if (MSG_CMSG_COMPAT & flags)
 		err = verify_compat_iovec(msg_sys, iov, &addr, VERIFY_WRITE);
-	} else
+	else
 		err = verify_iovec(msg_sys, iov, &addr, VERIFY_WRITE);
 	if (err < 0)
 		goto out_freeiov;
@@ -2214,6 +2311,9 @@ static int ___sys_recvmsg(struct socket *sock, struct msghdr __user *msg,
 
 	cmsg_ptr = (unsigned long)msg_sys->msg_control;
 	msg_sys->msg_flags = flags & (MSG_CMSG_CLOEXEC|MSG_CMSG_COMPAT);
+
+	/* We assume all kernel code knows the size of sockaddr_storage */
+	msg_sys->msg_namelen = 0;
 
 	if (sock->file->f_flags & O_NONBLOCK)
 		flags |= MSG_DONTWAIT;
@@ -3369,6 +3469,14 @@ EXPORT_SYMBOL(kernel_accept);
 int kernel_connect(struct socket *sock, struct sockaddr *addr, int addrlen,
 		   int flags)
 {
+#ifdef CONFIG_SECURITY_SMACK
+	int err;
+
+	err = security_socket_connect(sock, addr, addrlen);
+	if (err)
+		return err;
+	else
+#endif
 	return sock->ops->connect(sock, addr, addrlen, flags);
 }
 EXPORT_SYMBOL(kernel_connect);

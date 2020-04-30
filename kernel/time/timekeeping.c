@@ -26,6 +26,12 @@
 #include "tick-internal.h"
 #include "ntp_internal.h"
 
+#ifdef CONFIG_KDEBUGD_FTRACE
+#include "kdbg_util.h"
+#include <trace/kdbg_ftrace_helper.h>
+#include <trace/kdbg-ftrace.h>
+#endif /* CONFIG_KDEBUGD_FTRACE */
+
 static struct timekeeper timekeeper;
 static DEFINE_RAW_SPINLOCK(timekeeper_lock);
 static seqcount_t timekeeper_seq;
@@ -72,7 +78,7 @@ static void tk_set_wall_to_mono(struct timekeeper *tk, struct timespec wtm)
 	tk->wall_to_monotonic = wtm;
 	set_normalized_timespec(&tmp, -wtm.tv_sec, -wtm.tv_nsec);
 	tk->offs_real = timespec_to_ktime(tmp);
-	tk->offs_tai = ktime_sub(tk->offs_real, ktime_set(tk->tai_offset, 0));
+	tk->offs_tai = ktime_add(tk->offs_real, ktime_set(tk->tai_offset, 0));
 }
 
 static void tk_set_sleep_time(struct timekeeper *tk, struct timespec t)
@@ -177,6 +183,33 @@ static inline s64 timekeeping_get_ns(struct timekeeper *tk)
 	/* If arch requires, add in get_arch_timeoffset() */
 	return nsec + get_arch_timeoffset();
 }
+
+#ifdef CONFIG_KDEBUGD_FTRACE
+/* kdbg_ftrace_timekeeping_get_ns_raw
+ * function to get the raw nanoseconds value.
+ */
+s64 notrace kdbg_ftrace_timekeeping_get_ns_raw(void)
+{
+	cycle_t cycle_now, cycle_delta;
+	struct clocksource *clock;
+	s64 nsec;
+
+	if (fconf.trace_timestamp_nsec_status) {
+		/* read clocksource: */
+		clock = timekeeper.clock;
+		cycle_now = clock->read(clock);
+		/* calculate the delta since the last update_wall_time: */
+		cycle_delta = (cycle_now - clock->cycle_last) & clock->mask;
+
+		/* convert delta to nanoseconds. */
+		nsec = clocksource_cyc2ns(cycle_delta, clock->mult, clock->shift);
+
+		/* If arch requires, add in gettimeoffset() */
+		return nsec + get_arch_timeoffset();
+	} else
+		return 0;
+}
+#endif /* CONFIG_KDEBUGD_FTRACE */
 
 static inline s64 timekeeping_get_ns_raw(struct timekeeper *tk)
 {
@@ -490,11 +523,47 @@ int do_settimeofday(const struct timespec *tv)
 {
 	struct timekeeper *tk = &timekeeper;
 	struct timespec ts_delta, xt;
+#ifdef CONFIG_PLAT_TIZEN
+	struct timeval cur_tv = {0};
+	struct timespec cur_ts = {0};
+#endif
 	unsigned long flags;
 
 	if (!timespec_valid_strict(tv))
 		return -EINVAL;
 
+#ifdef CONFIG_PLAT_TIZEN
+	/* get the current timeval and calculate corresponding timespec*/
+	do_gettimeofday(&cur_tv);
+	cur_ts.tv_sec = cur_tv.tv_sec;
+	cur_ts.tv_nsec = cur_tv.tv_usec * NSEC_PER_USEC;
+
+	/*
+	 * In Tizen platform, do_settimeofday is allowed for task 'net-config'.
+	 * only when the time passed is bigger than current time.
+	 */
+	if ((strncmp(current->comm, "net-config", TASK_COMM_LEN))
+			&& (strncmp(current->comm, "vd-net-config", TASK_COMM_LEN))) {
+		/* Failure case when current process is *NOT* 'net-config' */
+		printk("\n");
+		printk("\033[31mERROR : do_settimeofday was called by - %s -\033[0m\n", current->comm);
+		printk("\033[31m  do_settimeofday can make potential hang problem ..\033[0m\n");
+		printk("\033[31m  You can't use this dangerous function on embedded system.\033[0m\n");
+		return -EFAULT;
+	} else {
+		if (timespec_compare(tv, &cur_ts) < 0) {
+			/* Failure case when pass timeval less that current time */
+			printk("\n");
+			printk("\033[31mERROR : do_settimeofday was called by - %s -\033[0m\n", current->comm);
+			printk("\033[31m  %s have to pass timeval[%ld] bigger than current time[%ld].\033[0m\n",
+					current->comm, tv->tv_sec, cur_ts.tv_sec);
+			return -EFAULT;
+		} else {
+			printk("\033[32m ** do_settimeofday called by :[%s] pid:[%d] (UTC)timeval:[Current:%ld Pass:%ld]** \033[0m\n",
+					current->comm, current->pid, cur_ts.tv_sec, tv->tv_sec);
+		}
+	}
+#endif
 	raw_spin_lock_irqsave(&timekeeper_lock, flags);
 	write_seqcount_begin(&timekeeper_seq);
 
@@ -590,7 +659,7 @@ s32 timekeeping_get_tai_offset(void)
 static void __timekeeping_set_tai_offset(struct timekeeper *tk, s32 tai_offset)
 {
 	tk->tai_offset = tai_offset;
-	tk->offs_tai = ktime_sub(tk->offs_real, ktime_set(tai_offset, 0));
+	tk->offs_tai = ktime_add(tk->offs_real, ktime_set(tai_offset, 0));
 }
 
 /**
@@ -605,6 +674,7 @@ void timekeeping_set_tai_offset(s32 tai_offset)
 	raw_spin_lock_irqsave(&timekeeper_lock, flags);
 	write_seqcount_begin(&timekeeper_seq);
 	__timekeeping_set_tai_offset(tk, tai_offset);
+	timekeeping_update(tk, false, true);
 	write_seqcount_end(&timekeeper_seq);
 	raw_spin_unlock_irqrestore(&timekeeper_lock, flags);
 	clock_was_set();
@@ -1007,6 +1077,8 @@ static int timekeeping_suspend(void)
 		timekeeping_suspend_time =
 			timespec_add(timekeeping_suspend_time, delta_delta);
 	}
+
+	timekeeping_update(tk, false, true);
 	write_seqcount_end(&timekeeper_seq);
 	raw_spin_unlock_irqrestore(&timekeeper_lock, flags);
 
@@ -1236,9 +1308,10 @@ out_adjust:
  * It also calls into the NTP code to handle leapsecond processing.
  *
  */
-static inline void accumulate_nsecs_to_secs(struct timekeeper *tk)
+static inline unsigned int accumulate_nsecs_to_secs(struct timekeeper *tk)
 {
 	u64 nsecps = (u64)NSEC_PER_SEC << tk->shift;
+	unsigned int clock_set = 0;
 
 	while (tk->xtime_nsec >= nsecps) {
 		int leap;
@@ -1260,9 +1333,10 @@ static inline void accumulate_nsecs_to_secs(struct timekeeper *tk)
 
 			__timekeeping_set_tai_offset(tk, tk->tai_offset - leap);
 
-			clock_was_set_delayed();
+			clock_set = 1;
 		}
 	}
+	return clock_set;
 }
 
 /**
@@ -1275,7 +1349,8 @@ static inline void accumulate_nsecs_to_secs(struct timekeeper *tk)
  * Returns the unconsumed cycles.
  */
 static cycle_t logarithmic_accumulation(struct timekeeper *tk, cycle_t offset,
-						u32 shift)
+						u32 shift,
+						unsigned int *clock_set)
 {
 	cycle_t interval = tk->cycle_interval << shift;
 	u64 raw_nsecs;
@@ -1289,7 +1364,7 @@ static cycle_t logarithmic_accumulation(struct timekeeper *tk, cycle_t offset,
 	tk->cycle_last += interval;
 
 	tk->xtime_nsec += tk->xtime_interval << shift;
-	accumulate_nsecs_to_secs(tk);
+	*clock_set |= accumulate_nsecs_to_secs(tk);
 
 	/* Accumulate raw time */
 	raw_nsecs = (u64)tk->raw_interval << shift;
@@ -1328,7 +1403,7 @@ static inline void old_vsyscall_fixup(struct timekeeper *tk)
 	tk->xtime_nsec -= remainder;
 	tk->xtime_nsec += 1ULL << tk->shift;
 	tk->ntp_error += remainder << tk->ntp_error_shift;
-
+	tk->ntp_error -= (1ULL << tk->shift) << tk->ntp_error_shift;
 }
 #else
 #define old_vsyscall_fixup(tk)
@@ -1347,6 +1422,7 @@ static void update_wall_time(void)
 	struct timekeeper *tk = &shadow_timekeeper;
 	cycle_t offset;
 	int shift = 0, maxshift;
+	unsigned int clock_set = 0;
 	unsigned long flags;
 
 	raw_spin_lock_irqsave(&timekeeper_lock, flags);
@@ -1381,7 +1457,8 @@ static void update_wall_time(void)
 	maxshift = (64 - (ilog2(ntp_tick_length())+1)) - 1;
 	shift = min(shift, maxshift);
 	while (offset >= tk->cycle_interval) {
-		offset = logarithmic_accumulation(tk, offset, shift);
+		offset = logarithmic_accumulation(tk, offset, shift,
+							&clock_set);
 		if (offset < tk->cycle_interval<<shift)
 			shift--;
 	}
@@ -1399,7 +1476,7 @@ static void update_wall_time(void)
 	 * Finally, make sure that after the rounding
 	 * xtime_nsec isn't larger than NSEC_PER_SEC
 	 */
-	accumulate_nsecs_to_secs(tk);
+	clock_set |= accumulate_nsecs_to_secs(tk);
 
 	write_seqcount_begin(&timekeeper_seq);
 	/* Update clock->cycle_last with the new value */
@@ -1419,6 +1496,10 @@ static void update_wall_time(void)
 	write_seqcount_end(&timekeeper_seq);
 out:
 	raw_spin_unlock_irqrestore(&timekeeper_lock, flags);
+	if (clock_set)
+		/* have to call outside the timekeeper_seq */
+		clock_was_set_delayed();
+
 }
 
 /**
@@ -1677,10 +1758,15 @@ int do_adjtimex(struct timex *txc)
 
 	if (tai != orig_tai) {
 		__timekeeping_set_tai_offset(tk, tai);
-		clock_was_set_delayed();
+		timekeeping_update(tk, false, true);
 	}
 	write_seqcount_end(&timekeeper_seq);
 	raw_spin_unlock_irqrestore(&timekeeper_lock, flags);
+
+	if (tai != orig_tai)
+		clock_was_set();
+
+	ntp_notify_cmos_timer();
 
 	return ret;
 }

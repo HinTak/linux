@@ -21,7 +21,12 @@
 #include <linux/kref.h>
 
 #define MAX_RETRIES	3
+#if defined CONFIG_BD_CACHE_ENABLED
+#define SR_TIMEOUT      (20 * HZ)
+#define SR_READ_TIMEOUT (15  * HZ)
+#else
 #define SR_TIMEOUT	(30 * HZ)
+#endif
 
 struct scsi_device;
 

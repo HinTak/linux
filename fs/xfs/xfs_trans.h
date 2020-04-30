@@ -37,7 +37,6 @@ typedef struct xfs_trans_header {
 } xfs_trans_header_t;
 
 #define	XFS_TRANS_HEADER_MAGIC	0x5452414e	/* TRAN */
-
 /*
  * Log item types.
  */

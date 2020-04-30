@@ -43,9 +43,21 @@ struct mmc_ioc_cmd {
 	/* DAT buffer */
 	__u64 data_ptr;
 };
+
+struct mmc_ioc_cmd_mult {
+	unsigned int  ioc_cnt;
+	/* Userspace pointer to the vector of mmc_ioc_cmd */
+	__u64         ioc_vec;
+};
+
 #define mmc_ioc_cmd_set_data(ic, ptr) ic.data_ptr = (__u64)(unsigned long) ptr
 
-#define MMC_IOC_CMD _IOWR(MMC_BLOCK_MAJOR, 0, struct mmc_ioc_cmd)
+#define MMC_IOC_CMD      _IOWR(MMC_BLOCK_MAJOR, 0, struct mmc_ioc_cmd)
+#define MMC_IOC_CMD_MULT _IOWR(MMC_BLOCK_MAJOR, 1, struct mmc_ioc_cmd_mult)
+
+#define MMC_IOC_CMD_BOOT_PERM_WP      _IOWR(MMC_BLOCK_MAJOR, 10, struct mmc_ioc_cmd)
+
+
 
 /*
  * Since this ioctl is only meant to enhance (and not replace) normal access

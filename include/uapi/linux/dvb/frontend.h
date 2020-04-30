@@ -375,7 +375,7 @@ struct dvb_frontend_event {
 #define DTV_STAT_ERROR_BLOCK_COUNT	68
 #define DTV_STAT_TOTAL_BLOCK_COUNT	69
 
-#define DTV_MAX_COMMAND		DTV_STAT_TOTAL_BLOCK_COUNT
+#define DTV_MAX_COMMAND	95//DTV_STAT_SSI_MARGIN//DTV_STAT_SSI_MARGIN
 
 typedef enum fe_pilot {
 	PILOT_ON,
@@ -410,6 +410,7 @@ typedef enum fe_delivery_system {
 	SYS_DVBT2,
 	SYS_TURBO,
 	SYS_DVBC_ANNEX_C,
+	SYS_OFDM_T2,
 } fe_delivery_system_t;
 
 /* backward compatibility */

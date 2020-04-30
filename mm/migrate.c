@@ -103,7 +103,7 @@ void putback_movable_pages(struct list_head *l)
 		list_del(&page->lru);
 		dec_zone_page_state(page, NR_ISOLATED_ANON +
 				page_is_file_cache(page));
-		if (unlikely(balloon_page_movable(page)))
+		if (unlikely(isolated_balloon_page(page)))
 			balloon_page_putback(page);
 		else
 			putback_lru_page(page);
@@ -1010,6 +1010,12 @@ int migrate_pages(struct list_head *from, new_page_t get_new_page,
 	int retry = 1;
 	int nr_failed = 0;
 	int nr_succeeded = 0;
+#ifdef CONFIG_HDMA_DEVICE
+	int is_hdma;
+	int nr_hdma_failed = 0;
+	int nr_hdma_succeeded = 0;
+	extern int hdma_is_page_reserved(struct page *);
+#endif
 	int pass = 0;
 	struct page *page;
 	struct page *page2;
@@ -1025,6 +1031,9 @@ int migrate_pages(struct list_head *from, new_page_t get_new_page,
 		list_for_each_entry_safe(page, page2, from, lru) {
 			cond_resched();
 
+#ifdef CONFIG_HDMA_DEVICE
+			is_hdma = hdma_is_page_reserved(page);
+#endif
 			rc = unmap_and_move(get_new_page, private,
 						page, pass > 2, mode);
 
@@ -1036,10 +1045,16 @@ int migrate_pages(struct list_head *from, new_page_t get_new_page,
 				break;
 			case MIGRATEPAGE_SUCCESS:
 				nr_succeeded++;
+#ifdef CONFIG_HDMA_DEVICE
+				nr_hdma_succeeded += is_hdma;
+#endif
 				break;
 			default:
 				/* Permanent failure */
 				nr_failed++;
+#ifdef CONFIG_HDMA_DEVICE
+				nr_hdma_failed += is_hdma;
+#endif
 				break;
 			}
 		}
@@ -1050,6 +1065,12 @@ out:
 		count_vm_events(PGMIGRATE_SUCCESS, nr_succeeded);
 	if (nr_failed)
 		count_vm_events(PGMIGRATE_FAIL, nr_failed);
+#ifdef CONFIG_HDMA_DEVICE
+	if (nr_hdma_succeeded)
+		count_vm_events(PGMIGRATE_HDMA_SUCCESS, nr_hdma_succeeded);
+	if (nr_hdma_failed)
+		count_vm_events(PGMIGRATE_HDMA_FAIL, nr_hdma_failed);
+#endif
 	trace_mm_migrate_pages(nr_succeeded, nr_failed, mode, reason);
 
 	if (!swapwrite)
@@ -1710,12 +1731,13 @@ int migrate_misplaced_transhuge_page(struct mm_struct *mm,
 		unlock_page(new_page);
 		put_page(new_page);		/* Free it */
 
-		unlock_page(page);
+		/* Retake the callers reference and putback on LRU */
+		get_page(page);
 		putback_lru_page(page);
+		mod_zone_page_state(page_zone(page),
+			 NR_ISOLATED_ANON + page_lru, -HPAGE_PMD_NR);
 
-		count_vm_events(PGMIGRATE_FAIL, HPAGE_PMD_NR);
-		isolated = 0;
-		goto out;
+		goto out_unlock;
 	}
 
 	/*
@@ -1732,9 +1754,9 @@ int migrate_misplaced_transhuge_page(struct mm_struct *mm,
 	entry = maybe_pmd_mkwrite(pmd_mkdirty(entry), vma);
 	entry = pmd_mkhuge(entry);
 
-	page_add_new_anon_rmap(new_page, vma, haddr);
-
+	pmdp_clear_flush(vma, haddr, pmd);
 	set_pmd_at(mm, haddr, pmd, entry);
+	page_add_new_anon_rmap(new_page, vma, haddr);
 	update_mmu_cache_pmd(vma, address, &entry);
 	page_remove_rmap(page);
 	/*
@@ -1753,7 +1775,6 @@ int migrate_misplaced_transhuge_page(struct mm_struct *mm,
 	count_vm_events(PGMIGRATE_SUCCESS, HPAGE_PMD_NR);
 	count_vm_numa_events(NUMA_PAGE_MIGRATE, HPAGE_PMD_NR);
 
-out:
 	mod_zone_page_state(page_zone(page),
 			NR_ISOLATED_ANON + page_lru,
 			-HPAGE_PMD_NR);
@@ -1762,6 +1783,11 @@ out:
 out_fail:
 	count_vm_events(PGMIGRATE_FAIL, HPAGE_PMD_NR);
 out_dropref:
+	entry = pmd_mknonnuma(entry);
+	set_pmd_at(mm, haddr, pmd, entry);
+	update_mmu_cache_pmd(vma, address, &entry);
+
+out_unlock:
 	unlock_page(page);
 	put_page(page);
 	return 0;

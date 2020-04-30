@@ -179,6 +179,7 @@ struct nfs_server {
 	u32			mountd_version;
 	unsigned short		mountd_port;
 	unsigned short		mountd_protocol;
+	unsigned long		native_fs_magic;
 };
 
 /* Server capabilities */

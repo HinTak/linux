@@ -26,14 +26,25 @@
 #include <linux/syscore_ops.h>
 #include <linux/ftrace.h>
 #include <trace/events/power.h>
+#include <trace/early.h>
+
+#ifdef CONFIG_IOTMODE
+#include <linux/delay.h>
+#endif
+#ifdef CONFIG_SDP_HW_CLOCK
+#include <mach/sdp_hwclock.h>
+#elif defined CONFIG_NVT_HW_CLOCK
+#include <mach/nvt_hwclock.h>
+#endif
 
 #include "power.h"
 
-const char *const pm_states[PM_SUSPEND_MAX] = {
-	[PM_SUSPEND_FREEZE]	= "freeze",
-	[PM_SUSPEND_STANDBY]	= "standby",
-	[PM_SUSPEND_MEM]	= "mem",
+struct pm_sleep_state pm_states[PM_SUSPEND_MAX] = {
+	[PM_SUSPEND_FREEZE] = { .label = "freeze", .state = PM_SUSPEND_FREEZE },
+	[PM_SUSPEND_STANDBY] = { .label = "standby", },
+	[PM_SUSPEND_MEM] = { .label = "mem", },
 };
+
 
 static const struct platform_suspend_ops *suspend_ops;
 
@@ -62,41 +73,33 @@ void freeze_wake(void)
 }
 EXPORT_SYMBOL_GPL(freeze_wake);
 
+static bool valid_state(suspend_state_t state)
+{
+	/*
+	 * PM_SUSPEND_STANDBY and PM_SUSPEND_MEM states need low level
+	 * support and need to be valid to the low level
+	 * implementation, no valid callback implies that none are valid.
+	 */
+	return suspend_ops && suspend_ops->valid && suspend_ops->valid(state);
+}
+
 /**
  * suspend_set_ops - Set the global suspend method table.
  * @ops: Suspend operations to use.
  */
 void suspend_set_ops(const struct platform_suspend_ops *ops)
 {
+	suspend_state_t i;
+
 	lock_system_sleep();
+
 	suspend_ops = ops;
+	for (i = PM_SUSPEND_STANDBY; i <= PM_SUSPEND_MEM; i++)
+		pm_states[i].state = valid_state(i) ? i : 0;
+
 	unlock_system_sleep();
 }
 EXPORT_SYMBOL_GPL(suspend_set_ops);
-
-bool valid_state(suspend_state_t state)
-{
-	if (state == PM_SUSPEND_FREEZE) {
-#ifdef CONFIG_PM_DEBUG
-		if (pm_test_level != TEST_NONE &&
-		    pm_test_level != TEST_FREEZER &&
-		    pm_test_level != TEST_DEVICES &&
-		    pm_test_level != TEST_PLATFORM) {
-			printk(KERN_WARNING "Unsupported pm_test mode for "
-					"freeze state, please choose "
-					"none/freezer/devices/platform.\n");
-			return false;
-		}
-#endif
-			return true;
-	}
-	/*
-	 * PM_SUSPEND_STANDBY and PM_SUSPEND_MEMORY states need lowlevel
-	 * support and need to be valid to the lowlevel
-	 * implementation, no valid callback implies that none are valid.
-	 */
-	return suspend_ops && suspend_ops->valid && suspend_ops->valid(state);
-}
 
 /**
  * suspend_valid_only_mem - Generic memory-only valid callback.
@@ -166,6 +169,179 @@ void __attribute__ ((weak)) arch_suspend_enable_irqs(void)
 {
 	local_irq_enable();
 }
+#ifdef CONFIG_PM_CRC_CHECK
+extern void save_suspend_crc(void);
+extern void compare_resume_crc(void);
+#endif
+
+unsigned int *micom_gpio;
+
+#ifdef CONFIG_IOTMODE
+#include <linux/cpufreq.h>
+#include <linux/platform_data/sdp-cpufreq.h>
+extern void iot_thaw_thread(suspend_state_t state);
+extern void iot_run_resume_callbacks(void);
+extern void set_iot_counter(int counter);
+extern void iot_reboot(int pid, char *process_name);
+extern void machine_restart(char *cmd);
+extern int read_iot_counter(void);
+extern int sdp_iotmode_powerdown(bool en);
+extern int iotmode;
+extern int wakeup_iot;
+extern bool iot_onoff;
+
+#define IOT_TIMESLICE		50 /* 50ms */
+#define MAX_IOT_TIMEOUT		10000
+#define MIN_IOT_TIMEOUT		10
+#define IOT_WDT_TIMEOUT		(20000/IOT_TIMESLICE)	/* iot hub app watchdog timeout = 20s */
+
+#define DEFAULT_MODE	-1
+
+#define OFF_MODE 	0
+#define TV_MODE 	1
+#define IOT_MODE 	2
+#define COLD_REBOOT 	3
+
+#define BOOT_TYPE_WOWLAN_PULSE7 	48 
+#define BOOT_TYPE_IOT_KEEP_ALIVE       53
+#define BOOT_TYPE_ZIGBEE               54
+#define POWER_WAKEUP_REASON_E_PHY_ANYPACKET  55  
+#define BOOT_TYPE_PANEL_POWER_KEY      32
+
+#if defined(CONFIG_ARCH_SDP1404)
+extern int sdp_cpufreq_freq_fix(unsigned int freq, bool on);
+#define GPIO_US_MCOM		0x1AB00000
+#define GPIO_US_MCOM_SIZE	0x2000
+#define ALIVE_MICOM		0x18
+#define SUS_MICOM		0x25
+int iot_micom_gpio(void)
+{
+	int ret=0;
+	unsigned int * p_gpio0, * p_gpio1 , * p_gpio2;
+	unsigned int save_reg0 , save_reg1 , save_reg2;
+	if(!iot_onoff)
+		return TV_MODE;
+
+	/* US P 0.1 */
+        p_gpio0 = micom_gpio + 0x465;
+	save_reg0 = *(volatile unsigned int*)p_gpio0; 
+	*(volatile unsigned int*)p_gpio0 |= (0x2 << 4);
+	/* US P 2.3 */
+        p_gpio1 = micom_gpio + 0x486;
+	save_reg1 = *(volatile unsigned int*)p_gpio1; 
+	*(volatile unsigned int*)p_gpio1 |= (0x2 << 12);
+	/* US P 2.4 */
+        p_gpio2 = micom_gpio + 0x486;
+	save_reg2 = *(volatile unsigned int*)p_gpio2; 
+	*(volatile unsigned int*)p_gpio2 |= (0x2 << 16);
+	
+	p_gpio0 = micom_gpio + 0x467;
+	ret |= ((*(volatile unsigned int*)p_gpio0>>1) & 1) << 2;
+		
+	p_gpio1 = micom_gpio + 0x488;
+	ret |= ((*(volatile unsigned int*)p_gpio1>>3) & 1) << 1;
+
+	p_gpio2 = micom_gpio + 0x488;
+	ret |= ((*(volatile unsigned int*)p_gpio2>>4) & 1);
+
+	*(volatile unsigned int*)p_gpio0 = save_reg0; 
+	*(volatile unsigned int*)p_gpio1 = save_reg1; 
+	*(volatile unsigned int*)p_gpio2 = save_reg2; 
+
+	return ret;
+}
+
+#elif defined(CONFIG_ARCH_SDP1406)
+extern int sdp_cpufreq_freq_fix(unsigned int freq, bool on);
+#define GPIO_US_MCOM		0x800700
+#define GPIO_US_MCOM_SIZE	0x100
+int iot_micom_gpio(void)
+{
+	int ret=0;
+	unsigned int * p_gpio;
+	if(!iot_onoff)
+		return TV_MODE;
+
+	/* MICOM register */
+	p_gpio = micom_gpio;
+	ret = *(volatile unsigned int*)p_gpio;
+
+	if( ret > TV_MODE) return IOT_MODE;
+	else return ret;
+}
+
+#elif defined(CONFIG_ARCH_SDP1501)
+extern int sdp_cpufreq_freq_fix(unsigned int freq, bool on);
+#define GPIO_US_MCOM            	0x7C1080
+#define GPIO_US_MCOM_SIZE       	0x100
+int iot_micom_gpio(void)
+{
+        int ret=0;
+        unsigned int * p_gpio;
+
+        if(!iot_onoff)
+                return TV_MODE;
+
+        /* MICOM register */
+        p_gpio = micom_gpio;
+        ret = *(volatile unsigned int*)(p_gpio+2);
+
+	switch(ret)
+	{
+		case BOOT_TYPE_WOWLAN_PULSE7:
+		case BOOT_TYPE_IOT_KEEP_ALIVE:
+		case BOOT_TYPE_ZIGBEE:
+		case POWER_WAKEUP_REASON_E_PHY_ANYPACKET:
+			return IOT_MODE;
+                case BOOT_TYPE_PANEL_POWER_KEY:
+                        return COLD_REBOOT;
+		default:
+			printk(KERN_ERR"IOT] Micom Boot reason : %d\n",ret);
+			return TV_MODE;
+	}
+}
+
+#else
+int iot_micom_gpio(void)
+{
+	return TV_MODE;
+}
+#endif
+#endif //end of CONFIG_IOTMODE
+
+extern void machine_restart_standby(char *cmd);
+extern int get_onboot_version(void);
+
+#if defined(CONFIG_ARCH_SDP1404) || defined(CONFIG_ARCH_SDP1406)
+int Is_always_Ready(void)
+{
+	int ret = false;
+	int target = get_onboot_version(); 
+	printk(KERN_ERR"target year : %d\n",target);
+	if(2016 == target)
+		ret = true;
+	return ret;
+}
+#elif defined(CONFIG_ARCH_SDP1501)
+int Is_always_Ready(void)
+{
+	int ret = false;
+	unsigned int * p_gpio;
+
+	p_gpio = micom_gpio;
+	ret = *(volatile unsigned int*)(p_gpio+5);
+
+	printk(KERN_ERR"IOT] Micom Master Standby On Support : %d\n",ret);
+
+	return ret;
+}
+#else
+int Is_always_Ready(void)
+{
+	int ret = false;
+	return ret;
+}
+#endif
 
 /**
  * suspend_enter - Make the system enter the given sleep state.
@@ -177,7 +353,6 @@ void __attribute__ ((weak)) arch_suspend_enable_irqs(void)
 static int suspend_enter(suspend_state_t state, bool *wakeup)
 {
 	int error;
-
 	if (need_suspend_ops(state) && suspend_ops->prepare) {
 		error = suspend_ops->prepare();
 		if (error)
@@ -221,7 +396,13 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 	if (!error) {
 		*wakeup = pm_wakeup_pending();
 		if (!(suspend_test(TEST_CORE) || *wakeup)) {
+#ifdef CONFIG_PM_CRC_CHECK
+			save_suspend_crc();
+#endif
 			error = suspend_ops->enter(state);
+#ifdef CONFIG_PM_CRC_CHECK
+			compare_resume_crc();
+#endif
 			events_check_enabled = false;
 		}
 		syscore_resume();
@@ -230,9 +411,26 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 	arch_suspend_enable_irqs();
 	BUG_ON(irqs_disabled());
 
- Enable_cpus:
+Enable_cpus:
 	enable_nonboot_cpus();
+#ifdef CONFIG_EARLY_TRACING
+	{
+#if defined(CONFIG_SDP_HW_CLOCK) || defined(CONFIG_NVT_HW_CLOCK)
+		char msg[64];
+		uint64_t ns = hwclock_raw_ns((uint32_t *)hwclock_get_va());
+		uint32_t rem = do_div(ns, 1000000);
 
+		snprintf(msg, sizeof(msg), "on resume: bare timestamp %llu.%06u",
+			 ns, rem);
+		trace_early_message(msg);
+#else
+		trace_early_message("on resume");
+#endif
+	}
+#endif
+#ifdef CONFIG_IOTMODE   
+	iotmode = iot_micom_gpio();
+#endif
  Platform_wake:
 	if (need_suspend_ops(state) && suspend_ops->wake)
 		suspend_ops->wake();
@@ -264,29 +462,45 @@ int suspend_devices_and_enter(suspend_state_t state)
 		if (error)
 			goto Close;
 	}
+#ifdef CONFIG_SMART_DEADLOCK
+	hook_smart_deadlock_exception_case(SMART_DEADLOCK_SUSPEND);
+#endif
 	suspend_console();
 	ftrace_stop();
 	suspend_test_start();
+
 	error = dpm_suspend_start(PMSG_SUSPEND);
 	if (error) {
 		printk(KERN_ERR "PM: Some devices failed to suspend\n");
+		printk(KERN_ERR "System will be down\n");
+		if(Is_always_Ready())
+			machine_restart_standby("Suspend fail - reboot\n");
+		else
+			pm_power_off();
 		goto Recover_platform;
 	}
 	suspend_test_finish("suspend devices");
 	if (suspend_test(TEST_DEVICES))
 		goto Recover_platform;
 
+	kasan_suspend();
+
 	do {
 		error = suspend_enter(state, &wakeup);
 	} while (!error && !wakeup && need_suspend_ops(state)
 		&& suspend_ops->suspend_again && suspend_ops->suspend_again());
 
+	kasan_resume();
  Resume_devices:
 	suspend_test_start();
 	dpm_resume_end(PMSG_RESUME);
-	suspend_test_finish("resume devices");
+
+    suspend_test_finish("resume devices");
 	ftrace_start();
 	resume_console();
+#ifdef CONFIG_SMART_DEADLOCK
+	hook_smart_deadlock_exception_case(SMART_DEADLOCK_RESUME);
+#endif
  Close:
 	if (need_suspend_ops(state) && suspend_ops->end)
 		suspend_ops->end();
@@ -305,12 +519,30 @@ int suspend_devices_and_enter(suspend_state_t state)
  * Call platform code to clean up, restart processes, and free the console that
  * we've allocated. This routine is not called for hibernation.
  */
-static void suspend_finish(void)
+#ifdef CONFIG_IOTMODE
+static void suspend_finish_prepare(void)
 {
-	suspend_thaw_processes();
+	suspend_thaw_processes_prepare();
 	pm_notifier_call_chain(PM_POST_SUSPEND);
 	pm_restore_console();
 }
+
+static void suspend_finish(void)
+{
+	dpm_resume_end_iot(PMSG_IOTRESUME);
+	suspend_thaw_processes();
+        pm_notifier_call_chain(PM_POST_SUSPEND);
+        pm_restore_console();
+}
+
+#else
+static void suspend_finish(void)
+{
+        suspend_thaw_processes();
+        pm_notifier_call_chain(PM_POST_SUSPEND);
+        pm_restore_console();
+}
+#endif
 
 /**
  * enter_state - Do common work needed to enter system sleep state.
@@ -324,9 +556,23 @@ static int enter_state(suspend_state_t state)
 {
 	int error;
 
-	if (!valid_state(state))
-		return -ENODEV;
-
+#ifdef CONFIG_IOTMODE
+	int iot_count = 0;
+	int wdt_count = 0;
+	int cur_wdt_counter = 0;
+	int last_wdt_counter = 0;
+#endif
+	if (state == PM_SUSPEND_FREEZE) {
+#ifdef CONFIG_PM_DEBUG
+		if (pm_test_level != TEST_NONE && pm_test_level <= TEST_CPUS) {
+			pr_warning("PM: Unsupported test mode for freeze state,"
+				   "please choose none/freezer/devices/platform.\n");
+			return -EAGAIN;
+		}
+#endif
+	} else if (!valid_state(state)) {
+		return -EINVAL;
+	}
 	if (!mutex_trylock(&pm_mutex))
 		return -EBUSY;
 
@@ -337,7 +583,7 @@ static int enter_state(suspend_state_t state)
 	sys_sync();
 	printk("done.\n");
 
-	pr_debug("PM: Preparing system for %s sleep\n", pm_states[state]);
+	pr_debug("PM: Preparing system for %s sleep\n", pm_states[state].label);
 	error = suspend_prepare(state);
 	if (error)
 		goto Unlock;
@@ -345,15 +591,98 @@ static int enter_state(suspend_state_t state)
 	if (suspend_test(TEST_FREEZER))
 		goto Finish;
 
-	pr_debug("PM: Entering %s sleep\n", pm_states[state]);
+	pr_debug("PM: Entering %s sleep\n", pm_states[state].label);
+
+
+#ifdef CONFIG_IOTMODE
+	if(iot_onoff){
+		trace_early_message("IoT mode Start");
+		iotmode = IOT_MODE;
+		wakeup_iot = DEFAULT_MODE;
+		suspend_finish_prepare();
+		pr_debug("IOT] Micom mode MODE : %d USER MODE : %d\n",
+					iotmode, wakeup_iot);
+		
+		/* Power gating for unused device */
+		dpm_prepare_iot(PMSG_IOTPOWEROFF);
+		dpm_poweroff_iot(PMSG_IOTPOWEROFF);
+	
+		error = disable_nonboot_cpus();
+		if (error)
+			pr_warning("IOT] disable_nonboot_cpus fail\n");
+		sdp_iotmode_powerdown(true);
+		
+		/* Run IOT thread */
+		iot_thaw_thread(state);
+		set_iot_counter(wdt_count);
+	
+	        while(true){
+	
+			iot_count++;
+			/* Wait for Hun apps */
+	                msleep(IOT_TIMESLICE);
+			cur_wdt_counter = read_iot_counter();
+	
+			/* IOT watchdog */
+			if(last_wdt_counter < cur_wdt_counter){
+				last_wdt_counter = cur_wdt_counter;
+				wdt_count = 0;
+			}else{
+				if(wdt_count > IOT_WDT_TIMEOUT){
+					iot_reboot(0,"hub");
+				}
+				wdt_count++;
+			}
+	
+	               	if(wakeup_iot != DEFAULT_MODE){
+	               		pr_debug("IOT] wakeup_iot hub app %d    MODE : %d USER MODE : %d\n",
+				iot_count , iotmode, wakeup_iot);
+	               	        iotmode = wakeup_iot;
+				break;
+	               	}
+
+			iotmode = iot_micom_gpio();
+
+                        if(iotmode == COLD_REBOOT)
+                        {
+                                if(arm_pm_restart)
+                                        arm_pm_restart('h',(char *)BOOT_TYPE_PANEL_POWER_KEY);          
+                                while(1); // no further life
+                        }
+
+			if(iotmode == TV_MODE){
+				trace_early_message("Wakeup TV mode");
+				break;
+			}
+			
+		        printk(KERN_ERR"IOT] wait hub app %d    MODE : %d USER MODE : %d\n",
+						iot_count , iotmode, wakeup_iot);
+		}
+		sdp_iotmode_powerdown(false);
+		enable_nonboot_cpus();
+
+		trace_early_message("IoT mode End");
+	}else{
+	        pm_restrict_gfp_mask();
+	        error = suspend_devices_and_enter(state);
+	        pm_restore_gfp_mask();
+	}
+	
+Finish:
+	suspend_finish();
+	trace_early_message("Tv mode Start");
+	pr_debug("PM: Finishing wakeup.\n");
+#else
 	pm_restrict_gfp_mask();
 	error = suspend_devices_and_enter(state);
 	pm_restore_gfp_mask();
 
- Finish:
-	pr_debug("PM: Finishing wakeup.\n");
+Finish:
 	suspend_finish();
- Unlock:
+	pr_debug("PM: Finishing wakeup.\n");
+#endif
+
+Unlock:
 	mutex_unlock(&pm_mutex);
 	return error;
 }
@@ -371,13 +700,32 @@ int pm_suspend(suspend_state_t state)
 
 	if (state <= PM_SUSPEND_ON || state >= PM_SUSPEND_MAX)
 		return -EINVAL;
-
+#ifdef CONFIG_SCHED_HMP
+	set_hmp_boost(1);
+#endif
+#ifdef CONFIG_IOTMODE
+	micom_gpio = ioremap(GPIO_US_MCOM,GPIO_US_MCOM_SIZE);
+#endif
 	error = enter_state(state);
 	if (error) {
+		if(Is_always_Ready())
+			machine_restart_standby("Suspend fail - reboot\n");
+		else
+			pm_power_off();
 		suspend_stats.fail++;
 		dpm_save_failed_errno(error);
+#ifdef CONFIG_SCHED_HMP
+		set_hmp_boost(0);
+#endif
 	} else {
 		suspend_stats.success++;
+#ifdef CONFIG_SCHED_HMP
+		set_hmp_boost(0);
+		set_hmp_boostpulse(180000000);
+#endif
+#ifdef CONFIG_IOTMODE
+	iounmap(micom_gpio);
+#endif
 	}
 	return error;
 }

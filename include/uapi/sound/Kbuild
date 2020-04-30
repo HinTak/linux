@@ -9,3 +9,9 @@ header-y += hdsp.h
 header-y += hdspm.h
 header-y += sb16_csp.h
 header-y += sfnt_info.h
+header-y += snd_amp.h
+header-y += sdp_srp_ioctl.h
+header-$(CONFIG_ARCH_SDP1404) += av_compress_param.h
+header-$(CONFIG_ARCH_SDP1412) += av_compress_param.h
+
+

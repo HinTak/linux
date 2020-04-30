@@ -1,0 +1,29 @@
+
+VDBENCH_DIR=../
+
+PPWD=`pwd`
+echo $PPWD
+
+if [ $1 ]
+then
+VDBENCH_DIR=$1
+fi
+
+if cd $VDBENCH_DIR;
+then
+	cp *.csv $PPWD/
+	cd $PPWD
+	if ./src/xlmake;
+	then
+		echo "excelmake done"
+	else
+		echo -e "\033[31mError ..recompile \033[0m"
+	fi
+	mv config_output.xls ../
+	rm -f config_output
+else
+	echo -e "\033[31m error ...check path\033[0m"
+fi
+
+rm -f *.csv
+

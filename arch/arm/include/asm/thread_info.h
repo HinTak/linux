@@ -14,9 +14,15 @@
 
 #include <linux/compiler.h>
 #include <asm/fpstate.h>
+#include <asm/page.h>
 
+#ifdef CONFIG_KASAN_STACK
+#define THREAD_SIZE_ORDER	4
+#else
 #define THREAD_SIZE_ORDER	1
-#define THREAD_SIZE		8192
+#endif
+
+#define THREAD_SIZE		(PAGE_SIZE << THREAD_SIZE_ORDER)
 #define THREAD_START_SP		(THREAD_SIZE - 8)
 
 #ifndef __ASSEMBLY__
@@ -153,10 +159,14 @@ extern int vfp_restore_user_hwstate(struct user_vfp __user *,
 #define TIF_SYSCALL_TRACEPOINT	10
 #define TIF_SECCOMP		11	/* seccomp syscall filtering active */
 #define TIF_NOHZ		12	/* in adaptive nohz mode */
+
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+#define TIF_SMART_DEADLOCK	13
+#endif
+
 #define TIF_USING_IWMMXT	17
 #define TIF_MEMDIE		18	/* is terminating due to OOM killer */
 #define TIF_RESTORE_SIGMASK	20
-#define TIF_SWITCH_MM		22	/* deferred switch_mm */
 
 #define _TIF_SIGPENDING		(1 << TIF_SIGPENDING)
 #define _TIF_NEED_RESCHED	(1 << TIF_NEED_RESCHED)
@@ -166,10 +176,18 @@ extern int vfp_restore_user_hwstate(struct user_vfp __user *,
 #define _TIF_SYSCALL_TRACEPOINT	(1 << TIF_SYSCALL_TRACEPOINT)
 #define _TIF_SECCOMP		(1 << TIF_SECCOMP)
 #define _TIF_USING_IWMMXT	(1 << TIF_USING_IWMMXT)
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+#define _TIF_SMART_DEADLOCK	(1 << TIF_SMART_DEADLOCK)
+#endif
 
 /* Checks for any syscall work in entry-common.S */
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
 #define _TIF_SYSCALL_WORK (_TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT | \
-			   _TIF_SYSCALL_TRACEPOINT | _TIF_SECCOMP)
+			   _TIF_SYSCALL_TRACEPOINT | _TIF_SECCOMP | _TIF_SMART_DEADLOCK)
+#else
+#define _TIF_SYSCALL_WORK (_TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT | \
+               _TIF_SYSCALL_TRACEPOINT | _TIF_SECCOMP)
+#endif
 
 /*
  * Change these and you break ASM code in entry-common.S

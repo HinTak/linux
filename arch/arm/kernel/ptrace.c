@@ -937,6 +937,7 @@ static int tracehook_report_syscall(struct pt_regs *regs,
 	return current_thread_info()->syscall;
 }
 
+
 asmlinkage int syscall_trace_enter(struct pt_regs *regs, int scno)
 {
 	current_thread_info()->syscall = scno;
@@ -944,6 +945,10 @@ asmlinkage int syscall_trace_enter(struct pt_regs *regs, int scno)
 	/* Do the secure computing check first; failures should be fast. */
 	if (secure_computing(scno) == -1)
 		return -1;
+
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	current->sm_tsk.w_syscall_time = jiffies;
+#endif
 
 	if (test_thread_flag(TIF_SYSCALL_TRACE))
 		scno = tracehook_report_syscall(regs, PTRACE_SYSCALL_ENTER);
@@ -964,6 +969,10 @@ asmlinkage void syscall_trace_exit(struct pt_regs *regs)
 	 * come in and change the current registers.
 	 */
 	audit_syscall_exit(regs);
+
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	current->sm_tsk.w_syscall_time = 0;
+#endif
 
 	/*
 	 * Note that we haven't updated the ->syscall field for the

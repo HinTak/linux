@@ -123,14 +123,16 @@ typedef struct dmx_caps {
 } dmx_caps_t;
 
 typedef enum {
-	DMX_SOURCE_FRONT0 = 0,
-	DMX_SOURCE_FRONT1,
-	DMX_SOURCE_FRONT2,
-	DMX_SOURCE_FRONT3,
+	DMX_SOURCE_FRONT0,	/*Default Tuner*/
+	DMX_SOURCE_FRONT1,	/*First Parallel*/
+	DMX_SOURCE_FRONT2,	/*Not used in samsung soc*/
+	DMX_SOURCE_FRONT3,	/*Second Parallel*/
+	DMX_SOURCE_FRONT4,	/*First Serial*/
+	DMX_SOURCE_FRONT5,	/*Second Serial*/
 	DMX_SOURCE_DVR0   = 16,
 	DMX_SOURCE_DVR1,
 	DMX_SOURCE_DVR2,
-	DMX_SOURCE_DVR3
+	DMX_SOURCE_DVR3,
 } dmx_source_t;
 
 struct dmx_stc {
@@ -151,5 +153,6 @@ struct dmx_stc {
 #define DMX_GET_STC              _IOWR('o', 50, struct dmx_stc)
 #define DMX_ADD_PID              _IOW('o', 51, __u16)
 #define DMX_REMOVE_PID           _IOW('o', 52, __u16)
+
 
 #endif /* _UAPI_DVBDMX_H_ */

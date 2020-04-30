@@ -62,6 +62,11 @@
 #include <asm/io.h>
 #include <asm/unistd.h>
 
+#define MAX_USER_TRACE_SIZE 512 
+
+#define CREATE_TRACE_POINTS
+#include <trace/events/user.h>
+
 #ifndef SET_UNALIGN_CTL
 # define SET_UNALIGN_CTL(a,b)	(-EINVAL)
 #endif
@@ -451,7 +456,10 @@ void kernel_power_off(void)
 EXPORT_SYMBOL_GPL(kernel_power_off);
 
 static DEFINE_MUTEX(reboot_mutex);
-
+#ifdef CONFIG_NOT_ALLOW_REBOOT_DURING_COREDUMP
+extern atomic_t coredump_in_progress;
+extern atomic_t coredump_reboot_status;
+#endif
 /*
  * Reboot system call: for obvious reasons only root may call it,
  * and even root needs to set up some magic numbers in the registers
@@ -495,6 +503,14 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 		cmd = LINUX_REBOOT_CMD_HALT;
 
 	mutex_lock(&reboot_mutex);
+#ifdef CONFIG_NOT_ALLOW_REBOOT_DURING_COREDUMP
+	if (atomic_read(&coredump_reboot_status) && atomic_read(&coredump_in_progress))
+	{
+		printk(KERN_ALERT"#### COREDUMP IN PROGRESS REBOOT FAILS ####\n");
+		mutex_unlock(&reboot_mutex);
+		return -EBUSY;
+	}
+#endif
 	switch (cmd) {
 	case LINUX_REBOOT_CMD_RESTART:
 		kernel_restart(NULL);
@@ -2099,6 +2115,14 @@ static int prctl_get_tid_address(struct task_struct *me, int __user **tid_addr)
 }
 #endif
 
+#ifndef CONFIG_VD_RELEASE
+#define MAGIC_PR_GET_DUMP_TRACE 0xf4f4f4f4
+static DEFINE_MUTEX(dump_trace_lock);
+#ifdef CONFIG_KDEBUGD_TRACE
+extern void show_user_backtrace_pid(pid_t pid, int use_ptrace, int load_elf);
+#endif
+#endif
+
 SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 		unsigned long, arg4, unsigned long, arg5)
 {
@@ -2195,6 +2219,21 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 	case PR_TASK_PERF_EVENTS_ENABLE:
 		error = perf_event_task_enable();
 		break;
+	case PR_TASK_PERF_USER_TRACE:
+	{
+		void __user *uevent_ptr = (void *)arg2;
+		char kstring[MAX_USER_TRACE_SIZE+1];
+		unsigned long uevent_len = arg3;
+
+		if (uevent_len > MAX_USER_TRACE_SIZE)
+			return -EINVAL;
+		if (copy_from_user(kstring, uevent_ptr, uevent_len))
+			return -EFAULT;
+		kstring[uevent_len] = 0;
+
+		trace_user(kstring);
+		return 0;
+	}
 	case PR_GET_TIMERSLACK:
 		error = current->timer_slack_ns;
 		break;
@@ -2262,6 +2301,27 @@ SYSCALL_DEFINE5(prctl, int, option, unsigned long, arg2, unsigned long, arg3,
 		if (arg2 || arg3 || arg4 || arg5)
 			return -EINVAL;
 		return current->no_new_privs ? 1 : 0;
+#ifndef CONFIG_VD_RELEASE
+	case PR_GET_DUMP_TRACE:
+		if (arg2 != MAGIC_PR_GET_DUMP_TRACE)
+			return -EINVAL;
+
+		if (!mutex_trylock(&dump_trace_lock)) {
+			pr_alert("** (pid:1) process already in backtrace **\n");
+			return -EAGAIN;
+		}
+		pr_alert("--------------------------------------------------------------\n");
+		pr_alert("** dump kernel stack of (pid:1) **\n");
+		show_stack(find_task_by_vpid(1), NULL);
+#ifdef CONFIG_KDEBUGD_TRACE
+		pr_alert("--------------------------------------------------------------\n");
+		pr_alert("** dump (pid:1) user backtrace **\n");
+		show_user_backtrace_pid(1, 0, 1);
+		pr_alert("--------------------------------------------------------------\n");
+#endif
+		mutex_unlock(&dump_trace_lock);
+		break;
+#endif
 	default:
 		error = -EINVAL;
 		break;

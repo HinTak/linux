@@ -66,6 +66,9 @@ struct spi_gpio_platform_data {
 	unsigned long	miso;
 
 	u16		num_chipselect;
+
+	/* Index of gpios to work with */
+	int             map_idx;
 };
 
 #endif /* __LINUX_SPI_GPIO_H */

@@ -34,6 +34,7 @@ ENTRY(cpu_v7_proc_fin)
 	bic	r0, r0, #0x1000			@ ...i............
 	bic	r0, r0, #0x0006			@ .............ca.
 	mcr	p15, 0, r0, c1, c0, 0		@ disable caches
+	isb
 	mov	pc, lr
 ENDPROC(cpu_v7_proc_fin)
 
@@ -56,6 +57,12 @@ ENTRY(cpu_v7_reset)
 	bic	r1, r1, #0x1			@ ...............m
  THUMB(	bic	r1, r1, #1 << 30 )		@ SCTLR.TE (Thumb exceptions)
 	mcr	p15, 0, r1, c1, c0, 0		@ disable MMU
+#ifdef CONFIG_ARM_ERRATA_830079
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
+	mcr	p15, 0, r1, c7, c5, 6		@ BPIALL
+#endif
 	isb
 	bx	r0
 ENDPROC(cpu_v7_reset)
@@ -75,13 +82,17 @@ ENTRY(cpu_v7_do_idle)
 ENDPROC(cpu_v7_do_idle)
 
 ENTRY(cpu_v7_dcache_clean_area)
-	ALT_SMP(mov	pc, lr)			@ MP extensions imply L1 PTW
-	ALT_UP(W(nop))
-	dcache_line_size r2, r3
-1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
+	ALT_SMP(W(nop))			@ MP extensions imply L1 PTW
+	ALT_UP_B(1f)
+	mov	pc, lr
+1:	dcache_line_size r2, r3
+2:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 	add	r0, r0, r2
 	subs	r1, r1, r2
-	bhi	1b
+	bhi	2b
 	dsb
 	mov	pc, lr
 ENDPROC(cpu_v7_dcache_clean_area)
@@ -91,47 +102,96 @@ ENDPROC(cpu_v7_dcache_clean_area)
 
 /* Suspend/resume support: derived from arch/arm/mach-s5pv210/sleep.S */
 .globl	cpu_v7_suspend_size
-.equ	cpu_v7_suspend_size, 4 * 8
+.equ	cpu_v7_suspend_size, 4 * 9
 #ifdef CONFIG_ARM_CPU_SUSPEND
 ENTRY(cpu_v7_do_suspend)
-	stmfd	sp!, {r4 - r10, lr}
+	stmfd	sp!, {r4 - r11, lr}
 	mrc	p15, 0, r4, c13, c0, 0	@ FCSE/PID
 	mrc	p15, 0, r5, c13, c0, 3	@ User r/o thread ID
 	stmia	r0!, {r4 - r5}
 	mrc	p15, 0, r6, c3, c0, 0	@ Domain ID
+#ifdef CONFIG_ARM_LPAE
+	mrrc	p15, 1, r5, r7, c2	@ TTB 1
+#else
 	mrc	p15, 0, r7, c2, c0, 1	@ TTB 1
+#endif
 	mrc	p15, 0, r11, c2, c0, 2	@ TTB control register
 	mrc	p15, 0, r8, c1, c0, 0	@ Control register
 	mrc	p15, 0, r9, c1, c0, 1	@ Auxiliary control register
 	mrc	p15, 0, r10, c1, c0, 2	@ Co-processor access control
-	stmia	r0, {r6 - r11}
-	ldmfd	sp!, {r4 - r10, pc}
+	stmia	r0, {r5 - r11}
+	ldmfd	sp!, {r4 - r11, pc}
 ENDPROC(cpu_v7_do_suspend)
 
 ENTRY(cpu_v7_do_resume)
 	mov	ip, #0
 	mcr	p15, 0, ip, c8, c7, 0	@ invalidate TLBs
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 	mcr	p15, 0, ip, c7, c5, 0	@ invalidate I cache
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 	mcr	p15, 0, ip, c13, c0, 1	@ set reserved context ID
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 	ldmia	r0!, {r4 - r5}
 	mcr	p15, 0, r4, c13, c0, 0	@ FCSE/PID
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 	mcr	p15, 0, r5, c13, c0, 3	@ User r/o thread ID
-	ldmia	r0, {r6 - r11}
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
+	ldmia	r0, {r5 - r11}
 	mcr	p15, 0, r6, c3, c0, 0	@ Domain ID
-#ifndef CONFIG_ARM_LPAE
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
+#ifdef CONFIG_ARM_LPAE
+	mcrr	p15, 0, r1, ip, c2	@ TTB 0
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
+	mcrr	p15, 1, r5, r7, c2	@ TTB 1
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
+#else
 	ALT_SMP(orr	r1, r1, #TTB_FLAGS_SMP)
 	ALT_UP(orr	r1, r1, #TTB_FLAGS_UP)
-#endif
 	mcr	p15, 0, r1, c2, c0, 0	@ TTB 0
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 	mcr	p15, 0, r7, c2, c0, 1	@ TTB 1
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
+#endif
 	mcr	p15, 0, r11, c2, c0, 2	@ TTB control register
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 	mrc	p15, 0, r4, c1, c0, 1	@ Read Auxiliary control register
 	teq	r4, r9			@ Is it already set?
 	mcrne	p15, 0, r9, c1, c0, 1	@ No, so write it
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 	mcr	p15, 0, r10, c1, c0, 2	@ Co-processor access control
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 	ldr	r4, =PRRR		@ PRRR
 	ldr	r5, =NMRR		@ NMRR
 	mcr	p15, 0, r4, c10, c2, 0	@ write PRRR
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 	mcr	p15, 0, r5, c10, c2, 1	@ write NMRR
 	isb
 	dsb
@@ -181,7 +241,9 @@ __v7_ca9mp_setup:
 	mov	r10, #(1 << 0)			@ TLB ops broadcasting
 	b	1f
 __v7_ca7mp_setup:
+__v7_ca12mp_setup:
 __v7_ca15mp_setup:
+__v7_ca17mp_setup:
 	mov	r10, #0
 1:
 #ifdef CONFIG_SMP
@@ -191,6 +253,9 @@ __v7_ca15mp_setup:
 	orreq	r0, r0, #(1 << 6)		@ Enable SMP/nAMP mode
 	orreq	r0, r0, r10			@ Enable CPU-specific SMP bits
 	mcreq	p15, 0, r0, c1, c0, 1
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 #endif
 	b	__v7_setup
 
@@ -227,12 +292,18 @@ __v7_pj4b_setup:
 	orr     r0, r0, #PJ4B_INTER_PARITY
 	bic	r0, r0, #PJ4B_STATIC_BP
 	mcr	p15, 1,	r0, c15, c1, 1
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 
 	/* Auxiliary Debug Modes Control 2 Register */
 	mrc	p15, 1,	r0, c15, c1, 2
 	bic	r0, r0, #PJ4B_FAST_LDR
 	orr	r0, r0, #PJ4B_AUX_DBG_CTRL2
 	mcr	p15, 1,	r0, c15, c1, 2
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 
 	/* Auxiliary Functional Modes Control Register 0 */
 	mrc	p15, 1,	r0, c15, c2, 0
@@ -242,11 +313,17 @@ __v7_pj4b_setup:
 	orr	r0, r0, #PJ4B_L1_PAR_CHK
 	orr	r0, r0, #PJ4B_BROADCAST_CACHE
 	mcr	p15, 1,	r0, c15, c2, 0
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 
 	/* Auxiliary Debug Modes Control 0 Register */
 	mrc	p15, 1,	r0, c15, c1, 0
 	orr	r0, r0, #PJ4B_WFI_WFE
 	mcr	p15, 1,	r0, c15, c1, 0
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 
 #endif /* CONFIG_CPU_PJ4B */
 
@@ -275,6 +352,9 @@ __v7_setup:
 	mrceq	p15, 0, r10, c1, c0, 1		@ read aux control register
 	orreq	r10, r10, #(1 << 6)		@ set IBE to 1
 	mcreq	p15, 0, r10, c1, c0, 1		@ write aux control register
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 #endif
 #ifdef CONFIG_ARM_ERRATA_458693
 	teq	r6, #0x20			@ only present in r2p0
@@ -282,6 +362,9 @@ __v7_setup:
 	orreq	r10, r10, #(1 << 5)		@ set L1NEON to 1
 	orreq	r10, r10, #(1 << 9)		@ set PLDNOP to 1
 	mcreq	p15, 0, r10, c1, c0, 1		@ write aux control register
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 #endif
 #ifdef CONFIG_ARM_ERRATA_460075
 	teq	r6, #0x20			@ only present in r2p0
@@ -289,6 +372,9 @@ __v7_setup:
 	tsteq	r10, #1 << 22
 	orreq	r10, r10, #(1 << 22)		@ set the Write Allocate disable bit
 	mcreq	p15, 1, r10, c9, c0, 2		@ write the L2 cache aux ctrl register
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 #endif
 	b	3f
 
@@ -301,6 +387,9 @@ __v7_setup:
 	mrcle	p15, 0, r10, c15, c0, 1		@ read diagnostic register
 	orrle	r10, r10, #1 << 4		@ set bit #4
 	mcrle	p15, 0, r10, c15, c0, 1		@ write diagnostic register
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 #endif
 #ifdef CONFIG_ARM_ERRATA_742231
 	teq	r6, #0x20			@ present in r2p0
@@ -310,12 +399,18 @@ __v7_setup:
 	orreq	r10, r10, #1 << 12		@ set bit #12
 	orreq	r10, r10, #1 << 22		@ set bit #22
 	mcreq	p15, 0, r10, c15, c0, 1		@ write diagnostic register
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 #endif
 #ifdef CONFIG_ARM_ERRATA_743622
 	teq	r5, #0x00200000			@ only present in r2p*
 	mrceq	p15, 0, r10, c15, c0, 1		@ read diagnostic register
 	orreq	r10, r10, #1 << 6		@ set bit #6
 	mcreq	p15, 0, r10, c15, c0, 1		@ write diagnostic register
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 #endif
 #if defined(CONFIG_ARM_ERRATA_751472) && defined(CONFIG_SMP)
 	ALT_SMP(cmp r6, #0x30)			@ present prior to r3p0
@@ -323,20 +418,35 @@ __v7_setup:
 	mrclt	p15, 0, r10, c15, c0, 1		@ read diagnostic register
 	orrlt	r10, r10, #1 << 11		@ set bit #11
 	mcrlt	p15, 0, r10, c15, c0, 1		@ write diagnostic register
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 1:
 #endif
 
 3:	mov	r10, #0
 	mcr	p15, 0, r10, c7, c5, 0		@ I+BTB cache invalidate
-	dsb
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 #ifdef CONFIG_MMU
 	mcr	p15, 0, r10, c8, c7, 0		@ invalidate I + D TLBs
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 	v7_ttb_setup r10, r4, r8, r5		@ TTBCR, TTBRx setup
 	ldr	r5, =PRRR			@ PRRR
 	ldr	r6, =NMRR			@ NMRR
 	mcr	p15, 0, r5, c10, c2, 0		@ write PRRR
-	mcr	p15, 0, r6, c10, c2, 1		@ write NMRR
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
 #endif
+	mcr	p15, 0, r6, c10, c2, 1		@ write NMRR
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
+#endif
+	dsb					@ Complete invalidations
 #ifndef CONFIG_ARM_THUMBEE
 	mrc	p15, 0, r0, c0, c1, 0		@ read ID_PFR0 for ThumbEE
 	and	r0, r0, #(0xf << 12)		@ ThumbEE enabled field
@@ -344,9 +454,15 @@ __v7_setup:
 	bne	1f
 	mov	r5, #0
 	mcr	p14, 6, r5, c1, c0, 0		@ Initialize TEEHBR to 0
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 	mrc	p14, 6, r0, c0, c0, 0		@ load TEECR
 	orr	r0, r0, #1			@ set the 1st bit in order to
 	mcr	p14, 6, r0, c0, c0, 0		@ stop userspace TEEHBR access
+#ifdef CONFIG_ARCH_SDP1406	
+	isb
+#endif
 1:
 #endif
 	adr	r5, v7_crval
@@ -461,6 +577,26 @@ __v7_ca15mp_proc_info:
 	.long	0xff0ffff0
 	__v7_proc __v7_ca15mp_setup
 	.size	__v7_ca15mp_proc_info, . - __v7_ca15mp_proc_info
+
+	/*
+	 * ARM Ltd. Cortex A12 processor.
+	 */
+	.type	__v7_ca12mp_proc_info, #object
+__v7_ca12mp_proc_info:
+	.long	0x410fc0d0
+	.long	0xff0ffff0
+	__v7_proc __v7_ca12mp_setup
+	.size	__v7_ca12mp_proc_info, . - __v7_ca12mp_proc_info
+
+	/*
+	 * ARM Ltd. Cortex A17 processor.
+	 */
+	.type	__v7_ca17mp_proc_info, #object
+__v7_ca17mp_proc_info:
+	.long	0x410fc0e0
+	.long	0xff0ffff0
+	__v7_proc __v7_ca17mp_setup
+	.size	__v7_ca17mp_proc_info, . - __v7_ca17mp_proc_info
 
 	/*
 	 * Qualcomm Inc. Krait processors.

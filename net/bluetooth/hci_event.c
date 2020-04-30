@@ -917,22 +917,12 @@ static void hci_cc_le_set_adv_enable(struct hci_dev *hdev, struct sk_buff *skb)
 	if (!sent)
 		return;
 
+	if (status)
+		return;
+
 	hci_dev_lock(hdev);
 
-	if (!status) {
-		if (*sent)
-			set_bit(HCI_LE_PERIPHERAL, &hdev->dev_flags);
-		else
-			clear_bit(HCI_LE_PERIPHERAL, &hdev->dev_flags);
-	}
-
-	if (!test_bit(HCI_INIT, &hdev->flags)) {
-		struct hci_request req;
-
-		hci_req_init(&req, hdev);
-		hci_update_ad(&req);
-		hci_req_run(&req, NULL);
-	}
+	mgmt_advertising(hdev, *sent);
 
 	hci_dev_unlock(hdev);
 }
@@ -1071,6 +1061,201 @@ static void hci_cc_write_remote_amp_assoc(struct hci_dev *hdev,
 	amp_write_rem_assoc_continue(hdev, rp->phy_handle);
 }
 
+static void hci_cc_set_conless_slave_broadcast(struct hci_dev *hdev,
+					       struct sk_buff *skb)
+{
+	struct hci_cp_set_connectionless_slave_broadcast *sent;
+	struct hci_rp_set_connectionless_slave_broadcast *rp =
+							(void *) skb->data;
+
+	BT_DBG("%s status 0x%2.2x", hdev->name, rp->status);
+
+	sent = hci_sent_cmd_data(hdev,
+				HCI_OP_SET_CONNECTIONLESS_SLAVE_BROADCAST);
+	if (!sent)
+		return;
+
+	hci_dev_lock(hdev);
+
+	if (!rp->status) {
+		hdev->lt_addr = rp->lt_addr;
+		hdev->csb_int = __le16_to_cpu(rp->csb_int);
+	}
+
+	hci_dev_unlock(hdev);
+
+}
+
+static void hci_cc_set_reserved_ltaddr(struct hci_dev *hdev,
+				       struct sk_buff *skb)
+{
+	struct hci_cp_set_reserved_lt_addr *sent;
+	struct hci_rp_set_reserved_lt_addr *rp = (void *) skb->data;
+
+	BT_DBG("%s status %d lt_addr %d", hdev->name, rp->status, rp->lt_addr);
+
+	sent = hci_sent_cmd_data(hdev, HCI_OP_SET_RESERVED_LT_ADDR);
+	if (!sent)
+		return;
+
+	hci_dev_lock(hdev);
+
+	if (!rp->status)
+		hdev->lt_addr = rp->lt_addr;
+
+	hci_dev_unlock(hdev);
+
+}
+
+static void hci_cc_delete_reserved_ltaddr(struct hci_dev *hdev,
+					  struct sk_buff *skb)
+{
+	struct hci_cp_delete_reserved_lt_addr *sent;
+	struct hci_rp_delete_reserved_lt_addr *rp = (void *) skb->data;
+
+	BT_DBG("%s status %d lt_addr %d", hdev->name, rp->status, rp->lt_addr);
+
+	sent = hci_sent_cmd_data(hdev, HCI_OP_DELETE_RESERVED_LT_ADDR);
+	if (!sent)
+		return;
+
+	hci_dev_lock(hdev);
+
+	if (!rp->status)
+		hdev->lt_addr = rp->lt_addr;
+
+	hci_dev_unlock(hdev);
+
+}
+
+static void hci_cc_set_conless_slave_broadcast_data(struct hci_dev *hdev,
+						    struct sk_buff *skb)
+{
+	struct hci_cp_set_connectionless_slave_broadcast_data *sent;
+	struct hci_rp_set_connectionless_slave_broadcast_data *rp =
+							(void *) skb->data;
+
+	BT_DBG("%s status %d lt_addr %d", hdev->name, rp->status, rp->lt_addr);
+
+	sent = hci_sent_cmd_data(hdev,
+			HCI_OP_SET_CONNECTIONLESS_SLAVE_BROADCAST_DATA);
+	if (!sent)
+		return;
+
+	hci_dev_lock(hdev);
+
+	if (!rp->status)
+		hdev->lt_addr = rp->lt_addr;
+
+	hci_dev_unlock(hdev);
+
+}
+
+static void hci_cc_read_sync_train_params(struct hci_dev *hdev,
+					  struct sk_buff *skb)
+{
+	struct hci_rp_read_sync_train_params *rp = (void *) skb->data;
+
+	BT_DBG("%s status %d", hdev->name, rp->status);
+
+	hci_dev_lock(hdev);
+
+	if (!rp->status) {
+		hdev->sync_train_int = __le16_to_cpu(rp->sync_train_int);
+		hdev->sync_train_tout = __le32_to_cpu(rp->sync_train_tout);
+		hdev->service_data = rp->service_data;
+	}
+
+	hci_dev_unlock(hdev);
+
+}
+
+static void hci_cc_write_sync_train_params(struct hci_dev *hdev,
+					   struct sk_buff *skb)
+{
+	struct hci_cp_write_sync_train_params *sent;
+	struct hci_rp_write_sync_train_params *rp = (void *) skb->data;
+
+	BT_DBG("%s status %d", hdev->name, rp->status);
+
+	sent = hci_sent_cmd_data(hdev, HCI_OP_WRITE_SYNC_TRAIN_PARAMS);
+	if (!sent)
+		return;
+
+	hci_dev_lock(hdev);
+
+	if (!rp->status)
+		hdev->sync_train_int = rp->sync_train_int;
+
+	hci_dev_unlock(hdev);
+
+
+}
+
+static void hci_cc_vspec_set_3d_control(struct hci_dev *hdev,
+					struct sk_buff *skb)
+{
+	struct hci_cp_vspec_set_3d_ctrl *sent;
+	__u8 status = *((__u8 *) skb->data);
+
+	BT_DBG("%s status %d", hdev->name, status);
+
+	sent = hci_sent_cmd_data(hdev, HCI_OP_VSPEC_SET_3D_CTRL);
+	if (!sent)
+		return;
+
+}
+
+static void hci_cc_vspec_set_3d_delay(struct hci_dev *hdev, struct sk_buff *skb)
+{
+	struct hci_cp_vspec_set_3d_delay *sent;
+	__u8 status = *((__u8 *) skb->data);
+
+	BT_DBG("%s status %d", hdev->name, status);
+
+	sent = hci_sent_cmd_data(hdev, HCI_OP_VSPEC_SET_3D_DELAY);
+	if (!sent)
+		return;
+
+}
+
+static void hci_cc_vspec_vsync_detect(struct hci_dev *hdev, struct sk_buff *skb)
+{
+	struct hci_cp_vspec_sync_detect *sent;
+	__u8 status = *((__u8 *) skb->data);
+
+	BT_DBG("%s status %d", hdev->name, status);
+
+	sent = hci_sent_cmd_data(hdev, HCI_OP_VSPEC_VSYNC_DETECT);
+	if (!sent)
+		return;
+
+}
+
+static void hci_cc_vspec_read_llr_scan_params(
+		struct hci_dev *hdev, struct sk_buff *skb)
+{
+	struct hci_rp_vspec_read_llr_scan_params *rp = (void *) skb->data;
+
+	hci_dev_lock(hdev);
+	mgmt_vspec_read_llr_scan_params_complete(hdev,
+				rp->status, skb->len, rp->data);
+	hci_dev_unlock(hdev);
+}
+
+static void hci_cc_vspec_get_all_headless_device_list(struct hci_dev *hdev, struct sk_buff *skb)
+{
+	struct hci_rp_vspec_get_all_headless_device_list *rp = (void *) skb->data;
+
+	hci_dev_lock(hdev);
+	if(skb->len <= 2)
+		mgmt_vspec_get_all_headless_device_list_complete(hdev, rp->status,
+					rp->headless_dev_count, skb->len, NULL);
+	else
+		mgmt_vspec_get_all_headless_device_list_complete(hdev, rp->status,
+			rp->headless_dev_count, skb->len, rp->data);
+	hci_dev_unlock(hdev);
+}
 static void hci_cs_inquiry(struct hci_dev *hdev, __u8 status)
 {
 	BT_DBG("%s status 0x%2.2x", hdev->name, status);
@@ -2326,6 +2511,49 @@ static void hci_cmd_complete_evt(struct hci_dev *hdev, struct sk_buff *skb)
 		hci_cc_write_remote_amp_assoc(hdev, skb);
 		break;
 
+	case HCI_OP_SET_CONNECTIONLESS_SLAVE_BROADCAST:
+		hci_cc_set_conless_slave_broadcast(hdev, skb);
+		break;
+
+	case HCI_OP_SET_RESERVED_LT_ADDR:
+		hci_cc_set_reserved_ltaddr(hdev, skb);
+		break;
+
+	case HCI_OP_DELETE_RESERVED_LT_ADDR:
+		hci_cc_delete_reserved_ltaddr(hdev, skb);
+		break;
+
+	case HCI_OP_SET_CONNECTIONLESS_SLAVE_BROADCAST_DATA:
+		hci_cc_set_conless_slave_broadcast_data(hdev, skb);
+		break;
+
+	case HCI_OP_READ_SYNC_TRAIN_PARAMS:
+		hci_cc_read_sync_train_params(hdev, skb);
+		break;
+
+	case HCI_OP_WRITE_SYNC_TRAIN_PARAMS:
+		hci_cc_write_sync_train_params(hdev, skb);
+		break;
+
+	case HCI_OP_VSPEC_SET_3D_CTRL:
+		hci_cc_vspec_set_3d_control(hdev, skb);
+		break;
+
+	case HCI_OP_VSPEC_SET_3D_DELAY:
+		hci_cc_vspec_set_3d_delay(hdev, skb);
+		break;
+
+	case HCI_OP_VSPEC_VSYNC_DETECT:
+		hci_cc_vspec_vsync_detect(hdev, skb);
+		break;
+
+	case HCI_OP_VSPEC_GET_ALL_HEADLESS_DEVICE_LIST:
+		hci_cc_vspec_get_all_headless_device_list(hdev, skb);
+		break;
+
+	case HCI_OP_VSPEC_READ_LLR_SCAN_PARAMS:
+		hci_cc_vspec_read_llr_scan_params(hdev, skb);
+		break;
 	default:
 		BT_DBG("%s opcode 0x%4.4x", hdev->name, opcode);
 		break;
@@ -2595,6 +2823,105 @@ static void hci_num_comp_blocks_evt(struct hci_dev *hdev, struct sk_buff *skb)
 	queue_work(hdev->workqueue, &hdev->tx_work);
 }
 
+static void hci_triggered_clock_capture_evt(struct hci_dev *hdev,
+				struct sk_buff *skb)
+{
+	struct hci_ev_triggered_clock_capture *ev = (void *) skb->data;
+
+	mgmt_triggered_clock_capture(hdev, ev->conn_handle, ev->which_clk,
+				ev->clk, ev->slot_offset);
+}
+
+static void hci_sync_train_complete_evt(struct hci_dev *hdev,
+			struct sk_buff *skb)
+{
+	struct hci_ev_sync_train_complete *ev = (void *) skb->data;
+
+	mgmt_sync_train_completed(hdev, ev->status);
+}
+
+static void hci_sync_train_receive_evt(struct hci_dev *hdev,
+	struct sk_buff *skb)
+{
+	struct hci_ev_sync_train_receive *ev = (void *) skb->data;
+
+	mgmt_sync_train_received(hdev, ev->status, ev->addr, ev->clock_offset,
+				ev->afh_channel_map, ev->lt_addr,
+				ev->next_broadcast_instant,
+				ev->slave_broadcast_interval,
+				ev->service_data);
+}
+
+static void hci_slave_broadcast_receive_evt(struct hci_dev *hdev,
+	struct sk_buff *skb)
+{
+	struct hci_ev_slave_broadcast_receive *ev = (void *) skb->data;
+
+	mgmt_slave_broadcast_received(hdev, ev->bd_addr, ev->lt_addr,
+					ev->clock, ev->offset,
+					ev->status, ev->fragment,
+					ev->data_length, ev->data);
+}
+
+static void hci_slave_broadcast_timeout_evt(struct hci_dev *hdev,
+	struct sk_buff *skb)
+{
+	struct hci_ev_slave_broadcast_timeout *ev = (void *) skb->data;
+
+	mgmt_slave_broadcast_timeout_event(hdev, ev->bd_addr, ev->lt_addr);
+}
+
+static void hci_truncated_page_complete_evt(struct hci_dev *hdev,
+	struct sk_buff *skb)
+{
+	struct hci_ev_truncated_page_complete *ev = (void *) skb->data;
+
+	mgmt_truncated_page_complete_event(hdev, ev->status, ev->bd_addr);
+}
+
+static void hci_slave_broadcast_channel_map_change_evt(struct hci_dev *hdev,
+	struct sk_buff *skb)
+{
+	struct hci_ev_clb_channel_map_change *ev = (void *) skb->data;
+
+	mgmt_slave_broadcast_channel_map_change_event(hdev, ev->channel_map);
+}
+
+static void hci_slave_page_resp_timeout_evt(struct hci_dev *hdev,
+				struct sk_buff *skb)
+{
+	mgmt_slave_page_reponse_timeout(hdev);
+}
+static void hci_inq_resp_notification_evt(struct hci_dev *hdev,
+				struct sk_buff *skb)
+{
+	struct hci_ev_inquiry_response_notification *ev = (void *) skb->data;
+
+	mgmt_inquiry_response_notification(hdev, ev->lap, ev->rssi);
+}
+
+static void hci_vspec_sync_3d_evt(struct hci_dev *hdev,
+				struct sk_buff *skb)
+{
+	__u8 subcode = skb->data[0];
+	struct hci_ev_vspec_frame_period *ev = (void *) skb->data;
+
+	skb_pull(skb, 1);
+
+	switch (subcode) {
+	case HCI_EV_VSPEC_3D_CODE_CHANGE:
+		mgmt_vspec_3d_code_change(hdev);
+		break;
+	case HCI_EV_VSPEC_FRAME_PERIOD:
+		mgmt_vspec_3d_frame_period(hdev, ev->frame_period,
+						ev->period_fraction,
+						ev->init_measurement);
+		break;
+	default:
+		BT_ERR("Unknown subcode %d", subcode);
+		break;
+	}
+}
 static void hci_mode_change_evt(struct hci_dev *hdev, struct sk_buff *skb)
 {
 	struct hci_ev_mode_change *ev = (void *) skb->data;
@@ -3611,11 +3938,21 @@ static void hci_le_ltk_request_evt(struct hci_dev *hdev, struct sk_buff *skb)
 	cp.handle = cpu_to_le16(conn->handle);
 
 	if (ltk->authenticated)
-		conn->sec_level = BT_SECURITY_HIGH;
+		conn->pending_sec_level = BT_SECURITY_HIGH;
+	else
+		conn->pending_sec_level = BT_SECURITY_MEDIUM;
+
+	conn->enc_key_size = ltk->enc_size;
 
 	hci_send_cmd(hdev, HCI_OP_LE_LTK_REPLY, sizeof(cp), &cp);
 
-	if (ltk->type & HCI_SMP_STK) {
+	/* Ref. Bluetooth Core SPEC pages 1975 and 2004. STK is a
+	 * temporary key used to encrypt a connection following
+	 * pairing. It is used during the Encrypted Session Setup to
+	 * distribute the keys. Later, security can be re-established
+	 * using a distributed LTK.
+	 */
+	if (ltk->type == HCI_SMP_STK_SLAVE) {
 		list_del(&ltk->list);
 		kfree(ltk);
 	}
@@ -3865,6 +4202,45 @@ void hci_event_packet(struct hci_dev *hdev, struct sk_buff *skb)
 		hci_num_comp_blocks_evt(hdev, skb);
 		break;
 
+	case HCI_EV_TRIGGERED_CLOCK_CAPTURE:
+		hci_triggered_clock_capture_evt(hdev, skb);
+		break;
+
+	case HCI_EV_SYNC_TRAIN_COMPLETE:
+		hci_sync_train_complete_evt(hdev, skb);
+		break;
+
+	case HCI_EV_SYNC_TRAIN_RECEIVE:
+		hci_sync_train_receive_evt(hdev, skb);
+		break;
+
+	case HCI_EV_SLAVE_BROADCAST_RECIVE:
+		hci_slave_broadcast_receive_evt(hdev, skb);
+		break;
+
+	case HCI_EV_SLAVE_BROADCAST_TIMEOUT:
+		hci_slave_broadcast_timeout_evt(hdev, skb);
+		break;
+
+	case HCI_EV_TRUNCATED_PAGE_COMPLETE:
+		hci_truncated_page_complete_evt(hdev, skb);
+		break;
+
+	case HCI_EV_CLB_CHANNEL_MAP_CHANGE:
+		hci_slave_broadcast_channel_map_change_evt(hdev, skb);
+		break;
+
+	case HCI_EV_SLAVE_PAGE_RESP_TIMEOUT:
+		hci_slave_page_resp_timeout_evt(hdev, skb);
+		break;
+
+	case HCI_EV_INQUIRY_RESPONSE_NOTIFICATION:
+		hci_inq_resp_notification_evt(hdev, skb);
+		break;
+
+	case HCI_EV_VENDOR_SPECIFIC:
+		hci_vspec_sync_3d_evt(hdev, skb);
+		break;
 	default:
 		BT_DBG("%s event 0x%2.2x", hdev->name, event);
 		break;

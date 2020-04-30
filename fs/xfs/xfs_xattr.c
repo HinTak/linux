@@ -19,6 +19,8 @@
 #include "xfs.h"
 #include "xfs_da_btree.h"
 #include "xfs_bmap_btree.h"
+#include "xfs_sb.h"
+#include "xfs_mount.h"
 #include "xfs_inode.h"
 #include "xfs_attr.h"
 #include "xfs_attr_leaf.h"
@@ -39,6 +41,10 @@ xfs_xattr_get(struct dentry *dentry, const char *name,
 	if (strcmp(name, "") == 0)
 		return -EINVAL;
 
+	if ((xflags & ATTR_SECURE) &&
+			!(ip->i_mount->m_flags & XFS_MOUNT_SECURITY)) {
+		return -EOPNOTSUPP;
+	}
 	/* Convert Linux syscall to XFS internal ATTR flags */
 	if (!size) {
 		xflags |= ATTR_KERNOVAL;
@@ -60,6 +66,10 @@ xfs_xattr_set(struct dentry *dentry, const char *name, const void *value,
 	if (strcmp(name, "") == 0)
 		return -EINVAL;
 
+	if ((xflags & ATTR_SECURE) &&
+			!(ip->i_mount->m_flags & XFS_MOUNT_SECURITY)) {
+		return -EOPNOTSUPP;
+	}
 	/* Convert Linux syscall to XFS internal ATTR flags */
 	if (flags & XATTR_CREATE)
 		xflags |= ATTR_CREATE;
@@ -146,6 +156,11 @@ xfs_xattr_put_listent(
 	if ((flags & XFS_ATTR_ROOT) && !capable(CAP_SYS_ADMIN))
 		return 0;
 
+	if ((flags & XFS_ATTR_SECURE) &&
+		 !(context->dp->i_mount->m_flags & XFS_MOUNT_SECURITY)) {
+		return 0;
+	}
+
 	arraytop = context->count + prefix_len + namelen + 1;
 	if (arraytop > context->firstu) {
 		context->count = -1;	/* insufficient space */
@@ -170,6 +185,11 @@ xfs_xattr_put_listent_sizes(
 	int		valuelen,
 	unsigned char	*value)
 {
+	if ((flags & XFS_ATTR_SECURE) &&
+		 !(context->dp->i_mount->m_flags & XFS_MOUNT_SECURITY)) {
+		return 0;
+	}
+
 	context->count += xfs_xattr_prefix_len(flags) + namelen + 1;
 	return 0;
 }

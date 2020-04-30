@@ -6,7 +6,10 @@
 #include <asm/exec.h>
 #include <uapi/linux/binfmts.h>
 
-#define CORENAME_MAX_SIZE 128
+/* For Tizen the mincore path name is increased,
+ * to accomadate that we have increased the buffer size
+ */
+#define CORENAME_MAX_SIZE 179
 
 /*
  * This structure is used to hold the arguments that are used when loading binaries.
@@ -99,9 +102,6 @@ extern void setup_new_exec(struct linux_binprm * bprm);
 extern void would_dump(struct linux_binprm *, struct file *);
 
 extern int suid_dumpable;
-#define SUID_DUMP_DISABLE	0	/* No setuid dumping */
-#define SUID_DUMP_USER		1	/* Dump as user of process */
-#define SUID_DUMP_ROOT		2	/* Dump as root */
 
 /* Stack area protections */
 #define EXSTACK_DEFAULT   0	/* Whatever the arch defaults to */

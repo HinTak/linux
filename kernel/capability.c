@@ -268,6 +268,10 @@ SYSCALL_DEFINE2(capset, cap_user_header_t, header, const cap_user_data_t, data)
 		i++;
 	}
 
+	effective.cap[CAP_LAST_U32] &= CAP_LAST_U32_VALID_MASK;
+	permitted.cap[CAP_LAST_U32] &= CAP_LAST_U32_VALID_MASK;
+	inheritable.cap[CAP_LAST_U32] &= CAP_LAST_U32_VALID_MASK;
+
 	new = prepare_creds();
 	if (!new)
 		return -ENOMEM;
@@ -379,6 +383,49 @@ bool has_capability_noaudit(struct task_struct *t, int cap)
  */
 bool ns_capable(struct user_namespace *ns, int cap)
 {
+#ifdef CONFIG_DAC_CAP_ERROR_LOG_MSG
+	char p_comm[TASK_COMM_LEN+1] = "_";
+#endif
+	if (unlikely(!cap_valid(cap))) {
+		printk(KERN_CRIT "capable() called with invalid cap=%u\n", cap);
+		BUG();
+	}
+
+	if (security_capable(current_cred(), ns, cap) == 0) {
+		current->flags |= PF_SUPERPRIV;
+		return true;
+	}
+#ifdef CONFIG_DAC_CAP_ERROR_LOG_MSG
+	rcu_read_lock();
+	if (current->real_parent != NULL)
+		strncpy(p_comm,
+			current->real_parent->group_leader->comm,
+						TASK_COMM_LEN);
+	rcu_read_unlock();
+	printk(KERN_ALERT"\n\n\n\n#########################################\n");
+	printk(KERN_ALERT"[ERROR][CAP:%s][CAP(%d)][TH(%s:%d)PTH(%s)][U(%d)G(%d)]\n",
+#ifdef CONFIG_SKIP_DAC_CAP_PERMISSION
+			"SKIP",
+#else
+			"NoSKIP",
+#endif
+			cap, current->comm, current->pid, p_comm, current_uid(),
+							current_gid());
+	printk(KERN_ALERT"###########################################\n\n\n\n");
+
+#endif
+#ifdef CONFIG_SKIP_DAC_CAP_PERMISSION
+	return true;
+#else
+	return false;
+#endif
+}
+EXPORT_SYMBOL(ns_capable);
+
+#if defined(CONFIG_SKIP_DAC_CAP_PERMISSION) || \
+		defined(CONFIG_DAC_CAP_ERROR_LOG_MSG)
+bool ns_capable_dac(struct user_namespace *ns, int cap)
+{
 	if (unlikely(!cap_valid(cap))) {
 		printk(KERN_CRIT "capable() called with invalid cap=%u\n", cap);
 		BUG();
@@ -390,7 +437,17 @@ bool ns_capable(struct user_namespace *ns, int cap)
 	}
 	return false;
 }
-EXPORT_SYMBOL(ns_capable);
+EXPORT_SYMBOL(ns_capable_dac);
+
+bool capable_wrt_inode_uidgid_dac(const struct inode *inode, int cap)
+{
+	struct user_namespace *ns = current_user_ns();
+
+	return ns_capable_dac(ns, cap) && kuid_has_mapping(ns, inode->i_uid) &&
+				kgid_has_mapping(ns, inode->i_gid);
+}
+
+#endif
 
 /**
  * file_ns_capable - Determine if the file's opener had a capability in effect
@@ -445,22 +502,18 @@ bool nsown_capable(int cap)
 }
 
 /**
- * inode_capable - Check superior capability over inode
+ * capable_wrt_inode_uidgid - Check nsown_capable and uid and gid mapped
  * @inode: The inode in question
  * @cap: The capability in question
  *
- * Return true if the current task has the given superior capability
- * targeted at it's own user namespace and that the given inode is owned
- * by the current user namespace or a child namespace.
- *
- * Currently we check to see if an inode is owned by the current
- * user namespace by seeing if the inode's owner maps into the
- * current user namespace.
- *
+ * Return true if the current task has the given capability targeted at
+ * its own user namespace and that the given inode's uid and gid are
+ * mapped into the current user namespace.
  */
-bool inode_capable(const struct inode *inode, int cap)
+bool capable_wrt_inode_uidgid(const struct inode *inode, int cap)
 {
 	struct user_namespace *ns = current_user_ns();
 
-	return ns_capable(ns, cap) && kuid_has_mapping(ns, inode->i_uid);
+	return ns_capable(ns, cap) && kuid_has_mapping(ns, inode->i_uid) &&
+		kgid_has_mapping(ns, inode->i_gid);
 }

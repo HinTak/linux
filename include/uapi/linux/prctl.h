@@ -148,5 +148,13 @@
 #define PR_GET_NO_NEW_PRIVS	39
 
 #define PR_GET_TID_ADDRESS	40
+#ifndef CONFIG_VD_RELEASE
+#define PR_GET_DUMP_TRACE	41 /* Dump kernel stack and user space BT for pid=1 */
+#endif
+
+/*
+ * Inject a trace event into the current tracing context:
+ */
+#define PR_TASK_PERF_USER_TRACE	666
 
 #endif /* _LINUX_PRCTL_H */

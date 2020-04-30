@@ -507,6 +507,52 @@ config USB_SWITCH_FSA9480
 	  stereo and mono audio, video, microphone and UART data to use
 	  a common connector port.
 
+config TIZEN_GLOBAL_LOCK
+	bool "Tizen Global Lock feature enable"
+	help
+	  This supports global lock feature for Tizen.
+
+config DMABUF_KDS_LOCK
+	bool "Support ioctls for dmabuf buffer lock with the KDS"
+	help
+	  This supports ioctls for controlling kds locks for dmabuf
+
+config GPIO_TV_FEATURE
+	tristate "GPIO Read/Write for TV features"
+	depends on OF_GPIO && SYSFS
+	help
+	  This provides sysfs nodes for read/write GPIO pin.
+	  
+config SDP_REGCTRL
+	tristate "simple register control driver"
+	depends on SYSFS
+	help
+	  This provides simple nodes for register read/write.
+
+config SLP_LOWMEM_NOTIFY
+	bool "Driver for SLP Low Memory Notification"
+	default y
+	help
+	 Provide interface to register for low memory notifications.
+
+config SLP_LOWMEM_NOTIFY_VIPAPP
+	bool "LMN handling VIP APP"
+	depends on SLP_LOWMEM_NOTIFY
+
+config SLP_LOWMEM_NOTIFY_PRELOAD
+       bool "Preloading app policy for Low Memory Notification"
+       depends on SLP_LOWMEM_NOTIFY
+       help
+         Treat oom_adj > 15 as (preloading app priority) + 15. This changes LMN
+         policy when choosing a victim task.
+
+config SLP_LOWMEM_SET_MIN_OOMADJ
+	bool "Changing default oom_adj value of process"
+	depends on SLP_LOWMEM_NOTIFY
+	help
+	 The oom_adj value will be -17 by default when a process is forked.
+	 It means LMN can not kill the process without changing the oom_adj value.
+
 config LATTICE_ECP3_CONFIG
 	tristate "Lattice ECP3 FPGA bitstream configuration via SPI"
 	depends on SPI && SYSFS
@@ -527,6 +573,14 @@ config SRAM
 	  the genalloc API. It is supposed to be used for small on-chip SRAM
 	  areas found on many SoCs.
 
+config SDP_MESSAGEBOX
+	tristate "SDP messagebox driver"
+	default n
+	help
+	  This driver communicate with SDP micom
+
+
+
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"
@@ -536,4 +590,6 @@ source "drivers/misc/carma/Kconfig"
 source "drivers/misc/altera-stapl/Kconfig"
 source "drivers/misc/mei/Kconfig"
 source "drivers/misc/vmw_vmci/Kconfig"
+source "drivers/misc/micom-msg/Kconfig"
+source "drivers/misc/kdbus/Kconfig"
 endmenu

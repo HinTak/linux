@@ -29,6 +29,11 @@
 #include <linux/spi/spi_bitbang.h>
 #include <linux/spi/spi_gpio.h>
 
+#include <linux/debugfs.h>
+#ifdef CONFIG_SDP_HW_CLOCK
+#include <mach/sdp_hwclock.h>
+#endif
+
 
 /*
  * This bitbanging SPI master driver should help make systems usable
@@ -90,7 +95,19 @@ struct spi_gpio {
 
 #endif
 
+static unsigned long long spi_set_calls;
+static unsigned long long spi_get_calls;
+
 /*----------------------------------------------------------------------*/
+
+static unsigned long long spi_get_nsecs(void)
+{
+#ifdef CONFIG_SDP_HW_CLOCK
+	return hwclock_ns((uint32_t *)hwclock_get_va());
+#else
+	return sched_clock();
+#endif
+}
 
 static inline struct spi_gpio * __pure
 spi_to_spi_gpio(const struct spi_device *spi)
@@ -114,16 +131,19 @@ spi_to_pdata(const struct spi_device *spi)
 
 static inline void setsck(const struct spi_device *spi, int is_on)
 {
+	spi_set_calls++;
 	gpio_set_value(SPI_SCK_GPIO, is_on);
 }
 
 static inline void setmosi(const struct spi_device *spi, int is_on)
 {
+	spi_set_calls++;
 	gpio_set_value(SPI_MOSI_GPIO, is_on);
 }
 
 static inline int getmiso(const struct spi_device *spi)
 {
+	spi_get_calls++;
 	return !!gpio_get_value(SPI_MISO_GPIO);
 }
 
@@ -154,27 +174,27 @@ static inline int getmiso(const struct spi_device *spi)
  */
 
 static u32 spi_gpio_txrx_word_mode0(struct spi_device *spi,
-		unsigned nsecs, u32 word, u8 bits)
+	    unsigned nsecs, unsigned flags, u32 word, u8 bits)
 {
-	return bitbang_txrx_be_cpha0(spi, nsecs, 0, 0, word, bits);
+	return bitbang_txrx_be_cpha0(spi, nsecs, 0, flags, word, bits);
 }
 
 static u32 spi_gpio_txrx_word_mode1(struct spi_device *spi,
-		unsigned nsecs, u32 word, u8 bits)
+	    unsigned nsecs, unsigned flags, u32 word, u8 bits)
 {
-	return bitbang_txrx_be_cpha1(spi, nsecs, 0, 0, word, bits);
+	return bitbang_txrx_be_cpha1(spi, nsecs, 0, flags, word, bits);
 }
 
 static u32 spi_gpio_txrx_word_mode2(struct spi_device *spi,
-		unsigned nsecs, u32 word, u8 bits)
+	    unsigned nsecs, unsigned flags, u32 word, u8 bits)
 {
-	return bitbang_txrx_be_cpha0(spi, nsecs, 1, 0, word, bits);
+	return bitbang_txrx_be_cpha0(spi, nsecs, 1, flags, word, bits);
 }
 
 static u32 spi_gpio_txrx_word_mode3(struct spi_device *spi,
-		unsigned nsecs, u32 word, u8 bits)
+	    unsigned nsecs, unsigned flags, u32 word, u8 bits)
 {
-	return bitbang_txrx_be_cpha1(spi, nsecs, 1, 0, word, bits);
+	return bitbang_txrx_be_cpha1(spi, nsecs, 1, flags, word, bits);
 }
 
 /*
@@ -188,30 +208,34 @@ static u32 spi_gpio_txrx_word_mode3(struct spi_device *spi,
  */
 
 static u32 spi_gpio_spec_txrx_word_mode0(struct spi_device *spi,
-		unsigned nsecs, u32 word, u8 bits)
+		unsigned nsecs, unsigned _flags, u32 word, u8 bits)
 {
 	unsigned flags = spi->master->flags;
+	(void)_flags;
 	return bitbang_txrx_be_cpha0(spi, nsecs, 0, flags, word, bits);
 }
 
 static u32 spi_gpio_spec_txrx_word_mode1(struct spi_device *spi,
-		unsigned nsecs, u32 word, u8 bits)
+		unsigned nsecs, unsigned _flags, u32 word, u8 bits)
 {
 	unsigned flags = spi->master->flags;
+	(void)_flags;
 	return bitbang_txrx_be_cpha1(spi, nsecs, 0, flags, word, bits);
 }
 
 static u32 spi_gpio_spec_txrx_word_mode2(struct spi_device *spi,
-		unsigned nsecs, u32 word, u8 bits)
+		unsigned nsecs, unsigned _flags, u32 word, u8 bits)
 {
 	unsigned flags = spi->master->flags;
+	(void)_flags;
 	return bitbang_txrx_be_cpha0(spi, nsecs, 1, flags, word, bits);
 }
 
 static u32 spi_gpio_spec_txrx_word_mode3(struct spi_device *spi,
-		unsigned nsecs, u32 word, u8 bits)
+		unsigned nsecs, unsigned _flags, u32 word, u8 bits)
 {
 	unsigned flags = spi->master->flags;
+	(void)_flags;
 	return bitbang_txrx_be_cpha1(spi, nsecs, 1, flags, word, bits);
 }
 
@@ -228,6 +252,7 @@ static void spi_gpio_chipselect(struct spi_device *spi, int is_active)
 
 	if (cs != SPI_GPIO_NO_CHIPSELECT) {
 		/* SPI is normally active-low */
+		spi_set_calls++;
 		gpio_set_value(cs, (spi->mode & SPI_CS_HIGH) ? is_active : !is_active);
 	}
 }
@@ -282,9 +307,15 @@ static void spi_gpio_cleanup(struct spi_device *spi)
 	struct spi_gpio *spi_gpio = spi_to_spi_gpio(spi);
 	unsigned int cs = spi_gpio->cs_gpios[spi->chip_select];
 
-	if (cs != SPI_GPIO_NO_CHIPSELECT)
+	pr_err("~~~~ %s, #1, %p\n", __func__, current);
+
+	if (cs != SPI_GPIO_NO_CHIPSELECT) {
+		pr_err("~~~~ %s, #2, %p\n", __func__, current);
 		gpio_free(cs);
+	}
 	spi_bitbang_cleanup(spi);
+
+	pr_err("~~~~ %s, #3, %p\n", __func__, current);
 }
 
 static int spi_gpio_alloc(unsigned pin, const char *label, bool is_in)
@@ -349,6 +380,52 @@ static struct of_device_id spi_gpio_dt_ids[] = {
 };
 MODULE_DEVICE_TABLE(of, spi_gpio_dt_ids);
 
+static int spi_gpio_get_map_idx(struct platform_device *pdev,
+				struct device_node *np)
+{
+	int cnt, i;
+	const struct property *levels;
+
+	levels = of_find_property(np, "new-hw,levels", NULL);
+	if (!levels)
+		return 0;
+	cnt = levels->length / sizeof(u32);
+
+	for (i = 0; i < cnt; i++) {
+		u32 levl;
+		int gpio, err;
+
+		err = of_property_read_u32_index(np, "new-hw,levels", i, &levl);
+		if (err) {
+			dev_err(&pdev->dev, "new-hw,levels#%d property is not found\n",
+				i);
+			return 0;
+		}
+
+		gpio = of_get_named_gpio(np, "new-hw,gpios", i);
+		if (gpio < 0) {
+			dev_err(&pdev->dev, "new-hw,gpios#%d gpio is not found\n",
+				i);
+			return 0;
+		}
+
+		err = spi_gpio_alloc(gpio, dev_name(&pdev->dev), true);
+		if (err) {
+			dev_err(&pdev->dev, "new-hw,gpios#%d, can't allocate gpio %d\n",
+				i, gpio);
+			return 0;
+		}
+
+		err = (!gpio_get_value(gpio) != !levl);
+		gpio_free(gpio);
+
+		if (err)
+			return 0;
+	}
+
+	return 1;
+}
+
 static int spi_gpio_probe_dt(struct platform_device *pdev)
 {
 	int ret;
@@ -365,26 +442,37 @@ static int spi_gpio_probe_dt(struct platform_device *pdev)
 	if (!pdata)
 		return -ENOMEM;
 
-	ret = of_get_named_gpio(np, "gpio-sck", 0);
+	/* Get the index of gpio map: old or new one */
+	pdata->map_idx = spi_gpio_get_map_idx(pdev, np);
+
+	ret = of_get_named_gpio(np, "gpio-sck", pdata->map_idx);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "gpio-sck property not found\n");
 		goto error_free;
 	}
 	pdata->sck = ret;
+	dev_err(&pdev->dev, "gpio sck  %d, P%u.%d\n", ret, ret / 8,
+		ret % 8);
 
-	ret = of_get_named_gpio(np, "gpio-miso", 0);
+	ret = of_get_named_gpio(np, "gpio-miso", pdata->map_idx);
 	if (ret < 0) {
 		dev_info(&pdev->dev, "gpio-miso property not found, switching to no-rx mode\n");
 		pdata->miso = SPI_GPIO_NO_MISO;
-	} else
+	} else {
 		pdata->miso = ret;
+		dev_err(&pdev->dev, "gpio miso %d, P%u.%d\n", ret, ret / 8,
+			ret % 8);
+	}
 
-	ret = of_get_named_gpio(np, "gpio-mosi", 0);
+	ret = of_get_named_gpio(np, "gpio-mosi", pdata->map_idx);
 	if (ret < 0) {
 		dev_info(&pdev->dev, "gpio-mosi property not found, switching to no-tx mode\n");
 		pdata->mosi = SPI_GPIO_NO_MOSI;
-	} else
+	} else {
 		pdata->mosi = ret;
+		dev_err(&pdev->dev, "gpio mosi %d, P%u.%d\n", ret, ret / 8,
+			ret % 8);
+	}
 
 	ret = of_property_read_u32(np, "num-chipselects", &tmp);
 	if (ret < 0) {
@@ -407,6 +495,92 @@ static inline int spi_gpio_probe_dt(struct platform_device *pdev)
 	return 0;
 }
 #endif
+
+static struct dentry *spi_debugfs;
+#define MILLION 1000000
+
+static int spi_debugfs_do_getset_ns(unsigned long long gets,
+				    unsigned long long sets,
+				    void *data, u64 *val)
+{
+	int v = 0;
+	unsigned long long i, now;
+	struct spi_gpio *spi = data;
+
+	now = spi_get_nsecs();
+
+	for (i = 0; i < gets; i++)
+		gpio_get_value(spi->pdata.sck);
+	for (i = 0; i < sets; i++) {
+		gpio_set_value(spi->pdata.sck, v);
+		v ^= 1;
+	}
+
+	*val = spi_get_nsecs() - now;
+
+	return 0;
+}
+
+static int spi_debugfs_do_gets_sets(void *data, u64 *val)
+{
+	return spi_debugfs_do_getset_ns(spi_get_calls, spi_set_calls,
+					data, val);
+}
+
+static int spi_debugfs_do_1000000_gets(void *data, u64 *val)
+{
+	return spi_debugfs_do_getset_ns(MILLION, 0, data, val);
+}
+
+static int spi_debugfs_do_1000000_sets(void *data, u64 *val)
+{
+	return spi_debugfs_do_getset_ns(0, MILLION, data, val);
+}
+
+static int spi_debugfs_calls(void *data, u64 *val)
+{
+	*val = spi_set_calls + spi_get_calls;
+	return 0;
+}
+
+DEFINE_SIMPLE_ATTRIBUTE(fops_do_gets_sets, spi_debugfs_do_gets_sets,
+			NULL, "%llu\n");
+DEFINE_SIMPLE_ATTRIBUTE(fops_do_1000000_sets, spi_debugfs_do_1000000_sets,
+			NULL, "%llu\n");
+DEFINE_SIMPLE_ATTRIBUTE(fops_do_1000000_gets, spi_debugfs_do_1000000_gets,
+			NULL, "%llu\n");
+DEFINE_SIMPLE_ATTRIBUTE(fops_calls, spi_debugfs_calls,
+			NULL, "%llu\n");
+
+static void spi_debugfs_create(struct spi_gpio *spi_gpio)
+{
+	spi_debugfs = debugfs_create_dir("spi_gpio", NULL);
+	if (!IS_ERR_OR_NULL(spi_debugfs)) {
+		debugfs_create_file("calls",
+				    S_IRUSR | S_IRGRP | S_IROTH,
+				    spi_debugfs, NULL, &fops_calls);
+		debugfs_create_u64("set_calls",
+				   S_IRUSR | S_IRGRP | S_IROTH,
+				   spi_debugfs, &spi_set_calls);
+		debugfs_create_u64("get_calls",
+				   S_IRUSR | S_IRGRP | S_IROTH,
+				   spi_debugfs, &spi_get_calls);
+		debugfs_create_file("do_gets_sets_ns",
+				    S_IRUSR | S_IRGRP | S_IROTH,
+				    spi_debugfs, spi_gpio, &fops_do_gets_sets);
+		debugfs_create_file("do_1000000_sets_ns",
+				    S_IRUSR | S_IRGRP | S_IROTH,
+				    spi_debugfs, spi_gpio, &fops_do_1000000_sets);
+		debugfs_create_file("do_1000000_gets_ns",
+				    S_IRUSR | S_IRGRP | S_IROTH,
+				    spi_debugfs, spi_gpio, &fops_do_1000000_gets);
+	}
+}
+
+static void spi_debugfs_destroy(void)
+{
+	debugfs_remove_recursive(spi_debugfs);
+}
 
 static int spi_gpio_probe(struct platform_device *pdev)
 {
@@ -463,9 +637,20 @@ static int spi_gpio_probe(struct platform_device *pdev)
 		 * property of the node.
 		 */
 
-		for (i = 0; i < SPI_N_CHIPSEL; i++)
-			spi_gpio->cs_gpios[i] =
-				of_get_named_gpio(np, "cs-gpios", i);
+		for (i = 0; i < SPI_N_CHIPSEL; i++) {
+			int ret;
+
+			ret = of_get_named_gpio(np, "cs-gpios",
+						SPI_N_CHIPSEL * pdata->map_idx +
+							i);
+			if (ret < 0)
+				dev_err(&pdev->dev, "cs-gpios property not found\n");
+			else {
+				spi_gpio->cs_gpios[i] = ret;
+				dev_err(&pdev->dev, "gpio cs   %d, P%u.%d\n",
+					ret, ret / 8, ret % 8);
+			}
+		}
 	}
 #endif
 
@@ -496,7 +681,8 @@ gpio_free:
 			gpio_free(SPI_MOSI_GPIO);
 		gpio_free(SPI_SCK_GPIO);
 		spi_master_put(master);
-	}
+	} else
+		spi_debugfs_create(spi_gpio);
 
 	return status;
 }
@@ -506,6 +692,10 @@ static int spi_gpio_remove(struct platform_device *pdev)
 	struct spi_gpio			*spi_gpio;
 	struct spi_gpio_platform_data	*pdata;
 	int				status;
+
+	pr_err("~~~~ %s, #1, %p\n", __func__, current);
+
+	spi_debugfs_destroy();
 
 	spi_gpio = platform_get_drvdata(pdev);
 	pdata = pdev->dev.platform_data;
@@ -521,6 +711,8 @@ static int spi_gpio_remove(struct platform_device *pdev)
 	if (SPI_MOSI_GPIO != SPI_GPIO_NO_MOSI)
 		gpio_free(SPI_MOSI_GPIO);
 	gpio_free(SPI_SCK_GPIO);
+
+	pr_err("~~~~ %s, #2, %p\n", __func__, current);
 
 	return status;
 }

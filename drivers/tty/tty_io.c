@@ -103,6 +103,9 @@
 #include <linux/selection.h>
 
 #include <linux/kmod.h>
+#ifdef CONFIG_KDEBUGD
+#include <kdebugd/kdebugd.h>
+#endif
 #include <linux/nsproxy.h>
 
 #undef TTY_DEBUG_HANGUP
@@ -156,6 +159,15 @@ static void release_tty(struct tty_struct *tty, int idx);
 static void __proc_set_tty(struct task_struct *tsk, struct tty_struct *tty);
 static void proc_set_tty(struct task_struct *tsk, struct tty_struct *tty);
 
+/* VDLinux, based SELP.Mstar default patch No.15,
+ * n_tty serial input disable, SP Team 2010-01-29 */
+#ifdef CONFIG_SERIAL_INPUT_MANIPULATION
+extern struct tty_struct *INPUT_tty;
+#endif
+#ifdef CONFIG_T2D_DEBUGD
+extern struct tty_struct *T2DINPUT_tty;
+#endif
+
 /**
  *	alloc_tty_struct	-	allocate a tty object
  *
@@ -185,6 +197,20 @@ void free_tty_struct(struct tty_struct *tty)
 		return;
 	if (tty->dev)
 		put_device(tty->dev);
+#ifdef CONFIG_SERIAL_INPUT_MANIPULATION
+	if(tty == INPUT_tty) {
+#ifdef CONFIG_SERIAL_INPUT_ENABLE_HELP_MSG
+		printk(KERN_ALERT "[SERIAL INPUT MANAGE] Managed tty_struct(.name:%s) is freed !!!\n",
+			tty->name);
+#endif
+		INPUT_tty = NULL;
+	}
+#endif
+#ifdef CONFIG_T2D_DEBUGD
+	if(tty == T2DINPUT_tty) {
+		T2DINPUT_tty = NULL;
+	}
+#endif
 	kfree(tty->write_buf);
 	tty->magic = 0xDEADDEAD;
 	kfree(tty);
@@ -603,7 +629,7 @@ static int tty_signal_session_leader(struct tty_struct *tty, int exit_session)
  *		BTM
  *		  redirect lock for undoing redirection
  *		  file list lock for manipulating list of ttys
- *		  tty_ldisc_lock from called functions
+ *		  tty_ldiscs_lock from called functions
  *		  termios_mutex resetting termios data
  *		  tasklist_lock to walk task list for hangup event
  *		    ->siglock to protect ->signal/->sighand
@@ -850,7 +876,8 @@ void disassociate_ctty(int on_exit)
 			struct pid *tty_pgrp = tty_get_pgrp(tty);
 			if (tty_pgrp) {
 				kill_pgrp(tty_pgrp, SIGHUP, on_exit);
-				kill_pgrp(tty_pgrp, SIGCONT, on_exit);
+				if (!on_exit)
+					kill_pgrp(tty_pgrp, SIGCONT, on_exit);
 				put_pid(tty_pgrp);
 			}
 		}
@@ -934,6 +961,11 @@ void no_tty(void)
 void stop_tty(struct tty_struct *tty)
 {
 	unsigned long flags;
+#ifdef CONFIG_BLOCK_STOP_TTY
+	printk (KERN_ALERT "[SELP:%s:%d] stop_tty() is blocked!!\n", __FILE__, __LINE__);
+	return;
+#endif
+
 	spin_lock_irqsave(&tty->ctrl_lock, flags);
 	if (tty->stopped) {
 		spin_unlock_irqrestore(&tty->ctrl_lock, flags);
@@ -1058,6 +1090,26 @@ int tty_write_lock(struct tty_struct *tty, int ndelay)
 	return 0;
 }
 
+#ifdef CONFIG_PRINT_MSG_PID_NAME_TAG
+static inline void attach_printf_message_tag(struct tty_struct *tty)
+{
+	if (current->tgid != current->pid) {
+		char buf[TASK_COMM_LEN];
+		get_task_comm(buf, current->group_leader);
+		snprintf(tty->write_buf, PID_NAME_TAG_SIZE,
+				"[#][%d][%s][%d][%s]",
+				current->group_leader->pid,
+				buf,
+				current->pid, current->comm);
+	} else {
+		snprintf(tty->write_buf, PID_NAME_TAG_SIZE,
+				"[#][%d][%s][-]",
+				current->pid, current->comm);
+	}
+}
+
+#endif
+
 /*
  * Split writes up in sane blocksizes to avoid
  * denial-of-service type attacks
@@ -1071,6 +1123,9 @@ static inline ssize_t do_tty_write(
 {
 	ssize_t ret, written = 0;
 	unsigned int chunk;
+#ifdef CONFIG_KDEBUGD
+	int kdbg_print = 1;
+#endif
 
 	ret = tty_write_lock(tty, file->f_flags & O_NDELAY);
 	if (ret < 0)
@@ -1120,10 +1175,47 @@ static inline ssize_t do_tty_write(
 		size_t size = count;
 		if (size > chunk)
 			size = chunk;
+#ifdef CONFIG_KDEBUGD
+#ifdef CONFIG_KDEBUGD_BG
+		if (kdebugd_running && tty->index == CONFIG_SERIAL_INPUT_MANIPULATION_PORTNUM && !kdbg_mode)
+			kdbg_print = 0;
+#ifdef CONFIG_KDEBUGD_PRINT_ONOFF
+		else
+			kdbg_print = kdbg_print_enable();
+#endif
+#else /* CONFIG_KDEBUGD_BG */
+		if (kdebugd_running && tty->index == CONFIG_SERIAL_INPUT_MANIPULATION_PORTNUM)
+			kdbg_print = 0;
+#ifdef CONFIG_KDEBUGD_PRINT_ONOFF
+		else
+			kdbg_print = kdbg_print_enable();
+#endif
+#endif /* CONFIG_KDEBUGD_BG */
+		/* [Kdebugd]:Print only when task's pid matches
+		 * from kdebugd's dynamic print list */
+		if (kdbg_print) {
+			ret = -EFAULT;
+			if (copy_from_user(tty->write_buf, buf, size))
+				break;
+#ifdef CONFIG_PRINT_MSG_PID_NAME_TAG
+			if (get_pid_name_tag() && (size > PID_NAME_TAG_SIZE))
+				attach_printf_message_tag(tty);
+#endif
+			ret = write(tty, file, tty->write_buf, size);
+		} else
+			ret = size;
+
+#else
+
 		ret = -EFAULT;
 		if (copy_from_user(tty->write_buf, buf, size))
 			break;
+#ifdef CONFIG_PRINT_MSG_PID_NAME_TAG
+		if (get_pid_name_tag() && (size > PID_NAME_TAG_SIZE))
+			attach_printf_message_tag(tty);
+#endif
 		ret = write(tty, file, tty->write_buf, size);
+#endif
 		if (ret <= 0)
 			break;
 		written += ret;
@@ -1266,12 +1358,13 @@ static void pty_line_name(struct tty_driver *driver, int index, char *p)
  *
  *	Locking: None
  */
-static void tty_line_name(struct tty_driver *driver, int index, char *p)
+static ssize_t tty_line_name(struct tty_driver *driver, int index, char *p)
 {
 	if (driver->flags & TTY_DRIVER_UNNUMBERED_NODE)
-		strcpy(p, driver->name);
+		return sprintf(p, "%s", driver->name);
 	else
-		sprintf(p, "%s%d", driver->name, index + driver->name_base);
+		return sprintf(p, "%s%d", driver->name,
+			       index + driver->name_base);
 }
 
 /**
@@ -1388,8 +1481,7 @@ static int tty_reopen(struct tty_struct *tty)
 	struct tty_driver *driver = tty->driver;
 
 	if (test_bit(TTY_CLOSING, &tty->flags) ||
-			test_bit(TTY_HUPPING, &tty->flags) ||
-			test_bit(TTY_LDISC_CHANGING, &tty->flags))
+			test_bit(TTY_HUPPING, &tty->flags))
 		return -EIO;
 
 	if (driver->type == TTY_DRIVER_TYPE_PTY &&
@@ -1405,7 +1497,7 @@ static int tty_reopen(struct tty_struct *tty)
 	}
 	tty->count++;
 
-	WARN_ON(!test_bit(TTY_LDISC, &tty->flags));
+	WARN_ON(!tty->ldisc);
 
 	return 0;
 }
@@ -1618,6 +1710,8 @@ static void release_tty(struct tty_struct *tty, int idx)
 	tty_free_termios(tty);
 	tty_driver_remove_tty(tty->driver, tty);
 	tty->port->itty = NULL;
+	if (tty->link)
+		tty->link->port->itty = NULL;
 	cancel_work_sync(&tty->port->buf.work);
 
 	if (tty->link)
@@ -2199,7 +2293,7 @@ static int tty_fasync(int fd, struct file *filp, int on)
  *	FIXME: does not honour flow control ??
  *
  *	Locking:
- *		Called functions take tty_ldisc_lock
+ *		Called functions take tty_ldiscs_lock
  *		current->signal->tty check is safe without locks
  *
  *	FIXME: may race normal receive processing
@@ -3014,7 +3108,7 @@ void initialize_tty_struct(struct tty_struct *tty,
 	tty->pgrp = NULL;
 	mutex_init(&tty->legacy_mutex);
 	mutex_init(&tty->termios_mutex);
-	mutex_init(&tty->ldisc_mutex);
+	init_ldsem(&tty->ldisc_sem);
 	init_waitqueue_head(&tty->write_wait);
 	init_waitqueue_head(&tty->read_wait);
 	INIT_WORK(&tty->hangup_work, do_tty_hangup);
@@ -3535,9 +3629,19 @@ static ssize_t show_cons_active(struct device *dev,
 		if (i >= ARRAY_SIZE(cs))
 			break;
 	}
-	while (i--)
-		count += sprintf(buf + count, "%s%d%c",
-				 cs[i]->name, cs[i]->index, i ? ' ':'\n');
+	while (i--) {
+		int index = cs[i]->index;
+		struct tty_driver *drv = cs[i]->device(cs[i], &index);
+
+		/* don't resolve tty0 as some programs depend on it */
+		if (drv && (cs[i]->index > 0 || drv->major != TTY_MAJOR))
+			count += tty_line_name(drv, index, buf + count);
+		else
+			count += sprintf(buf + count, "%s%d",
+					 cs[i]->name, cs[i]->index);
+
+		count += sprintf(buf + count, "%c", i ? ' ':'\n');
+	}
 	console_unlock();
 
 	return count;

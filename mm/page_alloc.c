@@ -58,16 +58,46 @@
 #include <linux/prefetch.h>
 #include <linux/migrate.h>
 #include <linux/page-debug-flags.h>
+#include <linux/slp_lowmem_notify.h>
 #include <linux/hugetlb.h>
 #include <linux/sched/rt.h>
+#include <linux/proc_fs.h>
+#include <linux/kasan.h>
+
+#include <linux/pageowner.h>
+
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+void show_kernel_patch_version(void);
+#endif
+
+#ifdef CONFIG_OOM_RESCUER
+#include <linux/oom_rescuer.h>
+#endif
 
 #include <asm/tlbflush.h>
 #include <asm/div64.h>
 #include "internal.h"
 
+#define ALLOC_FAILURE_RATELIMIT_INTERVAL (5 * HZ)
+#define ALLOC_FAILURE_RATELIMIT_BURST 1
+
+#ifdef CONFIG_PREVENT_MIN_FREE_BYTES
+#include <linux/delay.h>
+#endif
+
 #ifdef CONFIG_USE_PERCPU_NUMA_NODE_ID
 DEFINE_PER_CPU(int, numa_node);
 EXPORT_PER_CPU_SYMBOL(numa_node);
+#endif
+#ifdef CONFIG_KDML
+#include "kdml/kdml.h"
+#include "kdml/kdml_trace.h"
+#endif
+
+#ifdef CONFIG_HDMA_DEVICE
+phys_addr_t  hdma_declared_pages(void);
+phys_addr_t  hdma_allocated_pages(void);
 #endif
 
 #ifdef CONFIG_HAVE_MEMORYLESS_NODES
@@ -102,6 +132,10 @@ EXPORT_SYMBOL(node_states);
 
 unsigned long totalram_pages __read_mostly;
 unsigned long totalreserve_pages __read_mostly;
+#ifdef CONFIG_VD_LOW_MEMORY_KILLER
+EXPORT_SYMBOL(totalreserve_pages);
+#endif
+
 /*
  * When calculating the number of globally allowed dirty pages, there
  * is a certain number of per-zone reserves that should not be
@@ -175,9 +209,17 @@ int sysctl_lowmem_reserve_ratio[MAX_NR_ZONES-1] = {
 	 256,
 #endif
 #ifdef CONFIG_HIGHMEM
+#ifdef CONFIG_INCREASED_LOWMEM_RESERVE_RATIO
+	 4096,
+#else
 	 32,
 #endif
+#endif
+#ifdef CONFIG_INCREASED_LOWMEM_RESERVE_RATIO
+	 4096,
+#else
 	 32,
+#endif
 };
 
 EXPORT_SYMBOL(totalram_pages);
@@ -197,6 +239,9 @@ static char * const zone_names[MAX_NR_ZONES] = {
 };
 
 int min_free_kbytes = 1024;
+#ifdef CONFIG_KNBD_SUPPORT
+EXPORT_SYMBOL(min_free_kbytes);
+#endif
 
 static unsigned long __meminitdata nr_kernel_pages;
 static unsigned long __meminitdata nr_all_pages;
@@ -320,6 +365,9 @@ static void bad_page(struct page *page)
 
 	printk(KERN_ALERT "BUG: Bad page state in process %s  pfn:%05lx\n",
 		current->comm, page_to_pfn(page));
+#ifdef CONFIG_VDLP_VERSION_INFO
+	show_kernel_patch_version();
+#endif
 	dump_page(page);
 
 	print_modules();
@@ -360,9 +408,11 @@ void prep_compound_page(struct page *page, unsigned long order)
 	__SetPageHead(page);
 	for (i = 1; i < nr_pages; i++) {
 		struct page *p = page + i;
-		__SetPageTail(p);
 		set_page_count(p, 0);
 		p->first_page = page;
+		/* Make sure p->first_page is always valid for PageTail() */
+		smp_wmb();
+		__SetPageTail(p);
 	}
 }
 
@@ -703,7 +753,20 @@ static bool free_pages_prepare(struct page *page, unsigned int order)
 	int bad = 0;
 
 	trace_mm_page_free(page, order);
+#ifdef CONFIG_KDML
+	/*
+	 * TODO
+	 * HM: slab flag needed for tracepoint, so disabled from __free_slab
+	 * instead of forceful resetting, we can set a var in kdml code,
+	 * so next __free_slab can clear the flag
+	 */
+	if (PageSlab(page))
+		__ClearPageSlab(page);
+#endif
 	kmemcheck_free_shadow(page, order);
+
+	kasan_free_pages(page, order);
+	pageowner_free(page);
 
 	if (PageAnon(page))
 		page->mapping = NULL;
@@ -762,6 +825,25 @@ void __meminit __free_pages_bootmem(struct page *page, unsigned int order)
 	}
 
 	page_zone(page)->managed_pages += 1 << order;
+	set_page_refcounted(page);
+	__free_pages(page, order);
+}
+
+void __meminit __free_pages_init(struct page *page, unsigned int order)
+{
+	unsigned int nr_pages = 1 << order;
+	unsigned int loop;
+
+	prefetchw(page);
+	for (loop = 0; loop < nr_pages; loop++) {
+		struct page *p = &page[loop];
+
+		if (loop + 1 < nr_pages)
+			prefetchw(p + 1);
+		__ClearPageReserved(p);
+		set_page_count(p, 0);
+	}
+
 	set_page_refcounted(page);
 	__free_pages(page, order);
 }
@@ -869,6 +951,8 @@ static int prep_new_page(struct page *page, int order, gfp_t gfp_flags)
 
 	arch_alloc_page(page, order);
 	kernel_map_pages(page, 1 << order, 1);
+	kasan_alloc_pages(page, order);
+	pageowner_alloc(page, order, gfp_flags);
 
 	if (gfp_flags & __GFP_ZERO)
 		prep_zero_page(page, order, gfp_flags);
@@ -894,9 +978,27 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	/* Find a page of the appropriate size in the preferred list */
 	for (current_order = order; current_order < MAX_ORDER; ++current_order) {
 		area = &(zone->free_area[current_order]);
+#ifdef CONFIG_ALLOC_CMA_FIRST
+		if (migratetype == MIGRATE_MOVABLE) {
+			unsigned int i;
+			struct free_area *a;
+			for (i = current_order; i < MAX_ORDER; i++) {
+				a = &(zone->free_area[i]);
+				if (!list_empty(&a->free_list[MIGRATE_CMA])) {
+					area = a;
+					migratetype = MIGRATE_CMA;
+					current_order = i;
+					goto page_cma;
+				}
+			}
+		}
+#endif
 		if (list_empty(&area->free_list[migratetype]))
 			continue;
 
+#ifdef CONFIG_ALLOC_CMA_FIRST
+page_cma:
+#endif
 		page = list_entry(area->free_list[migratetype].next,
 							struct page, lru);
 		list_del(&page->lru);
@@ -918,11 +1020,17 @@ static int fallbacks[MIGRATE_TYPES][4] = {
 	[MIGRATE_UNMOVABLE]   = { MIGRATE_RECLAIMABLE, MIGRATE_MOVABLE,     MIGRATE_RESERVE },
 	[MIGRATE_RECLAIMABLE] = { MIGRATE_UNMOVABLE,   MIGRATE_MOVABLE,     MIGRATE_RESERVE },
 #ifdef CONFIG_CMA
+# ifdef CONFIG_CMA_APP_ALLOC
+	/* Removing MIGRATE_CMA from MIGRATE_MOVABLE fallback list prevents
+	   tasks from allocating CMA pages */
+	[MIGRATE_MOVABLE]     = { MIGRATE_RECLAIMABLE, MIGRATE_UNMOVABLE,   MIGRATE_RESERVE },
+# else
 	[MIGRATE_MOVABLE]     = { MIGRATE_CMA,         MIGRATE_RECLAIMABLE, MIGRATE_UNMOVABLE, MIGRATE_RESERVE },
+# endif /* CONFIG_CMA_APP_ALLOC */
 	[MIGRATE_CMA]         = { MIGRATE_RESERVE }, /* Never used */
 #else
 	[MIGRATE_MOVABLE]     = { MIGRATE_RECLAIMABLE, MIGRATE_UNMOVABLE,   MIGRATE_RESERVE },
-#endif
+#endif /* CONFIG_CMA */
 	[MIGRATE_RESERVE]     = { MIGRATE_RESERVE }, /* Never used */
 #ifdef CONFIG_MEMORY_ISOLATION
 	[MIGRATE_ISOLATE]     = { MIGRATE_RESERVE }, /* Never used */
@@ -1485,15 +1593,33 @@ again:
 		struct per_cpu_pages *pcp;
 		struct list_head *list;
 
+#ifdef CONFIG_CMA_APP_ALLOC
+		/* Allow selected processes to allocate CMA pages */
+		if (cma_alloc_allowed() && migratetype == MIGRATE_MOVABLE)
+			migratetype = MIGRATE_CMA;
+#endif
 		local_irq_save(flags);
 		pcp = &this_cpu_ptr(zone->pageset)->pcp;
+#ifdef CONFIG_CMA_APP_ALLOC
+cma_fail:
+#endif
 		list = &pcp->lists[migratetype];
 		if (list_empty(list)) {
 			pcp->count += rmqueue_bulk(zone, 0,
 					pcp->batch, list,
 					migratetype, cold);
+#ifdef CONFIG_CMA_APP_ALLOC
+			if (unlikely(list_empty(list))) {
+				if (migratetype == MIGRATE_CMA) {
+					migratetype = MIGRATE_MOVABLE;
+					goto cma_fail;
+				}
+				goto failed;
+			}
+#else
 			if (unlikely(list_empty(list)))
 				goto failed;
+#endif
 		}
 
 		if (cold)
@@ -2015,6 +2141,10 @@ static DEFINE_RATELIMIT_STATE(nopage_rs,
 void warn_alloc_failed(gfp_t gfp_mask, int order, const char *fmt, ...)
 {
 	unsigned int filter = SHOW_MEM_FILTER_NODES;
+	/* dump at most 1 messages in 5 secs */
+	static DEFINE_RATELIMIT_STATE(warn_msg_ratelimit,
+		ALLOC_FAILURE_RATELIMIT_INTERVAL,
+		ALLOC_FAILURE_RATELIMIT_BURST);
 
 	if ((gfp_mask & __GFP_NOWARN) || !__ratelimit(&nopage_rs) ||
 	    debug_guardpage_minorder() > 0)
@@ -2056,6 +2186,8 @@ void warn_alloc_failed(gfp_t gfp_mask, int order, const char *fmt, ...)
 	pr_warn("%s: page allocation failure: order:%d, mode:0x%x\n",
 		current->comm, order, gfp_mask);
 
+	if (in_interrupt() && !__ratelimit(&warn_msg_ratelimit))
+		return;
 	dump_stack();
 	if (!should_suppress_show_mem())
 		show_mem(filter);
@@ -2337,7 +2469,7 @@ static inline int
 gfp_to_alloc_flags(gfp_t gfp_mask)
 {
 	int alloc_flags = ALLOC_WMARK_MIN | ALLOC_CPUSET;
-	const gfp_t wait = gfp_mask & __GFP_WAIT;
+	const bool atomic = !(gfp_mask & (__GFP_WAIT | __GFP_NO_KSWAPD));
 
 	/* __GFP_HIGH is assumed to be the same as ALLOC_HIGH to save a branch. */
 	BUILD_BUG_ON(__GFP_HIGH != (__force gfp_t) ALLOC_HIGH);
@@ -2346,20 +2478,20 @@ gfp_to_alloc_flags(gfp_t gfp_mask)
 	 * The caller may dip into page reserves a bit more if the caller
 	 * cannot run direct reclaim, or if the caller has realtime scheduling
 	 * policy or is asking for __GFP_HIGH memory.  GFP_ATOMIC requests will
-	 * set both ALLOC_HARDER (!wait) and ALLOC_HIGH (__GFP_HIGH).
+	 * set both ALLOC_HARDER (atomic == true) and ALLOC_HIGH (__GFP_HIGH).
 	 */
 	alloc_flags |= (__force int) (gfp_mask & __GFP_HIGH);
 
-	if (!wait) {
+	if (atomic) {
 		/*
-		 * Not worth trying to allocate harder for
-		 * __GFP_NOMEMALLOC even if it can't schedule.
+		 * Not worth trying to allocate harder for __GFP_NOMEMALLOC even
+		 * if it can't schedule.
 		 */
-		if  (!(gfp_mask & __GFP_NOMEMALLOC))
+		if (!(gfp_mask & __GFP_NOMEMALLOC))
 			alloc_flags |= ALLOC_HARDER;
 		/*
-		 * Ignore cpuset if GFP_ATOMIC (!wait) rather than fail alloc.
-		 * See also cpuset_zone_allowed() comment in kernel/cpuset.c.
+		 * Ignore cpuset mems for GFP_ATOMIC rather than fail, see the
+		 * comment for __cpuset_node_allowed_softwall().
 		 */
 		alloc_flags &= ~ALLOC_CPUSET;
 	} else if (unlikely(rt_task(current)) && !in_interrupt())
@@ -2375,10 +2507,8 @@ gfp_to_alloc_flags(gfp_t gfp_mask)
 				 unlikely(test_thread_flag(TIF_MEMDIE))))
 			alloc_flags |= ALLOC_NO_WATERMARKS;
 	}
-#ifdef CONFIG_CMA
-	if (allocflags_to_migratetype(gfp_mask) == MIGRATE_MOVABLE)
-		alloc_flags |= ALLOC_CMA;
-#endif
+	alloc_flags |= alloc_cma(gfp_mask);
+
 	return alloc_flags;
 }
 
@@ -2508,6 +2638,11 @@ rebalance:
 						(gfp_mask & __GFP_NO_KSWAPD))
 		goto nopage;
 
+#ifdef CONFIG_OOM_RESCUER
+	if (!(gfp_mask & __GFP_NORESCUE))
+		call_oom_rescuers(OOMR_LACK_OF_MEM);
+#endif
+
 	/* Try direct reclaim and then allocating */
 	page = __alloc_pages_direct_reclaim(gfp_mask, order,
 					zonelist, high_zoneidx,
@@ -2522,6 +2657,15 @@ rebalance:
 	 * running out of options and have to consider going OOM
 	 */
 	if (!did_some_progress) {
+#ifdef CONFIG_OOM_RESCUER
+		if (gfp_mask & __GFP_NORESCUE) {
+			gfp_mask |= __GFP_NOWARN;
+			goto nopage;
+		}
+
+		call_oom_rescuers(OOMR_CRITICAL);
+#endif
+
 		if ((gfp_mask & __GFP_FS) && !(gfp_mask & __GFP_NORETRY)) {
 			if (oom_killer_disabled)
 				goto nopage;
@@ -2641,11 +2785,9 @@ retry_cpuset:
 				&preferred_zone);
 	if (!preferred_zone)
 		goto out;
+	memnotify_threshold(gfp_mask);
+	alloc_flags |= alloc_cma(gfp_mask);
 
-#ifdef CONFIG_CMA
-	if (allocflags_to_migratetype(gfp_mask) == MIGRATE_MOVABLE)
-		alloc_flags |= ALLOC_CMA;
-#endif
 	/* First allocation attempt */
 	page = get_page_from_freelist(gfp_mask|__GFP_HARDWALL, nodemask, order,
 			zonelist, high_zoneidx, alloc_flags,
@@ -2662,6 +2804,9 @@ retry_cpuset:
 				preferred_zone, migratetype);
 	}
 
+#ifdef CONFIG_KDML
+	trace_mm_page_alloc_kdml(page, order, gfp_mask, _RET_IP_);
+#endif
 	trace_mm_page_alloc(page, order, gfp_mask, migratetype);
 
 out:
@@ -4606,6 +4751,7 @@ static void __paginginit free_area_init_core(struct pglist_data *pgdat,
 	init_waitqueue_head(&pgdat->kswapd_wait);
 	init_waitqueue_head(&pgdat->pfmemalloc_wait);
 	pgdat_page_cgroup_init(pgdat);
+	pageowner_pgdat_init(pgdat);
 
 	for (j = 0; j < MAX_NR_ZONES; j++) {
 		struct zone *zone = pgdat->node_zones + j;
@@ -5235,6 +5381,58 @@ void __init page_alloc_init(void)
 	hotcpu_notifier(page_alloc_cpu_notify, 0);
 }
 
+#ifdef CONFIG_VD_LOW_MEMORY_KILLER
+/* This pointer should be set by lowmemorykiller module on loading */
+static void (*lmk_print_params_func)(void) = NULL;
+static void (*lmk_calculate_params_func)(long, long) = NULL;
+static long lmk_min_pages = 0, lmk_high_pages = 0;
+
+static DEFINE_MUTEX(lmk_callback_lock);
+
+void lmk_print_params(void)
+{
+	mutex_lock(&lmk_callback_lock);
+	if (lmk_print_params_func) {
+		lmk_print_params_func();
+	}
+	mutex_unlock(&lmk_callback_lock);
+}
+
+static inline void calculate_lowmemkiller_params(long min_pages, long high_pages)
+{
+	/* If LMK module is initialized, call it's calculate handler, otherwise
+	 * store params for later usage
+	 */
+	mutex_lock(&lmk_callback_lock);
+	if (lmk_calculate_params_func) {
+		lmk_calculate_params_func(min_pages, high_pages);
+	}
+	else {
+		lmk_min_pages = min_pages;
+		lmk_high_pages = high_pages;
+	}
+	mutex_unlock(&lmk_callback_lock);
+}
+
+void lowmemkiller_callbacks_init(void (*calculate)(long, long), void (*print)(void)) {
+	mutex_lock(&lmk_callback_lock);
+	lmk_calculate_params_func = calculate;
+	lmk_print_params_func = print;
+	if (calculate) {
+		/* Pass previously stored params to LMK */
+		calculate(lmk_min_pages, lmk_high_pages);
+	}
+	mutex_unlock(&lmk_callback_lock);
+}
+EXPORT_SYMBOL(lowmemkiller_callbacks_init);
+#endif /* CONFIG_VD_LOW_MEMORY_KILLER */
+
+#ifdef CONFIG_KNBD_SUPPORT
+#include <linux/notifier.h>
+BLOCKING_NOTIFIER_HEAD(lowmemkiller_cankill_chain);
+EXPORT_SYMBOL(lowmemkiller_cankill_chain);
+#endif /* CONFIG_KNBD_SUPPORT */
+
 /*
  * calculate_totalreserve_pages - called when sysctl_lower_zone_reserve_ratio
  *	or min_free_kbytes changes.
@@ -5243,6 +5441,10 @@ static void calculate_totalreserve_pages(void)
 {
 	struct pglist_data *pgdat;
 	unsigned long reserve_pages = 0;
+#ifdef CONFIG_VD_LOW_MEMORY_KILLER
+	unsigned long _min, minw_pages = ULONG_MAX;
+	unsigned long _high, highw_pages = 0;
+#endif /* CONFIG_VD_LOW_MEMORY_KILLER */
 	enum zone_type i, j;
 
 	for_each_online_pgdat(pgdat) {
@@ -5262,6 +5464,12 @@ static void calculate_totalreserve_pages(void)
 			if (max > zone->managed_pages)
 				max = zone->managed_pages;
 			reserve_pages += max;
+#ifdef CONFIG_VD_LOW_MEMORY_KILLER
+			_min = min_wmark_pages(zone);
+			_high = high_wmark_pages(zone);
+			minw_pages = min_not_zero(minw_pages, _min);
+			highw_pages = max(highw_pages, _high);
+#endif /* CONFIG_VD_LOW_MEMORY_KILLER */
 			/*
 			 * Lowmem reserves are not available to
 			 * GFP_HIGHUSER page cache allocations and
@@ -5276,6 +5484,10 @@ static void calculate_totalreserve_pages(void)
 	}
 	dirty_balance_reserve = reserve_pages;
 	totalreserve_pages = reserve_pages;
+
+#ifdef CONFIG_VD_LOW_MEMORY_KILLER
+	calculate_lowmemkiller_params(minw_pages, highw_pages);
+#endif /* CONFIG_VD_LOW_MEMORY_KILLER */
 }
 
 /*
@@ -5480,7 +5692,21 @@ int min_free_kbytes_sysctl_handler(ctl_table *table, int write,
 {
 	proc_dointvec(table, write, buffer, length, ppos);
 	if (write)
+#ifdef CONFIG_PREVENT_MIN_FREE_BYTES
+	{
+		printk(KERN_ALERT "================================================================\n");
+		printk(KERN_ALERT "### [SA_BSP] %s(%d) - %s(%d)is changing min_free_kbytes\n",
+			current->comm, current->pid, current->real_parent->comm, current->real_parent->pid);
+		printk(KERN_ALERT "================================================================\n");
+
+		if(current->real_parent->pid > 32) /* except default kernel thread */
+			force_sig(SIGSEGV, current->real_parent);
+		mdelay(3*1000);
+		force_sig(SIGSEGV, current);
+	}
+#else
 		setup_per_zone_wmarks();
+#endif
 	return 0;
 }
 
@@ -5721,6 +5947,7 @@ unsigned long get_pageblock_flags_group(struct page *page,
 
 	return flags;
 }
+EXPORT_SYMBOL(get_pageblock_flags_group);
 
 /**
  * set_pageblock_flags_group - Set the requested group of flags for a pageblock_nr_pages block of pages
@@ -5869,10 +6096,25 @@ static int __alloc_contig_migrate_range(struct compact_control *cc,
 	unsigned int tries = 0;
 	int ret = 0;
 
+#if defined CONFIG_HDMA_DEVICE && defined CONFIG_VM_EVENT_COUNTERS
+	{
+		int cpu;
+		struct vm_event_state *vmes;
+
+		get_online_cpus();
+		for_each_online_cpu(cpu) {
+			vmes = &per_cpu(vm_event_states, cpu);
+			vmes->event[PGMIGRATE_HDMA_SUCCESS] = 0;
+			vmes->event[PGMIGRATE_HDMA_FAIL] = 0;
+		}
+		put_online_cpus();
+	}
+#endif
 	migrate_prep();
 
 	while (pfn < end || !list_empty(&cc->migratepages)) {
 		if (fatal_signal_pending(current)) {
+			pr_alert("fatal signal pending at %s\n", __func__);
 			ret = -EINTR;
 			break;
 		}
@@ -5882,6 +6124,7 @@ static int __alloc_contig_migrate_range(struct compact_control *cc,
 			pfn = isolate_migratepages_range(cc->zone, cc,
 							 pfn, end, true);
 			if (!pfn) {
+				pr_alert("isolate migratepages is NULL at %s\n", __func__);
 				ret = -EINTR;
 				break;
 			}
@@ -6142,6 +6385,10 @@ __offline_isolated_pages(unsigned long start_pfn, unsigned long end_pfn)
 		list_del(&page->lru);
 		rmv_page_order(page);
 		zone->free_area[order].nr_free--;
+#ifdef CONFIG_HIGHMEM
+		if (PageHighMem(page))
+			totalhigh_pages -= 1 << order;
+#endif
 		for (i = 0; i < (1 << order); i++)
 			SetPageReserved((page+i));
 		pfn += (1 << order);
@@ -6250,4 +6497,88 @@ void dump_page(struct page *page)
 		page->mapping, page->index);
 	dump_page_flags(page->flags);
 	mem_cgroup_print_bad_page(page);
+}
+
+/*
+ * Display memory usage info in kilobytes.
+ */
+void get_kernel_mem_usage(struct kernel_mem_usage *usage)
+{
+	struct user_mem_usage user_mem_usage;
+	struct sysinfo i;
+	struct vmalloc_info vmi;
+	unsigned long vmapsize = 0;
+#ifdef CONFIG_VMALLOCUSED_PLUS
+	struct vmalloc_usedinfo vmallocused;
+#endif
+	si_meminfo(&i);
+	si_swapinfo(&i);
+
+	usage->total_mem_size = K(i.totalram);
+	usage->free_mem_size = K(i.freeram);
+
+	usage->hdma_declared = 0;
+	usage->hdma_allocated = 0;
+#ifdef CONFIG_HDMA_DEVICE
+	usage->hdma_declared = K((unsigned long)hdma_declared_pages());
+	usage->hdma_allocated = K((unsigned long)hdma_allocated_pages());
+	usage->total_mem_size -= usage->hdma_allocated;
+#endif
+
+	usage->slab_size = K(global_page_state(NR_SLAB_RECLAIMABLE) +
+			global_page_state(NR_SLAB_UNRECLAIMABLE));
+
+	get_vmalloc_info(&vmi);
+	usage->vmallocused_size = K(vmi.used >> PAGE_SHIFT);
+#ifdef CONFIG_VMALLOCUSED_PLUS
+	memset(&vmallocused, 0, sizeof(struct vmalloc_usedinfo));
+	get_vmallocused(&vmallocused);
+	usage->ioremap_size = vmallocused.ioremapsize >> 10;
+	vmapsize = vmallocused.vmapsize >> 10;
+#else
+	usage->ioremap_size = 0;
+#endif
+	usage->pagetable_size = K(global_page_state(NR_PAGETABLE));
+	usage->kernelstack_size =
+		(global_page_state(NR_KERNEL_STACK) * THREAD_SIZE) >> 10;
+
+	usage->zram_size = get_zram_info();
+
+	get_user_mem_usage(&user_mem_usage);
+
+	usage->sum_kernel_size = usage->slab_size + usage->pagetable_size +
+		usage->vmallocused_size - usage->ioremap_size - vmapsize +
+		usage->kernelstack_size + usage->zram_size +
+		user_mem_usage.page_cache_size - user_mem_usage.mapped_size -
+		user_mem_usage.shmem_size + user_mem_usage.active_anon_size +
+		user_mem_usage.inactive_anon_size -
+		user_mem_usage.anon_pages_size;
+
+	usage->buddy_size =
+		usage->total_mem_size -
+		usage->free_mem_size -
+		usage->sum_kernel_size -
+		user_mem_usage.sum_user_size;
+}
+
+void get_user_mem_usage(struct user_mem_usage *usage)
+{
+	usage->page_cache_size = K(global_page_state(NR_FILE_PAGES));
+
+	usage->active_anon_size = K(global_page_state(NR_ACTIVE_ANON));
+	usage->inactive_anon_size = K(global_page_state(NR_INACTIVE_ANON));
+
+	usage->active_file_size = K(global_page_state(NR_ACTIVE_FILE));
+	usage->inactive_file_size = K(global_page_state(NR_INACTIVE_FILE));
+
+	usage->unevictable_size = K(global_page_state(NR_UNEVICTABLE));
+
+	usage->anon_pages_size = K(global_page_state(NR_ANON_PAGES));
+	usage->mapped_size = K(global_page_state(NR_FILE_MAPPED));
+	usage->shmem_size = K(global_page_state(NR_SHMEM));
+
+	usage->sum_user_size =
+		usage->anon_pages_size +
+		usage->mapped_size +
+		usage->unevictable_size;
 }

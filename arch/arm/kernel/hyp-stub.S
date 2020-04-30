@@ -126,22 +126,40 @@ ENTRY(__hyp_stub_install_secondary)
 	@ Now install the hypervisor stub:
 	adr	r7, __hyp_stub_vectors
 	mcr	p15, 4, r7, c12, c0, 0	@ set hypervisor vector base (HVBAR)
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 
 	@ Disable all traps, so we don't get any nasty surprise
 	mov	r7, #0
 	mcr	p15, 4, r7, c1, c1, 0	@ HCR
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 	mcr	p15, 4, r7, c1, c1, 2	@ HCPTR
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 	mcr	p15, 4, r7, c1, c1, 3	@ HSTR
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 
 THUMB(	orr	r7, #(1 << 30)	)	@ HSCTLR.TE
 #ifdef CONFIG_CPU_BIG_ENDIAN
 	orr	r7, #(1 << 9)		@ HSCTLR.EE
 #endif
 	mcr	p15, 4, r7, c1, c0, 0	@ HSCTLR
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 
 	mrc	p15, 4, r7, c1, c1, 1	@ HDCR
 	and	r7, #0x1f		@ Preserve HPMN
 	mcr	p15, 4, r7, c1, c1, 1	@ HDCR
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 
 #if !defined(ZIMAGE) && defined(CONFIG_ARM_ARCH_TIMER)
 	@ make CNTP_* and CNTPCT accessible from PL1
@@ -153,6 +171,14 @@ THUMB(	orr	r7, #(1 << 30)	)	@ HSCTLR.TE
 	mrc	p15, 4, r7, c14, c1, 0	@ CNTHCTL
 	orr	r7, r7, #3		@ PL1PCEN | PL1PCTEN
 	mcr	p15, 4, r7, c14, c1, 0	@ CNTHCTL
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
+	mov	r7, #0
+	mcrr	p15, 4, r7, r7, c14	@ CNTVOFF
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 1:
 #endif
 
@@ -163,6 +189,9 @@ __hyp_stub_do_trap:
 	cmp	r0, #-1
 	mrceq	p15, 4, r0, c12, c0, 0	@ get HVBAR
 	mcrne	p15, 4, r0, c12, c0, 0	@ set HVBAR
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 	__ERET
 ENDPROC(__hyp_stub_do_trap)
 

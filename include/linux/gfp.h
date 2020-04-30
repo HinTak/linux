@@ -35,6 +35,7 @@ struct vm_area_struct;
 #define ___GFP_NO_KSWAPD	0x400000u
 #define ___GFP_OTHER_NODE	0x800000u
 #define ___GFP_WRITE		0x1000000u
+
 /* If the above are modified, __GFP_BITS_SHIFT may need updating */
 
 /*
@@ -93,6 +94,15 @@ struct vm_area_struct;
 #define __GFP_KMEMCG	((__force gfp_t)___GFP_KMEMCG) /* Allocation comes from a memcg-accounted resource */
 #define __GFP_WRITE	((__force gfp_t)___GFP_WRITE)	/* Allocator intends to dirty page */
 
+#ifdef CONFIG_OOM_RESCUER
+
+#if defined(CONFIG_TRANSPARENT_HUGEPAGE) || defined(CONFIG_NUMA)
+#error "It is impossible to use transparent huge pages and NUMA features with OOM rescuers!"
+#endif
+
+#define __GFP_NORESCUE ((__force gfp_t)___GFP_OTHER_NODE)
+#endif
+
 /*
  * This may seem redundant, but it's a way of annotating false positives vs.
  * allocations that simply cannot be supported (e.g. page tables).
@@ -132,9 +142,16 @@ struct vm_area_struct;
 #define GFP_MOVABLE_MASK (__GFP_RECLAIMABLE|__GFP_MOVABLE)
 
 /* Control page allocator reclaim behavior */
+#ifdef CONFIG_OOM_RESCUER
+#define GFP_RECLAIM_MASK (__GFP_WAIT|__GFP_HIGH|__GFP_IO|__GFP_FS|\
+			__GFP_NOWARN|__GFP_REPEAT|__GFP_NOFAIL|\
+			__GFP_NORETRY|__GFP_MEMALLOC|__GFP_NOMEMALLOC|\
+			__GFP_NORESCUE)
+#else
 #define GFP_RECLAIM_MASK (__GFP_WAIT|__GFP_HIGH|__GFP_IO|__GFP_FS|\
 			__GFP_NOWARN|__GFP_REPEAT|__GFP_NOFAIL|\
 			__GFP_NORETRY|__GFP_MEMALLOC|__GFP_NOMEMALLOC)
+#endif
 
 /* Control slab gfp mask during early boot */
 #define GFP_BOOT_MASK (__GFP_BITS_MASK & ~(__GFP_WAIT|__GFP_IO|__GFP_FS))
@@ -362,6 +379,7 @@ void *alloc_pages_exact_nid(int nid, size_t size, gfp_t gfp_mask);
 #define __get_dma_pages(gfp_mask, order) \
 		__get_free_pages((gfp_mask) | GFP_DMA, (order))
 
+extern void __free_pages_init(struct page *page, unsigned int order);
 extern void __free_pages(struct page *page, unsigned int order);
 extern void free_pages(unsigned long addr, unsigned int order);
 extern void free_hot_cold_page(struct page *page, int cold);

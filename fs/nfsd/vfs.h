@@ -68,6 +68,10 @@ __be32		do_nfsd_create(struct svc_rqst *, struct svc_fh *,
 				u32 *verifier, bool *truncp, bool *created);
 __be32		nfsd_commit(struct svc_rqst *, struct svc_fh *,
 				loff_t, unsigned long);
+__be32
+nfsd_fat_set_open_cnt(struct svc_rqst *rqstp, struct svc_fh *fhp,
+				u32 *clnt_open_count);
+
 #endif /* CONFIG_NFSD_V3 */
 __be32		nfsd_open(struct svc_rqst *, struct svc_fh *, umode_t,
 				int, struct file **);

@@ -69,6 +69,11 @@
 
 #include "internal.h"
 
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+void show_kernel_patch_version(void);
+#endif
+
 #ifdef LAST_NID_NOT_IN_PAGE_FLAGS
 #warning Unfortunate NUMA and NUMA Balancing config, growing page-frame for last_nid.
 #endif
@@ -211,14 +216,15 @@ static int tlb_next_batch(struct mmu_gather *tlb)
  *	tear-down from @mm. The @fullmm argument is used when @mm is without
  *	users and we're going to destroy the full address space (exit/execve).
  */
-void tlb_gather_mmu(struct mmu_gather *tlb, struct mm_struct *mm, bool fullmm)
+void tlb_gather_mmu(struct mmu_gather *tlb, struct mm_struct *mm, unsigned long start, unsigned long end)
 {
 	tlb->mm = mm;
 
-	tlb->fullmm     = fullmm;
+	/* Is it from 0 to ~0? */
+	tlb->fullmm     = !(start | (end+1));
 	tlb->need_flush_all = 0;
-	tlb->start	= -1UL;
-	tlb->end	= 0;
+	tlb->start	= start;
+	tlb->end	= end;
 	tlb->need_flush = 0;
 	tlb->local.next = NULL;
 	tlb->local.nr   = 0;
@@ -258,8 +264,6 @@ void tlb_finish_mmu(struct mmu_gather *tlb, unsigned long start, unsigned long e
 {
 	struct mmu_gather_batch *batch, *next;
 
-	tlb->start = start;
-	tlb->end   = end;
 	tlb_flush_mmu(tlb);
 
 	/* keep the page table cache within bounds */
@@ -697,6 +701,9 @@ static void print_bad_pte(struct vm_area_struct *vma, unsigned long addr,
 		"BUG: Bad page map in process %s  pte:%08llx pmd:%08llx\n",
 		current->comm,
 		(long long)pte_val(pte), (long long)pmd_val(*pmd));
+#ifdef CONFIG_VDLP_VERSION_INFO
+	show_kernel_patch_version();
+#endif
 	if (page)
 		dump_page(page);
 	printk(KERN_ALERT
@@ -892,6 +899,7 @@ copy_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	if (page) {
 		get_page(page);
 		page_dup_rmap(page);
+		mupt_inc_ctr(vma, page, addr, 1);
 		if (PageAnon(page))
 			rss[MM_ANONPAGES]++;
 		else
@@ -953,6 +961,7 @@ again:
 	spin_unlock(src_ptl);
 	pte_unmap(orig_src_pte);
 	add_mm_rss_vec(dst_mm, rss);
+	inc_rss_counter(vma, rss[0] + rss[1]); /* VD_SP */
 	pte_unmap_unlock(orig_dst_pte, dst_ptl);
 	cond_resched();
 
@@ -1155,12 +1164,15 @@ again:
 					mark_page_accessed(page);
 				rss[MM_FILEPAGES]--;
 			}
+			mupt_dec_ctr(vma, page, addr, 1);
 			page_remove_rmap(page);
 			if (unlikely(page_mapcount(page) < 0))
 				print_bad_pte(vma, addr, ptent, page);
-			force_flush = !__tlb_remove_page(tlb, page);
-			if (force_flush)
+			if (unlikely(!__tlb_remove_page(tlb, page))) {
+				force_flush = 1;
+				addr += PAGE_SIZE;
 				break;
+			}
 			continue;
 		}
 		/*
@@ -1194,6 +1206,7 @@ again:
 	} while (pte++, addr += PAGE_SIZE, addr != end);
 
 	add_mm_rss_vec(mm, rss);
+	inc_rss_counter(vma, (rss[MM_FILEPAGES]+rss[MM_ANONPAGES]));      /* VD_SP */
 	arch_leave_lazy_mmu_mode();
 	pte_unmap_unlock(start_pte, ptl);
 
@@ -1203,13 +1216,23 @@ again:
 	 * and page-free while holding it.
 	 */
 	if (force_flush) {
+		unsigned long old_end;
+
 		force_flush = 0;
 
-#ifdef HAVE_GENERIC_MMU_GATHER
-		tlb->start = addr;
-		tlb->end = end;
-#endif
+		/*
+		 * Flush the TLB just for the previous segment,
+		 * then update the range to be the remaining
+		 * TLB range.
+		 */
+		old_end = tlb->end;
+		tlb->end = addr;
+
 		tlb_flush_mmu(tlb);
+
+		tlb->start = addr;
+		tlb->end = old_end;
+
 		if (addr != end)
 			goto again;
 	}
@@ -1396,7 +1419,7 @@ void zap_page_range(struct vm_area_struct *vma, unsigned long start,
 	unsigned long end = start + size;
 
 	lru_add_drain();
-	tlb_gather_mmu(&tlb, mm, 0);
+	tlb_gather_mmu(&tlb, mm, start, end);
 	update_hiwater_rss(mm);
 	mmu_notifier_invalidate_range_start(mm, start, end);
 	for ( ; vma && vma->vm_start < end; vma = vma->vm_next)
@@ -1422,7 +1445,7 @@ static void zap_page_range_single(struct vm_area_struct *vma, unsigned long addr
 	unsigned long end = address + size;
 
 	lru_add_drain();
-	tlb_gather_mmu(&tlb, mm, 0);
+	tlb_gather_mmu(&tlb, mm, address, end);
 	update_hiwater_rss(mm);
 	mmu_notifier_invalidate_range_start(mm, address, end);
 	unmap_single_vma(&tlb, vma, address, end, details);
@@ -1452,6 +1475,16 @@ int zap_vma_ptes(struct vm_area_struct *vma, unsigned long address,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(zap_vma_ptes);
+
+/*
+ * FOLL_FORCE can write to even unwritable pte's, but only
+ * after we've gone through a COW cycle and they are dirty.
+ */
+static inline bool can_follow_write_pte(pte_t pte, unsigned int flags)
+{
+	return pte_write(pte) ||
+		((flags & FOLL_FORCE) && (flags & FOLL_COW) && pte_dirty(pte));
+}
 
 /**
  * follow_page_mask - look up a page descriptor from a user-virtual address
@@ -1560,7 +1593,7 @@ split_fallthrough:
 	}
 	if ((flags & FOLL_NUMA) && pte_numa(pte))
 		goto no_page;
-	if ((flags & FOLL_WRITE) && !pte_write(pte))
+	if ((flags & FOLL_WRITE) && !can_follow_write_pte(pte, flags))
 		goto unlock;
 
 	page = vm_normal_page(vma, address, pte);
@@ -1867,7 +1900,7 @@ long __get_user_pages(struct task_struct *tsk, struct mm_struct *mm,
 				 */
 				if ((ret & VM_FAULT_WRITE) &&
 				    !(vma->vm_flags & VM_WRITE))
-					foll_flags &= ~FOLL_WRITE;
+					foll_flags |= FOLL_COW;
 
 				cond_resched();
 			}
@@ -1928,10 +1961,15 @@ int fixup_user_fault(struct task_struct *tsk, struct mm_struct *mm,
 		     unsigned long address, unsigned int fault_flags)
 {
 	struct vm_area_struct *vma;
+	vm_flags_t vm_flags;
 	int ret;
 
 	vma = find_extend_vma(mm, address);
 	if (!vma || address < vma->vm_start)
+		return -EFAULT;
+
+	vm_flags = (fault_flags & FAULT_FLAG_WRITE) ? VM_WRITE : VM_READ;
+	if (!(vm_flags & vma->vm_flags))
 		return -EFAULT;
 
 	ret = handle_mm_fault(mm, vma, address, fault_flags);
@@ -2036,7 +2074,7 @@ EXPORT_SYMBOL(get_user_pages);
  *
  * Called without mmap_sem, but after all other threads have been killed.
  */
-#ifdef CONFIG_ELF_CORE
+#if defined(CONFIG_MINIMAL_CORE) || defined(CONFIG_ELF_CORE)
 struct page *get_dump_page(unsigned long addr)
 {
 	struct vm_area_struct *vma;
@@ -2049,7 +2087,7 @@ struct page *get_dump_page(unsigned long addr)
 	flush_cache_page(vma, addr, page_to_pfn(page));
 	return page;
 }
-#endif /* CONFIG_ELF_CORE */
+#endif /* CONFIG_MINIMAL_CORE */
 
 pte_t *__get_locked_pte(struct mm_struct *mm, unsigned long addr,
 			spinlock_t **ptl)
@@ -2098,6 +2136,8 @@ static int insert_page(struct vm_area_struct *vma, unsigned long addr,
 	inc_mm_counter_fast(mm, MM_FILEPAGES);
 	page_add_file_rmap(page);
 	set_pte_at(mm, addr, pte, mk_pte(page, prot));
+	inc_rss_counter(vma, 1);
+	mupt_inc_ctr(vma, page, addr, 1);
 
 	retval = 0;
 	pte_unmap_unlock(pte, ptl);
@@ -2804,8 +2844,11 @@ gotten:
 				dec_mm_counter_fast(mm, MM_FILEPAGES);
 				inc_mm_counter_fast(mm, MM_ANONPAGES);
 			}
-		} else
+		} else {
 			inc_mm_counter_fast(mm, MM_ANONPAGES);
+			inc_rss_counter(vma,1); /* VD_SP */
+			mupt_inc_ctr(vma, new_page, address, 1);
+		}
 		flush_cache_page(vma, address, pte_pfn(orig_pte));
 		entry = mk_pte(new_page, vma->vm_page_prot);
 		entry = maybe_mkwrite(pte_mkdirty(entry), vma);
@@ -3106,6 +3149,7 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
 
 	inc_mm_counter_fast(mm, MM_ANONPAGES);
 	dec_mm_counter_fast(mm, MM_SWAPENTS);
+	inc_rss_counter(vma,1); /* VD_SP */
 	pte = mk_pte(page, vma->vm_page_prot);
 	if ((flags & FAULT_FLAG_WRITE) && reuse_swap_page(page)) {
 		pte = maybe_mkwrite(pte_mkdirty(pte), vma);
@@ -3119,6 +3163,7 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		do_page_add_anon_rmap(page, vma, address, exclusive);
 	else /* ksm created a completely new copy */
 		page_add_new_anon_rmap(page, vma, address);
+	mupt_inc_ctr(vma, page, address, 1);
 	/* It's better to call commit-charge after rmap is established */
 	mem_cgroup_commit_charge_swapin(page, ptr);
 
@@ -3254,6 +3299,8 @@ static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		goto release;
 
 	inc_mm_counter_fast(mm, MM_ANONPAGES);
+	inc_rss_counter(vma,1); /* VD_SP */
+	mupt_inc_ctr(vma, page, address, 1);
 	page_add_new_anon_rmap(page, vma, address);
 setpte:
 	set_pte_at(mm, address, page_table, entry);
@@ -3409,9 +3456,13 @@ static int __do_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 			entry = maybe_mkwrite(pte_mkdirty(entry), vma);
 		if (anon) {
 			inc_mm_counter_fast(mm, MM_ANONPAGES);
+			inc_rss_counter(vma,1); /* VD_SP */
+			mupt_inc_ctr(vma, page, address, 1);
 			page_add_new_anon_rmap(page, vma, address);
 		} else {
 			inc_mm_counter_fast(mm, MM_FILEPAGES);
+			inc_rss_counter(vma,1); /* VD_SP */
+			mupt_inc_ctr(vma, page, address, 1);
 			page_add_file_rmap(page);
 			if (flags & FAULT_FLAG_WRITE) {
 				dirty_page = page;
@@ -3516,12 +3567,12 @@ static int do_nonlinear_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 }
 
 int numa_migrate_prep(struct page *page, struct vm_area_struct *vma,
-				unsigned long addr, int current_nid)
+				unsigned long addr, int page_nid)
 {
 	get_page(page);
 
 	count_vm_numa_event(NUMA_HINT_FAULTS);
-	if (current_nid == numa_node_id())
+	if (page_nid == numa_node_id())
 		count_vm_numa_event(NUMA_HINT_FAULTS_LOCAL);
 
 	return mpol_misplaced(page, vma, addr);
@@ -3532,7 +3583,7 @@ int do_numa_page(struct mm_struct *mm, struct vm_area_struct *vma,
 {
 	struct page *page = NULL;
 	spinlock_t *ptl;
-	int current_nid = -1;
+	int page_nid = -1;
 	int target_nid;
 	bool migrated = false;
 
@@ -3562,15 +3613,10 @@ int do_numa_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		return 0;
 	}
 
-	current_nid = page_to_nid(page);
-	target_nid = numa_migrate_prep(page, vma, addr, current_nid);
+	page_nid = page_to_nid(page);
+	target_nid = numa_migrate_prep(page, vma, addr, page_nid);
 	pte_unmap_unlock(ptep, ptl);
 	if (target_nid == -1) {
-		/*
-		 * Account for the fault against the current node if it not
-		 * being replaced regardless of where the page is located.
-		 */
-		current_nid = numa_node_id();
 		put_page(page);
 		goto out;
 	}
@@ -3578,11 +3624,11 @@ int do_numa_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	/* Migrate to the requested node */
 	migrated = migrate_misplaced_page(page, target_nid);
 	if (migrated)
-		current_nid = target_nid;
+		page_nid = target_nid;
 
 out:
-	if (current_nid != -1)
-		task_numa_fault(current_nid, 1, migrated);
+	if (page_nid != -1)
+		task_numa_fault(page_nid, 1, migrated);
 	return 0;
 }
 
@@ -3597,7 +3643,6 @@ static int do_pmd_numa_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	unsigned long offset;
 	spinlock_t *ptl;
 	bool numa = false;
-	int local_nid = numa_node_id();
 
 	spin_lock(&mm->page_table_lock);
 	pmd = *pmdp;
@@ -3620,9 +3665,10 @@ static int do_pmd_numa_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	for (addr = _addr + offset; addr < _addr + PMD_SIZE; pte++, addr += PAGE_SIZE) {
 		pte_t pteval = *pte;
 		struct page *page;
-		int curr_nid = local_nid;
+		int page_nid = -1;
 		int target_nid;
-		bool migrated;
+		bool migrated = false;
+
 		if (!pte_present(pteval))
 			continue;
 		if (!pte_numa(pteval))
@@ -3644,25 +3690,19 @@ static int do_pmd_numa_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		if (unlikely(page_mapcount(page) != 1))
 			continue;
 
-		/*
-		 * Note that the NUMA fault is later accounted to either
-		 * the node that is currently running or where the page is
-		 * migrated to.
-		 */
-		curr_nid = local_nid;
-		target_nid = numa_migrate_prep(page, vma, addr,
-					       page_to_nid(page));
-		if (target_nid == -1) {
+		page_nid = page_to_nid(page);
+		target_nid = numa_migrate_prep(page, vma, addr, page_nid);
+		pte_unmap_unlock(pte, ptl);
+		if (target_nid != -1) {
+			migrated = migrate_misplaced_page(page, target_nid);
+			if (migrated)
+				page_nid = target_nid;
+		} else {
 			put_page(page);
-			continue;
 		}
 
-		/* Migrate to the requested node */
-		pte_unmap_unlock(pte, ptl);
-		migrated = migrate_misplaced_page(page, target_nid);
-		if (migrated)
-			curr_nid = target_nid;
-		task_numa_fault(curr_nid, 1, migrated);
+		if (page_nid != -1)
+			task_numa_fault(page_nid, 1, migrated);
 
 		pte = pte_offset_map_lock(mm, pmdp, addr, &ptl);
 	}
@@ -4065,6 +4105,7 @@ int generic_access_phys(struct vm_area_struct *vma, unsigned long addr,
 
 	return len;
 }
+EXPORT_SYMBOL_GPL(generic_access_phys);
 #endif
 
 /*

@@ -20,6 +20,7 @@
 #include <linux/mm.h>
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
+#include <linux/vt_kern.h>
 #include <linux/console.h>
 #include <linux/init.h>
 #include <linux/jiffies.h>
@@ -51,6 +52,11 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/printk.h>
 
+#ifdef CONFIG_SEPARATE_PRINTK_FROM_USER
+	void _sep_printk_start(void);
+	void _sep_printk_end(void);
+#endif
+
 /* printk's without a loglevel use this.. */
 #define DEFAULT_MESSAGE_LOGLEVEL CONFIG_DEFAULT_MESSAGE_LOGLEVEL
 
@@ -64,6 +70,7 @@ int console_printk[4] = {
 	MINIMUM_CONSOLE_LOGLEVEL,	/* minimum_console_loglevel */
 	DEFAULT_CONSOLE_LOGLEVEL,	/* default_console_loglevel */
 };
+EXPORT_SYMBOL(console_printk);
 
 /*
  * Low level drivers may need that to know if they can schedule in
@@ -80,12 +87,40 @@ EXPORT_SYMBOL(oops_in_progress);
 static DEFINE_SEMAPHORE(console_sem);
 struct console *console_drivers;
 EXPORT_SYMBOL_GPL(console_drivers);
+/* cpu currently holding console_sem */
+static unsigned int sem_cpu = UINT_MAX;
 
 #ifdef CONFIG_LOCKDEP
 static struct lockdep_map console_lock_dep_map = {
 	.name = "console_lock"
 };
 #endif
+
+/*
+ * Helper macros to handle lockdep when locking/unlocking console_sem. We use
+ * macros instead of functions so that _RET_IP_ contains useful information.
+ */
+#define down_console_sem() do { \
+	down(&console_sem);\
+	sem_cpu = raw_smp_processor_id();\
+	mutex_acquire(&console_lock_dep_map, 0, 0, _RET_IP_);\
+} while (0)
+
+static int __down_trylock_console_sem(unsigned long ip)
+{
+	if (down_trylock(&console_sem))
+		return 1;
+	sem_cpu = raw_smp_processor_id();
+	mutex_acquire(&console_lock_dep_map, 0, 1, ip);
+	return 0;
+}
+#define down_trylock_console_sem() __down_trylock_console_sem(_RET_IP_)
+
+#define up_console_sem() do { \
+	mutex_release(&console_lock_dep_map, 1, _RET_IP_);\
+	sem_cpu = UINT_MAX;\
+	up(&console_sem);\
+} while (0)
 
 /*
  * This is used for debugging the mess that is the VT code by
@@ -208,6 +243,9 @@ struct log {
 	u8 facility;		/* syslog facility */
 	u8 flags:5;		/* internal record flags */
 	u8 level:3;		/* syslog level */
+#ifdef CONFIG_PRINTK_CPUID
+	u16 cpuid;		/* cpu invoking the log */
+#endif
 };
 
 /*
@@ -254,9 +292,6 @@ static u32 clear_idx;
 static char __log_buf[__LOG_BUF_LEN] __aligned(LOG_ALIGN);
 static char *log_buf = __log_buf;
 static u32 log_buf_len = __LOG_BUF_LEN;
-
-/* cpu currently holding logbuf_lock */
-static volatile unsigned int logbuf_cpu = UINT_MAX;
 
 /* human readable text of the record */
 static char *log_text(const struct log *msg)
@@ -306,7 +341,8 @@ static u32 log_next(u32 idx)
 static void log_store(int facility, int level,
 		      enum log_flags flags, u64 ts_nsec,
 		      const char *dict, u16 dict_len,
-		      const char *text, u16 text_len)
+		      const char *text, u16 text_len,
+		      const u16 cpuid)
 {
 	struct log *msg;
 	u32 size, pad_len;
@@ -357,6 +393,9 @@ static void log_store(int facility, int level,
 		msg->ts_nsec = local_clock();
 	memset(log_dict(msg) + dict_len, 0, pad_len);
 	msg->len = sizeof(struct log) + text_len + dict_len + pad_len;
+#ifdef CONFIG_PRINTK_CPUID
+	msg->cpuid = cpuid;
+#endif
 
 	/* insert message */
 	log_next_idx += msg->len;
@@ -877,12 +916,51 @@ static size_t print_time(u64 ts, char *buf)
 
 	rem_nsec = do_div(ts, 1000000000);
 
-	if (!buf)
-		return snprintf(NULL, 0, "[%5lu.000000] ", (unsigned long)ts);
+#ifdef CONFIG_PRINTK_CPUID
 
-	return sprintf(buf, "[%5lu.%06lu] ",
-		       (unsigned long)ts, rem_nsec / 1000);
+	if (!buf)
+		return (size_t)snprintf(NULL, 0, "%lu.0000] ", (unsigned long)ts);
+
+	return (size_t)sprintf(buf, "%lu.%04lu] ",
+			(unsigned long)ts, ((rem_nsec / 1000)/100));
+
+#else
+
+	if (!buf)
+		return (size_t)snprintf(NULL, 0, "[%lu.0000] ", (unsigned long)ts);
+
+	return (size_t)sprintf(buf, "[%lu.%04lu] ",
+			(unsigned long)ts, ((rem_nsec / 1000)/100));
+
+#endif
 }
+
+#ifdef CONFIG_PRINTK_CPUID
+static bool printk_cpuid = 1;
+module_param_named(cpuid, printk_cpuid, bool, S_IRUGO | S_IWUSR);
+
+static size_t print_cpuid(u16 cpuid, char *buf)
+{
+
+	if (!printk_cpuid)
+		return 0;
+
+#ifdef CONFIG_PRINTK_TIME
+
+	if (!buf)
+		return (size_t)snprintf(NULL, 0, "[%d-", cpuid);
+
+	return (size_t)snprintf(buf, 6, "[%d-", cpuid);
+#else
+
+	if (!buf)
+		return (size_t)snprintf(NULL, 0, "[%d]", cpuid);
+
+	return (size_t)snprintf(buf, 7, "[%d]", cpuid);
+
+#endif
+}
+#endif
 
 static size_t print_prefix(const struct log *msg, bool syslog, char *buf)
 {
@@ -903,6 +981,9 @@ static size_t print_prefix(const struct log *msg, bool syslog, char *buf)
 		}
 	}
 
+#ifdef CONFIG_PRINTK_CPUID
+	len += print_cpuid(msg->cpuid, buf ? buf + len : NULL);
+#endif
 	len += print_time(msg->ts_nsec, buf ? buf + len : NULL);
 	return len;
 }
@@ -1261,6 +1342,78 @@ SYSCALL_DEFINE3(syslog, int, type, char __user *, buf, int, len)
 	return do_syslog(type, buf, len, SYSLOG_FROM_READER);
 }
 
+#ifdef CONFIG_SEPARATE_PRINTK_FROM_USER
+void _sep_printk_start(void)
+{
+	struct console *con;
+	struct tty_driver *tty_drv, *tty_driver;
+	int index;
+	struct tty_struct *tty = NULL;
+
+	for_each_console(con) {
+		if ((con->flags & CON_ENABLED) && con->write &&
+		    (cpu_online(raw_smp_processor_id()) ||
+		    (con->flags & CON_ANYTIME))) {
+			tty_drv = con->device(con, &index);
+			tty_driver =  tty_driver_kref_get(tty_drv);
+			if (tty_driver) {
+				if (strcmp(con->name, "tty") == 0) {
+					index = fg_console;
+					mutex_lock(&tty_mutex);
+					tty = tty_init_dev(tty_driver, index);
+					mutex_unlock(&tty_mutex);
+				}
+				else {
+					if (tty_drv->ttys[index])
+						tty = tty_drv->ttys[index];
+					else {
+						mutex_lock(&tty_mutex);
+						tty = tty_init_dev(tty_driver, index);
+						mutex_unlock(&tty_mutex);
+					}
+				}
+				tty_driver_kref_put(tty_driver);
+			}
+			if (!IS_ERR_OR_NULL(tty)) {
+				tty->hw_stopped = 1;
+				/* tty_drv->stop(tty_drv->ttys[index]); */
+			}
+		}
+	}
+}
+
+void _sep_printk_end(void)
+{
+	struct console *con;
+	struct tty_driver *tty_drv, *tty_driver;
+	int index;
+	struct tty_struct *tty = NULL;
+
+	for_each_console(con) {
+		if ((con->flags & CON_ENABLED) && con->write &&
+		    (cpu_online(raw_smp_processor_id()) ||
+		    (con->flags & CON_ANYTIME))) {
+			tty_drv = con->device(con, &index);
+			tty_driver = tty_driver_kref_get(tty_drv);
+			if (tty_driver) {
+				if (strcmp(con->name, "tty") == 0)
+					index = fg_console;
+					tty = tty_drv->ttys[index];
+					tty->hw_stopped = 0;
+					/* tty_drv->start(tty_drv->ttys[index]); */
+					tty_driver_kref_put(tty_driver);
+					tty_wakeup(tty);
+			}
+		}
+	}
+}
+#endif
+
+#ifdef CONFIG_PRETTY_SHELL
+/* TTY pretty mode, defined in n_tty.c */
+extern unsigned char tty_pretty_mode;
+#endif
+
 /*
  * Call the console drivers, asking them to write out
  * log_buf[start] to log_buf[end - 1].
@@ -1272,6 +1425,12 @@ static void call_console_drivers(int level, const char *text, size_t len)
 
 	trace_console(text, len);
 
+#ifdef CONFIG_PRETTY_SHELL
+	/* In case of pretty mode we do not want
+	   to see even printk in our serial */
+	if (unlikely(tty_pretty_mode > 1))
+		return;
+#endif
 	if (level >= console_loglevel && !ignore_loglevel)
 		return;
 	if (!console_drivers)
@@ -1291,6 +1450,17 @@ static void call_console_drivers(int level, const char *text, size_t len)
 	}
 }
 
+static inline void __zap_locks(void)
+{
+	debug_locks_off();
+	/* If a crash is occurring, make sure we can't deadlock */
+	raw_spin_lock_init(&logbuf_lock);
+	/* And make sure that we print immediately */
+	sema_init(&console_sem, 1);
+	console_locked = 0;
+	sem_cpu = UINT_MAX;
+}
+
 /*
  * Zap console related locks when oopsing. Only zap at most once
  * every 10 seconds, to leave time for slow consoles to print a
@@ -1305,15 +1475,42 @@ static void zap_locks(void)
 		return;
 
 	oops_timestamp = jiffies;
-
-	debug_locks_off();
-	/* If a crash is occurring, make sure we can't deadlock */
-	raw_spin_lock_init(&logbuf_lock);
-	/* And make sure that we print immediately */
-	sema_init(&console_sem, 1);
+	__zap_locks();
 }
 
-/* Check if we have any console registered that can be called early in boot. */
+/*
+ * Zap console locks if we hit panic() inside of console_sem section.
+ */
+void console_panic_zap_locks( unsigned int this_cpu)
+{
+	/* foolproof, we want that function to be executed from
+	 * ipi_cpu_stop() (or similar) only. we can't rely on
+	 * `oops_in_progress' because ipi_cpu_stop() may call us
+	 * too late, after bust_spinlocks(0) on panicking CPU. */
+	if (!in_irq())
+		return;
+
+	if (sem_cpu == UINT_MAX && is_console_locked())
+		sem_cpu = this_cpu; /* force zap_locks() */
+
+	if (unlikely(sem_cpu == this_cpu)) {
+		/* console driver may gone crazy and every
+		 * zap_lock()->printk() will push it even further.
+		 * can't help here, just let it flow. we also don't
+		 * take care of any locks being held within the
+		 * driver, though we probably might be doing something
+		 * like
+		 * 	for_each_console(con)
+		 * 		con->reset(con);
+		 * to reset `con' locks */
+		__zap_locks();
+	}
+}
+
+/*
+ * Check if we have any console that is capable of printing while cpu is
+ * booting or shutting down. Requires console_sem.
+ */
 static int have_callable_console(void)
 {
 	struct console *con;
@@ -1328,10 +1525,9 @@ static int have_callable_console(void)
 /*
  * Can we actually use the console at this time on this cpu?
  *
- * Console drivers may assume that per-cpu resources have
- * been allocated. So unless they're explicitly marked as
- * being able to cope (CON_ANYTIME) don't call them until
- * this CPU is officially up.
+ * Console drivers may assume that per-cpu resources have been allocated. So
+ * unless they're explicitly marked as being able to cope (CON_ANYTIME) don't
+ * call them until this CPU is officially up.
  */
 static inline int can_use_console(unsigned int cpu)
 {
@@ -1343,36 +1539,24 @@ static inline int can_use_console(unsigned int cpu)
  * messages from a 'printk'. Return true (and with the
  * console_lock held, and 'console_locked' set) if it
  * is successful, false otherwise.
- *
- * This gets called with the 'logbuf_lock' spinlock held and
- * interrupts disabled. It should return with 'lockbuf_lock'
- * released but interrupts still disabled.
  */
-static int console_trylock_for_printk(unsigned int cpu)
-	__releases(&logbuf_lock)
+static int console_trylock_for_printk(void)
 {
-	int retval = 0, wake = 0;
+	unsigned int cpu = smp_processor_id();
 
-	if (console_trylock()) {
-		retval = 1;
-
-		/*
-		 * If we can't use the console, we need to release
-		 * the console semaphore by hand to avoid flushing
-		 * the buffer. We need to hold the console semaphore
-		 * in order to do this test safely.
-		 */
-		if (!can_use_console(cpu)) {
-			console_locked = 0;
-			wake = 1;
-			retval = 0;
-		}
+	if (!console_trylock())
+		return 0;
+	/*
+	 * If we can't use the console, we need to release the console
+	 * semaphore by hand to avoid flushing the buffer. We need to hold the
+	 * console semaphore in order to do this test safely.
+	 */
+	if (!can_use_console(cpu)) {
+		console_locked = 0;
+		up_console_sem();
+		return 0;
 	}
-	logbuf_cpu = UINT_MAX;
-	if (wake)
-		up(&console_sem);
-	raw_spin_unlock(&logbuf_lock);
-	return retval;
+	return 1;
 }
 
 int printk_delay_msec __read_mostly;
@@ -1403,6 +1587,7 @@ static struct cont {
 	u64 ts_nsec;			/* time of first print */
 	u8 level;			/* log level of first message */
 	u8 facility;			/* log level of first message */
+	u16 cpuid;			/* cpu invoking the logging request */
 	enum log_flags flags;		/* prefix, newline flags */
 	bool flushed:1;			/* buffer sealed and committed */
 } cont;
@@ -1421,7 +1606,8 @@ static void cont_flush(enum log_flags flags)
 		 * line. LOG_NOCONS suppresses a duplicated output.
 		 */
 		log_store(cont.facility, cont.level, flags | LOG_NOCONS,
-			  cont.ts_nsec, NULL, 0, cont.buf, cont.len);
+			  cont.ts_nsec, NULL, 0, cont.buf, cont.len,
+			  cont.cpuid);
 		cont.flags = flags;
 		cont.flushed = true;
 	} else {
@@ -1430,12 +1616,14 @@ static void cont_flush(enum log_flags flags)
 		 * just submit it to the store and free the buffer.
 		 */
 		log_store(cont.facility, cont.level, flags, 0,
-			  NULL, 0, cont.buf, cont.len);
+			  NULL, 0, cont.buf, cont.len,
+			  cont.cpuid);
 		cont.len = 0;
 	}
 }
 
-static bool cont_add(int facility, int level, const char *text, size_t len)
+static bool cont_add(int facility, int level, const char *text, size_t len,
+			const u16 cpuid)
 {
 	if (cont.len && cont.flushed)
 		return false;
@@ -1458,6 +1646,7 @@ static bool cont_add(int facility, int level, const char *text, size_t len)
 
 	memcpy(cont.buf + cont.len, text, len);
 	cont.len += len;
+	cont.cpuid = cpuid;
 
 	if (cont.len > (sizeof(cont.buf) * 80) / 100)
 		cont_flush(LOG_CONT);
@@ -1471,7 +1660,10 @@ static size_t cont_print_text(char *text, size_t size)
 	size_t len;
 
 	if (cont.cons == 0 && (console_prev & LOG_NEWLINE)) {
-		textlen += print_time(cont.ts_nsec, text);
+#ifdef CONFIG_PRINTK_CPUID
+		textlen += print_cpuid(cont.cpuid, text);
+#endif
+		textlen += print_time(cont.ts_nsec, text + textlen);
 		size -= textlen;
 	}
 
@@ -1505,6 +1697,9 @@ asmlinkage int vprintk_emit(int facility, int level,
 	unsigned long flags;
 	int this_cpu;
 	int printed_len = 0;
+	/* cpu currently holding logbuf_lock in this function */
+	static volatile unsigned int logbuf_cpu = UINT_MAX;
+
 
 	boot_delay_msec(level);
 	printk_delay();
@@ -1526,7 +1721,8 @@ asmlinkage int vprintk_emit(int facility, int level,
 		 */
 		if (!oops_in_progress && !lockdep_recursing(current)) {
 			recursion_bug = 1;
-			goto out_restore_irqs;
+			local_irq_restore(flags);
+			return 0;
 		}
 		zap_locks();
 	}
@@ -1543,7 +1739,7 @@ asmlinkage int vprintk_emit(int facility, int level,
 		printed_len += strlen(recursion_msg);
 		/* emit KERN_CRIT message */
 		log_store(0, 2, LOG_PREFIX|LOG_NEWLINE, 0,
-			  NULL, 0, recursion_msg, printed_len);
+			  NULL, 0, recursion_msg, printed_len, this_cpu);
 	}
 
 	/*
@@ -1593,9 +1789,9 @@ asmlinkage int vprintk_emit(int facility, int level,
 			cont_flush(LOG_NEWLINE);
 
 		/* buffer line if possible, otherwise store it right away */
-		if (!cont_add(facility, level, text, text_len))
+		if (!cont_add(facility, level, text, text_len, this_cpu))
 			log_store(facility, level, lflags | LOG_CONT, 0,
-				  dict, dictlen, text, text_len);
+				  dict, dictlen, text, text_len, this_cpu);
 	} else {
 		bool stored = false;
 
@@ -1607,31 +1803,47 @@ asmlinkage int vprintk_emit(int facility, int level,
 		 */
 		if (cont.len && cont.owner == current) {
 			if (!(lflags & LOG_PREFIX))
-				stored = cont_add(facility, level, text, text_len);
+				stored = cont_add(facility, level, text, text_len,
+						this_cpu);
 			cont_flush(LOG_NEWLINE);
 		}
 
 		if (!stored)
 			log_store(facility, level, lflags, 0,
-				  dict, dictlen, text, text_len);
+				  dict, dictlen, text, text_len,
+				  this_cpu);
 	}
 	printed_len += text_len;
 
+#ifdef CONFIG_DTVLOGD
+	/*
+	 * Write printk messages to dlog buffer,
+	 * we skip the printk levels, include newline too.
+	 */
+	if (lflags & LOG_NEWLINE)
+		text_len++;
+
+	do_dtvlog(3, text, text_len);
+#endif
+
+	logbuf_cpu = UINT_MAX;
+	raw_spin_unlock(&logbuf_lock);
+	local_irq_restore(flags);
+	/*
+	 * Disable preemption to avoid being preempted while holding
+	 * console_sem which would prevent anyone from printing to
+	 * console
+	 */
+	preempt_disable();
 	/*
 	 * Try to acquire and then immediately release the console semaphore.
 	 * The release will print out buffers and wake up /dev/kmsg and syslog()
 	 * users.
-	 *
-	 * The console_trylock_for_printk() function will release 'logbuf_lock'
-	 * regardless of whether it actually gets the console semaphore or not.
 	 */
-	if (console_trylock_for_printk(this_cpu))
+	if (console_trylock_for_printk())
 		console_unlock();
-
+	preempt_enable();
 	lockdep_on();
-out_restore_irqs:
-	local_irq_restore(flags);
-
 	return printed_len;
 }
 EXPORT_SYMBOL(vprintk_emit);
@@ -1898,14 +2110,14 @@ void suspend_console(void)
 	printk("Suspending console(s) (use no_console_suspend to debug)\n");
 	console_lock();
 	console_suspended = 1;
-	up(&console_sem);
+	up_console_sem();
 }
 
 void resume_console(void)
 {
 	if (!console_suspend_enabled)
 		return;
-	down(&console_sem);
+	down_console_sem();
 	console_suspended = 0;
 	console_unlock();
 }
@@ -1947,12 +2159,11 @@ void console_lock(void)
 {
 	might_sleep();
 
-	down(&console_sem);
+	down_console_sem();
 	if (console_suspended)
 		return;
 	console_locked = 1;
 	console_may_schedule = 1;
-	mutex_acquire(&console_lock_dep_map, 0, 0, _RET_IP_);
 }
 EXPORT_SYMBOL(console_lock);
 
@@ -1966,15 +2177,15 @@ EXPORT_SYMBOL(console_lock);
  */
 int console_trylock(void)
 {
-	if (down_trylock(&console_sem))
+	if (down_trylock_console_sem())
 		return 0;
+
 	if (console_suspended) {
-		up(&console_sem);
+		up_console_sem();
 		return 0;
 	}
 	console_locked = 1;
 	console_may_schedule = 0;
-	mutex_acquire(&console_lock_dep_map, 0, 1, _RET_IP_);
 	return 1;
 }
 EXPORT_SYMBOL(console_trylock);
@@ -2036,7 +2247,7 @@ void console_unlock(void)
 	bool retry;
 
 	if (console_suspended) {
-		up(&console_sem);
+		up_console_sem();
 		return;
 	}
 
@@ -2098,7 +2309,6 @@ skip:
 		local_irq_restore(flags);
 	}
 	console_locked = 0;
-	mutex_release(&console_lock_dep_map, 1, _RET_IP_);
 
 	/* Release the exclusive_console once it is used */
 	if (unlikely(exclusive_console))
@@ -2106,7 +2316,7 @@ skip:
 
 	raw_spin_unlock(&logbuf_lock);
 
-	up(&console_sem);
+	up_console_sem();
 
 	/*
 	 * Someone could have filled up the buffer again, so re-check if there's
@@ -2151,7 +2361,7 @@ void console_unblank(void)
 	 * oops_in_progress is set to 1..
 	 */
 	if (oops_in_progress) {
-		if (down_trylock(&console_sem) != 0)
+		if (down_trylock_console_sem() != 0)
 			return;
 	} else
 		console_lock();
@@ -2485,7 +2695,7 @@ void wake_up_klogd(void)
 	preempt_enable();
 }
 
-int printk_sched(const char *fmt, ...)
+int printk_deferred(const char *fmt, ...)
 {
 	unsigned long flags;
 	va_list args;
@@ -2920,5 +3130,438 @@ void show_regs_print_info(const char *log_lvl)
 	       log_lvl, current, current_thread_info(),
 	       task_thread_info(current));
 }
+
+
+
+#ifdef CONFIG_EMRG_SAVE_KLOG
+#include <linux/crc32.h>
+#include <linux/proc_fs.h>
+#include <linux/vdlp_version.h>
+
+#define WRITE_RAW_KLOG_HEAD_SIZE 512
+#define WRITE_RAW_KLOG_MAGIC (*(u32 *) "Dmsg")
+#define WRITE_RAW_KLOG_VERSION 4
+
+int kdump_part=0;
+static char dump_part[20];
+
+struct emrg_klog_params {
+	sector_t part_abs_offset;
+	void *buf;
+	int buf_len;
+	struct mmc_host *mmc_host;
+	u32 crc;
+};
+static struct emrg_klog_params emrg_klog_params;
+static atomic_t is_klog_dumped;
+
+struct write_raw_klog_head {
+	__u32 magic;
+	__u16 version;
+
+	/* struct log is not aligned, so there is no guarantees of matching
+	 * in-memory representation between kernel and userspace app
+	 * Lets save offsets to fields we need in the userspace
+	 */
+	__u8 offset_ts_nsec;
+	__u8 offset_len;
+	__u8 offset_text_len;
+	__u8 offset_cpuid;
+	__u8 offset_text;
+	__u8 pad;
+
+	__u32 crc;
+	__u32 len;
+	__u32 first_idx;
+	__u32 next_idx;
+	__u32 start_offset;
+	__u32 pc;
+	__u32 lr;
+	__u32 tv_sec;
+	__u32 tv_nsec;
+	__u32 klog_buf_crc;
+
+	/* dtvlogd */
+	__u32 dtvlogd_start;
+	__u32 dtvlogd_len;
+	__u32 dtvlogd_buf_crc;
+
+	/* strings */
+	char kern_ver[16];
+	char module_pc[32];
+	char module_lr[32];
+
+	__u32 type;
+};
+
+void get_module_name(unsigned long addr, char *buf, int buf_len)
+{
+	struct module *mod = __module_address(addr);
+
+	/* mod->name do not have to have termination null byte. All bytes
+	 * might be a string. Userspace should handle this correctly */
+	if (mod)
+		strncpy(buf, mod->name, buf_len);
+	else
+		strncpy(buf, "NA", buf_len);
+}
+
+static void fill_raw_klog_head(
+		struct write_raw_klog_head *head, u32 buf_len,
+		u32 first, u32 next, struct pt_regs *regs, __u32 klog_buf_crc,
+		u32 dtvlogd_len, u32 dtvlogd_start, u32 dtvlogd_crc, u32 type)
+{
+	struct timespec fault_time;
+	int ver_len = min_t(int, sizeof(DTV_KERNEL_VERSION),
+			sizeof(head->kern_ver));
+
+	memset(head, 0, WRITE_RAW_KLOG_HEAD_SIZE);
+	head->magic = WRITE_RAW_KLOG_MAGIC;
+	head->version = WRITE_RAW_KLOG_VERSION;
+	head->len = buf_len;
+	head->first_idx = first;
+	head->next_idx = next;
+	head->start_offset = WRITE_RAW_KLOG_HEAD_SIZE;
+	head->type = type;
+	if (regs) {
+		head->pc = regs->ARM_pc;
+		head->lr = regs->ARM_lr;
+	} else {
+		head->pc = 0x11111111;
+		head->lr = 0x22222222;
+	}
+
+	get_module_name(regs ? regs->ARM_pc : 0, head->module_pc,
+			sizeof(head->module_pc));
+	get_module_name(regs ? regs->ARM_lr : 0, head->module_lr,
+			sizeof(head->module_lr));
+
+	do_posix_clock_monotonic_gettime(&fault_time);
+	monotonic_to_bootbased(&fault_time);
+	head->tv_sec = fault_time.tv_sec;
+	head->tv_nsec = fault_time.tv_nsec;
+	head->klog_buf_crc = klog_buf_crc;
+
+	memcpy(head->kern_ver, DTV_KERNEL_VERSION, ver_len);
+
+	/* See the comment at the structure definition */
+	head->offset_ts_nsec	= offsetof(struct log, ts_nsec);
+	head->offset_len	= offsetof(struct log, len);
+	head->offset_text_len	= offsetof(struct log, text_len);
+#ifdef CONFIG_PRINTK_CPUID
+	head->offset_cpuid	= offsetof(struct log, cpuid);
+#endif
+	head->offset_text	= sizeof(struct log);
+
+	/* dtvlogd stuff */
+	head->dtvlogd_start = dtvlogd_start;
+	head->dtvlogd_len = dtvlogd_len;
+	head->dtvlogd_buf_crc = dtvlogd_crc;
+
+	head->crc = crc32(0, (void *) head, WRITE_RAW_KLOG_HEAD_SIZE);
+}
+
+#ifdef CONFIG_PLAT_NOVATEK
+int nvt_mmc_rw_request(struct mmc_host *host, u32 blk_addr,
+                           u32 blk_count, u8 *buf, bool is_write);
+#else
+int sdp_mmch_polling_request(void *host, u32 blk_addr,
+                             u32 blk_count, u8 *buf, bool is_write);
+#endif
+
+static int write_emrg_klog_data(void *data, int sectors_n, int offset)
+{
+#ifdef CONFIG_PLAT_NOVATEK
+	return nvt_mmc_rw_request(emrg_klog_params.mmc_host,
+			emrg_klog_params.part_abs_offset + offset,
+			sectors_n, data, true);
+#else
+	return sdp_mmch_polling_request(emrg_klog_params.mmc_host,
+			emrg_klog_params.part_abs_offset + offset,
+			sectors_n, data, true);
+#endif
+}
+
+#if (defined(CONFIG_DTVLOGD) && defined(CONFIG_BINFMT_ELF_COMP))
+/* Quite creepy and paranoid. But I'm afraid some day dtvlogd might be changed
+ * without concerning this code
+ *
+ * Returns number of copied bytes. In case of error - 0
+ */
+int copy_dtvlogd_buffer(char *buf, int buf_len)
+{
+	int ret, ret_len = 0;
+	char *buf1, *buf2;
+	int len1, len2;
+
+	if (buf_len < get_dtvlogd_max_length()) {
+		pr_err("Can not write emrg dtvlog, because system buffer "
+				"is bigger then preallocated emrg buffer\n");
+		return 0;
+	}
+
+	dtvlogd_write_stop();
+	ret = acquire_dtvlogd_all_buffer(&buf1, &len1, &buf2, &len2);
+	if (ret) {
+		pr_err("Can not write emrg dtvlog: fail to acquire\n");
+		goto exit;
+	}
+
+	if (len1 + len2 > buf_len) {
+		pr_err("Can not write emrg dtvlog: acquire_dtvlogd_all_buffer "
+				"returned wrong lenght\n");
+		goto exit;
+	} else
+		ret_len = len1 + len2;
+
+	if (len1)
+		memcpy(buf, buf1, len1);
+
+	if (len2)
+		memcpy(buf + len1, buf2, len2);
+
+exit:
+	dtvlogd_write_start();
+	/* Check if dtvlogd have enabled interrupts */
+	WARN_ON(!irqs_disabled());
+	return ret_len;
+}
+
+#else
+	#define copy_dtvlogd_buffer(buf, buf_len) 0
+#endif
+
+void write_emrg_klog(struct pt_regs *regs, u32 type)
+{
+	u32 first, next;
+	int ret;
+	int sectors_to_write;
+	unsigned long flags;
+	__u32 klog_buf_crc, dtvlogd_crc = 0, dtvlogd_start = 0;
+	int dtvlogd_len;
+
+	if (atomic_cmpxchg(&is_klog_dumped, 0, 1)) {
+		/* Already dumped */
+		return;
+	}
+
+	if (!emrg_klog_params.buf) {
+		pr_err("Can not write ermg klog, because emrg buffer "
+				"has not been preallocated\n");
+		return;
+	}
+
+	if (emrg_klog_params.crc != crc32(0, (void *) &emrg_klog_params,
+			offsetof(struct emrg_klog_params, crc))) {
+		pr_err("Can not write emrg klog, because of corruption of the "
+				"control structure\n");
+		return;
+	}
+
+	if (emrg_klog_params.buf_len < log_buf_len) {
+		/* Double check. See comment in the init_emrg_klog_save */
+		pr_err("Can not write emrg klog, because log_buffer is bigger "
+				"then preallocated emrg buffer\n");
+		return;
+	}
+	/* Freeze current status of the log buffer */
+	raw_spin_lock_irqsave(&logbuf_lock, flags);
+	memcpy(emrg_klog_params.buf, log_buf, log_buf_len);
+	next = log_next_idx;
+	first = log_first_idx;
+	raw_spin_unlock_irqrestore(&logbuf_lock, flags);
+
+	/* Write the log buffer itself */
+	/* No round_up here, because log_buf_len has to be pow_of_2 value */
+	sectors_to_write = log_buf_len >> 9;
+	ret = write_emrg_klog_data(emrg_klog_params.buf, sectors_to_write, 1);
+	if (ret) {
+		pr_err("can not write emrg klog data\n");
+		return;
+	}
+
+	klog_buf_crc = crc32(0, emrg_klog_params.buf, log_buf_len);
+
+	/* Since preallocated buffer already written, and no more needed
+	 * it can be reused for other purposes*/
+#if (defined(CONFIG_DTVLOGD) && defined(CONFIG_BINFMT_ELF_COMP))
+	dtvlogd_len = copy_dtvlogd_buffer(emrg_klog_params.buf,
+			emrg_klog_params.buf_len);
+	if (dtvlogd_len && IS_ENABLED(CONFIG_DTVLOGD)) {
+		dtvlogd_start = (sectors_to_write << 9)  +
+			WRITE_RAW_KLOG_HEAD_SIZE;
+		dtvlogd_crc = crc32(0, emrg_klog_params.buf, dtvlogd_len);
+		sectors_to_write = (dtvlogd_len + 511) >> 9;
+		ret = write_emrg_klog_data(emrg_klog_params.buf,
+				sectors_to_write, dtvlogd_start >> 9);
+		if (ret) {
+			pr_err("can not write emrg dtvlogd data\n");
+			/* Consider dtvlog as not written */
+			dtvlogd_start = 0;
+			dtvlogd_crc = 0;
+		}
+	}
+#endif
+
+	fill_raw_klog_head(emrg_klog_params.buf, log_buf_len, first, next, regs,
+			klog_buf_crc, dtvlogd_len, dtvlogd_start, dtvlogd_crc, type);
+
+	/* And write the header */
+	ret = write_emrg_klog_data(emrg_klog_params.buf,
+			WRITE_RAW_KLOG_HEAD_SIZE >> 9, 0);
+	if (ret) {
+		pr_err("can not write emrg klog data\n");
+		return;
+	}
+}
+
+static int emrg_klog_proc_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "%s\n", dump_part);
+	return 0;
+}
+
+static int ermg_klog_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, emrg_klog_proc_show, NULL);
+}
+
+static const struct file_operations emrg_klog_proc_fops = {
+	.open		= ermg_klog_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+static int save_emrg_log_event(struct notifier_block *self,
+			    unsigned long val,
+			    void *data)
+{
+	write_emrg_klog(NULL, WRITE_RAW_KLOG_TYPE_PANIC);
+	dump_stack();
+
+	return 0;
+}
+
+static struct notifier_block emrg_save_log_notifier = {
+	.notifier_call	= save_emrg_log_event,
+	.priority	= INT_MAX,
+};
+
+void setup_dump_partition(void)
+{
+	if(kdump_part)
+	{
+		snprintf(dump_part, 20, "/dev/mmcblk0p%d", kdump_part);
+#ifndef CONFIG_VD_RELEASE
+		printk("[EMERG]emrg dump part is %s as KDUMP=xxx\n", dump_part);
+#endif
+	}
+	else
+	{
+		snprintf(dump_part, 20, "/dev/mmcblk0p%d", CONFIG_EMRG_SAVE_KLOG_PARTITION_N);
+#ifndef CONFIG_VD_RELEASE
+		printk("[EMERG]emrg dump part is %s as kernel config\n", dump_part);
+#endif
+	}
+}
+
+#include <linux/mount.h>
+void *get_queue_host(struct block_device *bdev);
+sector_t get_bdev_mmc_offset(struct block_device *bdev);
+__init void init_emrg_klog_save(void)
+{
+	struct block_device *bdev;
+	fmode_t mode = FMODE_WRITE;
+	loff_t bdev_size, needed_space;
+	u32 dtvlogd_len = 0;
+#if (defined(CONFIG_DTVLOGD) && defined(CONFIG_BINFMT_ELF_COMP))
+	dtvlogd_len = get_dtvlogd_max_length();
+#endif
+
+	setup_dump_partition();
+
+	/* Check the layout.
+	 * Header has to have a size multiple to 4 bytes.
+	 * This makes us sure all members of the structure are on the aligned
+	 * positions. If you modifying struct write_raw_klog_head, please
+	 * modify the multiplier in the BUILD_BUG_ON
+	 */
+	BUILD_BUG_ON(sizeof(struct write_raw_klog_head) != 37*4);
+	BUILD_BUG_ON(sizeof(struct write_raw_klog_head) >
+			WRITE_RAW_KLOG_HEAD_SIZE);
+
+	if (!IS_ALIGNED(log_buf_len, 512) || !IS_ALIGNED(dtvlogd_len, 512)) {
+		pr_err("System message buffur is not aligned\n");
+		return;
+	}
+
+	bdev = blkdev_get_by_path(dump_part, mode,
+			init_emrg_klog_save);
+	if (IS_ERR_OR_NULL(bdev)) {
+		pr_err("Unable to open block device to write klog: %s\n",
+				dump_part);
+		return;
+	}
+
+	emrg_klog_params.part_abs_offset = get_bdev_mmc_offset(bdev);
+	emrg_klog_params.mmc_host = get_queue_host((bdev));
+
+	/* Check if we are fit into specified partition */
+	bdev_size = i_size_read(bdev->bd_inode);
+	needed_space = WRITE_RAW_KLOG_HEAD_SIZE + log_buf_len + dtvlogd_len;
+
+	BUG_ON(needed_space >= INT_MAX);
+
+	if (bdev_size < needed_space) {
+		pr_err("Block device %s is to small for saving emrg klog: "
+				"need %lld have %lld\n", dump_part,
+				needed_space, bdev_size);
+		goto exit;
+	}
+
+	/* Just double check. Currently, it is impossible that log_buf_len or
+	 * dtvlogd_len going to be changed after boot. Just protection in case
+	 * of future modifications */
+	emrg_klog_params.buf_len = max(log_buf_len, dtvlogd_len);
+
+	emrg_klog_params.buf = kmalloc(emrg_klog_params.buf_len, GFP_KERNEL);
+	if (!emrg_klog_params.buf) {
+		pr_err("Unable to allocate buffer for emrg save klog"
+				" - feature disabled\n");
+		/* Even though allocation failed, we are still going ahead
+		 * Because the feature is not critical for system work
+		 * */
+		goto exit;
+	}
+
+	emrg_klog_params.crc = crc32(0, (void *) &emrg_klog_params,
+			offsetof(struct emrg_klog_params, crc));
+
+	/* part_abs_offset is to critical to be corrupted.
+	 * Paranoid check, if value got corrupted before we calculated the crc
+	 */
+	if (emrg_klog_params.part_abs_offset != get_bdev_mmc_offset(bdev)) {
+		pr_err("Memory corruption while init the \"save emrg klog\"\n");
+		kfree(emrg_klog_params.buf);
+		memset(&emrg_klog_params, 0, sizeof(emrg_klog_params));
+		goto exit;
+	}
+
+	if (!proc_create("emrg_log_partition", 0, NULL, &emrg_klog_proc_fops))
+		pr_err("Unable to create last_boot_emrg_log proc entry\n");
+
+	atomic_set(&is_klog_dumped, 0);
+
+	/* We are not interest of return value. Just keep going. If panic
+	 * notifier failed to be registered, we have at least OOPs*/
+	atomic_notifier_chain_register(&panic_notifier_list,
+					       &emrg_save_log_notifier);
+
+exit:
+	blkdev_put(bdev, mode);
+	return;
+}
+#endif
 
 #endif

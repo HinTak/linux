@@ -4,6 +4,7 @@
 
 comment "MMC/SD/SDIO Host Controller Drivers"
 
+
 config MMC_ARMMMCI
 	tristate "ARM AMBA Multimedia Card Interface support"
 	depends on ARM_AMBA
@@ -153,6 +154,48 @@ config MMC_SDHCI_ESDHC_IMX
 	  If you have a controller with this interface, say Y or M here.
 
 	  If unsure, say N.
+
+config MMC_SDHCI_NVT
+	tristate "NVT Multimedia Card Interface support"
+	depends on ARCH_NVT_V7
+	depends on MMC_SDHCI_PLTFM
+	select MMC_SDHCI_IO_ACCESSORS
+	select MMC_ALWAYS_DUMP_SDHCI_REGS
+	help
+	  This selects the ARM(R) NVT(R) Multimedia Card Interface support.
+
+config MMC_SDHCI_NVT_HS200
+	bool "NVT MMC controller HS200 mode"
+	depends on MMC_SDHCI_NVT
+	help
+	  This asks Novatek's mmc controller to enable HS200 speed mode for eMMC
+
+config MMC_SDHCI_NVT_PIO_MODE
+	bool "NVT data R/W by CPU, not ADMA"
+	depends on MMC_SDHCI_NVT
+	help
+	  This asks Novatek's mmc controller use CPU to read/write data.
+
+config MMC_SDHCI_NVT_OPEN_ENDED_RW
+	bool "use open-ended RW in NVT mmc controller"
+	depends on MMC_SDHCI_NVT
+	help
+	  This enables AUTO CMD12 to stop multiple read/write, default is using predefined command.
+
+config MMC_SDHCI_NVT_ENABLE_DEV_CACHE
+	bool "enable emmc device's cache mode with Novatek's controller"
+	depends on MMC_SDHCI_NVT
+	help
+	  This enables emmc's device cache mode.
+
+config NVT_MMC_CLKGATE
+	bool "host layer clkgate.  (experimental)"
+	depends on MMC_SDHCI_NVT
+	help
+	  Gate clk when request done. 
+	  Ungate clk when command start to send.
+	  This is experimental function to reduce EMI.
+
 
 config MMC_SDHCI_DOVE
 	tristate "SDHCI support on Marvell's Dove SoC"

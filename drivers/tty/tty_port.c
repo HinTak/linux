@@ -256,10 +256,9 @@ void tty_port_tty_hangup(struct tty_port *port, bool check_clocal)
 {
 	struct tty_struct *tty = tty_port_tty_get(port);
 
-	if (tty && (!check_clocal || !C_CLOCAL(tty))) {
+	if (tty && (!check_clocal || !C_CLOCAL(tty)))
 		tty_hangup(tty);
-		tty_kref_put(tty);
-	}
+	tty_kref_put(tty);
 }
 EXPORT_SYMBOL_GPL(tty_port_tty_hangup);
 
@@ -486,8 +485,9 @@ int tty_port_close_start(struct tty_port *port,
 		return 0;
 	}
 	set_bit(ASYNCB_CLOSING, &port->flags);
-	tty->closing = 1;
 	spin_unlock_irqrestore(&port->lock, flags);
+
+	tty->closing = 1;
 
 	if (test_bit(ASYNCB_INITIALIZED, &port->flags)) {
 		/* Don't block on a stalled port, just pull the chain */
@@ -512,8 +512,9 @@ void tty_port_close_end(struct tty_port *port, struct tty_struct *tty)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&port->lock, flags);
 	tty->closing = 0;
+
+	spin_lock_irqsave(&port->lock, flags);
 
 	if (port->blocked_open) {
 		spin_unlock_irqrestore(&port->lock, flags);

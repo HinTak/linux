@@ -26,6 +26,7 @@
 #include <linux/file.h>
 #include <linux/fdtable.h>
 #include <linux/mm.h>
+#include <linux/vmacache.h>
 #include <linux/stat.h>
 #include <linux/fcntl.h>
 #include <linux/swap.h>
@@ -65,6 +66,13 @@
 #include "coredump.h"
 
 #include <trace/events/sched.h>
+
+/**
+* @brief Include Security Framework security operations
+* @author Maksym Koshel (m.koshel@samsung.com)
+* @date Sep 20, 2014
+*/
+#include <linux/sf_security.h>
 
 int suid_dumpable = 0;
 
@@ -607,7 +615,7 @@ static int shift_arg_pages(struct vm_area_struct *vma, unsigned long shift)
 		return -ENOMEM;
 
 	lru_add_drain();
-	tlb_gather_mmu(&tlb, mm, 0);
+	tlb_gather_mmu(&tlb, mm, old_start, old_end);
 	if (new_end > old_start) {
 		/*
 		 * when the old and new regions overlap clear from new_end.
@@ -624,7 +632,7 @@ static int shift_arg_pages(struct vm_area_struct *vma, unsigned long shift)
 		free_pgd_range(&tlb, old_start, old_end, new_end,
 			vma->vm_next ? vma->vm_next->vm_start : USER_PGTABLES_CEILING);
 	}
-	tlb_finish_mmu(&tlb, new_end, old_end);
+	tlb_finish_mmu(&tlb, old_start, old_end);
 
 	/*
 	 * Shrink the vma to just the new range.  Always succeeds.
@@ -654,10 +662,10 @@ int setup_arg_pages(struct linux_binprm *bprm,
 	unsigned long rlim_stack;
 
 #ifdef CONFIG_STACK_GROWSUP
-	/* Limit stack size to 1GB */
+	/* Limit stack size */
 	stack_base = rlimit_max(RLIMIT_STACK);
-	if (stack_base > (1 << 30))
-		stack_base = 1 << 30;
+	if (stack_base > STACK_SIZE_MAX)
+		stack_base = STACK_SIZE_MAX;
 
 	/* Make sure we didn't let the argument array grow too large. */
 	if (vma->vm_end - vma->vm_start > stack_base)
@@ -814,7 +822,7 @@ EXPORT_SYMBOL(read_code);
 static int exec_mmap(struct mm_struct *mm)
 {
 	struct task_struct *tsk;
-	struct mm_struct * old_mm, *active_mm;
+	struct mm_struct *old_mm, *active_mm;
 
 	/* Notify parent that we're no longer interested in the old VM */
 	tsk = current;
@@ -840,6 +848,8 @@ static int exec_mmap(struct mm_struct *mm)
 	tsk->mm = mm;
 	tsk->active_mm = mm;
 	activate_mm(active_mm, mm);
+	tsk->mm->vmacache_seqnum = 0;
+	vmacache_flush(tsk);
 	task_unlock(tsk);
 	arch_pick_mmap_layout(mm);
 	if (old_mm) {
@@ -1381,6 +1391,15 @@ int search_binary_handler(struct linux_binprm *bprm)
 	if (retval)
 		return retval;
 
+	/**
+	* @brief Call of the Security Framework routine for process start
+	* @author Maksym Koshel (m.koshel@samsung.com)
+	* @date Sep 20, 2014
+	*/
+	retval = sf_security_bprm_check(bprm);
+	if (retval)
+		return retval;
+
 	retval = audit_bprm(bprm);
 	if (retval)
 		return retval;
@@ -1451,6 +1470,17 @@ int search_binary_handler(struct linux_binprm *bprm)
 
 EXPORT_SYMBOL(search_binary_handler);
 
+
+#ifdef CONFIG_USE_ARS
+///////////////////////////////// MODIFY BY LKH (From here)  ////////////////////////////////////////
+bool exist_exec_verify_module = false;
+int (*verify_exec)(const char*, struct user_arg_ptr , struct user_arg_ptr, rwlock_t * const tasklist_lock) = NULL;
+
+EXPORT_SYMBOL(exist_exec_verify_module);
+EXPORT_SYMBOL(verify_exec);
+//////////////////////////////////// (End) ///////////////////////////////////////////////////////
+#endif // CONFIG_USE_ARS
+
 /*
  * sys_execve() executes a new program.
  */
@@ -1464,6 +1494,23 @@ static int do_execve_common(const char *filename,
 	bool clear_in_exec;
 	int retval;
 	const struct cred *cred = current_cred();
+
+#ifdef CONFIG_USE_ARS
+	if(__builtin_expect(exist_exec_verify_module, true))
+	{
+		//printk("Exec Verify Module is exist\n");
+		if(verify_exec != NULL)
+		{
+			retval = verify_exec(filename, argv, envp, &tasklist_lock);  
+			if(retval)
+				goto out_ret;
+		}
+	}
+	else
+	{
+		//printk("Exec Verify Module is *NOT* exist\n");
+	}
+#endif // CONFIG_USE_ARS
 
 	/*
 	 * We move the actual failure in case of RLIMIT_NPROC excess from
@@ -1669,6 +1716,12 @@ int __get_dumpable(unsigned long mm_flags)
 	return (ret > SUID_DUMP_USER) ? SUID_DUMP_ROOT : ret;
 }
 
+/*
+ * This returns the actual value of the suid_dumpable flag. For things
+ * that are using this for checking for privilege transitions, it must
+ * test against SUID_DUMP_USER rather than treating it as a boolean
+ * value.
+ */
 int get_dumpable(struct mm_struct *mm)
 {
 	return __get_dumpable(mm->flags);

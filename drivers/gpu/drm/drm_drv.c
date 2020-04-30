@@ -406,9 +406,16 @@ long drm_ioctl(struct file *filp,
 		cmd = ioctl->cmd_drv;
 	}
 	else if ((nr >= DRM_COMMAND_END) || (nr < DRM_COMMAND_BASE)) {
+		u32 drv_size;
+
 		ioctl = &drm_ioctls[nr];
-		cmd = ioctl->cmd;
+
+		drv_size = _IOC_SIZE(ioctl->cmd);
 		usize = asize = _IOC_SIZE(cmd);
+		if (drv_size > asize)
+			asize = drv_size;
+
+		cmd = ioctl->cmd;
 	} else
 		goto err_i1;
 
@@ -428,7 +435,7 @@ long drm_ioctl(struct file *filp,
 		retcode = -EINVAL;
 	} else if (((ioctl->flags & DRM_ROOT_ONLY) && !capable(CAP_SYS_ADMIN)) ||
 		   ((ioctl->flags & DRM_AUTH) && !file_priv->authenticated) ||
-		   ((ioctl->flags & DRM_MASTER) && !file_priv->is_master) ||
+		   /* ((ioctl->flags & DRM_MASTER) && !file_priv->is_master) || */ // allow multiple master : rany.kwon@samsung.com
 		   (!(ioctl->flags & DRM_CONTROL_ALLOW) && (file_priv->minor->type == DRM_MINOR_CONTROL))) {
 		retcode = -EACCES;
 	} else {

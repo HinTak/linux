@@ -400,6 +400,21 @@ config PPC_EARLY_DEBUG_EHV_BC_HANDLE
 	  there simply will be no early console output.  This is true also
 	  if you don't boot under a hypervisor at all.
 
+config PRINT_MSG_PID_NAME_TAG
+	bool "Add pid and name tag in the message"
+	default n
+	help
+	  Add pid and name tag in the message.
+	  The print format is [log][leader_pid][leader_comm][pid][comm]
+	  It will not attach before first message, It will be over writed untill max lenght
+	  of [define PID_NAME_TAG_SIZE 60]
+	  ex > [before] this is print message, it will be print to serial
+	       [after ] [#][100][my_test][120][thread]print to serial
+	                -- OR --
+	                [#][100][my_test][-]e, it will be print to serial
+	  the default is disable , if you want to enable you can change using proc
+	  cmd> echo 1 > /proc/tty/print_msg_tag
+
 config GOLDFISH_TTY
 	tristate "Goldfish TTY Driver"
 	depends on GOLDFISH

@@ -86,6 +86,7 @@ static int hid_start_in(struct hid_device *hid)
 			!test_bit(HID_DISCONNECTED, &usbhid->iofl) &&
 			!test_bit(HID_SUSPENDED, &usbhid->iofl) &&
 			!test_and_set_bit(HID_IN_RUNNING, &usbhid->iofl)) {
+
 		rc = usb_submit_urb(usbhid->urbin, GFP_ATOMIC);
 		if (rc != 0) {
 			clear_bit(HID_IN_RUNNING, &usbhid->iofl);
@@ -113,44 +114,28 @@ static void hid_retry_timeout(unsigned long _hid)
 /* Workqueue routine to reset the device or clear a halt */
 static void hid_reset(struct work_struct *work)
 {
-	struct usbhid_device *usbhid =
-		container_of(work, struct usbhid_device, reset_work);
-	struct hid_device *hid = usbhid->hid;
-	int rc = 0;
+    struct usbhid_device *usbhid =
+        container_of(work, struct usbhid_device, reset_work);
+    struct hid_device *hid = usbhid->hid;
+    int rc;
 
-	if (test_bit(HID_CLEAR_HALT, &usbhid->iofl)) {
-		dev_dbg(&usbhid->intf->dev, "clear halt\n");
-		rc = usb_clear_halt(hid_to_usb_dev(hid), usbhid->urbin->pipe);
-		clear_bit(HID_CLEAR_HALT, &usbhid->iofl);
-		hid_start_in(hid);
-	}
+    if (test_bit(HID_CLEAR_HALT, &usbhid->iofl)) {
+        dev_dbg(&usbhid->intf->dev, "clear halt\n");
+        rc = usb_clear_halt(hid_to_usb_dev(hid), usbhid->urbin->pipe);
+        clear_bit(HID_CLEAR_HALT, &usbhid->iofl);
+        if (rc == 0) {
+            hid_start_in(hid);
+        } else {
+            dev_dbg(&usbhid->intf->dev,
+                    "clear-halt failed: %d\n", rc);
+            set_bit(HID_RESET_PENDING, &usbhid->iofl);
+        }
+    }
 
-	else if (test_bit(HID_RESET_PENDING, &usbhid->iofl)) {
-		dev_dbg(&usbhid->intf->dev, "resetting device\n");
-		rc = usb_lock_device_for_reset(hid_to_usb_dev(hid), usbhid->intf);
-		if (rc == 0) {
-			rc = usb_reset_device(hid_to_usb_dev(hid));
-			usb_unlock_device(hid_to_usb_dev(hid));
-		}
-		clear_bit(HID_RESET_PENDING, &usbhid->iofl);
-	}
-
-	switch (rc) {
-	case 0:
-		if (!test_bit(HID_IN_RUNNING, &usbhid->iofl))
-			hid_io_error(hid);
-		break;
-	default:
-		hid_err(hid, "can't reset device, %s-%s/input%d, status %d\n",
-			hid_to_usb_dev(hid)->bus->bus_name,
-			hid_to_usb_dev(hid)->devpath,
-			usbhid->ifnum, rc);
-		/* FALLTHROUGH */
-	case -EHOSTUNREACH:
-	case -ENODEV:
-	case -EINTR:
-		break;
-	}
+    if (test_bit(HID_RESET_PENDING, &usbhid->iofl)) {
+        dev_dbg(&usbhid->intf->dev, "resetting device\n");
+        usb_queue_reset_device(usbhid->intf);
+    }
 }
 
 /* Main I/O error handler */
@@ -186,6 +171,13 @@ static void hid_io_error(struct hid_device *hid)
 			schedule_work(&usbhid->reset_work);
 			goto done;
 		}
+		#ifdef SAMSUNG_PATCH_WITH_USB_HID_DISCONNECT_BUGFIX
+		/* Routing clear halt command from hid_io_error  */
+                else if(test_bit(HID_CLEAR_HALT, &usbhid->iofl))
+                {
+                        schedule_work(&usbhid->reset_work);
+                }
+                #endif
 	}
 
 	mod_timer(&usbhid->io_retry,
@@ -309,7 +301,13 @@ static void hid_irq_in(struct urb *urb)
 		usbhid_mark_busy(usbhid);
 		clear_bit(HID_IN_RUNNING, &usbhid->iofl);
 		set_bit(HID_CLEAR_HALT, &usbhid->iofl);
+	#ifdef SAMSUNG_PATCH_WITH_USB_HID_DISCONNECT_BUGFIX
+	/* hid_io_error is more standard way of processing error condition, 
+ 	does not schedule reset work queue until few retries */
+		hid_io_error(hid);
+	#else		
 		schedule_work(&usbhid->reset_work);
+	#endif
 		return;
 	case -ECONNRESET:	/* unlink */
 	case -ENOENT:
@@ -535,7 +533,6 @@ static void __usbhid_submit_report(struct hid_device *hid, struct hid_report *re
 {
 	int head;
 	struct usbhid_device *usbhid = hid->driver_data;
-	int len = ((report->size - 1) >> 3) + 1 + (report->id > 0);
 
 	if ((hid->quirks & HID_QUIRK_NOGET) && dir == USB_DIR_IN)
 		return;
@@ -546,7 +543,7 @@ static void __usbhid_submit_report(struct hid_device *hid, struct hid_report *re
 			return;
 		}
 
-		usbhid->out[usbhid->outhead].raw_report = kmalloc(len, GFP_ATOMIC);
+		usbhid->out[usbhid->outhead].raw_report = hid_alloc_report_buf(report, GFP_ATOMIC);
 		if (!usbhid->out[usbhid->outhead].raw_report) {
 			hid_warn(hid, "output queueing failed\n");
 			return;
@@ -595,7 +592,7 @@ static void __usbhid_submit_report(struct hid_device *hid, struct hid_report *re
 	}
 
 	if (dir == USB_DIR_OUT) {
-		usbhid->ctrl[usbhid->ctrlhead].raw_report = kmalloc(len, GFP_ATOMIC);
+		usbhid->ctrl[usbhid->ctrlhead].raw_report = hid_alloc_report_buf(report, GFP_ATOMIC);
 		if (!usbhid->ctrl[usbhid->ctrlhead].raw_report) {
 			hid_warn(hid, "control queueing failed\n");
 			return;
@@ -1522,7 +1519,6 @@ static int hid_suspend(struct usb_interface *intf, pm_message_t message)
 	struct usbhid_device *usbhid = hid->driver_data;
 	int status = 0;
 	bool driver_suspended = false;
-
 	if (PMSG_IS_AUTO(message)) {
 		spin_lock_irq(&usbhid->lock);	/* Sync with error handler */
 		if (!test_bit(HID_RESET_PENDING, &usbhid->iofl)

@@ -1,8 +1,8 @@
 VERSION = 3
 PATCHLEVEL = 10
-SUBLEVEL = 0
+SUBLEVEL = 30
 EXTRAVERSION =
-NAME = Unicycling Gorilla
+NAME = TOSSUG Baby Fish
 
 # *DOCUMENTATION*
 # To see a list of typical targets execute "make help"
@@ -165,12 +165,22 @@ export srctree objtree VPATH
 # then ARCH is assigned, getting whatever value it gets normally, and 
 # SUBARCH is subsequently ignored.
 
-SUBARCH := $(shell uname -m | sed -e s/i.86/x86/ -e s/x86_64/x86/ \
-				  -e s/sun4u/sparc64/ \
-				  -e s/arm.*/arm/ -e s/sa110/arm/ \
-				  -e s/s390x/s390/ -e s/parisc64/parisc/ \
-				  -e s/ppc.*/powerpc/ -e s/mips.*/mips/ \
-				  -e s/sh[234].*/sh/ -e s/aarch64.*/arm64/ )
+# SUBARCH := $(shell uname -m | sed -e s/i.86/x86/ -e s/x86_64/x86/ \
+# 				  -e s/sun4u/sparc64/ \
+# 				  -e s/arm.*/arm/ -e s/sa110/arm/ \
+# 				  -e s/s390x/s390/ -e s/parisc64/parisc/ \
+# 				  -e s/ppc.*/powerpc/ -e s/mips.*/mips/ \
+# 				  -e s/sh[234].*/sh/ -e s/aarch64.*/arm64/ )
+
+target_ARM = $(shell cat .config | sed -n '/CONFIG_ARM=/p' | wc -l )
+target_MIPS = $(shell cat .config | sed -n '/CONFIG_MIPS=/p' | wc -l )
+
+ifeq ($(target_ARM),1)
+        SUBARCH = arm
+endif
+ifeq ($(target_MIPS),1)
+        SUBARCH = mips
+endif
 
 # Cross compiling and selecting different set of gcc/bin-utils
 # ---------------------------------------------------------------------------
@@ -192,6 +202,8 @@ SUBARCH := $(shell uname -m | sed -e s/i.86/x86/ -e s/x86_64/x86/ \
 # "make" in the configured kernel build directory always uses that.
 # Default value for CROSS_COMPILE is not to prefix executables
 # Note: Some architectures assign CROSS_COMPILE in their arch/*/Makefile
+export KBUILD_BUILDHOST := $(SUBARCH)
+ARCH		?= arm
 ARCH		?= $(SUBARCH)
 CROSS_COMPILE	?= $(CONFIG_CROSS_COMPILE:"%"=%)
 
@@ -239,10 +251,19 @@ CONFIG_SHELL := $(shell if [ -x "$$BASH" ]; then echo $$BASH; \
 	  else if [ -x /bin/bash ]; then echo /bin/bash; \
 	  else echo sh; fi ; fi)
 
+ifdef CONFIG_PLAT_TIZEN
+HOSTCC       = $(shell if [ `which gcc-4.6` ]; then echo "gcc-4.6"; else echo "gcc"; fi)
+HOSTCXX      = $(shell if [ `which g++-4.6` ]; then echo "g++-4.6"; else echo "g++"; fi)
+else
 HOSTCC       = gcc
 HOSTCXX      = g++
+endif
 HOSTCFLAGS   = -Wall -Wmissing-prototypes -Wstrict-prototypes -O2 -fomit-frame-pointer
 HOSTCXXFLAGS = -O2
+
+#HOSTCFLAGS   += -m32
+#HOSTCXXFLAGS += -m32
+#HOSTLDFLAGS  += -m32
 
 # Decide whether to build built-in, modular, or both.
 # Normally, just do built-in.
@@ -342,12 +363,18 @@ CHECK		= sparse
 
 CHECKFLAGS     := -D__linux__ -Dlinux -D__STDC__ -Dunix -D__unix__ \
 		  -Wbitwise -Wno-return-void $(CF)
-CFLAGS_MODULE   =
+CFLAGS_MODULE   = -mlong-calls # rany.kwon: to solve relocation error
 AFLAGS_MODULE   =
 LDFLAGS_MODULE  =
 CFLAGS_KERNEL	=
 AFLAGS_KERNEL	=
 CFLAGS_GCOV	= -fprofile-arcs -ftest-coverage
+
+CFLAGS_KASAN	= -fsanitize=address \
+			--param asan-memintrin=0 \
+			--param asan-instrumentation-with-call-threshold=0 \
+			--param asan-fixed-shadow-offset=0 \
+			-DKASAN_HOOKS
 
 
 # Use USERINCLUDE when you must reference the UAPI directories only.
@@ -374,6 +401,8 @@ KBUILD_CFLAGS   := -Wall -Wundef -Wstrict-prototypes -Wno-trigraphs \
 		   -Werror-implicit-function-declaration \
 		   -Wno-format-security \
 		   -fno-delete-null-pointer-checks
+
+
 KBUILD_AFLAGS_KERNEL :=
 KBUILD_CFLAGS_KERNEL :=
 KBUILD_AFLAGS   := -D__ASSEMBLY__
@@ -390,9 +419,10 @@ export ARCH SRCARCH CONFIG_SHELL HOSTCC HOSTCFLAGS CROSS_COMPILE AS LD CC
 export CPP AR NM STRIP OBJCOPY OBJDUMP
 export MAKE AWK GENKSYMS INSTALLKERNEL PERL UTS_MACHINE
 export HOSTCXX HOSTCXXFLAGS LDFLAGS_MODULE CHECK CHECKFLAGS
+export HOSTLDFLAGS
 
 export KBUILD_CPPFLAGS NOSTDINC_FLAGS LINUXINCLUDE OBJCOPYFLAGS LDFLAGS
-export KBUILD_CFLAGS CFLAGS_KERNEL CFLAGS_MODULE CFLAGS_GCOV
+export KBUILD_CFLAGS CFLAGS_KERNEL CFLAGS_MODULE CFLAGS_GCOV CFLAGS_KASAN
 export KBUILD_AFLAGS AFLAGS_KERNEL AFLAGS_MODULE
 export KBUILD_AFLAGS_MODULE KBUILD_CFLAGS_MODULE KBUILD_LDFLAGS_MODULE
 export KBUILD_AFLAGS_KERNEL KBUILD_CFLAGS_KERNEL
@@ -573,8 +603,27 @@ all: vmlinux
 ifdef CONFIG_CC_OPTIMIZE_FOR_SIZE
 KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,maybe-uninitialized,)
 else
-KBUILD_CFLAGS	+= -O2
+KBUILD_CFLAGS	+= -O2 $(call cc-disable-warning,maybe-uninitialized,)
 endif
+
+ifdef CONFIG_KASAN_STACK
+CFLAGS_KASAN += --param asan-stack=1
+else
+CFLAGS_KASAN += --param asan-stack=0
+endif
+
+ifdef CONFIG_KASAN_GLOBALS
+CFLAGS_KASAN += --param asan-globals=1
+else
+CFLAGS_KASAN += --param asan-globals=0
+endif
+
+ifdef CONFIG_KASAN_UAR
+CFLAGS_KASAN += --param asan-use-after-return=1
+else
+CFLAGS_KASAN += --param asan-use-after-return=0
+endif
+
 
 include $(srctree)/arch/$(SRCARCH)/Makefile
 
@@ -614,9 +663,13 @@ KBUILD_CFLAGS	+= -fomit-frame-pointer
 endif
 endif
 
+KBUILD_CFLAGS   += $(call cc-option, -fno-var-tracking-assignments)
+
 ifdef CONFIG_DEBUG_INFO
 KBUILD_CFLAGS	+= -g
 KBUILD_AFLAGS	+= -gdwarf-2
+else
+KBUILD_CFLAGS	+= -g
 endif
 
 ifdef CONFIG_DEBUG_INFO_REDUCED
@@ -734,6 +787,28 @@ export mod_sign_cmd
 
 ifeq ($(KBUILD_EXTMOD),)
 core-y		+= kernel/ mm/ fs/ ipc/ security/ crypto/ block/
+
+#for kdebugd
+ifdef CONFIG_KDEBUGD
+KDBGINCLUDE     := -Ikernel/kdebugd\
+		-Ikernel/kdebugd/include \
+		-Ikernel/kdebugd/include/kdebugd \
+                -Ikernel/kdebugd/aop \
+                -Ikernel/kdebugd/elf \
+                -Ikernel/kdebugd/elf/dem_src
+
+LINUXINCLUDE    += $(KDBGINCLUDE)
+export LINUXINCLUDE
+endif
+
+#for t2ddebugd
+T2DDBGINCLUDE     := -Ikernel/t2ddebugd\
+		-Ikernel/t2ddebugd/include \
+		-Ikernel/t2ddebugd/include/t2ddebugd
+
+LINUXINCLUDE    += $(T2DDBGINCLUDE)
+export LINUXINCLUDE
+
 
 vmlinux-dirs	:= $(patsubst %/,%,$(filter %/, $(init-y) $(init-m) \
 		     $(core-y) $(core-m) $(drivers-y) $(drivers-m) \
@@ -1223,9 +1298,18 @@ PHONY += $(module-dirs) modules
 $(module-dirs): crmodverdir $(objtree)/Module.symvers
 	$(Q)$(MAKE) $(build)=$(patsubst _module_%,%,$@)
 
+ifdef CONFIG_PLAT_TIZEN
 modules: $(module-dirs)
 	@$(kecho) '  Building modules, stage 2.';
 	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.modpost
+else
+rebuild_host_binary:
+	$(srctree)/scripts/ReBuildForModuleBuild.sh
+
+modules: rebuild_host_binary $(module-dirs)
+	@$(kecho) '  Building modules, stage 2.';
+	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.modpost
+endif
 
 PHONY += modules_install
 modules_install: _emodinst_ _emodinst_post

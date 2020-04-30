@@ -31,6 +31,9 @@
 #include <asm/uaccess.h>
 #include "internal.h"
 
+#define BD_DISK_MAJOR 0xb
+#define CAP_BITS 9
+
 struct bdev_inode {
 	struct block_device bdev;
 	struct inode vfs_inode;
@@ -58,17 +61,24 @@ static void bdev_inode_switch_bdi(struct inode *inode,
 			struct backing_dev_info *dst)
 {
 	struct backing_dev_info *old = inode->i_data.backing_dev_info;
+	bool wakeup_bdi = false;
 
 	if (unlikely(dst == old))		/* deadlock avoidance */
 		return;
 	bdi_lock_two(&old->wb, &dst->wb);
 	spin_lock(&inode->i_lock);
 	inode->i_data.backing_dev_info = dst;
-	if (inode->i_state & I_DIRTY)
+	if (inode->i_state & I_DIRTY) {
+		if (bdi_cap_writeback_dirty(dst) && !wb_has_dirty_io(&dst->wb))
+			wakeup_bdi = true;
 		list_move(&inode->i_wb_list, &dst->wb.b_dirty);
+	}
 	spin_unlock(&inode->i_lock);
 	spin_unlock(&old->wb.list_lock);
 	spin_unlock(&dst->wb.list_lock);
+
+	if (wakeup_bdi)
+		bdi_wakeup_thread_delayed(dst);
 }
 
 /* Kill _all_ buffers and pagecache , dirty or not.. */
@@ -1168,6 +1178,9 @@ static int __blkdev_get(struct block_device *bdev, fmode_t mode, int for_part)
 			ret = 0;
 			if (bdev->bd_disk->fops->open)
 				ret = bdev->bd_disk->fops->open(bdev, mode);
+			if(bdev->bd_disk->major == BD_DISK_MAJOR)
+				bdev->bd_inode->i_size =
+					(loff_t)get_capacity(disk)<<CAP_BITS;
 			/* the same as first opener case, read comment there */
 			if (bdev->bd_invalidated) {
 				if (!ret)

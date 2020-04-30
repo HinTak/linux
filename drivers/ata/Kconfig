@@ -97,6 +97,29 @@ config SATA_AHCI_PLATFORM
 
 	  If unsure, say N.
 
+config SATA_AHCI_SDP
+        tristate "SDP AHCI SATA support"
+        help
+          This option enables support for SDP AHCI Serial ATA
+          controllers.
+
+          If unsure, say N.
+
+menuconfig SATA_AHCI_SDP_PHY
+	tristate "SDP AHCI PHY devices"
+	help
+	  This option enables sdp sata phy device supports.
+
+if SATA_AHCI_SDP_PHY
+
+config SATA_AHCI_SDP_PHY_HAWKP
+	tristate "Hawk-P SATA PHY support"
+	
+config SATA_AHCI_SDP_PHY_GOLFV
+	tristate "Golf-V SATA PHY support"
+	
+endif # SATA_AHCI_SDP_PHY
+
 config SATA_FSL
 	tristate "Freescale 3.0Gbps SATA support"
 	depends on FSL_SOC
@@ -107,7 +130,7 @@ config SATA_FSL
 	  If unsure, say N.
 
 config SATA_INIC162X
-	tristate "Initio 162x SATA support"
+	tristate "Initio 162x SATA support (Very Experimental)"
 	depends on PCI
 	help
 	  This option enables support for Initio 162x Serial ATA.

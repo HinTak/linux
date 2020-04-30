@@ -2818,6 +2818,25 @@ static int ntfs_fill_super(struct super_block *sb, void *opt, const int silent)
 			ntfs_error(sb, "Unsupported NTFS filesystem.");
 		goto err_out_now;
 	}
+
+	/* SELP readpages patch */
+	/*
+	 * SELP patch 2010/01/15
+	 * In case user format the device with more than PAGE_SIZE cluster,
+	 * we use the PAGE_SIZE.
+	 */
+	if (vol->cluster_size > PAGE_SIZE)
+		blocksize = sb_min_blocksize(sb, PAGE_SIZE);
+	else	/* fix block size problem.*/
+		blocksize = sb_min_blocksize(sb, vol->cluster_size);
+
+	if (blocksize < NTFS_BLOCK_SIZE) {
+		if (!silent)
+			ntfs_error(sb, "Unable to set device block size.");
+		goto err_out_now;
+	}
+	BUG_ON(blocksize != sb->s_blocksize);
+
 	/*
 	 * If the boot sector indicates a sector size bigger than the current
 	 * device block size, switch the device block size to the sector size.

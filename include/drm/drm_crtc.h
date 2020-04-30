@@ -660,6 +660,14 @@ struct drm_plane_funcs {
  * @funcs: helper functions
  * @helper_private: storage for drver layer
  * @properties: property tracking for this plane
+ * @crtc_x: plane x crtc position
+ * @crtc_y: plane y crtc position
+ * @crtc_w: plane w crtc width
+ * @crtc_y: plane h crtc height
+ * @src_x: plane x source position
+ * @src_y: plane y source position
+ * @src_w: plane w source width
+ * @src_y: plane h source height
  */
 struct drm_plane {
 	struct drm_device *dev;
@@ -684,6 +692,15 @@ struct drm_plane {
 	void *helper_private;
 
 	struct drm_object_properties properties;
+	
+	/* plane info for user to get */
+	/* Signed dest location allows it to be partially off screen */
+	int32_t crtc_x, crtc_y;
+	uint32_t crtc_w, crtc_h;
+
+	/* Source values are 16.16 fixed point */
+	uint32_t src_x, src_y;
+	uint32_t src_h, src_w;
 };
 
 /**

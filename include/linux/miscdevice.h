@@ -45,6 +45,15 @@
 #define MAPPER_CTRL_MINOR	236
 #define LOOP_CTRL_MINOR		237
 #define VHOST_NET_MINOR		238
+#define UHID_MINOR		239
+#ifdef CONFIG_ORSAY_VDBINDER_IPC
+#define VDBINDER_MINOR		240
+#define VDASHMEM_MINOR		241
+#endif
+#ifdef CONFIG_BPTIME
+/* ioctl character device for broadcast time */
+#define BPTIME_MINOR           248
+#endif
 #define MISC_DYNAMIC_MINOR	255
 
 struct device;

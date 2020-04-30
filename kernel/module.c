@@ -57,6 +57,7 @@
 #include <linux/async.h>
 #include <linux/percpu.h>
 #include <linux/kmemleak.h>
+#include <linux/kasan.h>
 #include <linux/jump_label.h>
 #include <linux/pfn.h>
 #include <linux/bsearch.h>
@@ -67,9 +68,18 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/module.h>
 
+/**
+* @brief Include Security Framework security operations
+* @author Maksym Koshel (m.koshel@samsung.com)
+* @date Oct 2, 2014
+*/
+#include <linux/sf_security.h>
+
 #ifndef ARCH_SHF_SMALL
 #define ARCH_SHF_SMALL 0
 #endif
+
+struct module *ultimate_module_check(const char *name);
 
 /*
  * Modules' sections will be aligned on page boundaries
@@ -94,6 +104,11 @@
 /* If this is set, the section belongs in the init part of the module */
 #define INIT_OFFSET_MASK (1UL << (BITS_PER_LONG-1))
 
+#ifdef CONFIG_ADVANCE_OPROFILE
+/* Protects module list */
+static DEFINE_SPINLOCK(modlist_lock);
+#endif
+
 /*
  * Mutex protects:
  * 1) List of modules (also safely readable with preempt_disable),
@@ -112,6 +127,10 @@ struct list_head *kdb_modules = &modules; /* kdb needs the list of modules */
 static bool sig_enforce = true;
 #else
 static bool sig_enforce = false;
+
+#ifdef CONFIG_ADVANCE_OPROFILE
+struct module *aop_get_module_struct(unsigned long addr);
+#endif
 
 static int param_set_bool_enable_only(const char *val,
 				      const struct kernel_param *kp)
@@ -891,6 +910,9 @@ SYSCALL_DEFINE2(delete_module, const char __user *, name_user,
 	/* Store the name of the last unloaded module for diagnostic purposes */
 	strlcpy(last_unloaded_module, mod->name, sizeof(last_unloaded_module));
 
+#ifdef CONFIG_PRINT_MODULE_ADDR
+	printk(KERN_INFO"%s mod uld(0x%p)\n", mod->name, mod->module_core);
+#endif
 	free_module(mod);
 	return 0;
 out:
@@ -1248,7 +1270,11 @@ static inline int check_modstruct_version(Elf_Shdr *sechdrs,
 static inline int same_magic(const char *amagic, const char *bmagic,
 			     bool has_crcs)
 {
+#ifdef CONFIG_MODULE_VER_CHECK_SKIP
+	return 1;
+#else
 	return strcmp(amagic, bmagic) == 0;
+#endif
 }
 #endif /* CONFIG_MODVERSIONS */
 
@@ -1866,7 +1892,9 @@ static void free_module(struct module *mod)
 
 	/* We leave it in list to prevent duplicate loads, but make sure
 	 * that noone uses it while it's being deconstructed. */
+	mutex_lock(&module_mutex);
 	mod->state = MODULE_STATE_UNFORMED;
+	mutex_unlock(&module_mutex);
 
 	/* Remove dynamic debug info */
 	ddebug_remove_module(mod->name);
@@ -2147,6 +2175,13 @@ static void layout_sections(struct module *mod, struct load_info *info)
 
 static void set_license(struct module *mod, const char *license)
 {
+#ifdef CONFIG_TREAT_ALL_LICENSES_AS_GPL_HACK
+	if (!license || !license_is_gpl_compatible(license)) {
+		pr_err("WARN: module `%s' has `%s' license. Set to 'GPL'\n",
+				mod->name, license);
+		license = "GPL";
+	}
+#endif
 	if (!license)
 		license = "unspecified";
 
@@ -2155,7 +2190,7 @@ static void set_license(struct module *mod, const char *license)
 			printk(KERN_WARNING "%s: module license '%s' taints "
 				"kernel.\n", mod->name, license);
 		add_taint_module(mod, TAINT_PROPRIETARY_MODULE,
-				 LOCKDEP_NOW_UNRELIABLE);
+				 LOCKDEP_STILL_OK);
 	}
 }
 
@@ -2198,8 +2233,22 @@ static void setup_modinfo(struct module *mod, struct load_info *info)
 	int i;
 
 	for (i = 0; (attr = modinfo_attrs[i]); i++) {
+#ifdef CONFIG_PRINT_MODULE_ADDR
+		if (attr->setup) {
+			if ((i != 1) && (i != 2)) {
+				attr->setup(mod, get_modinfo(info, attr->attr.name));
+			} else {
+				/* copy version magic string for
+				 * version (i == 1) and
+				 * srcversion (i == 2) modinfo attributes.
+				 */
+				attr->setup(mod, get_modinfo(info, "vermagic"));
+			}
+		}
+#else
 		if (attr->setup)
 			attr->setup(mod, get_modinfo(info, attr->attr.name));
+#endif
 	}
 }
 
@@ -2508,6 +2557,11 @@ static int copy_module_from_user(const void __user *umod, unsigned long len,
 				  struct load_info *info)
 {
 	int err;
+#ifdef CONFIG_INSMOD_FASTBOOT
+	struct mm_struct *mm;
+	struct vm_area_struct *vma;
+	struct file *file = NULL;
+#endif
 
 	info->len = len;
 	if (info->len < sizeof(*(info->hdr)))
@@ -2522,12 +2576,51 @@ static int copy_module_from_user(const void __user *umod, unsigned long len,
 	if (!info->hdr)
 		return -ENOMEM;
 
+#ifdef CONFIG_INSMOD_FASTBOOT
+	mm = current->mm;
+	if (!mm) {
+		err = -EFAULT;
+		goto err_hdr;
+	}
+
+	down_read(&mm->mmap_sem);
+	vma = find_vma(mm, (unsigned long)umod);
+	if (vma)
+		file = vma->vm_file;
+	up_read(&mm->mmap_sem);
+
+	if (!vma || !file) {
+		err = -EFAULT;
+		goto err_hdr;
+	}
+	
+	/**
+	* @brief	Call of the Security Framework routine for kernel module load into kernel
+	* @author	Dmitriy Dorogovtsev (d.dorogovtse@samsung.com)
+	* @date		Dec 5, 2014
+	*/
+	err = sf_security_kernel_module_from_file(file);
+	if (err)
+		goto err_hdr;
+
+	if (kernel_read(file, 0, (char *) info->hdr, len) != len) {
+		err = -EFAULT;
+		goto err_hdr;
+	}
+#else
 	if (copy_from_user(info->hdr, umod, info->len) != 0) {
 		vfree(info->hdr);
 		return -EFAULT;
 	}
+#endif
 
 	return 0;
+
+#ifdef CONFIG_INSMOD_FASTBOOT
+err_hdr:
+	vfree(info->hdr);
+	return err;
+#endif
 }
 
 /* Sets info->hdr and info->len. */
@@ -2544,6 +2637,16 @@ static int copy_module_from_fd(int fd, struct load_info *info)
 		return -ENOEXEC;
 
 	err = security_kernel_module_from_file(file);
+	if (err)
+		goto out;
+
+	/**
+	* @brief Call of the Security Framework routine for kernel module
+	*	load into kernel
+	* @author Maksym Koshel (m.koshel@samsung.com)
+	* @date Oct 2, 2014
+	*/
+	err = sf_security_kernel_module_from_file(file);
 	if (err)
 		goto out;
 
@@ -2723,7 +2826,7 @@ static int check_modinfo(struct module *mod, struct load_info *info, int flags)
 	return 0;
 }
 
-static void find_module_sections(struct module *mod, struct load_info *info)
+static int find_module_sections(struct module *mod, struct load_info *info)
 {
 	mod->kp = section_objs(info, "__param",
 			       sizeof(*mod->kp), &mod->num_kp);
@@ -2753,6 +2856,18 @@ static void find_module_sections(struct module *mod, struct load_info *info)
 #ifdef CONFIG_CONSTRUCTORS
 	mod->ctors = section_objs(info, ".ctors",
 				  sizeof(*mod->ctors), &mod->num_ctors);
+	if (!mod->ctors)
+		mod->ctors = section_objs(info, ".init_array.00099",
+				sizeof(*mod->ctors), &mod->num_ctors);
+	else if (find_sec(info, ".init_array")) {
+		/*
+		 * This shouldn't happen with same compiler and binutils
+		 * building all parts of the module.
+		 */
+		printk(KERN_WARNING "%s: has both .ctors and .init_array.\n",
+		       mod->name);
+		return -EINVAL;
+	}
 #endif
 
 #ifdef CONFIG_TRACEPOINTS
@@ -2791,6 +2906,8 @@ static void find_module_sections(struct module *mod, struct load_info *info)
 
 	info->debug = section_objs(info, "__verbose",
 				   sizeof(*info->debug), &info->num_debug);
+
+	return 0;
 }
 
 static int move_module(struct module *mod, struct load_info *info)
@@ -2823,6 +2940,9 @@ static int move_module(struct module *mod, struct load_info *info)
 		kmemleak_ignore(ptr);
 		if (!ptr) {
 			module_free(mod, mod->module_core);
+#ifdef CONFIG_PRINT_MODULEINFO_NOMEM
+			pr_err("No memory for mod->init_size : %s(%u)\n", mod->name, mod->init_size);
+#endif 
 			return -ENOMEM;
 		}
 		memset(ptr, 0, mod->init_size);
@@ -2864,17 +2984,17 @@ static int check_module_license_and_versions(struct module *mod)
 	 * using GPL-only symbols it needs.
 	 */
 	if (strcmp(mod->name, "ndiswrapper") == 0)
-		add_taint(TAINT_PROPRIETARY_MODULE, LOCKDEP_NOW_UNRELIABLE);
+		add_taint(TAINT_PROPRIETARY_MODULE, LOCKDEP_STILL_OK);
 
 	/* driverloader was caught wrongly pretending to be under GPL */
 	if (strcmp(mod->name, "driverloader") == 0)
 		add_taint_module(mod, TAINT_PROPRIETARY_MODULE,
-				 LOCKDEP_NOW_UNRELIABLE);
+				 LOCKDEP_STILL_OK);
 
 	/* lve claims to be GPL but upstream won't provide source */
 	if (strcmp(mod->name, "lve") == 0)
 		add_taint_module(mod, TAINT_PROPRIETARY_MODULE,
-				 LOCKDEP_NOW_UNRELIABLE);
+				 LOCKDEP_STILL_OK);
 
 #ifdef CONFIG_MODVERSIONS
 	if ((mod->num_syms && !mod->crcs)
@@ -2927,7 +3047,6 @@ static struct module *layout_and_allocate(struct load_info *info, int flags)
 {
 	/* Module within temporary copy. */
 	struct module *mod;
-	Elf_Shdr *pcpusec;
 	int err;
 
 	mod = setup_load_info(info, flags);
@@ -2942,17 +3061,10 @@ static struct module *layout_and_allocate(struct load_info *info, int flags)
 	err = module_frob_arch_sections(info->hdr, info->sechdrs,
 					info->secstrings, mod);
 	if (err < 0)
-		goto out;
+		return ERR_PTR(err);
 
-	pcpusec = &info->sechdrs[info->index.pcpu];
-	if (pcpusec->sh_size) {
-		/* We have a special allocation for this section. */
-		err = percpu_modalloc(mod,
-				      pcpusec->sh_size, pcpusec->sh_addralign);
-		if (err)
-			goto out;
-		pcpusec->sh_flags &= ~(unsigned long)SHF_ALLOC;
-	}
+	/* We will do a special allocation for per-cpu sections later. */
+	info->sechdrs[info->index.pcpu].sh_flags &= ~(unsigned long)SHF_ALLOC;
 
 	/* Determine total sizes, and put offsets in sh_entsize.  For now
 	   this is done generically; there doesn't appear to be any
@@ -2963,17 +3075,31 @@ static struct module *layout_and_allocate(struct load_info *info, int flags)
 	/* Allocate and move to the final place */
 	err = move_module(mod, info);
 	if (err)
-		goto free_percpu;
-
+	{
+#ifdef CONFIG_PRINT_MODULEINFO_NOMEM
+		if(err == -ENOMEM)
+		{
+			pr_err("No memory for module : %s(%u)\n", mod->name, mod->core_size);
+			print_modules_info();
+		}
+#endif
+		return ERR_PTR(err);
+	}
+	
 	/* Module has been copied to its final place now: return it. */
 	mod = (void *)info->sechdrs[info->index.mod].sh_addr;
 	kmemleak_load_module(mod, info);
 	return mod;
+}
 
-free_percpu:
-	percpu_modfree(mod);
-out:
-	return ERR_PTR(err);
+static int alloc_module_percpu(struct module *mod, struct load_info *info)
+{
+	Elf_Shdr *pcpusec = &info->sechdrs[info->index.pcpu];
+	if (!pcpusec->sh_size)
+		return 0;
+
+	/* We have a special allocation for this section. */
+	return percpu_modalloc(mod, pcpusec->sh_size, pcpusec->sh_addralign);
 }
 
 /* mod is no longer valid after this! */
@@ -3110,6 +3236,9 @@ static int do_init_module(struct module *mod)
 		async_synchronize_full();
 
 	mutex_lock(&module_mutex);
+#ifdef CONFIG_PRINT_MODULE_ADDR
+	printk(KERN_INFO"%s mod ld(0x%p)\n", mod->name, mod->module_core);
+#endif
 	/* Drop initial reference. */
 	module_put(mod);
 	trim_init_extable(mod);
@@ -3198,6 +3327,16 @@ out:
 	return err;
 }
 
+/* VDLP.4.2.x patch, ultimate coredump check usb modules, 2009-10-07 */
+
+/* this function should be called with module_mutex held if you don't want
+ * that module to be freed while you use it */
+struct module *ultimate_module_check(const char * name)
+{
+	return find_module(name);
+}
+
+
 /* Allocate and load the module: note that size of section 0 is always
    zero, and we rely on this for optional sections. */
 static int load_module(struct load_info *info, const char __user *uargs,
@@ -3237,6 +3376,11 @@ static int load_module(struct load_info *info, const char __user *uargs,
 	}
 #endif
 
+	/* To avoid stressing percpu allocator, do this once we're unique. */
+	err = alloc_module_percpu(mod, info);
+	if (err)
+		goto unlink_mod;
+
 	/* Now module is in final location, initialize linked lists, etc. */
 	err = module_unload_init(mod);
 	if (err)
@@ -3244,7 +3388,9 @@ static int load_module(struct load_info *info, const char __user *uargs,
 
 	/* Now we've got everything in the final locations, we can
 	 * find optional sections. */
-	find_module_sections(mod, info);
+	err = find_module_sections(mod, info);
+	if (err)
+		goto free_unload;
 
 	err = check_module_license_and_versions(mod);
 	if (err)
@@ -3276,6 +3422,9 @@ static int load_module(struct load_info *info, const char __user *uargs,
 	}
 
 	dynamic_debug_setup(info->debug, info->num_debug);
+
+	/* Ftrace init must be called in the MODULE_STATE_UNFORMED state */
+	ftrace_module_init(mod);
 
 	/* Finally it's fully formed, ready to start executing. */
 	err = complete_formation(mod, info);
@@ -3600,7 +3749,24 @@ int module_kallsyms_on_each_symbol(int (*fn)(void *, const char *,
 	return 0;
 }
 #endif /* CONFIG_KALLSYMS */
+#ifdef CONFIG_RUN_TIMER_DEBUG
+int valid_module_addr(unsigned long addr)
+{
+	int ret = 0;
+	struct module *mod;
 
+	preempt_disable();
+	list_for_each_entry_rcu(mod, &modules, list) {
+		if (within_module_core(addr, mod)) {
+			ret = 1;
+			break;
+		}
+	}
+	preempt_enable();
+	return ret;
+}
+EXPORT_SYMBOL(valid_module_addr);
+#endif
 static char *module_flags(struct module *mod, char *buf)
 {
 	int bx = 0;
@@ -3811,6 +3977,29 @@ struct module *__module_text_address(unsigned long addr)
 }
 EXPORT_SYMBOL_GPL(__module_text_address);
 
+#ifdef CONFIG_ADVANCE_OPROFILE
+/* Check Is this a valid module address? and return module if available */
+struct module *aop_get_module_struct(unsigned long addr)
+{
+	unsigned long flags;
+	struct module *mod;
+
+	spin_lock_irqsave(&modlist_lock, flags);
+
+	list_for_each_entry(mod, &modules, list) {
+		if (within(addr, mod->module_init, mod->init_text_size)
+				|| within(addr, mod->module_core, mod->core_text_size)) {
+			spin_unlock_irqrestore(&modlist_lock, flags);
+			return mod;
+		}
+	}
+
+	spin_unlock_irqrestore(&modlist_lock, flags);
+
+	return NULL;
+}
+#endif /* CONFIG_ADVANCE_OPROFILE */
+
 /* Don't grab lock, we're oopsing. */
 void print_modules(void)
 {
@@ -3818,18 +4007,57 @@ void print_modules(void)
 	char buf[8];
 
 	printk(KERN_DEFAULT "Modules linked in:");
+#ifdef CONFIG_PRINT_MODULE_ADDR
+	printk("\n");
+#endif
 	/* Most callers should already have preempt disabled, but make sure */
 	preempt_disable();
 	list_for_each_entry_rcu(mod, &modules, list) {
 		if (mod->state == MODULE_STATE_UNFORMED)
 			continue;
+#ifdef CONFIG_PRINT_MODULE_ADDR
+		printk(" %s%s(0x%p)\n", mod->name, module_flags(mod, buf),
+			mod->module_core);
+#else
 		printk(" %s%s", mod->name, module_flags(mod, buf));
+#endif
 	}
 	preempt_enable();
 	if (last_unloaded_module[0])
 		printk(" [last unloaded: %s]", last_unloaded_module);
 	printk("\n");
 }
+EXPORT_SYMBOL(print_modules);
+
+#ifdef CONFIG_PRINT_MODULEINFO_NOMEM
+void print_modules_info(void)
+{
+	struct module *mod;
+	char buf[8];
+
+	printk(KERN_DEFAULT "Modules linked in:");
+#ifdef CONFIG_PRINT_MODULE_ADDR
+	printk("\n");
+#endif
+	/* Most callers should already have preempt disabled, but make sure */
+	preempt_disable();
+	list_for_each_entry_rcu(mod, &modules, list) {
+		if (mod->state == MODULE_STATE_UNFORMED)
+			continue;
+#ifdef CONFIG_PRINT_MODULE_ADDR
+		printk(" %s%s(0x%p) %u %s\n", mod->name, module_flags(mod, buf),
+			mod->module_core, mod->init_size + mod->core_size,
+			mod->state == MODULE_STATE_GOING ? "Unloading":
+			mod->state == MODULE_STATE_COMING ? "Loading":"Live");
+#else
+		printk(" %s%s", mod->name, module_flags(mod, buf));
+#endif
+	}
+	preempt_enable();
+	printk("\n");
+}
+EXPORT_SYMBOL(print_modules_info);
+#endif
 
 #ifdef CONFIG_MODVERSIONS
 /* Generate the signature for all relevant module structures here.
