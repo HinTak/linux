@@ -26,7 +26,6 @@
 #include <linux/blkdev.h>
 #include <linux/delay.h>
 #include <linux/jiffies.h>
-#include <asm/unaligned.h>
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
@@ -944,7 +943,7 @@ void scsi_eh_prep_cmnd(struct scsi_cmnd *scmd, struct scsi_eh_save *ses,
 			    scmd->sdb.length);
 		scmd->sdb.table.sgl = &ses->sense_sgl;
 		scmd->sc_data_direction = DMA_FROM_DEVICE;
-		scmd->sdb.table.nents = 1;
+		scmd->sdb.table.nents = scmd->sdb.table.orig_nents = 1;
 		scmd->cmnd[0] = REQUEST_SENSE;
 		scmd->cmnd[4] = scmd->sdb.length;
 		scmd->cmd_len = COMMAND_SIZE(scmd->cmnd[0]);
@@ -1238,7 +1237,13 @@ retry_tur:
 	case SUCCESS:
 		return 0;
 	default:
-		return 1;
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+		 /* SELP.arm.3.x support A1 2007-12-14 */
+                //20070919 for checking Test Unit Ready command inhancement speed of momory card remove from card-reader
+                 return rtn;
+#else //org
+                return 1;
+#endif
 	}
 }
 
@@ -1318,6 +1323,12 @@ static int scsi_eh_abort_cmds(struct list_head *work_q,
 	int rtn;
 	struct Scsi_Host *shost;
 
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+        /* SELP.arm.3.x support A1 2007-10-22 */
+        //20070919 for checking Test Unit Ready command inhancement speed of momory card remove from card-reader
+        int ret1= 0;
+        int ret2= 0;
+#endif
 	list_for_each_entry_safe(scmd, next, work_q, eh_entry) {
 		if (!(scmd->eh_eflags & SCSI_EH_CANCEL_CMD))
 			continue;
@@ -1343,10 +1354,21 @@ static int scsi_eh_abort_cmds(struct list_head *work_q,
 			return list_empty(work_q);
 		}
 		scmd->eh_eflags &= ~SCSI_EH_CANCEL_CMD;
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+                        /* SELP.arm.3.x support A1 2007-12-14 */
+                        //20070919 for checking Test Unit Ready command inhancement speed of momory card remove from card-reader
+                        ret1 = scsi_device_online(scmd->device);
+                        ret2 = scsi_eh_tur(scmd);
+                        if (!ret1 || !ret2)
+                                scsi_eh_finish_cmd(scmd, done_q);
+                        else if(ret2 == FAILED)
+                                scsi_eh_finish_cmd(scmd, done_q);
+#else //org
 		if (rtn == FAST_IO_FAIL)
 			scsi_eh_finish_cmd(scmd, done_q);
 		else
 			list_move_tail(&scmd->eh_entry, &check_list);
+#endif
 	}
 
 	return scsi_eh_test_devices(&check_list, work_q, done_q, 0);
@@ -2587,33 +2609,3 @@ void scsi_build_sense_buffer(int desc, u8 *buf, u8 key, u8 asc, u8 ascq)
 	}
 }
 EXPORT_SYMBOL(scsi_build_sense_buffer);
-
-/**
- * scsi_set_sense_information - set the information field in a
- *		formatted sense data buffer
- * @buf:	Where to build sense data
- * @info:	64-bit information value to be set
- *
- **/
-void scsi_set_sense_information(u8 *buf, u64 info)
-{
-	if ((buf[0] & 0x7f) == 0x72) {
-		u8 *ucp, len;
-
-		len = buf[7];
-		ucp = (char *)scsi_sense_desc_find(buf, len + 8, 0);
-		if (!ucp) {
-			buf[7] = len + 0xa;
-			ucp = buf + 8 + len;
-		}
-		ucp[0] = 0;
-		ucp[1] = 0xa;
-		ucp[2] = 0x80; /* Valid bit */
-		ucp[3] = 0;
-		put_unaligned_be64(info, &ucp[4]);
-	} else if ((buf[0] & 0x7f) == 0x70) {
-		buf[0] |= 0x80;
-		put_unaligned_be64(info, &buf[3]);
-	}
-}
-EXPORT_SYMBOL(scsi_set_sense_information);

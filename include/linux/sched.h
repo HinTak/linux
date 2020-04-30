@@ -60,6 +60,9 @@ struct sched_param {
 #include <linux/magic.h>
 
 #include <asm/processor.h>
+#ifdef CONFIG_SMART_DEADLOCK
+#include <linux/smart-deadlock.h>
+#endif
 
 #define SCHED_ATTR_SIZE_VER0	48	/* sizeof first published struct */
 
@@ -364,6 +367,23 @@ extern void show_regs(struct pt_regs *);
  */
 extern void show_stack(struct task_struct *task, unsigned long *sp);
 
+extern int find_match_elf_name(struct task_struct *t, char *name,
+		unsigned long addr);
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+extern void show_pid_maps(struct task_struct *task);
+extern void show_user_stack(struct task_struct *task, struct pt_regs *regs);
+#if defined(CONFIG_ARM) || defined(CONFIG_ARM64)
+extern void dump_info(struct task_struct *task, struct pt_regs *regs,
+		unsigned long addr);
+#endif
+extern void dump_mem_kernel(const char *str, unsigned long bottom,
+		unsigned long top);
+#endif
+#ifdef CONFIG_SHOW_THREAD_GROUP_STACK
+	void __show_user_stack_tg(struct task_struct *task);
+#endif
+
+
 extern void cpu_init (void);
 extern void trap_init(void);
 extern void update_process_times(int user);
@@ -525,16 +545,29 @@ struct cpu_itimer {
 };
 
 /**
- * struct cputime - snaphsot of system and user cputime
+ * struct prev_cputime - snaphsot of system and user cputime
  * @utime: time spent in user mode
  * @stime: time spent in system mode
+ * @lock: protects the above two fields
  *
- * Gathers a generic snapshot of user and system time.
+ * Stores previous user/system time values such that we can guarantee
+ * monotonicity.
  */
-struct cputime {
+struct prev_cputime {
+#ifndef CONFIG_VIRT_CPU_ACCOUNTING_NATIVE
 	cputime_t utime;
 	cputime_t stime;
+	raw_spinlock_t lock;
+#endif
 };
+
+static inline void prev_cputime_init(struct prev_cputime *prev)
+{
+#ifndef CONFIG_VIRT_CPU_ACCOUNTING_NATIVE
+	prev->utime = prev->stime = 0;
+	raw_spin_lock_init(&prev->lock);
+#endif
+}
 
 /**
  * struct task_cputime - collected CPU time counts
@@ -542,22 +575,19 @@ struct cputime {
  * @stime:		time spent in kernel mode, in &cputime_t units
  * @sum_exec_runtime:	total time spent on the CPU, in nanoseconds
  *
- * This is an extension of struct cputime that includes the total runtime
- * spent by the task from the scheduler point of view.
- *
- * As a result, this structure groups together three kinds of CPU time
- * that are tracked for threads and thread groups.  Most things considering
- * CPU time want to group these counts together and treat all three
- * of them in parallel.
+ * This structure groups together three kinds of CPU time that are tracked for
+ * threads and thread groups.  Most things considering CPU time want to group
+ * these counts together and treat all three of them in parallel.
  */
 struct task_cputime {
 	cputime_t utime;
 	cputime_t stime;
 	unsigned long long sum_exec_runtime;
 };
+
 /* Alternate field names when used to cache expirations. */
-#define prof_exp	stime
 #define virt_exp	utime
+#define prof_exp	stime
 #define sched_exp	sum_exec_runtime
 
 #define INIT_CPUTIME	\
@@ -695,9 +725,7 @@ struct signal_struct {
 	cputime_t utime, stime, cutime, cstime;
 	cputime_t gtime;
 	cputime_t cgtime;
-#ifndef CONFIG_VIRT_CPU_ACCOUNTING_NATIVE
-	struct cputime prev_cputime;
-#endif
+	struct prev_cputime prev_cputime;
 	unsigned long nvcsw, nivcsw, cnvcsw, cnivcsw;
 	unsigned long min_flt, maj_flt, cmin_flt, cmaj_flt;
 	unsigned long inblock, oublock, cinblock, coublock;
@@ -773,6 +801,25 @@ struct signal_struct {
 
 #define SIGNAL_UNKILLABLE	0x00000040 /* for init: ignore fatal signals */
 
+#define SIGNAL_STOP_MASK (SIGNAL_CLD_MASK | SIGNAL_STOP_STOPPED | \
+			SIGNAL_STOP_CONTINUED)
+
+static inline void signal_set_stop_flags(struct signal_struct *sig,
+					unsigned int flags)
+{
+	WARN_ON(sig->flags & (SIGNAL_GROUP_EXIT|SIGNAL_GROUP_COREDUMP));
+	sig->flags = (sig->flags & ~SIGNAL_STOP_MASK) | flags;
+}
+
+#ifdef CONFIG_COREDUMP_SIGKILL_BLOCKED
+#define SIGNAL_GROUP_BLOCK_SIGKILL 0x00000080 /*Block SIGKILL*/
+#else
+#define SIGNAL_GROUP_BLOCK_SIGKILL 0x00000000 /*Block SIGKILL*/
+#endif
+
+#define signal_block_sigkill(tsk) \
+		(tsk->signal->flags & \
+		(SIGNAL_GROUP_BLOCK_SIGKILL | SIGNAL_GROUP_COREDUMP))
 /* If true, all threads except ->group_exit_task have pending SIGKILL */
 static inline int signal_group_exit(const struct signal_struct *sig)
 {
@@ -802,6 +849,8 @@ struct user_struct {
 	unsigned long mq_bytes;	/* How many bytes can be allocated to mqueue? */
 #endif
 	unsigned long locked_shm; /* How many pages of mlocked shm ? */
+	unsigned long unix_inflight;	/* How many files in flight in unix sockets */
+	atomic_long_t pipe_bufs;  /* how many pages are allocated in pipe buffers */
 
 #ifdef CONFIG_KEYS
 	struct key *uid_keyring;	/* UID specific keyring */
@@ -1299,9 +1348,9 @@ struct task_struct {
 #ifdef CONFIG_SMP
 	struct llist_node wake_entry;
 	int on_cpu;
-	struct task_struct *last_wakee;
-	unsigned long wakee_flips;
+	unsigned int wakee_flips;
 	unsigned long wakee_flip_decay_ts;
+	struct task_struct *last_wakee;
 
 	int wake_cpu;
 #endif
@@ -1360,7 +1409,7 @@ struct task_struct {
 	unsigned brk_randomized:1;
 #endif
 	/* per-thread vma caching */
-	u32 vmacache_seqnum;
+	u64 vmacache_seqnum;
 	struct vm_area_struct *vmacache[VMACACHE_SIZE];
 #if defined(SPLIT_RSS_COUNTING)
 	struct task_rss_stat	rss_stat;
@@ -1384,6 +1433,10 @@ struct task_struct {
 
 #ifdef CONFIG_MEMCG_KMEM
 	unsigned memcg_kmem_skip_account:1;
+#endif
+
+#ifdef CONFIG_PROC_VD_SUSPEND_POLICY
+	unsigned suspend_last:1;
 #endif
 
 	unsigned long atomic_flags; /* Flags needing atomic access. */
@@ -1430,9 +1483,7 @@ struct task_struct {
 
 	cputime_t utime, stime, utimescaled, stimescaled;
 	cputime_t gtime;
-#ifndef CONFIG_VIRT_CPU_ACCOUNTING_NATIVE
-	struct cputime prev_cputime;
-#endif
+	struct prev_cputime prev_cputime;
 #ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN
 	seqlock_t vtime_seqlock;
 	unsigned long long vtime_snap;
@@ -1452,6 +1503,7 @@ struct task_struct {
 	struct list_head cpu_timers[3];
 
 /* process credentials */
+	const struct cred __rcu *ptracer_cred; /* Tracer's credentials at attach */
 	const struct cred __rcu *real_cred; /* objective and real subjective task
 					 * credentials (COW) */
 	const struct cred __rcu *cred;	/* effective (overridable) subjective task
@@ -1502,8 +1554,8 @@ struct task_struct {
 	struct seccomp seccomp;
 
 /* Thread group tracking */
-   	u32 parent_exec_id;
-   	u32 self_exec_id;
+	u32 parent_exec_id;
+	u32 self_exec_id;
 /* Protection of (de-)allocation: mm, files, fs, tty, keyrings, mems_allowed,
  * mempolicy */
 	spinlock_t alloc_lock;
@@ -1545,6 +1597,10 @@ struct task_struct {
 	unsigned int lockdep_recursion;
 	struct held_lock held_locks[MAX_LOCK_DEPTH];
 	gfp_t lockdep_reclaim_gfp;
+#endif
+
+#ifdef CONFIG_UBSAN
+        unsigned int                    in_ubsan;
 #endif
 
 /* journalling filesystem info */
@@ -1723,6 +1779,24 @@ struct task_struct {
 #endif
 #ifdef CONFIG_DEBUG_ATOMIC_SLEEP
 	unsigned long	task_state_change;
+#endif
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+	unsigned long user_ssp;  /* user mode start sp */
+#endif
+#ifdef CONFIG_SMART_DEADLOCK
+	struct smart_deadlock_task sm_tsk;
+#endif
+#ifdef CONFIG_STACK_RECLAIM
+	unsigned long stack_rec_time;
+#endif
+
+// jason77.lee@samsung.com
+#ifdef CONFIG_SECURITY_SFD_SECURECONTAINER
+	int uepLevel;
+#endif // CONFIG_SECURITY_SFD_SECURECONTAINER
+
+#ifdef CONFIG_VDFS4_TRACE
+	unsigned int vt_rep_idx;
 #endif
 };
 
@@ -2833,12 +2907,6 @@ extern int _cond_resched(void);
 })
 
 extern int __cond_resched_lock(spinlock_t *lock);
-
-#ifdef CONFIG_PREEMPT_COUNT
-#define PREEMPT_LOCK_OFFSET	PREEMPT_OFFSET
-#else
-#define PREEMPT_LOCK_OFFSET	0
-#endif
 
 #define cond_resched_lock(lock) ({				\
 	___might_sleep(__FILE__, __LINE__, PREEMPT_LOCK_OFFSET);\

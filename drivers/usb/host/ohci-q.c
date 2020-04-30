@@ -70,8 +70,26 @@ __acquires(ohci->lock)
 
 	/* urb->complete() can reenter this HCD */
 	usb_hcd_unlink_urb_from_ep(ohci_to_hcd(ohci), urb);
-	spin_unlock (&ohci->lock);
-	usb_hcd_giveback_urb(ohci_to_hcd(ohci), urb, status);
+#ifdef SAMSUNG_PATCH_RMB_WMB_AT_UNLINK
+        /* Making sure that all data of urb are proper used only for full speed devices. */
+        if((urb->dev != NULL) && (urb->dev->speed <= USB_SPEED_FULL))
+                wmb();
+#endif
+
+#ifdef SAMSUNG_USB_FULL_SPEED_BT_MODIFY_GIVEBACK_URB
+   /* For HawkM and BT device only */
+   if((soc_is_sdp1406()) && (urb->dev != NULL) && (urb->dev->speed == USB_SPEED_FULL)){
+       usb_hcd_prepare_urb_for_giveback(ohci_to_hcd(ohci), urb, status);
+       spin_unlock (&ohci->lock);
+       usb_hcd_full_speed_giveback_urb(ohci_to_hcd(ohci), urb, status);
+   }else{
+       spin_unlock (&ohci->lock);
+       usb_hcd_giveback_urb(ohci_to_hcd(ohci), urb, status);
+   }
+#else
+        spin_unlock (&ohci->lock);
+        usb_hcd_giveback_urb(ohci_to_hcd(ohci), urb, status);
+#endif
 	spin_lock (&ohci->lock);
 
 	/* stop periodic dma if it's not needed */
@@ -89,10 +107,15 @@ __acquires(ohci->lock)
 	 */
 	if (!list_empty(&ep->urb_list)) {
 		urb = list_first_entry(&ep->urb_list, struct urb, urb_list);
-		urb_priv = urb->hcpriv;
-		if (urb_priv->td_cnt > urb_priv->length) {
-			status = 0;
-			goto restart;
+		if(urb){
+			urb_priv = urb->hcpriv;
+			if(urb_priv)
+			{
+				if (urb_priv->td_cnt > urb_priv->length) {
+					status = 0;
+					goto restart;
+				}
+			}
 		}
 	}
 }
@@ -980,10 +1003,6 @@ rescan_all:
 		int			completed, modified;
 		__hc32			*prev;
 
-		/* Is this ED already invisible to the hardware? */
-		if (ed->state == ED_IDLE)
-			goto ed_idle;
-
 		/* only take off EDs that the HC isn't using, accounting for
 		 * frame counter wraps and EDs with partially retired TDs
 		 */
@@ -1011,12 +1030,10 @@ skip_ed:
 		}
 
 		/* ED's now officially unlinked, hc doesn't see */
-		ed->state = ED_IDLE;
 		ed->hwHeadP &= ~cpu_to_hc32(ohci, ED_H);
 		ed->hwNextED = 0;
 		wmb();
 		ed->hwINFO &= ~cpu_to_hc32(ohci, ED_SKIP | ED_DEQUEUE);
-ed_idle:
 
 		/* reentrancy:  if we drop the schedule lock, someone might
 		 * have modified this list.  normally it's just prepending
@@ -1044,6 +1061,15 @@ rescan_this:
 
 			td = list_entry (entry, struct td, td_list);
 			urb = td->urb;
+			/* In some strange scenario we found that urb gets NULL value 
+			 * so putting some useful debug prints and skip td.
+			 */
+		
+			if(unlikely(urb == NULL)){
+				printk(KERN_ERR"\n%p td is having NULL poiter for urb\n", td);
+				ohci_dump_td(ohci, "debug", td);
+				continue;
+			}	
 			urb_priv = td->urb->hcpriv;
 
 			if (!urb->unlinked) {
@@ -1087,6 +1113,7 @@ rescan_this:
 		if (list_empty(&ed->td_list)) {
 			*last = ed->ed_next;
 			ed->ed_next = NULL;
+			ed->state = ED_IDLE;
 			list_del(&ed->in_use_list);
 		} else if (ohci->rh_state == OHCI_RH_RUNNING) {
 			*last = ed->ed_next;

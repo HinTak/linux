@@ -1289,6 +1289,7 @@ static void nfs_initiate_write(struct nfs_pgio_header *hdr,
 static void nfs_redirty_request(struct nfs_page *req)
 {
 	nfs_mark_request_dirty(req);
+	set_bit(NFS_CONTEXT_RESEND_WRITES, &req->wb_context->flags);
 	nfs_unlock_request(req);
 	nfs_end_page_writeback(req);
 	nfs_release_request(req);
@@ -1382,24 +1383,27 @@ static void nfs_writeback_check_extend(struct nfs_pgio_header *hdr,
 {
 	struct nfs_pgio_args *argp = &hdr->args;
 	struct nfs_pgio_res *resp = &hdr->res;
+	u64 size = argp->offset + resp->count;
 
 	if (!(fattr->valid & NFS_ATTR_FATTR_SIZE))
+		fattr->size = size;
+	if (nfs_size_to_loff_t(fattr->size) < i_size_read(hdr->inode)) {
+		fattr->valid &= ~NFS_ATTR_FATTR_SIZE;
 		return;
-	if (argp->offset + resp->count != fattr->size)
-		return;
-	if (nfs_size_to_loff_t(fattr->size) < i_size_read(hdr->inode))
+	}
+	if (size != fattr->size)
 		return;
 	/* Set attribute barrier */
 	nfs_fattr_set_barrier(fattr);
+	/* ...and update size */
+	fattr->valid |= NFS_ATTR_FATTR_SIZE;
 }
 
 void nfs_writeback_update_inode(struct nfs_pgio_header *hdr)
 {
-	struct nfs_fattr *fattr = hdr->res.fattr;
+	struct nfs_fattr *fattr = &hdr->fattr;
 	struct inode *inode = hdr->inode;
 
-	if (fattr == NULL)
-		return;
 	spin_lock(&inode->i_lock);
 	nfs_writeback_check_extend(hdr, fattr);
 	nfs_post_op_update_inode_force_wcc_locked(inode, fattr);

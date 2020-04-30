@@ -285,6 +285,7 @@ struct xhci_op_regs {
 #define XDEV_U0		(0x0 << 5)
 #define XDEV_U2		(0x2 << 5)
 #define XDEV_U3		(0x3 << 5)
+#define XDEV_INACTIVE	(0x6 << 5)
 #define XDEV_RESUME	(0xf << 5)
 /* true: port has power (see HCC_PPC) */
 #define PORT_POWER	(1 << 9)
@@ -1591,6 +1592,23 @@ struct xhci_hcd {
 	u32			port_status_u0;
 /* Compliance Mode Timer Triggered every 2 seconds */
 #define COMP_MODE_RCVRY_MSECS 2000
+
+#ifdef CONFIG_ARCH_SDP
+
+/* only for Jazz-OCM HUB */
+#define SET_ADDR_MAXCHK_CONT	4
+	unsigned int 		cnt_txerr_setaddr_usb2;
+
+#ifdef CONFIG_USB_DEBUG
+#define CHK_STATE(v,state_mask)	(((v)&(state_mask)) == (state_mask))
+#define CTX_TO_CERR_INFO(p)	(((p) >> 1) & 0x3)
+#define CERR_INIT_MAX		3 	/* 0-3 qtd retries; 0 == don't stop */
+	/* for Debug / Early Warning(for SDP) */
+	u32 handshake_fail_cnt_usb2;
+	int cerr;
+#endif	
+
+#endif
 };
 
 /* convert between an HCD pointer and the corresponding EHCI_HCD */
@@ -1614,7 +1632,18 @@ static inline struct usb_hcd *xhci_to_hcd(struct xhci_hcd *xhci)
 	dev_warn_ratelimited(xhci_to_hcd(xhci)->self.controller , fmt , ## args)
 #define xhci_info(xhci, fmt, args...) \
 	dev_info(xhci_to_hcd(xhci)->self.controller , fmt , ## args)
-
+/* TODO: copied from ehci.h - can be refactored? */
+/* xHCI spec says all registers are little endian */
+static inline unsigned int xhci_readl(const struct xhci_hcd *xhci,
+		__le32 __iomem *regs)
+{
+	return readl(regs);
+}
+static inline void xhci_writel(struct xhci_hcd *xhci,
+		const unsigned int val, __le32 __iomem *regs)
+{
+	writel(val, regs);
+}
 /*
  * Registers should always be accessed with double word or quad word accesses.
  *
@@ -1759,6 +1788,9 @@ int xhci_resume(struct xhci_hcd *xhci, bool hibernated);
 #define	xhci_suspend	NULL
 #define	xhci_resume	NULL
 #endif
+
+int xhci_plat_init(void);
+void xhci_plat_exit(void); //for xhci-plat.c init
 
 int xhci_get_frame(struct usb_hcd *hcd);
 irqreturn_t xhci_irq(struct usb_hcd *hcd);

@@ -58,6 +58,11 @@
 struct cma;
 struct page;
 
+#ifdef CONFIG_CMA
+extern void cma_add_device_on_region(struct device *device, struct cma *cma);
+extern void cma_remove_device_on_region(struct device *device, struct cma *cma);
+#endif
+
 #ifdef CONFIG_DMA_CMA
 
 extern struct cma *dma_contiguous_default_area;

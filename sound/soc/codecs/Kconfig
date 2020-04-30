@@ -401,6 +401,9 @@ config SND_SOC_CS42XX8_I2C
 	select SND_SOC_CS42XX8
 	select REGMAP_I2C
 
+config SND_SOC_TLV320WN
+	tristate
+
 config SND_SOC_CX20442
 	tristate
 	depends on TTY
@@ -844,6 +847,9 @@ config SND_SOC_WM9712
 config SND_SOC_WM9713
 	tristate
 
+config SND_SOC_MT8167_CODEC
+	tristate
+
 # Amp
 config SND_SOC_LM4857
 	tristate
@@ -863,5 +869,7 @@ config SND_SOC_ML26124
 config SND_SOC_TPA6130A2
 	tristate "Texas Instruments TPA6130A2 headphone amplifier"
 	depends on I2C
+
+source sound/soc/codecs/dbmdx/Kconfig
 
 endmenu

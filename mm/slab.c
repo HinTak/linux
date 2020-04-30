@@ -1602,7 +1602,7 @@ static struct page *kmem_getpages(struct kmem_cache *cachep, gfp_t flags,
 	}
 
 	/* Record if ALLOC_NO_WATERMARKS was set when allocating the slab */
-	if (unlikely(page->pfmemalloc))
+	if (page_is_pfmemalloc(page))
 		pfmemalloc_active = true;
 
 	nr_pages = (1 << cachep->gfporder);
@@ -1613,7 +1613,7 @@ static struct page *kmem_getpages(struct kmem_cache *cachep, gfp_t flags,
 		add_zone_page_state(page_zone(page),
 			NR_SLAB_UNRECLAIMABLE, nr_pages);
 	__SetPageSlab(page);
-	if (page->pfmemalloc)
+	if (page_is_pfmemalloc(page))
 		SetPageSlabPfmemalloc(page);
 
 	if (kmemcheck_enabled && !(cachep->flags & SLAB_NOTRACK)) {
@@ -3973,6 +3973,8 @@ void get_slabinfo(struct kmem_cache *cachep, struct slabinfo *sinfo)
 	sinfo->cache_order = cachep->gfporder;
 }
 
+extern int seq_printk(struct seq_file *m, const char *f, ...);
+
 void slabinfo_show_stats(struct seq_file *m, struct kmem_cache *cachep)
 {
 #if STATS
@@ -3987,7 +3989,7 @@ void slabinfo_show_stats(struct seq_file *m, struct kmem_cache *cachep)
 		unsigned long node_frees = cachep->node_frees;
 		unsigned long overflows = cachep->node_overflow;
 
-		seq_printf(m, " : globalstat %7lu %6lu %5lu %4lu "
+		seq_printk(m, " : globalstat %7lu %6lu %5lu %4lu "
 			   "%4lu %4lu %4lu %4lu %4lu",
 			   allocs, high, grown,
 			   reaped, errors, max_freeable, node_allocs,
@@ -4000,7 +4002,7 @@ void slabinfo_show_stats(struct seq_file *m, struct kmem_cache *cachep)
 		unsigned long freehit = atomic_read(&cachep->freehit);
 		unsigned long freemiss = atomic_read(&cachep->freemiss);
 
-		seq_printf(m, " : cpustat %6lu %6lu %6lu %6lu",
+		seq_printk(m, " : cpustat %6lu %6lu %6lu %6lu",
 			   allochit, allocmiss, freehit, freemiss);
 	}
 #endif

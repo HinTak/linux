@@ -75,6 +75,16 @@
 			    KEXEC_CORE_NOTE_DESC_BYTES )
 #endif
 
+ /*
+ * The vdlp version of kexec-note definition.
+ */
+#ifdef CONFIG_KEXEC_CSYSTEM
+#define KEXEC_CSYSTEM_CORE_NOTE_DESC_BYTES ALIGN(sizeof(struct arm_regs_t), 4)
+#define KEXEC_CSYSTEM_NOTE_BYTES ( (KEXEC_NOTE_HEAD_BYTES * 2) +	\
+			    KEXEC_CORE_NOTE_NAME_BYTES +		\
+			    KEXEC_CSYSTEM_CORE_NOTE_DESC_BYTES )
+#endif
+
 /*
  * This structure is used to hold the arguments that are used when loading
  * kernel binaries.
@@ -239,7 +249,11 @@ extern void *kexec_purgatory_get_symbol_addr(struct kimage *image,
 					     const char *name);
 extern void crash_kexec(struct pt_regs *);
 int kexec_should_crash(struct task_struct *);
+#ifdef CONFIG_KEXEC_CSYSTEM
+void crash_save_cpu(struct arm_regs_t *regs, int cpu);
+#else
 void crash_save_cpu(struct pt_regs *regs, int cpu);
+#endif
 void crash_save_vmcoreinfo(void);
 void crash_map_reserved_pages(void);
 void crash_unmap_reserved_pages(void);
@@ -299,7 +313,11 @@ extern int kexec_load_disabled;
  */
 extern struct resource crashk_res;
 extern struct resource crashk_low_res;
+#ifndef CONFIG_KEXEC_CSYSTEM
 typedef u32 note_buf_t[KEXEC_NOTE_BYTES/4];
+#else
+typedef u32 note_buf_t[KEXEC_CSYSTEM_NOTE_BYTES/4];
+#endif
 extern note_buf_t __percpu *crash_notes;
 extern u32 vmcoreinfo_note[VMCOREINFO_NOTE_SIZE/4];
 extern size_t vmcoreinfo_size;

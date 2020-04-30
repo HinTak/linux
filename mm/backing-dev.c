@@ -11,6 +11,7 @@
 #include <linux/writeback.h>
 #include <linux/device.h>
 #include <trace/events/writeback.h>
+#include <linux/slab.h>
 
 static atomic_long_t bdi_seq = ATOMIC_LONG_INIT(0);
 
@@ -163,6 +164,8 @@ static ssize_t name##_show(struct device *dev,				\
 			   struct device_attribute *attr, char *page)	\
 {									\
 	struct backing_dev_info *bdi = dev_get_drvdata(dev);		\
+									\
+	if(!bdi) return 0;						\
 									\
 	return snprintf(page, PAGE_SIZE-1, "%lld\n", (long long)expr);	\
 }									\
@@ -350,6 +353,11 @@ static void bdi_wb_shutdown(struct backing_dev_info *bdi)
 	 */
 	bdi_remove_from_list(bdi);
 
+	if (check_freezing()) {
+		cancel_delayed_work(&bdi->wb.dwork);
+		return;
+	}
+
 	/*
 	 * Drain work list and shutdown the delayed_work.  At this point,
 	 * @bdi->bdi_list is empty telling bdi_Writeback_workfn() that @bdi
@@ -383,6 +391,7 @@ int bdi_init(struct backing_dev_info *bdi)
 	int i, err;
 
 	bdi->dev = NULL;
+	kref_init(&bdi->refcnt);
 
 	bdi->min_ratio = 0;
 	bdi->max_ratio = 100;
@@ -421,25 +430,66 @@ err:
 }
 EXPORT_SYMBOL(bdi_init);
 
-void bdi_destroy(struct backing_dev_info *bdi)
+struct backing_dev_info *bdi_alloc_node(gfp_t gfp_mask, int node_id)
 {
-	int i;
+	struct backing_dev_info *bdi;
 
+	bdi = kmalloc_node(sizeof(struct backing_dev_info),
+			   gfp_mask | __GFP_ZERO, node_id);
+	if (!bdi)
+		return NULL;
+
+	if (bdi_init(bdi)) {
+		kfree(bdi);
+		return NULL;
+	}
+	return bdi;
+}
+void bdi_unregister(struct backing_dev_info *bdi)
+{
 	bdi_wb_shutdown(bdi);
 	bdi_set_min_ratio(bdi, 0);
-
-	WARN_ON(!list_empty(&bdi->work_list));
-	WARN_ON(delayed_work_pending(&bdi->wb.dwork));
 
 	if (bdi->dev) {
 		bdi_debug_unregister(bdi);
 		device_unregister(bdi->dev);
 		bdi->dev = NULL;
 	}
+}
+
+static void bdi_exit(struct backing_dev_info *bdi)
+{
+	int i;
+
+        WARN_ON_ONCE(bdi->dev);
+	WARN_ON(!list_empty(&bdi->work_list));
+	WARN_ON(delayed_work_pending(&bdi->wb.dwork));
 
 	for (i = 0; i < NR_BDI_STAT_ITEMS; i++)
 		percpu_counter_destroy(&bdi->bdi_stat[i]);
 	fprop_local_destroy_percpu(&bdi->completions);
+}
+
+static void release_bdi(struct kref *ref)
+{
+	struct backing_dev_info *bdi =
+			container_of(ref, struct backing_dev_info, refcnt);
+
+	if (test_bit(BDI_registered, &bdi->state))
+		bdi_unregister(bdi);
+	bdi_exit(bdi);
+	kfree(bdi);
+}
+
+void bdi_put(struct backing_dev_info *bdi)
+{
+	kref_put(&bdi->refcnt, release_bdi);
+}
+
+void bdi_destroy(struct backing_dev_info *bdi)
+{
+	bdi_unregister(bdi);
+	bdi_exit(bdi);
 }
 EXPORT_SYMBOL(bdi_destroy);
 
@@ -536,8 +586,9 @@ EXPORT_SYMBOL(congestion_wait);
  * jiffies for either a BDI to exit congestion of the given @sync queue
  * or a write to complete.
  *
- * In the absence of zone congestion, cond_resched() is called to yield
- * the processor if necessary but otherwise does not sleep.
+ * In the absence of zone congestion, a short sleep or a cond_resched is
+ * performed to yield the processor and to allow other subsystems to make
+ * a forward progress.
  *
  * The return value is 0 if the sleep is for the full timeout. Otherwise,
  * it is the number of jiffies that were still remaining when the function
@@ -557,7 +608,19 @@ long wait_iff_congested(struct zone *zone, int sync, long timeout)
 	 */
 	if (atomic_read(&nr_bdi_congested[sync]) == 0 ||
 	    !test_bit(ZONE_CONGESTED, &zone->flags)) {
-		cond_resched();
+
+		/*
+		 * Memory allocation/reclaim might be called from a WQ
+		 * context and the current implementation of the WQ
+		 * concurrency control doesn't recognize that a particular
+		 * WQ is congested if the worker thread is looping without
+		 * ever sleeping. Therefore we have to do a short sleep
+		 * here rather than calling cond_resched().
+		 */
+		if (current->flags & PF_WQ_WORKER)
+			schedule_timeout_uninterruptible(1);
+		else
+			cond_resched();
 
 		/* In case we scheduled, work out time remaining */
 		ret = timeout - (jiffies - start);

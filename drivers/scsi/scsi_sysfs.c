@@ -592,6 +592,12 @@ sdev_rd_attr (vendor, "%.8s\n");
 sdev_rd_attr (model, "%.16s\n");
 sdev_rd_attr (rev, "%.4s\n");
 
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+sdev_rd_attr (serial, "%.32s\n");                       //add for usb serial number
+sdev_rd_attr (logicalnumber, "%.16s\n");                //add for usb logical number
+sdev_rd_attr (usbdevpath, "%.16s\n");                   //add for usb device path
+#endif
+
 static ssize_t
 sdev_show_device_busy(struct device *dev, struct device_attribute *attr,
 		char *buf)
@@ -859,7 +865,7 @@ sdev_store_queue_depth(struct device *dev, struct device_attribute *attr,
 
 	depth = simple_strtoul(buf, NULL, 0);
 
-	if (depth < 1 || depth > sht->can_queue)
+	if (depth < 1 || depth > sdev->host->can_queue)
 		return -EINVAL;
 
 	retval = sht->change_queue_depth(sdev, depth);
@@ -931,6 +937,11 @@ static struct attribute *scsi_sdev_attrs[] = {
 	&dev_attr_device_busy.attr,
 	&dev_attr_vendor.attr,
 	&dev_attr_model.attr,
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+        &dev_attr_serial.attr,
+        &dev_attr_logicalnumber.attr,
+        &dev_attr_usbdevpath.attr,
+#endif
 	&dev_attr_rev.attr,
 	&dev_attr_rescan.attr,
 	&dev_attr_delete.attr,

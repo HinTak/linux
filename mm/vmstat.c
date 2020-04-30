@@ -692,13 +692,19 @@ int fragmentation_index(struct zone *zone, unsigned int order)
 #define TEXT_FOR_HIGHMEM(xx)
 #endif
 
+#ifdef CONFIG_CMA
+#define TEXT_FOR_CMA(xx) xx "_cma",
+#else
+#define TEXT_FOR_CMA(xx)
+#endif
+
 #define TEXTS_FOR_ZONES(xx) TEXT_FOR_DMA(xx) TEXT_FOR_DMA32(xx) xx "_normal", \
-					TEXT_FOR_HIGHMEM(xx) xx "_movable",
+					TEXT_FOR_HIGHMEM(xx) xx "_movable", \
+					TEXT_FOR_CMA(xx)
 
 const char * const vmstat_text[] = {
 	/* enum zone_stat_item countes */
 	"nr_free_pages",
-	"nr_alloc_batch",
 	"nr_inactive_anon",
 	"nr_active_anon",
 	"nr_inactive_file",
@@ -738,7 +744,6 @@ const char * const vmstat_text[] = {
 	"workingset_activate",
 	"workingset_nodereclaim",
 	"nr_anon_transparent_hugepages",
-	"nr_free_cma",
 
 	/* enum writeback_stat_item counters */
 	"nr_dirty_threshold",
@@ -765,6 +770,8 @@ const char * const vmstat_text[] = {
 	TEXTS_FOR_ZONES("pgsteal_direct")
 	TEXTS_FOR_ZONES("pgscan_kswapd")
 	TEXTS_FOR_ZONES("pgscan_direct")
+
+	"pg_lowmem_fallback",
 	"pgscan_direct_throttle",
 
 #ifdef CONFIG_NUMA
@@ -843,7 +850,6 @@ const char * const vmstat_text[] = {
 #ifdef CONFIG_DEBUG_VM_VMACACHE
 	"vmacache_find_calls",
 	"vmacache_find_hits",
-	"vmacache_full_flushes",
 #endif
 #endif /* CONFIG_VM_EVENTS_COUNTERS */
 };
@@ -902,9 +908,6 @@ static char * const migratetype_names[MIGRATE_TYPES] = {
 	"Reclaimable",
 	"Movable",
 	"Reserve",
-#ifdef CONFIG_CMA
-	"CMA",
-#endif
 #ifdef CONFIG_MEMORY_ISOLATION
 	"Isolate",
 #endif
@@ -1060,6 +1063,9 @@ static void pagetypeinfo_showmixedcount_print(struct seq_file *m,
 				continue;
 
 			page = pfn_to_page(pfn);
+			if (page_zone(page) != zone)
+				continue;
+
 			if (PageBuddy(page)) {
 				pfn += (1UL << page_order(page)) - 1;
 				continue;
@@ -1075,10 +1081,7 @@ static void pagetypeinfo_showmixedcount_print(struct seq_file *m,
 
 			page_mt = gfpflags_to_migratetype(page_ext->gfp_mask);
 			if (pageblock_mt != page_mt) {
-				if (is_migrate_cma(pageblock_mt))
-					count[MIGRATE_MOVABLE]++;
-				else
-					count[pageblock_mt]++;
+				count[pageblock_mt]++;
 
 				pfn = block_end_pfn;
 				break;
@@ -1273,6 +1276,81 @@ static const struct file_operations proc_zoneinfo_file_operations = {
 	.release	= seq_release,
 };
 
+static int mem_usage_show(struct seq_file *m, void *arg)
+{
+	pg_data_t *pgdat = (pg_data_t *)arg;
+	struct kernel_mem_usage kernel_usage;
+	struct user_mem_usage user_usage;
+
+	seq_printf(m, "\nMem_usage_show node_id %d\n", pgdat->node_id);
+	get_kernel_mem_usage(&kernel_usage);
+	get_user_mem_usage(&user_usage);
+
+	seq_printf(m, "\nkernel memory usage\ntotal_mem_size\t\t%lu\n"
+		"free_mem_size\t\t%lu\n"
+		"slab_size\t\t%lu\n"
+		"vmalloc_used_size\t%lu\n"
+		"ioremap_size\t\t%lu\n"
+		"pagetable_size\t\t%lu\n"
+		"kernelstack_size\t%lu\n"
+		"zram_size\t\t%lu\n"
+		"buddy_size\t\t%lu\n"
+		"sum_kernel_size\t\t%lu\n",
+		kernel_usage.total_mem_size,
+		kernel_usage.free_mem_size,
+		kernel_usage.slab_size,
+		kernel_usage.vmallocused_size,
+		kernel_usage.ioremap_size,
+		kernel_usage.pagetable_size,
+		kernel_usage.kernelstack_size,
+		kernel_usage.zram_size,
+		kernel_usage.buddy_size,
+		kernel_usage.sum_kernel_size);
+
+	seq_printf(m, "\nuser memory usage\npage_cache_size\t\t%lu\n"
+		"active_anon_size\t%lu\n"
+		"inactive_anon_size\t%lu\n"
+		"active_file_size\t%lu\n"
+		"inactive_file_size\t%lu\n"
+		"unevictable_size\t%lu\n"
+		"anon_pages_size\t\t%lu\n"
+		"mapped_size\t\t%lu\n"
+		"shmem_size\t\t%lu\n"
+		"sum_user_size\t\t%lu\n",
+		user_usage.page_cache_size,
+		user_usage.active_anon_size,
+		user_usage.inactive_anon_size,
+		user_usage.active_file_size,
+		user_usage.inactive_file_size,
+		user_usage.unevictable_size,
+		user_usage.anon_pages_size,
+		user_usage.mapped_size,
+		user_usage.shmem_size,
+		user_usage.sum_user_size);
+
+	return 0;
+}
+
+static const struct seq_operations mem_usage_op = {
+	.start	= frag_start, /* iterate over all zones. The same as in
+			       * fragmentation. */
+	.next	= frag_next,
+	.stop	= frag_stop,
+	.show	= mem_usage_show,
+};
+
+static int mem_usage_open(struct inode *inode, struct file *file)
+{
+	return seq_open(file, &mem_usage_op);
+}
+
+static const struct file_operations proc_mem_usage_file_operations = {
+	.open		= mem_usage_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
+};
+
 enum writeback_stat_item {
 	NR_DIRTY_THRESHOLD,
 	NR_DIRTY_BG_THRESHOLD,
@@ -1326,7 +1404,9 @@ static int vmstat_show(struct seq_file *m, void *arg)
 	unsigned long *l = arg;
 	unsigned long off = l - (unsigned long *)m->private;
 
-	seq_printf(m, "%s %lu\n", vmstat_text[off], *l);
+	seq_puts(m, vmstat_text[off]);
+	seq_put_decimal_ull(m, ' ', *l);
+	seq_putc(m, '\n');
 	return 0;
 }
 
@@ -1357,6 +1437,7 @@ static const struct file_operations proc_vmstat_file_operations = {
 #endif /* CONFIG_PROC_FS */
 
 #ifdef CONFIG_SMP
+static struct workqueue_struct *vmstat_wq;
 static DEFINE_PER_CPU(struct delayed_work, vmstat_work);
 int sysctl_stat_interval __read_mostly = HZ;
 static cpumask_var_t cpu_stat_off;
@@ -1369,7 +1450,8 @@ static void vmstat_update(struct work_struct *w)
 		 * to occur in the future. Keep on running the
 		 * update worker thread.
 		 */
-		schedule_delayed_work(this_cpu_ptr(&vmstat_work),
+		queue_delayed_work_on(smp_processor_id(), vmstat_wq,
+			this_cpu_ptr(&vmstat_work),
 			round_jiffies_relative(sysctl_stat_interval));
 	else {
 		/*
@@ -1437,7 +1519,7 @@ static void vmstat_shepherd(struct work_struct *w)
 		if (need_update(cpu) &&
 			cpumask_test_and_clear_cpu(cpu, cpu_stat_off))
 
-			schedule_delayed_work_on(cpu,
+			queue_delayed_work_on(cpu, vmstat_wq,
 				&per_cpu(vmstat_work, cpu), 0);
 
 	put_online_cpus();
@@ -1459,6 +1541,7 @@ static void __init start_shepherd_timer(void)
 		BUG();
 	cpumask_copy(cpu_stat_off, cpu_online_mask);
 
+	vmstat_wq = alloc_workqueue("vmstat", WQ_FREEZABLE|WQ_MEM_RECLAIM, 0);
 	schedule_delayed_work(&shepherd,
 		round_jiffies_relative(sysctl_stat_interval));
 }
@@ -1532,6 +1615,8 @@ static int __init setup_vmstat(void)
 	proc_create("pagetypeinfo", S_IRUGO, NULL, &pagetypeinfo_file_ops);
 	proc_create("vmstat", S_IRUGO, NULL, &proc_vmstat_file_operations);
 	proc_create("zoneinfo", S_IRUGO, NULL, &proc_zoneinfo_file_operations);
+	proc_create("mem_usage", S_IRUGO, NULL,
+			&proc_mem_usage_file_operations);
 #endif
 	return 0;
 }

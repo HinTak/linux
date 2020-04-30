@@ -71,6 +71,11 @@
 
 #include "internal.h"
 
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+void show_kernel_patch_version(void);
+#endif
+
 #ifdef LAST_CPUPID_NOT_IN_PAGE_FLAGS
 #warning Unfortunate NUMA and NUMA Balancing config, growing page-frame for last_cpupid.
 #endif
@@ -136,14 +141,38 @@ core_initcall(init_zero_pfn);
 void sync_mm_rss(struct mm_struct *mm)
 {
 	int i;
+	unsigned long rst;
 
 	for (i = 0; i < NR_MM_COUNTERS; i++) {
-		if (current->rss_stat.count[i]) {
-			add_mm_counter(mm, i, current->rss_stat.count[i]);
-			current->rss_stat.count[i] = 0;
-		}
+		rst = atomic_set_return(0, &current->rss_stat.count[i]);
+		if (rst)
+			add_mm_counter(mm, i, rst);
 	}
 	current->rss_stat.events = 0;
+}
+
+void sync_task_rss(struct task_struct *p)
+{
+	int i;
+	unsigned long rst;
+
+	for (i = 0; i < NR_MM_COUNTERS; i++) {
+		rst = atomic_set_return(0, &p->rss_stat.count[i]);
+		if (rst)
+			add_mm_counter(p->mm, i, rst);
+	}
+	p->rss_stat.events = 0;
+}
+
+void sync_process_rss(struct task_struct *p)
+{
+	struct task_struct *t = NULL;
+
+	for_each_thread(p, t) {
+		task_lock(t);
+		sync_task_rss(t);
+		task_unlock(t);
+	}
 }
 
 static void add_mm_counter_fast(struct mm_struct *mm, int member, int val)
@@ -151,7 +180,7 @@ static void add_mm_counter_fast(struct mm_struct *mm, int member, int val)
 	struct task_struct *task = current;
 
 	if (likely(task->mm == mm))
-		task->rss_stat.count[member] += val;
+		atomic_long_add(val, &task->rss_stat.count[member]);
 	else
 		add_mm_counter(mm, member, val);
 }
@@ -682,6 +711,9 @@ static void print_bad_pte(struct vm_area_struct *vma, unsigned long addr,
 		"BUG: Bad page map in process %s  pte:%08llx pmd:%08llx\n",
 		current->comm,
 		(long long)pte_val(pte), (long long)pmd_val(*pmd));
+#ifdef CONFIG_VDLP_VERSION_INFO
+	show_kernel_patch_version();
+#endif
 	if (page)
 		dump_page(page, "bad pte");
 	printk(KERN_ALERT
@@ -780,9 +812,9 @@ struct page *vm_normal_page(struct vm_area_struct *vma, unsigned long addr,
 		}
 	}
 
+check_pfn:
 	if (is_zero_pfn(pfn))
 		return NULL;
-check_pfn:
 	if (unlikely(pfn > highest_memmap_pfn)) {
 		print_bad_pte(vma, addr, pte, NULL);
 		return NULL;
@@ -934,6 +966,7 @@ again:
 	spin_unlock(src_ptl);
 	pte_unmap(orig_src_pte);
 	add_mm_rss_vec(dst_mm, rss);
+	inc_rss_counter(vma, rss[0] + rss[1]); /* VD_SP */
 	pte_unmap_unlock(orig_dst_pte, dst_ptl);
 	cond_resched();
 
@@ -1157,6 +1190,7 @@ again:
 	} while (pte++, addr += PAGE_SIZE, addr != end);
 
 	add_mm_rss_vec(mm, rss);
+	inc_rss_counter(vma, (rss[MM_FILEPAGES]+rss[MM_ANONPAGES]));      /* VD_SP */
 	arch_leave_lazy_mmu_mode();
 
 	/* Do the actual TLB flush before dropping ptl */
@@ -1391,6 +1425,59 @@ static void zap_page_range_single(struct vm_area_struct *vma, unsigned long addr
 	mmu_notifier_invalidate_range_end(mm, address, end);
 	tlb_finish_mmu(&tlb, address, end);
 }
+#ifdef CONFIG_STACK_RECLAIM
+extern struct vm_area_struct *find_vma_noupdate(struct mm_struct *mm, unsigned long addr);
+static bool dynamic_stack_shrink_enable; 
+
+static int __init set_stack_shrink_enable(char *str)
+{
+	pr_info("[STACK_RECLAIM]Enable(Threshold:%d MB|Timeout:%d sec)", CONFIG_STACK_RECLAIM_THRESHOLD, CONFIG_STACK_RECLAIM_TIMEOUT);
+	dynamic_stack_shrink_enable = true;
+	return 0;
+}
+early_param("only_entry_model", set_stack_shrink_enable);
+
+void shrink_user_stack(unsigned long sp) 
+{
+	struct vm_area_struct *vma;
+	unsigned long addr = PAGE_MASK & sp;    
+	unsigned long start, size, available;
+	unsigned long cur_rec_time = jiffies;
+ 
+	if (!dynamic_stack_shrink_enable)
+		return;
+	
+	available = (si_mem_available() << (PAGE_SHIFT - 10)) >> 10;
+	if (available > CONFIG_STACK_RECLAIM_THRESHOLD)
+		return;
+
+	if (jiffies_to_msecs(cur_rec_time - current->stack_rec_time) < CONFIG_STACK_RECLAIM_TIMEOUT * MSEC_PER_SEC) 
+		return;
+
+	vma = find_vma_noupdate(current->mm, addr);
+
+	if (!vma)
+		return;
+#ifdef CONFIG_STACK_GROWSUP
+	addr += PAGE_SIZE;
+	if (addr - sp > 2048)
+		addr += PAGE_SIZE;
+	addr += PAGE_SIZE;
+	start = addr;
+	size = vma->vm_end - start;
+#else
+	if (sp - addr < 2048)
+		addr -= PAGE_SIZE;
+	addr -= PAGE_SIZE;
+	start = vma->vm_start;
+	size = addr - vma->vm_start;
+#endif 
+	zap_page_range_single(vma, start, size, NULL);
+	
+	current->stack_rec_time = jiffies;	
+}
+EXPORT_SYMBOL_GPL(shrink_user_stack);
+#endif
 
 /**
  * zap_vma_ptes - remove ptes mapping the vma
@@ -1462,6 +1549,7 @@ static int insert_page(struct vm_area_struct *vma, unsigned long addr,
 	inc_mm_counter_fast(mm, MM_FILEPAGES);
 	page_add_file_rmap(page);
 	set_pte_at(mm, addr, pte, mk_pte(page, prot));
+	inc_rss_counter(vma, 1);
 
 	retval = 0;
 	pte_unmap_unlock(pte, ptl);
@@ -2100,6 +2188,7 @@ static int wp_page_copy(struct mm_struct *mm, struct vm_area_struct *vma,
 			}
 		} else {
 			inc_mm_counter_fast(mm, MM_ANONPAGES);
+			inc_rss_counter(vma, 1); /* VD_SP */
 		}
 		flush_cache_page(vma, address, pte_pfn(orig_pte));
 		entry = mk_pte(new_page, vma->vm_page_prot);
@@ -2446,7 +2535,7 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		unsigned int flags, pte_t orig_pte)
 {
 	spinlock_t *ptl;
-	struct page *page, *swapcache;
+	struct page *page, *swapcache = NULL;
 	struct mem_cgroup *memcg;
 	swp_entry_t entry;
 	pte_t pte;
@@ -2472,19 +2561,35 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	delayacct_set_flag(DELAYACCT_PF_SWAPIN);
 	page = lookup_swap_cache(entry);
 	if (!page) {
-		page = swapin_readahead(entry,
-					GFP_HIGHUSER_MOVABLE, vma, address);
-		if (!page) {
-			/*
-			 * Back out if somebody else faulted in this pte
-			 * while we released the pte lock.
-			 */
-			page_table = pte_offset_map_lock(mm, pmd, address, &ptl);
-			if (likely(pte_same(*page_table, orig_pte)))
-				ret = VM_FAULT_OOM;
-			delayacct_clear_flag(DELAYACCT_PF_SWAPIN);
-			goto unlock;
-		}
+       struct swap_info_struct *si = swp_swap_info(entry);
+
+	   if (si->flags & SWP_SYNCHRONOUS_IO &&
+			   __swap_count(si, entry) == 1) {
+		   /* skip swapcache */
+		   page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma, address);
+		   if (page) {
+			   lock_page(page);
+			   __SetPageSwapBacked(page);
+			   set_page_private(page, entry.val);
+			   lru_cache_add_anon(page);
+			   swap_readpage(page);
+		   }
+	   } else {
+		   page = swapin_readahead(entry,
+				   GFP_HIGHUSER_MOVABLE, vma, address);
+		   swapcache = page;
+	   }
+	   if (!page) {
+		   /*
+			* Back out if somebody else faulted in this pte
+			* while we released the pte lock.
+			*/
+		   page_table = pte_offset_map_lock(mm, pmd, address, &ptl);
+		   if (likely(pte_same(*page_table, orig_pte)))
+			   ret = VM_FAULT_OOM;
+		   delayacct_clear_flag(DELAYACCT_PF_SWAPIN);
+		   goto unlock;
+	   }
 
 		/* Had to read the page from swap area: Major fault */
 		ret = VM_FAULT_MAJOR;
@@ -2501,7 +2606,6 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		goto out_release;
 	}
 
-	swapcache = page;
 	locked = lock_page_or_retry(page, mm, flags);
 
 	delayacct_clear_flag(DELAYACCT_PF_SWAPIN);
@@ -2516,7 +2620,8 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	 * test below, are not enough to exclude that.  Even if it is still
 	 * swapcache, we need to check that the page's swap has not changed.
 	 */
-	if (unlikely(!PageSwapCache(page) || page_private(page) != entry.val))
+	if (unlikely((!PageSwapCache(page) ||
+					page_private(page) != entry.val)) && swapcache)	
 		goto out_page;
 
 	page = ksm_might_need_to_copy(page, vma, address);
@@ -2555,6 +2660,7 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
 
 	inc_mm_counter_fast(mm, MM_ANONPAGES);
 	dec_mm_counter_fast(mm, MM_SWAPENTS);
+	inc_rss_counter(vma, 1); /* VD_SP */
 	pte = mk_pte(page, vma->vm_page_prot);
 	if ((flags & FAULT_FLAG_WRITE) && reuse_swap_page(page)) {
 		pte = maybe_mkwrite(pte_mkdirty(pte), vma);
@@ -2566,20 +2672,22 @@ static int do_swap_page(struct mm_struct *mm, struct vm_area_struct *vma,
 	if (pte_swp_soft_dirty(orig_pte))
 		pte = pte_mksoft_dirty(pte);
 	set_pte_at(mm, address, page_table, pte);
-	if (page == swapcache) {
-		do_page_add_anon_rmap(page, vma, address, exclusive);
-		mem_cgroup_commit_charge(page, memcg, true);
-	} else { /* ksm created a completely new copy */
+	/* ksm created a completely new copy */
+	if (unlikely(page != swapcache && swapcache)) {
 		page_add_new_anon_rmap(page, vma, address);
 		mem_cgroup_commit_charge(page, memcg, false);
 		lru_cache_add_active_or_unevictable(page, vma);
+	} else {
+		do_page_add_anon_rmap(page, vma, address, exclusive);
+		mem_cgroup_commit_charge(page, memcg, true);
+		activate_page(page);
 	}
 
 	swap_free(entry);
 	if (vm_swap_full() || (vma->vm_flags & VM_LOCKED) || PageMlocked(page))
 		try_to_free_swap(page);
 	unlock_page(page);
-	if (page != swapcache) {
+	if (page != swapcache && swapcache) {
 		/*
 		 * Hold the lock to avoid the swap entry to be reused
 		 * until we take the PT lock for the pte_same() check
@@ -2612,45 +2720,11 @@ out_page:
 	unlock_page(page);
 out_release:
 	page_cache_release(page);
-	if (page != swapcache) {
+	if (page != swapcache && swapcache) {
 		unlock_page(swapcache);
 		page_cache_release(swapcache);
 	}
 	return ret;
-}
-
-/*
- * This is like a special single-page "expand_{down|up}wards()",
- * except we must first make sure that 'address{-|+}PAGE_SIZE'
- * doesn't hit another vma.
- */
-static inline int check_stack_guard_page(struct vm_area_struct *vma, unsigned long address)
-{
-	address &= PAGE_MASK;
-	if ((vma->vm_flags & VM_GROWSDOWN) && address == vma->vm_start) {
-		struct vm_area_struct *prev = vma->vm_prev;
-
-		/*
-		 * Is there a mapping abutting this one below?
-		 *
-		 * That's only ok if it's the same stack mapping
-		 * that has gotten split..
-		 */
-		if (prev && prev->vm_end == address)
-			return prev->vm_flags & VM_GROWSDOWN ? 0 : -ENOMEM;
-
-		return expand_downwards(vma, address - PAGE_SIZE);
-	}
-	if ((vma->vm_flags & VM_GROWSUP) && address + PAGE_SIZE == vma->vm_end) {
-		struct vm_area_struct *next = vma->vm_next;
-
-		/* As VM_GROWSDOWN but s/below/above/ */
-		if (next && next->vm_start == address + PAGE_SIZE)
-			return next->vm_flags & VM_GROWSUP ? 0 : -ENOMEM;
-
-		return expand_upwards(vma, address + PAGE_SIZE);
-	}
-	return 0;
 }
 
 /*
@@ -2669,9 +2743,9 @@ static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
 
 	pte_unmap(page_table);
 
-	/* Check if we need to add a guard page to the stack */
-	if (check_stack_guard_page(vma, address) < 0)
-		return VM_FAULT_SIGSEGV;
+	/* File mapping without ->vm_ops ? */
+	if (vma->vm_flags & VM_SHARED)
+		return VM_FAULT_SIGBUS;
 
 	/* Use the zero-page for reads */
 	if (!(flags & FAULT_FLAG_WRITE) && !mm_forbids_zeropage(mm)) {
@@ -2708,6 +2782,7 @@ static int do_anonymous_page(struct mm_struct *mm, struct vm_area_struct *vma,
 		goto release;
 
 	inc_mm_counter_fast(mm, MM_ANONPAGES);
+	inc_rss_counter(vma, 1); /* VD_SP */
 	page_add_new_anon_rmap(page, vma, address);
 	mem_cgroup_commit_charge(page, memcg, false);
 	lru_cache_add_active_or_unevictable(page, vma);
@@ -2796,9 +2871,11 @@ void do_set_pte(struct vm_area_struct *vma, unsigned long address,
 		entry = maybe_mkwrite(pte_mkdirty(entry), vma);
 	if (anon) {
 		inc_mm_counter_fast(vma->vm_mm, MM_ANONPAGES);
+		inc_rss_counter(vma, 1); /* VD_SP */
 		page_add_new_anon_rmap(page, vma, address);
 	} else {
 		inc_mm_counter_fast(vma->vm_mm, MM_FILEPAGES);
+		inc_rss_counter(vma, 1); /* VD_SP */
 		page_add_file_rmap(page);
 	}
 	set_pte_at(vma->vm_mm, address, pte, entry);
@@ -2808,7 +2885,11 @@ void do_set_pte(struct vm_area_struct *vma, unsigned long address,
 }
 
 static unsigned long fault_around_bytes __read_mostly =
+#ifdef CONFIG_DO_NOT_FAULT_AROUND_BYTES
+	PAGE_SIZE;
+#else
 	rounddown_pow_of_two(65536);
+#endif
 
 #ifdef CONFIG_DEBUG_FS
 static int fault_around_bytes_get(void *data, u64 *val)
@@ -3097,6 +3178,9 @@ static int do_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 			- vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
 
 	pte_unmap(page_table);
+	/* The VMA was not fully populated on mmap() or missing VM_DONTEXPAND */
+	if (!vma->vm_ops->fault)
+		return VM_FAULT_SIGBUS;
 	if (!(flags & FAULT_FLAG_WRITE))
 		return do_read_fault(mm, vma, address, pmd, pgoff, flags,
 				orig_pte);
@@ -3242,13 +3326,12 @@ static int handle_pte_fault(struct mm_struct *mm,
 	barrier();
 	if (!pte_present(entry)) {
 		if (pte_none(entry)) {
-			if (vma->vm_ops) {
-				if (likely(vma->vm_ops->fault))
-					return do_fault(mm, vma, address, pte,
-							pmd, flags, entry);
-			}
-			return do_anonymous_page(mm, vma, address,
-						 pte, pmd, flags);
+			if (vma->vm_ops)
+				return do_fault(mm, vma, address, pte, pmd,
+						flags, entry);
+
+			return do_anonymous_page(mm, vma, address, pte, pmd,
+					flags);
 		}
 		return do_swap_page(mm, vma, address,
 					pte, pmd, flags, entry);

@@ -1,0 +1,29 @@
+config KDBUS
+       tristate "kdbus interprocess communication"
+       depends on TMPFS
+       help
+         D-Bus is a system for low-latency, low-overhead, easy to use
+         interprocess communication (IPC).
+
+         See Documentation/kdbus.txt
+
+         To compile this driver as a module, choose M here: the
+         module will be called kdbus.
+
+config KDBUS_DEBUG
+       bool "kdbus debug infrastruture"
+       depends on KDBUS
+       help
+         This enable kdbus debug feature which provides useful information
+         for diagnosis.
+
+config KDBUS_DEBUG_TRACE
+       bool "kdbus connection based history tracer"
+       depends on KDBUS_DEBUG
+       help
+         Connection based histroy tracer
+
+config KDBUS_DEBUG_NUM_TRACES 
+	   int "Number of footprints to be traced"
+       default 30
+       depends on KDBUS_DEBUG_TRACE

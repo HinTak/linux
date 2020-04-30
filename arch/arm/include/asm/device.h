@@ -17,6 +17,9 @@ struct dev_archdata {
 #ifdef CONFIG_ARM_DMA_USE_IOMMU
 	struct dma_iommu_mapping	*mapping;
 #endif
+#ifdef CONFIG_SDP_SMEM
+	void				*smem_priv;
+#endif
 	bool dma_coherent;
 };
 

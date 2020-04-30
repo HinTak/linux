@@ -203,6 +203,7 @@ core_pattern is used to specify a core dumpfile pattern name.
 		/proc/sys/fs/suid_dumpable
 	%s	signal number
 	%t	UNIX time of dump
+	%T	tid
 	%h	hostname
 	%e	executable filename (may be shortened)
 	%E	executable path

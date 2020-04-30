@@ -1181,6 +1181,7 @@ static int mmc_sd_runtime_resume(struct mmc_host *host)
 	return 0;
 }
 
+#ifndef CONFIG_MTK_KERNEL_SOLUTION
 static int mmc_sd_power_restore(struct mmc_host *host)
 {
 	int ret;
@@ -1191,11 +1192,16 @@ static int mmc_sd_power_restore(struct mmc_host *host)
 
 	return ret;
 }
+#endif
 
 static int mmc_sd_reset(struct mmc_host *host)
 {
 	mmc_power_cycle(host, host->card->ocr);
+#ifdef CONFIG_MTK_KERNEL_SOLUTION
+	return mmc_sd_init_card(host, host->card->ocr, host->card);
+#else
 	return mmc_sd_power_restore(host);
+#endif
 }
 
 static const struct mmc_bus_ops mmc_sd_ops = {
@@ -1205,7 +1211,9 @@ static const struct mmc_bus_ops mmc_sd_ops = {
 	.runtime_resume = mmc_sd_runtime_resume,
 	.suspend = mmc_sd_suspend,
 	.resume = mmc_sd_resume,
+#ifndef CONFIG_MTK_KERNEL_SOLUTION
 	.power_restore = mmc_sd_power_restore,
+#endif
 	.alive = mmc_sd_alive,
 	.shutdown = mmc_sd_suspend,
 	.reset = mmc_sd_reset,

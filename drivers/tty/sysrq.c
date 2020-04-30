@@ -51,12 +51,13 @@
 #include <asm/ptrace.h>
 #include <asm/irq_regs.h>
 
+#ifdef CONFIG_MMC_TRACE
+#include "../../drivers/mmc/core/mmc_trace.h"
+#endif
+
 /* Whether we react on sysrq keys or just ignore them */
 static int __read_mostly sysrq_enabled = CONFIG_MAGIC_SYSRQ_DEFAULT_ENABLE;
 static bool __read_mostly sysrq_always_enabled;
-
-unsigned short platform_sysrq_reset_seq[] __weak = { KEY_RESERVED };
-int sysrq_reset_downtime_ms __weak;
 
 static bool sysrq_on(void)
 {
@@ -99,6 +100,19 @@ static struct sysrq_key_op sysrq_loglevel_op = {
 	.action_msg	= "Changing Loglevel",
 	.enable_mask	= SYSRQ_ENABLE_LOG,
 };
+
+#ifdef CONFIG_MMC_TRACE
+static void sysrq_handle_mmc_trace(int key)
+{
+	show_mmc_trace(0);
+}
+static struct sysrq_key_op sysrq_mmc_trace_op = {
+	.handler	= sysrq_handle_mmc_trace,
+	.help_msg	= "mmc_trace(a)",
+	.action_msg	= "MMC TRACE",
+	.enable_mask	= SYSRQ_ENABLE_DUMP,
+};
+#endif
 
 #ifdef CONFIG_VT
 static void sysrq_handle_SAK(int key)
@@ -374,6 +388,20 @@ static struct sysrq_key_op sysrq_moom_op = {
 	.enable_mask	= SYSRQ_ENABLE_SIGNAL,
 };
 
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+extern void show_irq(void);
+static void sysrq_handle_showirq(int key)
+{
+	show_irq();
+}
+static struct sysrq_key_op sysrq_showirq_op = {
+	.handler	= sysrq_handle_showirq,
+	.help_msg	= "show-irq-count(g)",
+	.action_msg	= "show each cpu irq count",
+	.enable_mask	= SYSRQ_ENABLE_SIGNAL,
+};
+#endif
+
 #ifdef CONFIG_BLOCK
 static void sysrq_handle_thaw(int key)
 {
@@ -429,14 +457,22 @@ static struct sysrq_key_op *sysrq_key_table[36] = {
 	 * a: Don't use for system provided sysrqs, it is handled specially on
 	 * sparc and will never arrive.
 	 */
+#ifdef CONFIG_MMC_TRACE
+	&sysrq_mmc_trace_op,		/* a - mmc_trace */
+#else
 	NULL,				/* a */
+#endif
 	&sysrq_reboot_op,		/* b */
 	&sysrq_crash_op,		/* c & ibm_emac driver debug */
 	&sysrq_showlocks_op,		/* d */
 	&sysrq_term_op,			/* e */
 	&sysrq_moom_op,			/* f */
 	/* g: May be registered for the kernel debugger */
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+	&sysrq_showirq_op,		/* g */
+#else
 	NULL,				/* g */
+#endif
 	NULL,				/* h - reserved for help */
 	&sysrq_kill_op,			/* i */
 #ifdef CONFIG_BLOCK
@@ -569,6 +605,7 @@ void handle_sysrq(int key)
 EXPORT_SYMBOL(handle_sysrq);
 
 #ifdef CONFIG_INPUT
+static int sysrq_reset_downtime_ms;
 
 /* Simple translation table for the SysRq keys */
 static const unsigned char sysrq_xlate[KEY_CNT] =
@@ -949,23 +986,8 @@ static bool sysrq_handler_registered;
 
 static inline void sysrq_register_handler(void)
 {
-	unsigned short key;
 	int error;
-	int i;
 
-	/* First check if a __weak interface was instantiated. */
-	for (i = 0; i < ARRAY_SIZE(sysrq_reset_seq); i++) {
-		key = platform_sysrq_reset_seq[i];
-		if (key == KEY_RESERVED || key > KEY_MAX)
-			break;
-
-		sysrq_reset_seq[sysrq_reset_seq_len++] = key;
-	}
-
-	/*
-	 * DT configuration takes precedence over anything that would
-	 * have been defined via the __weak interface.
-	 */
 	sysrq_of_get_keyreset_config();
 
 	error = input_register_handler(&sysrq_handler);

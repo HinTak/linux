@@ -27,6 +27,7 @@ if NETDEVICES
 
 config MII
 	tristate
+    default y
 
 config NET_CORE
 	default y

@@ -253,6 +253,21 @@ static int ____call_usermodehelper(void *data)
 
 	commit_creds(new);
 
+#ifdef CONFIG_FORCE_EXEC_SHELL_N_SERIAL
+        /*
+         * the process executed by call_usermodehelper() is not set stdin,stdout.
+         * so have to open /dev/console just for "/bin/sh" 
+         */
+        if(strstr(sub_info->path,"sh"))
+        {
+                if (sys_open((const char __user *) "/dev/console", O_RDWR, 0) < 0)
+                        pr_err("Warning: unable to open an initial console.\n");
+
+                (void) sys_dup(0);
+                (void) sys_dup(0);
+        }
+#endif
+
 	retval = do_execve(getname_kernel(sub_info->path),
 			   (const char __user *const __user *)sub_info->argv,
 			   (const char __user *const __user *)sub_info->envp);

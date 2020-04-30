@@ -248,6 +248,10 @@ static const struct file_operations sw_sync_fops = {
 static struct miscdevice sw_sync_dev = {
 	.minor	= MISC_DYNAMIC_MINOR,
 	.name	= "sw_sync",
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+	.lab_smk64 = "*",
+#endif
+	.mode	= 0777,
 	.fops	= &sw_sync_fops,
 };
 

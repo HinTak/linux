@@ -28,6 +28,13 @@
 #define SMK_LABELLEN	24
 #define SMK_LONGLABEL	256
 
+#define check_d_instantiate(inode)                                                  \
+        ({                                                              \
+                struct inode_smack *d_inode = inode->i_security;                        \
+                if (unlikely(!(d_inode->smk_flags & SMK_INODE_INSTANT)))            \
+                        wait_event_interruptible(d_inode->d_instantiate_label_set_wait,d_inode->smk_flags & SMK_INODE_INSTANT);     \
+         })
+
 /*
  * This is the repository for labels seen so that it is
  * not necessary to keep allocating tiny chuncks of memory
@@ -93,6 +100,12 @@ struct inode_smack {
 	struct smack_known	*smk_mmap;	/* label of the mmap domain */
 	struct mutex		smk_lock;	/* initialization lock */
 	int			smk_flags;	/* smack inode flags */
+	struct rcu_head 	rcu;    	/* for freeing the inode_smack */
+	wait_queue_head_t d_instantiate_label_set_wait;
+#ifdef CONFIG_SECURITY_SMACK_BOOTMODE_FOR_DEV_NODE
+	wait_queue_head_t label_set_wait;
+#endif
+	char			last_process[TASK_COMM_LEN]; /* Last process modifying the label */
 };
 
 struct task_smack {
@@ -106,6 +119,7 @@ struct task_smack {
 #define	SMK_INODE_TRANSMUTE	0x02	/* directory is transmuting */
 #define	SMK_INODE_CHANGED	0x04	/* smack was transmuted */
 #define	SMK_INODE_IMPURE	0x08	/* involved in an impure transaction */
+#define	SMK_INODE_TLABEL	0x10	/* transmute label is set on inode */
 
 /*
  * A label access rule.
@@ -136,6 +150,26 @@ struct smk_port_label {
 	unsigned short		smk_port;	/* the port number */
 	struct smack_known	*smk_in;	/* inbound label */
 	struct smack_known	*smk_out;	/* outgoing label */
+	short		        smk_can_reuse;
+	short		        smk_sock_type;  /* Socket type */
+};
+
+/* Super block security struct flags for mount options */
+#define FSDEFAULT_MNT   0x01
+#define FSFLOOR_MNT     0x02
+#define FSHAT_MNT       0x04
+#define FSROOT_MNT      0x08
+#define FSTRANS_MNT     0x10
+
+#define NUM_SMK_MNT_OPTS        5
+
+enum {
+	Opt_error = -1,
+	Opt_fsdefault = 1,
+	Opt_fsfloor = 2,
+	Opt_fshat = 3,
+	Opt_fsroot = 4,
+	Opt_fstransmute = 5,
 };
 
 /*
@@ -217,6 +251,18 @@ struct smack_audit_data {
 	char *object;
 	char *request;
 	int result;
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+	int mode;
+#endif
+	int sock_type;
+	int sock_proto;
+	int sock_reuseaddr;
+	int sock_reuseport;
+#ifdef CONFIG_SECURITY_SMACK_BOOTMODE_FOR_DEV_NODE
+	int wait_permission;
+#endif
+	int d_instantiated;
+	char *last_process; /* last process which change smack label */
 };
 
 /*
@@ -229,10 +275,6 @@ struct smk_audit_info {
 	struct smack_audit_data sad;
 #endif
 };
-/*
- * These functions are in smack_lsm.c
- */
-struct inode_smack *new_inode_smack(struct smack_known *);
 
 /*
  * These functions are in smack_access.c
@@ -276,10 +318,36 @@ extern struct mutex	smack_known_lock;
 extern struct list_head smack_known_list;
 extern struct list_head smk_netlbladdr_list;
 
-extern struct security_operations smack_ops;
-
 #define SMACK_HASH_SLOTS 16
 extern struct hlist_head smack_known_hash[SMACK_HASH_SLOTS];
+
+/*
+* Print last process information which change smack label.
+*/
+static inline void smk_label_change_last_process(struct inode_smack *isp)
+{
+
+	if (strcmp(current->comm, "chsmack")) {
+		strlcpy(isp->last_process, current->comm,
+			TASK_COMM_LEN);
+	} else {
+
+		rcu_read_lock();
+		if (strcmp(current->real_parent->comm,
+			  "sh")) {
+			strlcpy(isp->last_process,
+				current->real_parent->comm,
+				TASK_COMM_LEN);
+		} else {
+
+			strlcpy(isp->last_process,
+				current->real_parent->real_parent->comm,
+				TASK_COMM_LEN);
+		}
+		rcu_read_unlock();
+	}
+
+}
 
 /*
  * Is the directory transmuting?
@@ -341,6 +409,12 @@ static inline int smack_privileged(int cap)
 {
 	struct smack_known *skp = smk_of_current();
 
+	/*
+	 * All kernel tasks are privileged
+	 */
+	if (unlikely(current->flags & PF_KTHREAD))
+		return 1;
+
 	if (!capable(cap))
 		return 0;
 	if (smack_onlycap == NULL || smack_onlycap == skp)
@@ -348,17 +422,47 @@ static inline int smack_privileged(int cap)
 	return 0;
 }
 
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+/*
+ *  * SMACK Mode
+ *   */
+extern int smack_mode;
+
+int smk_exist_unconfined_label(char * buf);
+
+static inline int check_system_mode( int ret, char *subject, char *object )
+{
+	int result = ret;
+	if ( ret == 0 )
+		return ret;
+
+	if ( smack_mode == 1 ) {
+		result = 0;
+	} else if ((smack_mode == 3) &&
+			(smk_exist_unconfined_label(subject) ||
+			 smk_exist_unconfined_label(object))) {
+		result = 0;
+	}
+
+	return result;
+}
+#endif
 /*
  * logging functions
  */
 #define SMACK_AUDIT_DENIED 0x1
 #define SMACK_AUDIT_ACCEPT 0x2
 extern int log_policy;
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
 
 void smack_log(char *subject_label, char *object_label,
 		int request,
+		int result, struct smk_audit_info *auditdata, int mode);
+#else 
+void smack_log(char *subject_label, char *object_label,
+		int request,
 		int result, struct smk_audit_info *auditdata);
-
+#endif
 #ifdef CONFIG_AUDIT
 
 /*
@@ -373,6 +477,8 @@ static inline void smk_ad_init(struct smk_audit_info *a, const char *func,
 	a->a.type = type;
 	a->a.smack_audit_data = &a->sad;
 	a->a.smack_audit_data->function = func;
+	a->sad.d_instantiated  = -1;
+	a->sad.last_process = NULL;
 }
 
 static inline void smk_ad_init_net(struct smk_audit_info *a, const char *func,
@@ -391,12 +497,18 @@ static inline void smk_ad_setfield_u_tsk(struct smk_audit_info *a,
 static inline void smk_ad_setfield_u_fs_path_dentry(struct smk_audit_info *a,
 						    struct dentry *d)
 {
+	struct inode_smack *isp = d_backing_inode(d)->i_security;
 	a->a.u.dentry = d;
+	a->sad.d_instantiated  = isp->smk_flags & (SMK_INODE_INSTANT | SMK_INODE_TLABEL);
+	a->sad.last_process = isp->last_process;
 }
 static inline void smk_ad_setfield_u_fs_inode(struct smk_audit_info *a,
 					      struct inode *i)
 {
+	struct inode_smack *isp = i->i_security;
 	a->a.u.inode = i;
+	a->sad.d_instantiated  = isp->smk_flags & (SMK_INODE_INSTANT | SMK_INODE_TLABEL);
+	a->sad.last_process = isp->last_process;
 }
 static inline void smk_ad_setfield_u_fs_path(struct smk_audit_info *a,
 					     struct path p)

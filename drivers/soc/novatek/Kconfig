@@ -1,0 +1,50 @@
+#
+# Novatek SOC drivers
+#
+config SOC_NVT
+	bool "Novatek SoC(NVT) drivers support"
+	default y if ARCH_NVT
+        help
+       	  Say y here to enable NVT SOC support.  These provides driver
+          functions for hwgzip, sda, and another. Please enable SOC_NVT
+	  when you want to use them.
+
+if SOC_NVT
+
+config NVT_UNZIP
+	bool "NVT UNZIP decompressor driver"
+	default y
+	help
+          Say y here to enable NVT UNZIP support.
+	  These provides driver functions for hwgzip.
+	  currently zlib/gzip is supported.
+	  the driver support hw1/hw2 for vdfs.
+	  please check related configure file when using it.
+
+#config NVT_UNZIP_HWDCOMP_VDFS
+#	bool "Use H/W decompresser for VDFS"
+#	depends on NVT_UNZIP
+#	select HW_DECOMPRESSOR
+
+config NVT_UNZIP_AUTH
+	bool "Use H/W Auth(AES-CTR, SHA256)"
+	depends on NVT_UNZIP
+	default n
+
+
+config NVT_UNZIP_FIFO
+	bool "NVT UNZIP decompressor ATF driver"
+	default n
+	depends on NVT_UNZIP
+	help
+          Say y here to enable NVT UNZIP FIFO support.
+	  These provides driver functions for hwgzip.
+	  currently zlib/gzip is supported.
+	  the driver support hw1/hw2 for vdfs.
+	  please check related configure file when using it.
+
+config NDP_RUNTIME_PM
+	bool "NDP device runtime power manage helper"
+	default n
+
+endif#SOC_NVT

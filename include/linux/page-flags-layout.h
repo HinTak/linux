@@ -17,8 +17,20 @@
 #define ZONES_SHIFT 1
 #elif MAX_NR_ZONES <= 4
 #define ZONES_SHIFT 2
+#elif MAX_NR_ZONES <= 8
+#if defined(CONFIG_CMA) && (MAX_NR_ZONES-1) <= 4
+#define ZONES_SHIFT 2
+#define ZONE_CMA_IN_PAGE_FLAGS 0
 #else
+#define ZONES_SHIFT 3
+#endif
+
+#else /* MAX_NR_ZONES <= 8 */
 #error ZONES_SHIFT -- too many zones configured adjust calculation
+#endif
+
+#ifndef ZONE_CMA_IN_PAGE_FLAGS
+#define ZONE_CMA_IN_PAGE_FLAGS 1
 #endif
 
 #ifdef CONFIG_SPARSEMEM

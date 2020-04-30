@@ -40,6 +40,8 @@
 #include "blk-cgroup.h"
 #include "blk-mq.h"
 
+#include <linux/vdfs_trace.h>	/* FlashFS : vdfs-trace */
+
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_bio_remap);
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_rq_remap);
 EXPORT_TRACEPOINT_SYMBOL_GPL(block_bio_complete);
@@ -78,21 +80,6 @@ void blk_queue_congestion_threshold(struct request_queue *q)
 	q->nr_congestion_off = nr;
 }
 
-/**
- * blk_get_backing_dev_info - get the address of a queue's backing_dev_info
- * @bdev:	device
- *
- * Locates the passed device's request queue and returns the address of its
- * backing_dev_info.  This function can only be called if @bdev is opened
- * and the return value is never NULL.
- */
-struct backing_dev_info *blk_get_backing_dev_info(struct block_device *bdev)
-{
-	struct request_queue *q = bdev_get_queue(bdev);
-
-	return &q->backing_dev_info;
-}
-EXPORT_SYMBOL(blk_get_backing_dev_info);
 
 void blk_rq_init(struct request_queue *q, struct request *rq)
 {
@@ -111,6 +98,9 @@ void blk_rq_init(struct request_queue *q, struct request *rq)
 	rq->start_time = jiffies;
 	set_start_time_ns(rq);
 	rq->part = NULL;
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	rq->cmd_flags &= ~REQ_DIRECTIO;
+#endif
 }
 EXPORT_SYMBOL(blk_rq_init);
 
@@ -194,7 +184,7 @@ EXPORT_SYMBOL(blk_delay_queue);
  **/
 void blk_start_queue(struct request_queue *q)
 {
-	WARN_ON(!irqs_disabled());
+	WARN_ON(!in_interrupt() && !irqs_disabled());
 
 	queue_flag_clear(QUEUE_FLAG_STOPPED, q);
 	__blk_run_queue(q);
@@ -475,7 +465,9 @@ EXPORT_SYMBOL_GPL(blk_queue_bypass_end);
 
 void blk_set_queue_dying(struct request_queue *q)
 {
-	queue_flag_set_unlocked(QUEUE_FLAG_DYING, q);
+	spin_lock_irq(q->queue_lock);
+	queue_flag_set(QUEUE_FLAG_DYING, q);
+	spin_unlock_irq(q->queue_lock);
 
 	if (q->mq_ops)
 		blk_mq_wake_waiters(q);
@@ -541,7 +533,7 @@ void blk_cleanup_queue(struct request_queue *q)
 	spin_unlock_irq(lock);
 
 	/* @q won't process any more request, flush async actions */
-	del_timer_sync(&q->backing_dev_info.laptop_mode_wb_timer);
+	del_timer_sync(&q->backing_dev_info->laptop_mode_wb_timer);
 	blk_sync_queue(q);
 
 	if (q->mq_ops)
@@ -552,7 +544,7 @@ void blk_cleanup_queue(struct request_queue *q)
 		q->queue_lock = &q->__queue_lock;
 	spin_unlock_irq(lock);
 
-	bdi_destroy(&q->backing_dev_info);
+	bdi_unregister(q->backing_dev_info);
 
 	/* @q is and will stay empty, shutdown and put */
 	blk_put_queue(q);
@@ -619,18 +611,20 @@ struct request_queue *blk_alloc_queue_node(gfp_t gfp_mask, int node_id)
 	if (q->id < 0)
 		goto fail_q;
 
-	q->backing_dev_info.ra_pages =
-			(VM_MAX_READAHEAD * 1024) / PAGE_CACHE_SIZE;
-	q->backing_dev_info.state = 0;
-	q->backing_dev_info.capabilities = 0;
-	q->backing_dev_info.name = "block";
-	q->node = node_id;
 
-	err = bdi_init(&q->backing_dev_info);
-	if (err)
+	q->backing_dev_info = bdi_alloc_node(gfp_mask, node_id);
+	if (!q->backing_dev_info)
 		goto fail_id;
 
-	setup_timer(&q->backing_dev_info.laptop_mode_wb_timer,
+	q->backing_dev_info->ra_pages =
+			(VM_MAX_READAHEAD * 1024) / PAGE_CACHE_SIZE;
+	q->backing_dev_info->state = 0;
+	q->backing_dev_info->capabilities = 0;
+	q->backing_dev_info->name = "block";
+	q->node = node_id;
+
+
+	setup_timer(&q->backing_dev_info->laptop_mode_wb_timer,
 		    laptop_mode_timer_fn, (unsigned long) q);
 	setup_timer(&q->timeout, blk_rq_timed_out_timer, (unsigned long) q);
 	INIT_LIST_HEAD(&q->queue_head);
@@ -669,7 +663,7 @@ struct request_queue *blk_alloc_queue_node(gfp_t gfp_mask, int node_id)
 	return q;
 
 fail_bdi:
-	bdi_destroy(&q->backing_dev_info);
+	bdi_put(q->backing_dev_info);
 fail_id:
 	ida_simple_remove(&blk_queue_ida, q->id);
 fail_q:
@@ -1100,7 +1094,7 @@ fail_elvpriv:
 	 * disturb iosched and blkcg but weird is bettern than dead.
 	 */
 	printk_ratelimited(KERN_WARNING "%s: dev %s: request aux data allocation failed, iosched may be disturbed\n",
-			   __func__, dev_name(q->backing_dev_info.dev));
+			   __func__, dev_name(q->backing_dev_info->dev));
 
 	rq->cmd_flags &= ~REQ_ELVPRIV;
 	rq->elv.icq = NULL;
@@ -1478,6 +1472,13 @@ bool bio_attempt_back_merge(struct request_queue *q, struct request *req,
 	req->ioprio = ioprio_best(req->ioprio, bio_prio(bio));
 
 	blk_account_io_start(req, false);
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	if (test_bit(BIO_DIRECT, (unsigned long *)&bio->bi_flags)) {
+		/* printk(KERN_DEBUG "%s: ELEVATOR_BACK_MERGE,
+		  BIO_DIRECT->__REQ_DIRECTIO\n", __FUNCTION__);*/
+		req->cmd_flags |= REQ_DIRECTIO;
+	}
+#endif
 	return true;
 }
 
@@ -1502,6 +1503,13 @@ bool bio_attempt_front_merge(struct request_queue *q, struct request *req,
 	req->ioprio = ioprio_best(req->ioprio, bio_prio(bio));
 
 	blk_account_io_start(req, false);
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	if (test_bit(BIO_DIRECT, (unsigned long *)&bio->bi_flags)) {
+		/* printk(KERN_DEBUG "%s: ELEVATOR_FRONT_MERGE,
+		   BIO_DIRECT->__REQ_DIRECTIO\n", __FUNCTION__); */
+		req->cmd_flags |= REQ_DIRECTIO;
+	}
+#endif
 	return true;
 }
 
@@ -1663,6 +1671,11 @@ get_rq:
 
 	if (test_bit(QUEUE_FLAG_SAME_COMP, &q->queue_flags))
 		req->cpu = raw_smp_processor_id();
+
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	if (test_bit(BIO_DIRECT, (unsigned long *)&bio->bi_flags))
+		req->cmd_flags |= REQ_DIRECTIO;
+#endif
 
 	plug = current->plug;
 	if (plug) {
@@ -2446,6 +2459,7 @@ bool blk_update_request(struct request *req, int error, unsigned int nr_bytes)
 	int total_bytes;
 
 	trace_block_rq_complete(req->q, req, nr_bytes);
+	vdfs_trace_complete_req(req, nr_bytes);
 
 	if (!req->bio)
 		return false;
@@ -2605,7 +2619,7 @@ void blk_finish_request(struct request *req, int error)
 	BUG_ON(blk_queued_rq(req));
 
 	if (unlikely(laptop_mode) && req->cmd_type == REQ_TYPE_FS)
-		laptop_io_completion(&req->q->backing_dev_info);
+		laptop_io_completion(req->q->backing_dev_info);
 
 	blk_delete_timer(req);
 

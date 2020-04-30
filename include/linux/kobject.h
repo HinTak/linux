@@ -57,7 +57,15 @@ enum kobject_action {
 	KOBJ_MOVE,
 	KOBJ_ONLINE,
 	KOBJ_OFFLINE,
-	KOBJ_MAX
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+        KOBJ_MOUNT,     /*added by kks, hotplug with MSC device*/
+        KOBJ_UMOUNT,    /*added by kks, hotplug with MSC device*/
+        //Unknown device (for USB2.0 certification)
+        //Do not use enum, 20131108, commect out by sm79.bae
+//        KOBJ_NOTSUPPORTED_DEV_ADD,	
+//	KOBJ_NOTSUPPORTED_DEV_REMOVE,
+#endif      
+	KOBJ_MAX,
 };
 
 struct kobject {
@@ -107,6 +115,8 @@ extern int __must_check kobject_rename(struct kobject *, const char *new_name);
 extern int __must_check kobject_move(struct kobject *, struct kobject *);
 
 extern struct kobject *kobject_get(struct kobject *kobj);
+extern struct kobject * __must_check kobject_get_unless_zero(
+						struct kobject *kobj);
 extern void kobject_put(struct kobject *kobj);
 
 extern const void *kobject_namespace(struct kobject *kobj);

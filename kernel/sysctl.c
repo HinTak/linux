@@ -64,6 +64,7 @@
 #include <linux/binfmts.h>
 #include <linux/sched/sysctl.h>
 #include <linux/kexec.h>
+#include <linux/mount.h>
 
 #include <asm/uaccess.h>
 #include <asm/processor.h>
@@ -104,6 +105,15 @@ extern unsigned int core_pipe_limit;
 #endif
 extern int pid_max;
 extern int pid_max_min, pid_max_max;
+#ifdef CONFIG_PROFILE_MEMORY_USAGE
+extern int sysctl_profile_memory_usage;
+extern int profile_memory_usage_sysctl_handler(struct ctl_table*, int,
+						void __user *,
+						size_t *, loff_t *);
+#endif
+#ifndef CONFIG_VD_RELEASE
+extern int sysctl_blockcrashlog;
+#endif
 extern int percpu_pagelist_fraction;
 extern int compat_log;
 extern int latencytop_enabled;
@@ -275,6 +285,9 @@ static int min_extfrag_threshold;
 static int max_extfrag_threshold = 1000;
 #endif
 
+int proc_dointvec_debug(struct ctl_table *table, int write,
+        void __user *buffer, size_t *lenp, loff_t *ppos);
+
 static struct ctl_table kern_table[] = {
 	{
 		.procname	= "sched_child_runs_first",
@@ -428,6 +441,15 @@ static struct ctl_table kern_table[] = {
 		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+	{
+		.procname	= "sched_autogroup_migrate",
+		.data		= &sysctl_sched_autogroup_migrate,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_ag_migrate_minmax,
 		.extra1		= &zero,
 		.extra2		= &one,
 	},
@@ -781,7 +803,7 @@ static struct ctl_table kern_table[] = {
 		.data		= &console_loglevel,
 		.maxlen		= 4*sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec,
+		.proc_handler	= proc_dointvec_debug,
 	},
 	{
 		.procname	= "printk_ratelimit",
@@ -1132,6 +1154,17 @@ static struct ctl_table kern_table[] = {
 		.extra1		= &zero,
 		.extra2		= &one,
 	},
+#ifndef CONFIG_VD_RELEASE
+	{
+		.procname   = "blockcrashlog",
+		.data           = &sysctl_blockcrashlog,
+		.maxlen         = sizeof(int),
+		.mode           = 0644,
+		.proc_handler   = proc_dointvec_minmax,
+		.extra1     = &zero,
+		.extra2     = &one,
+	},
+#endif
 	{ }
 };
 
@@ -1308,6 +1341,13 @@ static struct ctl_table vm_table[] = {
 		.proc_handler	= lowmem_reserve_ratio_sysctl_handler,
 	},
 	{
+		.procname	= "vmallocinfo_enable",
+		.data		= &sysctl_vmallocinfo_enabled,
+		.maxlen		= sizeof(sysctl_vmallocinfo_enabled),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
 		.procname	= "drop_caches",
 		.data		= &sysctl_drop_caches,
 		.maxlen		= sizeof(int),
@@ -1316,6 +1356,15 @@ static struct ctl_table vm_table[] = {
 		.extra1		= &one,
 		.extra2		= &four,
 	},
+#ifdef CONFIG_PROFILE_MEMORY_USAGE
+	{
+		.procname       = "profile_memory_usage",
+		.data           = &sysctl_profile_memory_usage,
+		.maxlen         = sizeof(int),
+		.mode           = 0644,
+		.proc_handler   = profile_memory_usage_sysctl_handler,
+	},
+#endif
 #ifdef CONFIG_COMPACTION
 	{
 		.procname	= "compact_memory",
@@ -1528,14 +1577,16 @@ static struct ctl_table vm_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_doulongvec_minmax,
 	},
+	{
+		.procname	= "mount-max",
+		.data		= &sysctl_mount_max,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &one,
+	},
 	{ }
 };
-
-#if defined(CONFIG_BINFMT_MISC) || defined(CONFIG_BINFMT_MISC_MODULE)
-static struct ctl_table binfmt_misc_table[] = {
-	{ }
-};
-#endif
 
 static struct ctl_table fs_table[] = {
 	{
@@ -1690,7 +1741,7 @@ static struct ctl_table fs_table[] = {
 	{
 		.procname	= "binfmt_misc",
 		.mode		= 0555,
-		.child		= binfmt_misc_table,
+		.child		= sysctl_mount_point,
 	},
 #endif
 	{
@@ -1700,6 +1751,20 @@ static struct ctl_table fs_table[] = {
 		.mode		= 0644,
 		.proc_handler	= &pipe_proc_fn,
 		.extra1		= &pipe_min_size,
+	},
+	{
+		.procname	= "pipe-user-pages-hard",
+		.data		= &pipe_user_pages_hard,
+		.maxlen		= sizeof(pipe_user_pages_hard),
+		.mode		= 0644,
+		.proc_handler	= proc_doulongvec_minmax,
+	},
+	{
+		.procname	= "pipe-user-pages-soft",
+		.data		= &pipe_user_pages_soft,
+		.maxlen		= sizeof(pipe_user_pages_soft),
+		.mode		= 0644,
+		.proc_handler	= proc_doulongvec_minmax,
 	},
 	{ }
 };
@@ -1732,10 +1797,16 @@ static struct ctl_table dev_table[] = {
 	{ }
 };
 
+#ifdef CONFIG_SCHED_AUTOGROUP
+static struct mutex ag_migrate_lock;
+#endif
+
 int __init sysctl_init(void)
 {
 	struct ctl_table_header *hdr;
-
+#ifdef CONFIG_SCHED_AUTOGROUP
+	mutex_init(&ag_migrate_lock);
+#endif
 	hdr = register_sysctl_table(sysctl_base_table);
 	kmemleak_not_leak(hdr);
 	return 0;
@@ -2134,6 +2205,47 @@ int proc_dointvec(struct ctl_table *table, int write,
 		    	    NULL,NULL);
 }
 
+/* debug for set printk level */
+int proc_dointvec_debug(struct ctl_table *table, int write,
+		void __user *buffer, size_t *lenp, loff_t *ppos)
+{
+
+	if(write)
+	{
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] trying loglevel : %s \n",(char*)buffer);
+		printk(KERN_EMERG "[CORESYS] PID : %d %s \n",current->pid, current->comm);
+		printk(KERN_EMERG "[CORESYS] PPID : %d %s \n",
+				current->real_parent->pid, current->real_parent->comm);
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[CORESYS] setting printk loglevel is blocked \n");
+		return -EINVAL;
+	}
+	else
+	{
+		return do_proc_dointvec(table,write,buffer,lenp,ppos,
+				NULL,NULL);
+	}
+}
+
 /*
  * Taint values can only be increased
  * This means we can safely use a temporary.
@@ -2225,6 +2337,7 @@ static int do_proc_dointvec_minmax_conv(bool *negp, unsigned long *lvalp,
  *
  * Returns 0 on success.
  */
+
 int proc_dointvec_minmax(struct ctl_table *table, int write,
 		  void __user *buffer, size_t *lenp, loff_t *ppos)
 {
@@ -2235,6 +2348,34 @@ int proc_dointvec_minmax(struct ctl_table *table, int write,
 	return do_proc_dointvec(table, write, buffer, lenp, ppos,
 				do_proc_dointvec_minmax_conv, &param);
 }
+
+#ifdef CONFIG_SCHED_AUTOGROUP
+extern struct task_struct *ag_thread;
+extern struct completion migrate_compl;
+
+int proc_dointvec_ag_migrate_minmax(struct ctl_table *table, int write,
+		  void __user *buffer, size_t *lenp, loff_t *ppos)
+{
+	int err = 0;
+	int state = sysctl_sched_autogroup_migrate;
+
+	if (write && !capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	err = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+	if (err < 0)
+		return err;
+
+	mutex_lock(&ag_migrate_lock);
+	if (write && (sysctl_sched_autogroup_migrate ^ state)) {
+		init_completion(&migrate_compl);
+		wake_up_process(ag_thread);
+		wait_for_completion(&migrate_compl);
+	}
+	mutex_unlock(&ag_migrate_lock);
+	return err;
+}
+#endif
 
 static void validate_coredump_safety(void)
 {
@@ -2332,6 +2473,7 @@ static int __do_proc_doulongvec_minmax(void *data, struct ctl_table *table, int 
 				break;
 			if (neg)
 				continue;
+			val = convmul * val / convdiv;
 			if ((min && val < *min) || (max && val > *max))
 				continue;
 			*i = val;

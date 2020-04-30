@@ -659,15 +659,35 @@ EXPORT_SYMBOL_GPL(usb_unlink_urb);
  */
 void usb_kill_urb(struct urb *urb)
 {
+#ifdef SAMSUNG_PATCH_TASK_AFFINITY_FOR_PREVENT_OHCI_HANG
+	struct cpumask org_mask;
+#endif
+
 	might_sleep();
 	if (!(urb && urb->dev && urb->ep))
 		return;
+
+#ifdef SAMSUNG_PATCH_TASK_AFFINITY_FOR_PREVENT_OHCI_HANG
+	/*
+	 * When the routine is running, may attempts to access from other core 
+	 * at the same time. It may happen hang while suspend routine is running. 
+	 * So, Set current task affnity to core 0 to prevent the access.
+	 */
+	if (urb->dev->speed <= USB_SPEED_FULL) {
+		org_mask = current->cpus_allowed;
+		set_cpus_allowed_ptr(current, cpumask_of(0));
+	}
+#endif
 	atomic_inc(&urb->reject);
 
 	usb_hcd_unlink_urb(urb, -ENOENT);
 	wait_event(usb_kill_urb_queue, atomic_read(&urb->use_count) == 0);
 
 	atomic_dec(&urb->reject);
+#ifdef SAMSUNG_PATCH_TASK_AFFINITY_FOR_PREVENT_OHCI_HANG
+	if (urb->dev->speed <= USB_SPEED_FULL)
+		set_cpus_allowed_ptr(current, &org_mask);
+#endif
 }
 EXPORT_SYMBOL_GPL(usb_kill_urb);
 

@@ -19,11 +19,16 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/stacktrace.h>
+#include <asm/stacktrace.h>
 #include <linux/string.h>
+#include <linux/spinlock.h>
 #include <linux/types.h>
 #include <linux/kasan.h>
+#include <asm/traps.h>
+#include <asm/memory.h>
 
 #include <asm/sections.h>
+#include <linux/hashtable.h>
 
 #include "kasan.h"
 #include "../slab.h"
@@ -33,6 +38,28 @@
 #define SHADOW_BLOCKS_PER_ROW 16
 #define SHADOW_BYTES_PER_ROW (SHADOW_BLOCKS_PER_ROW * SHADOW_BYTES_PER_BLOCK)
 #define SHADOW_ROWS_AROUND_ADDR 2
+
+#define KASAN_HASH_BIT 20
+static DEFINE_HASHTABLE(stacktrace_ht, KASAN_HASH_BIT);
+DEFINE_SPINLOCK(kasan_hash_lock);
+#define HASH_LIM (1 << KASAN_HASH_BIT)
+
+enum {
+	KASAN_ALLOC_BT,
+	KASAN_FREE_BT,
+	KASAN_FAULT_BT,
+	KASAN_MAX_BT
+};
+struct trace_hash {
+	struct hlist_node hentry;
+	unsigned int nr_entries_access;
+	unsigned int nr_entries_alloc;
+	unsigned int nr_entries_free;
+	unsigned long entries_alloc[TRACK_ADDRS_COUNT];
+	unsigned long entries_free[TRACK_ADDRS_COUNT];
+	unsigned long entries_access[TRACK_ADDRS_COUNT];
+	size_t access_size;
+};
 
 static const void *find_first_bad_addr(const void *addr, size_t size)
 {
@@ -59,10 +86,12 @@ static void print_error_description(struct kasan_access_info *info)
 	switch (shadow_val) {
 	case KASAN_FREE_PAGE:
 	case KASAN_KMALLOC_FREE:
+	case KASAN_VMALLOC_FREE:
 		bug_type = "use after free";
 		break;
 	case KASAN_PAGE_REDZONE:
 	case KASAN_KMALLOC_REDZONE:
+	case KASAN_VMALLOC_REDZONE:
 	case KASAN_GLOBAL_REDZONE:
 	case 0 ... KASAN_SHADOW_SCALE_SIZE - 1:
 		bug_type = "out of bounds access";
@@ -97,26 +126,137 @@ static inline bool init_task_stack_addr(const void *addr)
 			sizeof(init_thread_union.stack));
 }
 
+static inline unsigned int kasan_hash(unsigned long int entry)
+{
+	unsigned int hash = ((unsigned long int)_etext - entry) % HASH_LIM;
+	return hash;
+}
+
+static int add_trace_entry(struct kasan_access_info *info,
+		struct stack_trace trace[KASAN_MAX_BT], struct trace_hash *node)
+{
+	u32 hash;
+	int i, match_found = 0;
+
+	hash = kasan_hash(trace[KASAN_FAULT_BT].entries[0]);
+	spin_lock(&kasan_hash_lock);
+	hash_for_each_possible(stacktrace_ht, node, hentry, hash) {
+		if (node->access_size != info->access_size)
+			continue;
+		do {
+			if (node->nr_entries_alloc != trace[KASAN_ALLOC_BT].nr_entries ||
+					node->nr_entries_free != trace[KASAN_FREE_BT].nr_entries ||
+					node->nr_entries_access != trace[KASAN_FAULT_BT].nr_entries)
+				break;
+			for (i = 0; i < trace[KASAN_ALLOC_BT].nr_entries; i++)
+				if (trace[KASAN_ALLOC_BT].entries[i] != node->entries_alloc[i])
+					break;
+			if (i != trace[KASAN_ALLOC_BT].nr_entries)
+				break;
+			for (i = 0; i < trace[KASAN_FREE_BT].nr_entries; i++)
+				if (trace[KASAN_FREE_BT].entries[i] != node->entries_free[i])
+					break;
+			if (i != trace[KASAN_FREE_BT].nr_entries)
+				break;
+			for (i = 0; i < trace[KASAN_FAULT_BT].nr_entries; i++)
+				if (trace[KASAN_FAULT_BT].entries[i] != node->entries_access[i])
+					break;
+			if (i != trace[KASAN_FAULT_BT].nr_entries)
+				break;
+			match_found = 1;
+		} while (0);
+		if (match_found) {
+			spin_unlock(&kasan_hash_lock);
+			return 0;
+		}
+	}
+	spin_unlock(&kasan_hash_lock);
+	node = kzalloc(sizeof(struct trace_hash), GFP_KERNEL);
+	spin_lock(&kasan_hash_lock);
+	if (node) {
+		node->access_size = info->access_size;
+		node->nr_entries_alloc = trace[KASAN_ALLOC_BT].nr_entries;
+		node->nr_entries_free = trace[KASAN_FREE_BT].nr_entries;
+		node->nr_entries_access = trace[KASAN_FAULT_BT].nr_entries;
+		for (i = 0; i < trace[KASAN_ALLOC_BT].nr_entries; i++)
+			node->entries_alloc[i] = trace[KASAN_ALLOC_BT].entries[i];
+		for (i = 0; i < trace[KASAN_FREE_BT].nr_entries; i++)
+			node->entries_free[i] = trace[KASAN_FREE_BT].entries[i];
+		for (i = 0; i < trace[KASAN_FAULT_BT].nr_entries; i++)
+			node->entries_access[i] = trace[KASAN_FAULT_BT].entries[i];
+		hash_add(stacktrace_ht, &node->hentry, hash);
+	}
+	spin_unlock(&kasan_hash_lock);
+	return 1;
+}
+
+static int kasan_find_object(struct page *page, struct kmem_cache **cache,
+		void **object, const void *addr){
+	void *last_object;
+
+	if (PageSlab(page)) {
+		*cache = page->slab_cache;
+
+		*object = virt_to_obj(*cache, page_address(page), addr);
+		last_object = page_address(page) +
+			page->objects * (*cache)->size;
+
+		if (unlikely((*object) > last_object))
+			*object = last_object; /* we hit into padding */
+		return 1;
+	}
+	return 0;
+}
+
+static int kasan_save_kernel_stack(struct kasan_access_info *info, int skip)
+{
+	struct stack_trace trace[KASAN_MAX_BT];
+	unsigned long stack_trace[TRACK_ADDRS_COUNT], stack_trace_alloc[TRACK_ADDRS_COUNT],
+		      stack_trace_free[TRACK_ADDRS_COUNT];
+	struct trace_hash *node = NULL;
+	int i;
+	const void *addr = info->access_addr;
+	struct page *page;
+	struct kmem_cache *cache;
+	void *object;
+
+	trace[0].entries = stack_trace_alloc;
+	trace[1].entries = stack_trace_free;
+	trace[2].entries = stack_trace;
+	for (i = 0; i < KASAN_MAX_BT; i++) {
+		trace[i].nr_entries = 0;
+		trace[i].max_entries = TRACK_ADDRS_COUNT;
+		trace[i].skip = skip + 2;
+	}
+	if ((addr >= (void *)PAGE_OFFSET) &&
+			(addr < high_memory)) {
+		page = virt_to_head_page(addr);
+
+		if (kasan_find_object(page, &cache, &object, addr) &&
+				(cache->flags & SLAB_STORE_USER)) {
+			kasan_get_track(cache, object, 0, &trace[KASAN_ALLOC_BT]);
+			kasan_get_track(cache, object, 1, &trace[KASAN_FREE_BT]);
+		}
+	}
+
+	kasan_disable_current();
+	save_stack_trace_tsk(current, &trace[KASAN_FAULT_BT]);
+	kasan_enable_current();
+	return add_trace_entry(info, trace, node);
+}
+
 static void print_address_description(struct kasan_access_info *info)
 {
 	const void *addr = info->access_addr;
+	struct page *page;
+	struct kmem_cache *cache;
+	void *object;
 
 	if ((addr >= (void *)PAGE_OFFSET) &&
-		(addr < high_memory)) {
-		struct page *page = virt_to_head_page(addr);
+			(addr < high_memory)) {
+		page = virt_to_head_page(addr);
 
-		if (PageSlab(page)) {
-			void *object;
-			struct kmem_cache *cache = page->slab_cache;
-			void *last_object;
-
-			object = virt_to_obj(cache, page_address(page), addr);
-			last_object = page_address(page) +
-				page->objects * cache->size;
-
-			if (unlikely(object > last_object))
-				object = last_object; /* we hit into padding */
-
+		if (kasan_find_object(page, &cache, &object, addr)) {
 			object_err(cache, page, object,
 				"kasan: bad access detected");
 			return;
@@ -128,7 +268,6 @@ static void print_address_description(struct kasan_access_info *info)
 		if (!init_task_stack_addr(addr))
 			pr_err("Address belongs to variable %pS\n", addr);
 	}
-
 	dump_stack();
 }
 
@@ -216,10 +355,9 @@ void kasan_report_user_access(struct kasan_access_info *info)
 }
 
 void kasan_report(unsigned long addr, size_t size,
-		bool is_write, unsigned long ip)
+		bool is_write, unsigned long ip, int skip)
 {
 	struct kasan_access_info info;
-
 	if (likely(!kasan_enabled()))
 		return;
 
@@ -227,21 +365,22 @@ void kasan_report(unsigned long addr, size_t size,
 	info.access_size = size;
 	info.is_write = is_write;
 	info.ip = ip;
-	kasan_report_error(&info);
+	if (kasan_save_kernel_stack(&info, skip))
+		kasan_report_error(&info);
 }
 
 
 #define DEFINE_ASAN_REPORT_LOAD(size)                     \
 void __asan_report_load##size##_noabort(unsigned long addr) \
 {                                                         \
-	kasan_report(addr, size, false, _RET_IP_);	  \
+	kasan_report(addr, size, false, _RET_IP_, 0);	  \
 }                                                         \
 EXPORT_SYMBOL(__asan_report_load##size##_noabort)
 
 #define DEFINE_ASAN_REPORT_STORE(size)                     \
 void __asan_report_store##size##_noabort(unsigned long addr) \
 {                                                          \
-	kasan_report(addr, size, true, _RET_IP_);	   \
+	kasan_report(addr, size, true, _RET_IP_, 0);	   \
 }                                                          \
 EXPORT_SYMBOL(__asan_report_store##size##_noabort)
 
@@ -258,12 +397,12 @@ DEFINE_ASAN_REPORT_STORE(16);
 
 void __asan_report_load_n_noabort(unsigned long addr, size_t size)
 {
-	kasan_report(addr, size, false, _RET_IP_);
+	kasan_report(addr, size, false, _RET_IP_, 0);
 }
 EXPORT_SYMBOL(__asan_report_load_n_noabort);
 
 void __asan_report_store_n_noabort(unsigned long addr, size_t size)
 {
-	kasan_report(addr, size, true, _RET_IP_);
+	kasan_report(addr, size, true, _RET_IP_, 0);
 }
 EXPORT_SYMBOL(__asan_report_store_n_noabort);

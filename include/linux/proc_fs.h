@@ -10,6 +10,31 @@
 struct proc_dir_entry;
 
 #ifdef CONFIG_PROC_FS
+#ifdef CONFIG_VMALLOCUSED_PLUS
+/*
+ * Structure to retrieve values for vMallocused
+ * "/proc/meminfo - VmallocUsed is combination of several parameters
+ * this will help in dividing the total into subvalues"
+ *
+ */
+struct vmalloc_usedinfo {
+	unsigned long vmapramsize;
+	unsigned long vmallocsize;
+	unsigned long ioremapsize;
+	unsigned long vmapsize;
+	unsigned long vpagessize;
+	unsigned long usermapsize;
+	unsigned long overlappedsize;
+	unsigned long modulessize;
+	unsigned long vm_lazy_free;
+};
+
+/*
+ * Function to retreiver values for vMallocUsed
+ */
+
+extern void get_vmallocused(struct vmalloc_usedinfo *);
+#endif
 
 extern void proc_root_init(void);
 extern void proc_flush_task(struct task_struct *);

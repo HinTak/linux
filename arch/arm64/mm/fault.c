@@ -109,21 +109,52 @@ static void __do_kernel_fault(struct mm_struct *mm, unsigned long addr,
  * Something tried to access memory that isn't in our memory map. User mode
  * accesses just cause a SIGSEGV
  */
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+extern void dump_info(struct task_struct *task, struct pt_regs *regs,
+		unsigned long addr);
+#endif
 static void __do_user_fault(struct task_struct *tsk, unsigned long addr,
 			    unsigned int esr, unsigned int sig, int code,
 			    struct pt_regs *regs)
 {
 	struct siginfo si;
+	int dump;
+	unsigned long int flags;
 
-	if (show_unhandled_signals && unhandled_signal(tsk, sig) &&
+	spin_lock_irqsave(&tsk->sighand->siglock, flags);
+	set_flag_block_sigkill_lockless(tsk, sig);
+	dump = sig != SIGBUS ? true : (!sig_user_defined(tsk, sig));
+	spin_unlock_irqrestore(&tsk->sighand->siglock, flags);
+
+#ifndef CONFIG_SHOW_FAULT_TRACE_INFO
+	if (dump && show_unhandled_signals && unhandled_signal(tsk, sig) &&
 	    printk_ratelimit()) {
-		pr_info("%s[%d]: unhandled %s (%d) at 0x%08lx, esr 0x%03x\n",
-			tsk->comm, task_pid_nr(tsk), fault_name(esr), sig,
-			addr, esr);
+		if (!compat_user_mode(regs))
+			pr_alert("%s[%d]: unhandled %s (%d) at 0x%016lx, esr 0x%03x\n",
+				tsk->comm, task_pid_nr(tsk), fault_name(esr), sig,
+				addr, esr);
+		else
+			pr_alert("%s[%d]: unhandled %s (%d) at 0x%08lx, esr 0x%03x\n",
+				tsk->comm, task_pid_nr(tsk), fault_name(esr), sig,
+				addr, esr);
+
 		show_pte(tsk->mm, addr);
 		show_regs(regs);
 	}
+#else
+	if (dump) {
+		if (!compat_user_mode(regs))
+			pr_alert("%s[%d]: unhandled %s (%d) at 0x%016lx, esr 0x%03x\n",
+				tsk->comm, task_pid_nr(tsk), fault_name(esr), sig,
+				addr, esr);
+		else
+			pr_alert("%s[%d]: unhandled %s (%d) at 0x%08lx, esr 0x%03x\n",
+				tsk->comm, task_pid_nr(tsk), fault_name(esr), sig,
+				addr, esr);
 
+		dump_info(tsk, regs, addr);
+	}
+#endif
 	tsk->thread.fault_address = addr;
 	tsk->thread.fault_code = esr;
 	si.si_signo = sig;
@@ -447,7 +478,6 @@ static const char *fault_name(unsigned int esr)
 	const struct fault_info *inf = fault_info + (esr & 63);
 	return inf->name;
 }
-
 /*
  * Dispatch a data abort to the relevant handler.
  */

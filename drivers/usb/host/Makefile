@@ -2,6 +2,10 @@
 # Makefile for USB Host Controller Drivers
 #
 
+ifeq ($(CHIP_NAME), CHIP_KANTM)
+EXTRA_CFLAGS += -D__KANTM_REV_${CHIP_REV}__
+endif
+
 # tell define_trace.h where to find the xhci trace header
 CFLAGS_xhci-trace.o := -I$(src)
 
@@ -13,7 +17,7 @@ fhci-$(CONFIG_FHCI_DEBUG) += fhci-dbg.o
 xhci-hcd-y := xhci.o xhci-mem.o
 xhci-hcd-y += xhci-ring.o xhci-hub.o xhci-dbg.o
 xhci-hcd-y += xhci-trace.o
-
+xhci-hcd-y+= xhci-plat.o
 xhci-plat-hcd-y := xhci-plat.o
 ifneq ($(CONFIG_USB_XHCI_MVEBU), )
 	xhci-plat-hcd-y		+= xhci-mvebu.o
@@ -30,6 +34,32 @@ obj-$(CONFIG_USB_XHCI_PCI)	+= xhci-pci.o
 obj-$(CONFIG_USB_XHCI_PLATFORM) += xhci-plat-hcd.o
 
 obj-$(CONFIG_USB_EHCI_HCD)	+= ehci-hcd.o
+
+#############################################
+# usb_enable_musem  : Muse.M
+# usb_enable_kantm2 : Kant.M2
+# usb_enable_kants  : Kant.S, Kant.SU
+#############################################
+# usb_enable_etc    : EP, AV, etc.
+#############################################
+ifeq ($(CONFIG_SAMSUNG_USB_TV_PRODUCT),y)
+ifeq ($(CONFIG_ARCH_SDP),y)
+ifeq ($(CONFIG_ARCH_SDP1803),y)
+usb_enable-y	:= usb_enable_common.o usb_enable_musem.o
+ifeq ($(PRODUCT_TYPE), WALL)
+EXTRA_CFLAGS	+= -D__PRD_TYPE_WALL__
+endif
+else
+usb_enable-y	:= usb_enable_common.o usb_enable_kantm2.o
+endif
+else
+usb_enable-y	:= usb_enable_common.o usb_enable_kants.o
+endif
+else
+usb_enable-y	:= usb_enable_etc.o
+endif
+
+obj-$(CONFIG_USB_ENABLE)	+= usb_enable.o
 obj-$(CONFIG_USB_EHCI_PCI)	+= ehci-pci.o
 obj-$(CONFIG_USB_EHCI_HCD_PLATFORM)	+= ehci-platform.o
 obj-$(CONFIG_USB_EHCI_MXC)	+= ehci-mxc.o

@@ -3,6 +3,24 @@ menu "Clock Source drivers"
 config CLKSRC_OF
 	bool
 
+config 	SDP_TIMER
+	bool
+	default n
+	select GENERIC_TIME
+	select GENERIC_CLOCKEVENTS
+
+config CLKSRC_SDP_TIMER
+	def_bool y if ARCH_SDP
+	depends on ARCH_SDP
+	help
+	  Support for Samsung SDP basic timer.
+
+config CLKSRC_SDP12XX_TIMER
+	def_bool y if ARCH_SDP
+	depends on ARCH_SDP
+	help
+	  Support for Samsung SDP12XX basic timer.
+
 config CLKSRC_I8253
 	bool
 
@@ -148,6 +166,12 @@ config ATMEL_ST
 	select CLKSRC_OF
 	select MFD_SYSCON
 
+config CLKSRC_ARM_GLOBAL_TIMER_BROADCAST
+	bool
+	depends on ARM_GLOBAL_TIMER
+	help
+	 Use ARM global timer clock source as broadcast clock device
+
 config CLKSRC_METAG_GENERIC
 	def_bool y if METAG
 	help
@@ -258,4 +282,12 @@ config CLKSRC_PXA
 	help
 	  This enables OST0 support available on PXA and SA-11x0
 	  platforms.
+
+if PLAT_NOVATEK
+config CLKSRC_NVT_TIMER
+	bool "Novatek timer clocksource"
+	default n
+	help
+	  This adds the clocksource driver that is depended on normal timer.
+endif
 endmenu

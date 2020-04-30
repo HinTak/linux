@@ -15,6 +15,18 @@
 #include <asm/page.h>
 #include <asm/mmu.h>
 
+#ifdef CONFIG_RSS_INFO
+/* define VMA group */
+#define VMAG_CNT        7
+#define VMAG_CODE       0       /* exclude so */
+#define VMAG_DATA       1       /* exclude so */
+#define VMAG_LIBCODE    2       /* lib so */
+#define VMAG_LIBDATA    3       /* lib so */
+#define VMAG_HEAP       4       /* process heap */
+#define VMAG_STACK      5       /* process stack */
+#define VMAG_OTHER      6       /* mmap, shm, ... */
+#endif  /* CONFIG_RSS_INFO */
+
 #ifndef AT_VECTOR_SIZE_ARCH
 #define AT_VECTOR_SIZE_ARCH 0
 #endif
@@ -63,15 +75,6 @@ struct page {
 		union {
 			pgoff_t index;		/* Our offset within mapping. */
 			void *freelist;		/* sl[aou]b first free object */
-			bool pfmemalloc;	/* If set by the page allocator,
-						 * ALLOC_NO_WATERMARKS was set
-						 * and the low watermark was not
-						 * met implying that the system
-						 * is under some pressure. The
-						 * caller should try ensure
-						 * this page is only used to
-						 * free other pages.
-						 */
 		};
 
 		union {
@@ -81,9 +84,9 @@ struct page {
 			unsigned long counters;
 #else
 			/*
-			 * Keep _count separate from slub cmpxchg_double data.
-			 * As the rest of the double word is protected by
-			 * slab_lock but _count is not.
+			 * Keep _refcount separate from slub cmpxchg_double
+			 * data.  As the rest of the double word is protected by
+			 * slab_lock but _refcount is not.
 			 */
 			unsigned counters;
 #endif
@@ -99,9 +102,9 @@ struct page {
 					 *
 					 * Used also for tail pages
 					 * refcounting instead of
-					 * _count. Tail pages cannot
+					 * _refcount. Tail pages cannot
 					 * be mapped and keeping the
-					 * tail page _count zero at
+					 * tail page _refcount zero at
 					 * all times guarantees
 					 * get_page_unless_zero() will
 					 * never succeed on tail
@@ -116,7 +119,11 @@ struct page {
 					};
 					int units;	/* SLOB */
 				};
-				atomic_t _count;		/* Usage count, see below. */
+				/*
+				 * Usage count, *USE WRAPPER FUNCTION*
+				 * when manual accounting. See page_ref.h
+				 */
+				atomic_t _refcount;
 			};
 			unsigned int active;	/* SLAB */
 		};
@@ -338,7 +345,7 @@ enum {
 /* per-thread cached information, */
 struct task_rss_stat {
 	int events;	/* for synchronization threshold */
-	int count[NR_MM_COUNTERS];
+	atomic_long_t count[NR_MM_COUNTERS];
 };
 #endif /* USE_SPLIT_PTE_PTLOCKS */
 
@@ -350,7 +357,7 @@ struct kioctx_table;
 struct mm_struct {
 	struct vm_area_struct *mmap;		/* list of VMAs */
 	struct rb_root mm_rb;
-	u32 vmacache_seqnum;                   /* per-thread vmacache */
+	u64 vmacache_seqnum;                   /* per-thread vmacache */
 #ifdef CONFIG_MMU
 	unsigned long (*get_unmapped_area) (struct file *filp,
 				unsigned long addr, unsigned long len,
@@ -393,6 +400,12 @@ struct mm_struct {
 	unsigned long arg_start, arg_end, env_start, env_end;
 
 	unsigned long saved_auxv[AT_VECTOR_SIZE]; /* for /proc/PID/auxv */
+#ifdef CONFIG_RSS_INFO
+	atomic_long_t max_total_rss;
+	atomic_long_t curr_rss[VMAG_CNT];
+	atomic_long_t max_rss[VMAG_CNT];
+#endif  /* CONFIG_RSS_INFO */
+
 
 	/*
 	 * Special counters, in some configurations protected by the

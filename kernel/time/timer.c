@@ -1400,6 +1400,7 @@ void update_process_times(int user_tick)
 #endif
 	scheduler_tick();
 	run_posix_cpu_timers(p);
+
 }
 
 /*

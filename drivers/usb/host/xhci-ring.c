@@ -82,7 +82,7 @@ dma_addr_t xhci_trb_virt_to_dma(struct xhci_segment *seg,
 		return 0;
 	/* offset in TRBs */
 	segment_offset = trb - seg->trbs;
-	if (segment_offset > TRBS_PER_SEGMENT)
+	if (segment_offset >= TRBS_PER_SEGMENT)
 		return 0;
 	return seg->dma + (segment_offset * sizeof(*trb));
 }
@@ -331,6 +331,8 @@ void xhci_ring_ep_doorbell(struct xhci_hcd *xhci,
 	if ((ep_state & EP_HALT_PENDING) || (ep_state & SET_DEQ_PENDING) ||
 	    (ep_state & EP_HALTED))
 		return;
+
+	dsb();
 	writel(DB_VALUE(ep_index, stream_id), db_addr);
 	/* The CPU has better things to do at this point than wait for a
 	 * write-posting flush.  It'll get there soon enough.
@@ -1546,6 +1548,9 @@ static void handle_port_status(struct xhci_hcd *xhci,
 		usb_hcd_resume_root_hub(hcd);
 	}
 
+	if (hcd->speed == HCD_USB3 && (temp & PORT_PLS_MASK) == XDEV_INACTIVE)
+		bus_state->port_remote_wakeup &= ~(1 << faked_port_index);
+
 	if ((temp & PORT_PLC) && (temp & PORT_PLS_MASK) == XDEV_RESUME) {
 		xhci_dbg(xhci, "port resume event for port %d\n", port_id);
 
@@ -2276,6 +2281,19 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 
 	event_dma = le64_to_cpu(event->buffer);
 	trb_comp_code = GET_COMP_CODE(le32_to_cpu(event->transfer_len));
+
+#if defined(CONFIG_ARCH_SDP) && defined(CONFIG_USB_DEBUG)
+	/* check cerr when occurs transaction error .*/
+	xhci->cerr = 0;
+	if( ep_ctx ) {
+		int ep_type = CTX_TO_EP_TYPE(le32_to_cpu(ep_ctx->ep_info2));
+		if( ep_type != ISOC_OUT_EP && ep_type != ISOC_IN_EP ) {
+			xhci->cerr = CERR_INIT_MAX 
+				- CTX_TO_CERR_INFO(ep_ctx->ep_info2);
+		}
+	}
+#endif
+
 	/* Look for common error cases */
 	switch (trb_comp_code) {
 	/* Skip codes that require special handling depending on
@@ -2727,12 +2745,16 @@ static void queue_trb(struct xhci_hcd *xhci, struct xhci_ring *ring,
 		u32 field1, u32 field2, u32 field3, u32 field4)
 {
 	struct xhci_generic_trb *trb;
-
+	
 	trb = &ring->enqueue->generic;
 	trb->field[0] = cpu_to_le32(field1);
+	wmb();
 	trb->field[1] = cpu_to_le32(field2);
+	wmb();
 	trb->field[2] = cpu_to_le32(field3);
+	wmb();
 	trb->field[3] = cpu_to_le32(field4);
+	wmb();
 	inc_enq(xhci, ring, more_trbs_coming);
 }
 

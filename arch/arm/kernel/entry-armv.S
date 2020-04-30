@@ -222,6 +222,7 @@ ENDPROC(__irq_svc)
 	.ltorg
 
 #ifdef CONFIG_PREEMPT
+.pushsection .irqentry.text, "ax"
 svc_preempt:
 	mov	r8, lr
 1:	bl	preempt_schedule_irq		@ irq en/disable is done inside
@@ -229,6 +230,7 @@ svc_preempt:
 	tst	r0, #_TIF_NEED_RESCHED
 	reteq	r8				@ go again
 	b	1b
+.popsection
 #endif
 
 __und_fault:

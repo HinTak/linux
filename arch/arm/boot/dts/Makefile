@@ -660,6 +660,8 @@ dtb-$(CONFIG_ARCH_MEDIATEK) += \
 	mt6592-evb.dtb \
 	mt8127-moose.dtb \
 	mt8135-evbp1.dtb
+dtb-$(CONFIG_ARCH_NVT72668) += nvtca9-72668.dtb
+dtb-$(CONFIG_ARCH_NVT72658) += nvtca9-72658.dtb
 endif
 
 always		:= $(dtb-y)

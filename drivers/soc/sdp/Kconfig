@@ -1,0 +1,158 @@
+#
+# Samsung VD SOC drivers
+#
+config SOC_SDP
+	bool "Samsung VD SoC(SDP) drivers support"
+	default y if ARCH_SDP
+
+if SOC_SDP
+
+##************** SDP UNZIP ****************##
+config SDP_UNZIP
+	bool "SDP UNZIP decompressor driver"
+	depends on ARCH_SDP
+	default y
+
+config SDP_UNZIP_HWDCOMP_VDFS
+	bool "Use H/W decompresser for VDFS"
+	depends on SDP_UNZIP
+	select HW_DECOMPRESSOR
+
+config SDP_UNZIP_AUTH
+	bool "Use H/W Auth(AES-CTR, SHA256)"
+	depends on SDP_UNZIP && !(ARCH_SDP1404||ARCH_SDP1406||ARCH_SDP1412)#after Jazz
+	select SDP_UNZIP_AUTH_STANDALONE if !(ARCH_SDP1501)#after Kant
+	select SDP_UNZIP_FIRST_PAGE_OFFSET if !(ARCH_SDP1501||ARCH_SDP1601)#after Muse
+	default y
+
+config SDP_UNZIP_AUTH_STANDALONE
+	depends on SDP_UNZIP
+	bool
+
+config SDP_UNZIP_FIRST_PAGE_OFFSET
+	depends on SDP_UNZIP
+	bool
+
+config SDP_UNZIP_SELFTEST
+	bool "Use SDP UNZIP Driver Selftest sysfs"
+	depends on SDP_UNZIP
+	select CRYPTO
+	select CRYPTO_CTR
+	select CRYPTO_SHA256
+	select CRYPTO_DEFLATE
+	select CRYPTO_ZLIB
+	default n
+
+config SDP_UNZIP_TEST
+	bool "SDP UNZIP Test Module"
+	depends on SDP_UNZIP
+	default n
+
+
+
+
+config SDP_SPI
+		tristate "SDP SPI Master Controller Driver"
+		default n
+		depends on ARCH_SDP
+		select SPI
+		select SPI_MASTER
+		help
+		  SDP SPI Master Controller Driver.
+
+config SDP_SPI_NUM_OF_CS
+		int "Number of chip select."
+		default 1
+		depends on SDP_SPI
+		help
+		  Default CS is 1, but if you used the GPIO CS, CS can be larger than 1.
+
+config SDP_SPIDEV
+		tristate "User Level SPI Device Driver for SDP SPI"
+		depends on SDP_SPI
+
+config SDP_SPI_DEBUG
+		bool "Print Debug Msg for SDP SPI"
+		depends on SDP_SPI
+
+
+config SDP_AVS
+	bool "SDP Adaptive Voltage Scaling"
+	default n
+
+config SDP_THERMAL
+	depends on ARCH_SDP && CPU_FREQ
+	bool "SDP Thermal Management"
+	default y
+
+config SDP_BUSERR
+	bool "SDP Bus Error Debug"
+	default y
+
+config SDP_BUSMON
+	bool "SDP Bus Monitor Debug"
+	default y
+
+config SDP_RUNTIME_PM
+    bool "SDP Device Runtime Power Manage Helper"
+    default y
+
+config SDP_KVALUE
+    bool "SDP Key-Value-Handler Repository"
+    default y
+
+config SDP_MICOM_CECIF
+	bool "SDP Micom CECIF Driver for control by Main"
+	depends on SDP_MICOM_CONTROLLER
+	select MFD_SYSCON
+	select CEC_CORE
+	default n
+
+config SDP_MICOM_CECIF_TEST
+	tristate "SDP Micom CECIF Driver Test"
+	depends on (SDP_MICOM_CECIF && !SDP_MICOM_CECIF_SUPPORT_SUBSYSTEM)
+	default n
+
+config SDP_MICOM_CECIF_SUPPORT_SUBSYSTEM
+	bool "CECIF driver to support cec subsystem api"
+	depends on (SDP_MICOM_CECIF && CEC_CORE)
+	default n
+
+config SDP_MICOM_PINCTRL
+	bool "SDP Micom Pin control by Main"
+	depends on PINCTRL
+	default y
+	
+config SDP_MICOM_IRB
+	bool "SDP Micom IRB Driver"
+	select MEDIA_RC_SUPPORT
+	select RC_DECODERS
+	select LIRC
+	select IR_LIRC_CODEC
+	default n
+
+
+config SDP_SMEM
+	bool "Samsung SMEM allocator"
+	depends on DMA_CMA && HAS_DMA && MMU
+	select GENERIC_ALLOCATOR
+	default y
+	help
+		Samsung SMEM memory allocator.
+
+config SDP_SMEM_CACHE
+	bool "Use Cache backend"
+	depends on SDP_SMEM
+	default n
+
+config SDP_SMEM_TEST
+	tristate "Samsung SMEM allocator test driver"
+	depends on SDP_SMEM
+	default n
+
+
+config SDP_BUILTIN_SERDES
+	bool "SerDes initial code for SDP SoC (for SERET)"
+	default n
+
+endif#SOC_SDP

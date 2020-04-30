@@ -487,8 +487,8 @@ static int blkcg_reset_stats(struct cgroup_subsys_state *css,
 static const char *blkg_dev_name(struct blkcg_gq *blkg)
 {
 	/* some drivers (floppy) instantiate a queue w/o disk registered */
-	if (blkg->q->backing_dev_info.dev)
-		return dev_name(blkg->q->backing_dev_info.dev);
+	if (blkg->q->backing_dev_info->dev)
+		return dev_name(blkg->q->backing_dev_info->dev);
 	return NULL;
 }
 
@@ -716,8 +716,12 @@ int blkg_conf_prep(struct blkcg *blkcg, const struct blkcg_policy *pol,
 		return -EINVAL;
 
 	disk = get_gendisk(MKDEV(major, minor), &part);
-	if (!disk || part)
+	if (!disk)
 		return -EINVAL;
+	if (part) {
+		put_disk(disk);
+		return -EINVAL;
+	}
 
 	rcu_read_lock();
 	spin_lock_irq(disk->queue->queue_lock);

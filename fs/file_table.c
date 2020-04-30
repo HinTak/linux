@@ -51,6 +51,9 @@ static void file_free_rcu(struct rcu_head *head)
 
 static inline void file_free(struct file *f)
 {
+#ifdef CONFIG_FD_PID
+	put_pid(f->f_pid);
+#endif
 	percpu_counter_dec(&nr_files);
 	call_rcu(&f->f_u.fu_rcuhead, file_free_rcu);
 }
@@ -100,6 +103,12 @@ int proc_nr_files(struct ctl_table *table, int write,
  * done, you will imbalance int the mount's writer count
  * and a warning at __fput() time.
  */
+#ifndef CONFIG_VD_RELEASE
+static unsigned long nr_files_opened;
+static unsigned long nr_files_opened_last;
+extern void *return_address(unsigned int level);
+#endif
+
 struct file *get_empty_filp(void)
 {
 	const struct cred *cred = current_cred();
@@ -123,6 +132,18 @@ struct file *get_empty_filp(void)
 	if (unlikely(!f))
 		return ERR_PTR(-ENOMEM);
 
+#ifndef CONFIG_VD_RELEASE
+	nr_files_opened = get_nr_files();
+	if ((nr_files_opened != nr_files_opened_last) && 
+		(nr_files_opened >= files_stat.max_files)) {
+		pr_err_ratelimited("Files opened %lu [P:%s T:%d] (%pS) <- (%pS) <- (%pS) <- (%pS) <- (%pS)\n",
+			nr_files_opened, current->comm, current->pid,
+			(void *)return_address(0), (void *)return_address(1),
+			(void *)return_address(2), (void *)return_address(3),
+			(void *)return_address(4));
+		nr_files_opened_last = nr_files_opened;
+	}
+#endif
 	percpu_counter_inc(&nr_files);
 	f->f_cred = get_cred(cred);
 	error = security_file_alloc(f);
@@ -137,6 +158,10 @@ struct file *get_empty_filp(void)
 	mutex_init(&f->f_pos_lock);
 	eventpoll_init_file(f);
 	/* f->f_version: 0 */
+#ifdef CONFIG_FD_PID
+	if (current)
+		f->f_pid = get_task_pid(current, PIDTYPE_PID);
+#endif
 	return f;
 
 over:

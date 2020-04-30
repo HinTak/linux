@@ -87,12 +87,22 @@
 #include <linux/slab.h>
 #include <linux/flex_array.h>
 #include <linux/posix-timers.h>
+#include <linux/vmalloc.h>
 #ifdef CONFIG_HARDWALL
 #include <asm/hardwall.h>
 #endif
 #include <trace/events/oom.h>
 #include "internal.h"
 #include "fd.h"
+
+#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+#include <linux/sf_security.h>
+#endif
+
+
+#ifdef CONFIG_SLP_LOWMEM_NOTIFY
+#include <linux/slp_lowmem_notify.h>
+#endif
 
 /* NOTE:
  *	Implementing inode permission operations in /proc is almost
@@ -536,6 +546,14 @@ static bool has_pid_permissions(struct pid_namespace *pid,
 				 struct task_struct *task,
 				 int hide_pid_min)
 {
+
+#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+	if(!sf_proc_authorized(current,task))
+	{
+		return false;
+	}
+#endif
+
 	if (pid->hide_pid < hide_pid_min)
 		return true;
 	if (in_group_p(pid->pid_gid))
@@ -816,6 +834,43 @@ static const struct file_operations proc_environ_operations = {
 	.release	= mem_release,
 };
 
+int oom_score_to_adj(short oom_score_adj)
+{
+	int oom_adj;
+
+	if (oom_score_adj >= 0)
+		oom_adj = (oom_score_adj * OOM_ADJUST_MAX) / OOM_SCORE_ADJ_MAX;
+	else
+		oom_adj = (oom_score_adj * -OOM_DISABLE) / OOM_SCORE_ADJ_MAX;
+
+	return oom_adj;
+}
+EXPORT_SYMBOL(oom_score_to_adj);
+
+short oom_adj_to_score(int oom_adj)
+{
+	short oom_score_adj;
+
+	if (oom_adj == 0) {
+		oom_score_adj = 0;
+	} else if (oom_adj == OOM_ADJUST_MAX) {
+		oom_score_adj = OOM_SCORE_ADJ_MAX;
+	} else if (oom_adj == OOM_DISABLE) {
+		oom_score_adj = OOM_SCORE_ADJ_MIN;
+	} else if (oom_adj > 0) {
+		oom_score_adj = (oom_adj * OOM_SCORE_ADJ_MAX) / OOM_ADJUST_MAX;
+		/* Increment to avoid fraction errors */
+		oom_score_adj++;
+	} else {
+		oom_score_adj = (oom_adj * OOM_SCORE_ADJ_MAX) / -OOM_DISABLE;
+		/* Decrement to avoid fraction errors */
+		oom_score_adj--;
+	}
+
+	return oom_score_adj;
+}
+EXPORT_SYMBOL(oom_adj_to_score);
+
 static ssize_t oom_adj_read(struct file *file, char __user *buf, size_t count,
 			    loff_t *ppos)
 {
@@ -828,11 +883,7 @@ static ssize_t oom_adj_read(struct file *file, char __user *buf, size_t count,
 	if (!task)
 		return -ESRCH;
 	if (lock_task_sighand(task, &flags)) {
-		if (task->signal->oom_score_adj == OOM_SCORE_ADJ_MAX)
-			oom_adj = OOM_ADJUST_MAX;
-		else
-			oom_adj = (task->signal->oom_score_adj * -OOM_DISABLE) /
-				  OOM_SCORE_ADJ_MAX;
+		oom_adj = oom_score_to_adj(task->signal->oom_score_adj);
 		unlock_task_sighand(task, &flags);
 	}
 	put_task_struct(task);
@@ -848,6 +899,13 @@ static ssize_t oom_adj_write(struct file *file, const char __user *buf,
 	int oom_adj;
 	unsigned long flags;
 	int err;
+
+#ifdef CONFIG_SLP_LOWMEM_NOTIFY
+		pr_warn_once("%s (%d): /proc/<pid>/oom_adj is deprecated,"
+			"please use /proc/<pid>/oom_score_adj instead.\n",
+			  current->comm, task_pid_nr(current));
+		return -EPERM;
+#endif
 
 	memset(buffer, 0, sizeof(buffer));
 	if (count > sizeof(buffer) - 1)
@@ -887,16 +945,14 @@ static ssize_t oom_adj_write(struct file *file, const char __user *buf,
 	 * Scale /proc/pid/oom_score_adj appropriately ensuring that a maximum
 	 * value is always attainable.
 	 */
-	if (oom_adj == OOM_ADJUST_MAX)
-		oom_adj = OOM_SCORE_ADJ_MAX;
-	else
-		oom_adj = (oom_adj * OOM_SCORE_ADJ_MAX) / -OOM_DISABLE;
+	oom_adj = oom_adj_to_score(oom_adj);
 
-	if (oom_adj < task->signal->oom_score_adj &&
+	/* Permit the write by app */
+	/*if (oom_adj < task->signal->oom_score_adj &&
 	    !capable(CAP_SYS_RESOURCE)) {
 		err = -EACCES;
 		goto err_sighand;
-	}
+	}*/
 
 	/*
 	 * /proc/pid/oom_adj is provided for legacy purposes, ask users to use
@@ -908,7 +964,7 @@ static ssize_t oom_adj_write(struct file *file, const char __user *buf,
 
 	task->signal->oom_score_adj = oom_adj;
 	trace_oom_score_adj_update(task);
-err_sighand:
+/*err_sighand:*/
 	unlock_task_sighand(task, &flags);
 err_task_lock:
 	task_unlock(task);
@@ -974,6 +1030,18 @@ static ssize_t oom_score_adj_write(struct file *file, const char __user *buf,
 		err = -ESRCH;
 		goto out;
 	}
+
+#ifdef CONFIG_SLP_LOWMEM_NOTIFY
+		if (memnotify_check_oom_score_adj_admin()) {
+			if (memnotify_add_oom_score_adj_item(task,
+				oom_score_adj) == -ENOMEM) {
+				put_task_struct(task);
+				return -ENOMEM;
+			}
+			put_task_struct(task);
+			return count;
+		}
+#endif
 
 	task_lock(task);
 	if (!task->mm) {
@@ -2142,6 +2210,356 @@ out:
 	return 0;
 }
 
+#ifdef CONFIG_RSS_INFO
+
+#define K(x) ((x) << (PAGE_SHIFT-10))
+#define STRING_LENGTH 48
+
+struct kernel_usage {
+	unsigned long slab;
+	unsigned long slab_unreclaimable;
+	unsigned long page_table;
+	unsigned long vmalloc_used;
+	unsigned long kernel_stack;
+	unsigned long kernel_total;
+};
+
+void get_kernel_usage(struct kernel_usage *ku)
+{
+	struct vmalloc_info vmi;
+	struct task_struct *p;
+	unsigned int number_of_task = 0;
+	unsigned long kernel_stack = 0;
+
+	for_each_process(p)
+		number_of_task++;
+
+	kernel_stack = (THREAD_SIZE * number_of_task)/PAGE_SIZE;
+
+	get_vmalloc_info(&vmi);
+
+	ku->slab = K(global_page_state(NR_SLAB_RECLAIMABLE)
+		     + global_page_state(NR_SLAB_UNRECLAIMABLE));
+	ku->slab_unreclaimable = K(global_page_state(NR_SLAB_UNRECLAIMABLE));
+	ku->page_table = K(global_page_state(NR_PAGETABLE));
+	ku->vmalloc_used = (vmi.used >> 10);
+	ku->kernel_stack = K(kernel_stack);
+	ku->kernel_total = ku->slab + ku->page_table + ku->vmalloc_used + ku->kernel_stack;
+}
+
+static int show_rss(struct seq_file *m, void *v)
+{
+	struct inode *inode = m->private;
+	struct task_struct *task = get_proc_task(inode);
+	struct mm_struct *mm;
+	int i;
+	unsigned long cur_cnt[VMAG_CNT], max_cnt[VMAG_CNT];
+	unsigned long tot_cur_cnt = 0;
+
+	struct kernel_usage kernel_mem = {0,};
+
+	if (!task)
+		return 0;
+
+	mm = get_task_mm(task);
+	if (!mm)
+		return 0;
+
+	for (i = 0; i < VMAG_CNT; i++) {
+		get_rss_cnt(mm, i, &cur_cnt[i], &max_cnt[i]);
+		tot_cur_cnt += cur_cnt[i];
+	}
+
+	get_kernel_usage(&kernel_mem);
+
+	/* print usage count : human readable */
+	seq_printf(m,   " =======================\n"
+		"  Process Max : %7luK\n"
+		"     Code Max : %7luK\n"
+		"     Data Max : %7luK\n"
+		"  LibCode Max : %7luK\n"
+		"  LibData Max : %7luK\n"
+		" Heap-BRK Max : %7luK\n"
+		"    Stack Max : %7luK\n"
+		"    Other Max : %7luK\n"
+		" =======================\n"
+		"  Process Cur : %7luK\n"
+		"     Code Cur : %7luK\n"
+		"     Data Cur : %7luK\n"
+		"  LibCode Cur : %7luK\n"
+		"  LibData Cur : %7luK\n"
+		" Heap-BRK Cur : %7luK\n"
+		"    Stack Cur : %7luK\n"
+		"    Other Cur : %7luK\n"
+		" =======================\n"
+		"         Slab : %7luK (%luK)\n"
+		"     PageTabe : %7luK\n"
+		"  VmallocUsed : %7luK\n"
+		"  KernelStack : %7luK\n"
+		" Kernel Total : %7luK\n",
+		K(get_max_total_rss(mm)), K(max_cnt[0]), K(max_cnt[1]),
+		K(max_cnt[2]), K(max_cnt[3]), K(max_cnt[4]), K(max_cnt[5]),
+		K(max_cnt[6]),
+		K(tot_cur_cnt), K(cur_cnt[0]), K(cur_cnt[1]), K(cur_cnt[2]),
+		K(cur_cnt[3]), K(cur_cnt[4]), K(cur_cnt[5]), K(cur_cnt[6]),
+		kernel_mem.slab, kernel_mem.slab_unreclaimable,
+		kernel_mem.page_table, kernel_mem.vmalloc_used,
+		kernel_mem.kernel_stack, kernel_mem.kernel_total);
+
+	mmput(mm);
+
+	return 0;
+}
+
+static int rss_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, show_rss, inode);
+}
+
+const struct file_operations proc_pid_rss_operations = {
+	.open = rss_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+#endif  /* CONFIG_RSS_INFO ends */
+
+#ifdef CONFIG_PROC_SCHED_CPU_AFFINITY
+/*
+ * size of mask_str is taken NR_CPUS / 4 + 4
+ * e.g. if NR_CPUS=8, then size of mask_str is 8 / 4 + 4
+ * 2 + 4 = 6 i.e. 0xff including '\n' and '\0'.
+ * special case added for NR_CPUS % 4 exist.
+ */
+
+#define MAX_MASK_STR_SIZE	((NR_CPUS / 4) + (NR_CPUS % 4 ? 1 : 0) + 4)
+
+static int show_cpu_affinity_mask(struct seq_file *m, void *v)
+{
+	int ret = 0;
+	cpumask_var_t cpumask;
+	char mask_str[MAX_MASK_STR_SIZE] = {0};
+	struct inode *inode = m->private;
+	struct task_struct *task = get_proc_task(inode);
+
+	if (!task)
+		return -EFAULT;
+
+	if (!alloc_cpumask_var(&cpumask, GFP_KERNEL)) {
+		ret = -EFAULT;
+		pr_debug("alloc_cpumask_var failed.\n");
+		goto err_alloc_cpumask_var;
+	}
+
+	if (sched_getaffinity(task->pid, cpumask)) {
+		ret = -EFAULT;
+		pr_debug("sched_getaffinity, pid %d failed.\n", task->pid);
+		goto err_sched_getaffinity;
+	}
+
+	if (!cpumask_scnprintf(mask_str, sizeof(mask_str), cpumask)) {
+		ret = -EFAULT;
+		pr_debug("cpumask_scnprintf failed.\n");
+		goto err_sched_getaffinity;
+	}
+
+	seq_printf(m, "0x%s\n", mask_str);
+
+err_sched_getaffinity:
+	free_cpumask_var(cpumask);
+err_alloc_cpumask_var:
+	put_task_struct(task);
+	return ret;
+}
+
+static void cpu_affinity_mask_help(void)
+{
+	pr_info("ex)\n");
+	pr_info("# echo 0xf > /proc/[pid]/cpu_affinity_mask   (for assign task to core 0~3)\n");
+	pr_info("# echo 0xff > /proc/[pid]/cpu_affinity_mask   (for assign task to core 0~7)\n");
+	pr_info("# echo 0xf0 > /proc/[pid]/cpu_affinity_mask   (for assign task to core 4~7)\n");
+}
+
+struct pending_pid_list {
+	struct list_head list;
+	pid_t pid;
+};
+
+static void free_list(struct list_head *head)
+{
+	struct pending_pid_list *pend_pid, *tmp;
+
+	list_for_each_entry_safe(pend_pid, tmp, head, list) {
+		list_del(&pend_pid->list);
+		kfree(pend_pid);
+	}
+}
+
+static int add_to_list(struct list_head *head, pid_t pid)
+{
+	struct pending_pid_list *tmp;
+
+	tmp = kzalloc(sizeof(*tmp), GFP_ATOMIC);
+	if (!tmp) {
+		pr_err("add_to_list: kmalloc() failed!\n");
+		return -ENOMEM;
+	}
+
+	tmp->pid = pid;
+	list_add(&tmp->list, head);
+	return 0;
+}
+
+static ssize_t cpu_affinity_mask_write(struct file *file, const char __user *buf,
+		size_t count, loff_t *ppos)
+{
+	int ret;
+	cpumask_var_t cpumask;
+	char mask_str[MAX_MASK_STR_SIZE] = {0};
+	char tmp_mask_str[MAX_MASK_STR_SIZE] = {0};
+	unsigned long cpumask_val;
+	struct inode *inode = file_inode(file);
+	struct task_struct *task = get_proc_task(inode);
+
+	if (!task)
+		return -EFAULT;
+
+	if (!count) {
+		put_task_struct(task);
+		return (ssize_t)count;
+	}
+
+	if (count >= sizeof(mask_str)) {
+		ret = -EINVAL;
+		pr_err("Invalid input, max lengh allowed %zd\n", sizeof(mask_str) - 1);
+		cpu_affinity_mask_help();
+		goto err;
+	}
+
+	if (copy_from_user(mask_str, buf, count)) {
+		ret = -EINVAL;
+		pr_debug("copy_from_user failed, buf %p, count %zd.\n", buf, count);
+		goto err;
+	}
+	/* null terminate mask_str */
+	mask_str[sizeof(mask_str) - 1] = '\0';
+
+	if (!alloc_cpumask_var(&cpumask, GFP_KERNEL)) {
+		ret = -EFAULT;
+		pr_debug("alloc_cpumask_var failed.\n");
+		goto err;
+	}
+
+	/* sanity checks */
+	if (mask_str[0] != '0' || mask_str[1] != 'x' || strict_strtoul(mask_str, 16, &cpumask_val) < 0) {
+		ret = -EFAULT;
+		pr_err("Invalid input, enter value in hex e.g. 0xf\n");
+		cpu_affinity_mask_help();
+		goto err_bitmap_parse;
+	}
+
+	if (!cpumask_val || cpumask_val > (1 << NR_CPUS) - 1) {
+		ret = -EINVAL;
+		pr_err("Invalid cpu mask %lu, [Range (> 0 && <= NR_CPUS_BITS(%d))].\n",
+			cpumask_val, (1 << NR_CPUS) - 1);
+		cpu_affinity_mask_help();
+		goto err_bitmap_parse;
+	}
+
+	/*
+	 * bitmap_parse does not take 0x and extra '\n' in mast_str, hence removing them and
+	 * storing in tmp_mask_str.
+	 */
+	strncpy(tmp_mask_str, mask_str + 2, sizeof(mask_str) - 2);
+	if (tmp_mask_str[strlen(tmp_mask_str) - 1] == '\n')
+		tmp_mask_str[strlen(tmp_mask_str) - 1] = '\0';
+	pr_debug("mask_str %s, strlen(mask_str) %zd, tmp_mask_str %s  strlen(tmp_mask_str) %zd.\n",
+		mask_str, strlen(mask_str), tmp_mask_str, strlen(tmp_mask_str));
+
+	/* coversion to cpumask */
+	if (bitmap_parse(tmp_mask_str, strlen(tmp_mask_str), cpumask_bits(cpumask), nr_cpumask_bits)) {
+		ret = -EFAULT;
+		pr_debug("bitmap_parse, tmp_mask_str %s failed.\n", tmp_mask_str);
+		goto err_bitmap_parse;
+	}
+
+	if (task->pid == task->tgid) { /* Process */
+		struct task_struct *p;
+		LIST_HEAD(pending_pid_head);
+
+		/* store the pids in list */
+		rcu_read_lock();
+		for_each_thread(task, p) {
+			/* get the task_struct */
+			get_task_struct(p);
+
+			/* add to list */
+			if (add_to_list(&pending_pid_head, p->pid)) {
+				pr_err("add_to_list, cpumask_val 0x%x, pid %d failed.\n", (int) cpumask_val, p->pid);
+				/* put the task_struct */
+				put_task_struct(p);
+				break;
+			}
+			pr_debug("add_to_list, cpumask_val 0x%x, pid %d.\n", (int) cpumask_val, p->pid);
+		}
+		rcu_read_unlock();
+
+		/* set the cpu affinity for all pids */
+		if (!list_empty(&pending_pid_head)) {
+			struct pending_pid_list *pend_pid;
+
+			list_for_each_entry(pend_pid, &pending_pid_head, list) {
+				struct task_struct *q;
+
+				/* try to set the affinity */
+				if (sched_setaffinity(pend_pid->pid, cpumask))
+					pr_err("sched_setaffinity(process), cpumask_val 0x%x, pid %d failed.\n", (int) cpumask_val, pend_pid->pid);
+				else
+					pr_debug("sched_setaffinity(process), cpumask_val 0x%x, pid %d.\n", (int) cpumask_val, pend_pid->pid);
+
+				/* put the task_struct */
+				rcu_read_lock();
+				q = find_task_by_vpid(pend_pid->pid);
+				if (q)
+					put_task_struct(q);
+				rcu_read_unlock();
+			}
+			free_list(&pending_pid_head);
+		}
+	} else { /* Thread */
+		/* set the cpu affinity for task->pid */
+		if (sched_setaffinity(task->pid, cpumask))
+			pr_err("sched_setaffinity(thread), cpumask_val 0x%x, pid %d failed.\n", (int) cpumask_val, task->pid);
+		else
+			pr_debug("sched_setaffinity(thread), cpumask_val 0x%x, pid %d.\n", (int) cpumask_val, task->pid);
+	}
+	pr_debug("sched_setaffinity: mask_str %s for pid %d\n.", mask_str, task->pid);
+	ret = count;
+err_bitmap_parse:
+	free_cpumask_var(cpumask);
+err:
+	put_task_struct(task);
+	return ret;
+}
+
+static int cpu_affinity_mask_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, show_cpu_affinity_mask, inode);
+}
+
+const struct file_operations proc_pid_cpu_affinity_mask_operations = {
+	.open           = cpu_affinity_mask_open,
+	.write          = cpu_affinity_mask_write,
+	.read           = seq_read,
+	.llseek         = seq_lseek,
+	.release        = single_release,
+};
+#endif /* CONFIG_PROC_SCHED_CPU_AFFINITY */
+
+#ifdef CONFIG_MEMSTAT_INFO
+extern struct file_operations proc_pid_memstat_operations;
+#endif
+
 #ifdef CONFIG_SECURITY
 static ssize_t proc_pid_attr_read(struct file * file, char __user * buf,
 				  size_t count, loff_t *ppos)
@@ -2540,6 +2958,22 @@ static int proc_pid_personality(struct seq_file *m, struct pid_namespace *ns,
 	return err;
 }
 
+#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+static int proc_pid_zone(struct seq_file *m, struct pid_namespace *ns,
+			  struct pid *pid, struct task_struct *task)
+{
+	#ifdef CONFIG_SECURITY_SFD_SECURECONTAINER_MODE_ENFORCE        
+	#define  SECURECONTAINER_PID_ZONE_UEP_LEVEL_ALLOW	'D'
+	if(SECURECONTAINER_PID_ZONE_UEP_LEVEL_ALLOW <= current->uepLevel)
+	#endif
+	{
+		seq_printf(m, "%d %d",task->uepLevel,task->nsproxy->type);
+	}
+	
+	return 0;
+}
+#endif
+
 /*
  * Thread groups
  */
@@ -2586,11 +3020,19 @@ static const struct pid_entry tgid_base_stuff[] = {
 	REG("mounts",     S_IRUGO, proc_mounts_operations),
 	REG("mountinfo",  S_IRUGO, proc_mountinfo_operations),
 	REG("mountstats", S_IRUSR, proc_mountstats_operations),
+	REG("reclaim", S_IWUSR, proc_reclaim_operations),
 #ifdef CONFIG_PROC_PAGE_MONITOR
 	REG("clear_refs", S_IWUSR, proc_clear_refs_operations),
 	REG("smaps",      S_IRUGO, proc_pid_smaps_operations),
 	REG("pagemap",    S_IRUSR, proc_pagemap_operations),
 #endif
+#ifdef CONFIG_RSS_INFO
+	REG("rss",	S_IRUGO, proc_pid_rss_operations),
+#endif
+#ifdef CONFIG_MEMSTAT_INFO
+	REG("vd_memstat",	S_IRUGO, proc_pid_memstat_operations),
+#endif
+
 #ifdef CONFIG_SECURITY
 	DIR("attr",       S_IRUGO|S_IXUGO, proc_attr_dir_inode_operations, proc_attr_dir_operations),
 #endif
@@ -2640,6 +3082,13 @@ static const struct pid_entry tgid_base_stuff[] = {
 #ifdef CONFIG_CHECKPOINT_RESTORE
 	REG("timers",	  S_IRUGO, proc_timers_operations),
 #endif
+#ifdef CONFIG_PROC_SCHED_CPU_AFFINITY
+	REG("cpu_affinity_mask", S_IRUGO|S_IWUSR, proc_pid_cpu_affinity_mask_operations),
+#endif
+#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+	ONE("zone",      S_IRUSR, proc_pid_zone),
+#endif
+
 };
 
 static int proc_tgid_base_readdir(struct file *file, struct dir_context *ctx)
@@ -2881,6 +3330,8 @@ int proc_pid_readdir(struct file *file, struct dir_context *ctx)
 	     iter.tgid += 1, iter = next_tgid(ns, iter)) {
 		char name[PROC_NUMBUF];
 		int len;
+
+		cond_resched();
 		if (!has_pid_permissions(ns, iter.task, 2))
 			continue;
 
@@ -2938,6 +3389,12 @@ static const struct pid_entry tid_base_stuff[] = {
 	REG("clear_refs", S_IWUSR, proc_clear_refs_operations),
 	REG("smaps",     S_IRUGO, proc_tid_smaps_operations),
 	REG("pagemap",    S_IRUSR, proc_pagemap_operations),
+#endif
+#ifdef CONFIG_RSS_INFO
+	REG("rss",	S_IRUGO, proc_pid_rss_operations),
+#endif
+#ifdef CONFIG_MEMSTAT_INFO
+	REG("vd_memstat",	S_IRUGO, proc_pid_memstat_operations),
 #endif
 #ifdef CONFIG_SECURITY
 	DIR("attr",      S_IRUGO|S_IXUGO, proc_attr_dir_inode_operations, proc_attr_dir_operations),

@@ -766,7 +766,7 @@ struct kmem_cache *kmalloc_slab(size_t size, gfp_t flags)
 		WARN_ON_ONCE(!(flags & __GFP_NOWARN));
 		return NULL;
 	}
-
+#ifndef CONFIG_VD_KMALLOC_SLAB
 	if (size <= 192) {
 		if (!size)
 			return ZERO_SIZE_PTR;
@@ -774,6 +774,21 @@ struct kmem_cache *kmalloc_slab(size_t size, gfp_t flags)
 		index = size_index[size_index_elem(size)];
 	} else
 		index = fls(size - 1);
+#else
+	if (size <= 128) {
+		index = 1;
+		if (!size)
+			return ZERO_SIZE_PTR;
+
+		if (size <= 64)
+			index = 0;
+	} else{
+		index = fls(size - 1);
+		index = ((size - 1) >> (index - 1)) &
+			((size - 1) >> (index - 2)) ?
+			(((index - 7) << 1) + 1) : ((index - 7) << 1);
+	}
+#endif
 
 #ifdef CONFIG_ZONE_DMA
 	if (unlikely((flags & GFP_DMA)))
@@ -805,7 +820,7 @@ void __init create_kmalloc_caches(unsigned long flags)
 	 */
 	BUILD_BUG_ON(KMALLOC_MIN_SIZE > 256 ||
 		(KMALLOC_MIN_SIZE & (KMALLOC_MIN_SIZE - 1)));
-
+#ifndef CONFIG_VD_KMALLOC_SLAB
 	for (i = 8; i < KMALLOC_MIN_SIZE; i += 8) {
 		int elem = size_index_elem(i);
 
@@ -850,6 +865,14 @@ void __init create_kmalloc_caches(unsigned long flags)
 		if (KMALLOC_MIN_SIZE <= 64 && !kmalloc_caches[2] && i == 7)
 			kmalloc_caches[2] = create_kmalloc_cache(NULL, 192, flags);
 	}
+#else
+	for (i = 0; i <= KMALLOC_SHIFT_HIGH; i++) {
+		if (!kmalloc_caches[i]) {
+			kmalloc_caches[i] = create_kmalloc_cache(NULL,
+					kmalloc_size(i), flags);
+		}
+	}
+#endif
 
 	/* Kmalloc array is now usable */
 	slab_state = UP;
@@ -921,6 +944,8 @@ EXPORT_SYMBOL(kmalloc_order_trace);
 #define SLABINFO_RIGHTS S_IRUSR
 #endif
 
+extern int seq_printk(struct seq_file *m, const char *f, ...);
+
 static void print_slabinfo_header(struct seq_file *m)
 {
 	/*
@@ -928,20 +953,20 @@ static void print_slabinfo_header(struct seq_file *m)
 	 * without _too_ many complaints.
 	 */
 #ifdef CONFIG_DEBUG_SLAB
-	seq_puts(m, "slabinfo - version: 2.1 (statistics)\n");
+	seq_printk(m, "slabinfo - version: 2.1 (statistics)\n");
 #else
-	seq_puts(m, "slabinfo - version: 2.1\n");
+	seq_printk(m, "slabinfo - version: 2.1\n");
 #endif
-	seq_puts(m, "# name            <active_objs> <num_objs> <objsize> "
+	seq_printk(m, "# name            <active_objs> <num_objs> <objsize> "
 		 "<objperslab> <pagesperslab>");
-	seq_puts(m, " : tunables <limit> <batchcount> <sharedfactor>");
-	seq_puts(m, " : slabdata <active_slabs> <num_slabs> <sharedavail>");
+	seq_printk(m, " : tunables <limit> <batchcount> <sharedfactor>");
+	seq_printk(m, " : slabdata <active_slabs> <num_slabs> <sharedavail>");
 #ifdef CONFIG_DEBUG_SLAB
-	seq_puts(m, " : globalstat <listallocs> <maxobjs> <grown> <reaped> "
+	seq_printk(m, " : globalstat <listallocs> <maxobjs> <grown> <reaped> "
 		 "<error> <maxfreeable> <nodeallocs> <remotefrees> <alienoverflow>");
-	seq_puts(m, " : cpustat <allochit> <allocmiss> <freehit> <freemiss>");
+	seq_printk(m, " : cpustat <allochit> <allocmiss> <freehit> <freemiss>");
 #endif
-	seq_putc(m, '\n');
+	seq_printk(m, "\n");
 }
 
 void *slab_start(struct seq_file *m, loff_t *pos)
@@ -990,16 +1015,16 @@ static void cache_show(struct kmem_cache *s, struct seq_file *m)
 
 	memcg_accumulate_slabinfo(s, &sinfo);
 
-	seq_printf(m, "%-17s %6lu %6lu %6u %4u %4d",
+	seq_printk(m, "%-17s %6lu %6lu %6u %4u %4d",
 		   cache_name(s), sinfo.active_objs, sinfo.num_objs, s->size,
 		   sinfo.objects_per_slab, (1 << sinfo.cache_order));
 
-	seq_printf(m, " : tunables %4u %4u %4u",
+	seq_printk(m, " : tunables %4u %4u %4u",
 		   sinfo.limit, sinfo.batchcount, sinfo.shared);
-	seq_printf(m, " : slabdata %6lu %6lu %6lu",
+	seq_printk(m, " : slabdata %6lu %6lu %6lu",
 		   sinfo.active_slabs, sinfo.num_slabs, sinfo.shared_avail);
 	slabinfo_show_stats(m, s);
-	seq_putc(m, '\n');
+	seq_printk(m, "\n");
 }
 
 static int slab_show(struct seq_file *m, void *p)
@@ -1011,6 +1036,23 @@ static int slab_show(struct seq_file *m, void *p)
 	if (is_root_cache(s))
 		cache_show(s, m);
 	return 0;
+}
+
+void print_slabinfo_oom(void)
+{
+	struct kmem_cache *s;
+
+	print_slabinfo_header(NULL);
+
+	if (mutex_trylock(&slab_mutex)) {
+		list_for_each_entry(s, &slab_caches, list) {
+			cache_show(s, NULL);
+		}
+		mutex_unlock(&slab_mutex);
+	} else {
+		pr_info("Unable to print slabinfo report because of "
+				"slab_mutex contention\n");
+	}
 }
 
 #ifdef CONFIG_MEMCG_KMEM

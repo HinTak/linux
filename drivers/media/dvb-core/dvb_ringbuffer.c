@@ -45,6 +45,7 @@ void dvb_ringbuffer_init(struct dvb_ringbuffer *rbuf, void *data, size_t len)
 	rbuf->data=data;
 	rbuf->size=len;
 	rbuf->error=0;
+	rbuf->is_shared_llbuf=0;
 
 	init_waitqueue_head(&rbuf->queue);
 
@@ -96,6 +97,7 @@ void dvb_ringbuffer_reset(struct dvb_ringbuffer *rbuf)
 	rbuf->pread = rbuf->pwrite = 0;
 	rbuf->error = 0;
 }
+EXPORT_SYMBOL(dvb_ringbuffer_reset);
 
 void dvb_ringbuffer_flush_spinlock_wakeup(struct dvb_ringbuffer *rbuf)
 {

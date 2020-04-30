@@ -10,6 +10,22 @@
 #ifndef __LINUX_MTD_SPI_NOR_H
 #define __LINUX_MTD_SPI_NOR_H
 
+
+/*
+ * Manufacturer IDs
+ *
+ * The first byte returned from the flash after sending opcode SPINOR_OP_RDID.
+ * Sometimes these are the same as CFI IDs, but sometimes they aren't.
+ */
+#define SNOR_MFR_ATMEL          CFI_MFR_ATMEL
+#define SNOR_MFR_GIGADEVICE     0xc8
+#define SNOR_MFR_INTEL          CFI_MFR_INTEL
+#define SNOR_MFR_MICRON         CFI_MFR_ST /* ST Micro <--> Micron */
+#define SNOR_MFR_MACRONIX       CFI_MFR_MACRONIX
+#define SNOR_MFR_SPANSION       CFI_MFR_AMD
+#define SNOR_MFR_SST            CFI_MFR_SST
+#define SNOR_MFR_WINBOND        0xef /* Also used by some Spansion */
+
 /*
  * Note on opcode nomenclature: some opcodes have a format like
  * SPINOR_OP_FUNCTION{4,}_x_y_z. The numbers x, y, and z stand for the number
@@ -61,13 +77,16 @@
 #define SPINOR_OP_WD_EVCR      0x61    /* Write EVCR register */
 
 /* Status Register bits. */
-#define SR_WIP			1	/* Write in progress */
-#define SR_WEL			2	/* Write enable latch */
+#define SR_WIP			BIT(0)	/* Write in progress */
+#define SR_WEL			BIT(1)	/* Write enable latch */
 /* meaning of other SR_* bits may differ between vendors */
-#define SR_BP0			4	/* Block protect 0 */
-#define SR_BP1			8	/* Block protect 1 */
-#define SR_BP2			0x10	/* Block protect 2 */
-#define SR_SRWD			0x80	/* SR write protect */
+#define SR_BP0			BIT(2)	/* Block protect 0 */
+#define SR_BP1			BIT(3)	/* Block protect 1 */
+#define SR_BP2			BIT(4)	/* Block protect 2 */
+#define SR_TB			BIT(5)	/* Top/Bottom protect */
+#define SR_SRWD			BIT(7)	/* SR write protect */
+/* Micron specific status bits */
+#define SR_BP3			BIT(6)	/* Block protect 3 */
 
 #define SR_QUAD_EN_MX		0x40	/* Macronix Quad I/O */
 
@@ -125,6 +144,8 @@ enum spi_nor_ops {
 
 enum spi_nor_option_flags {
 	SNOR_F_USE_FSR		= BIT(0),
+	SNOR_F_HAS_SR_TB	= BIT(1),
+	SNOR_F_HAS_SR_BP3	= BIT(2),
 };
 
 /**
@@ -133,6 +154,7 @@ enum spi_nor_option_flags {
  * @lock:		the lock for the read/write/erase/lock/unlock operations
  * @dev:		point to a spi device, or a spi nor controller device.
  * @page_size:		the page size of the SPI NOR
+ * @n_sectors:		number of sector
  * @addr_width:		number of address bytes
  * @erase_opcode:	the opcode for erasing a sector
  * @read_opcode:	the read opcode
@@ -157,6 +179,8 @@ enum spi_nor_option_flags {
  *			at the offset @offs
  * @lock:		[FLASH-SPECIFIC] lock a region of the SPI NOR
  * @unlock:		[FLASH-SPECIFIC] unlock a region of the SPI NOR
+ * @flash_is_locked:	[FLASH-SPECIFIC] check if a region of the SPI NOR is
+ *			completely locked
  * @priv:		the private data
  */
 struct spi_nor {
@@ -164,6 +188,7 @@ struct spi_nor {
 	struct mutex		lock;
 	struct device		*dev;
 	u32			page_size;
+	u16			n_sectors;
 	u8			addr_width;
 	u8			erase_opcode;
 	u8			read_opcode;
@@ -193,6 +218,7 @@ struct spi_nor {
 
 	int (*flash_lock)(struct spi_nor *nor, loff_t ofs, uint64_t len);
 	int (*flash_unlock)(struct spi_nor *nor, loff_t ofs, uint64_t len);
+	int (*flash_is_locked)(struct spi_nor *nor, loff_t ofs, uint64_t len);
 
 	void *priv;
 };

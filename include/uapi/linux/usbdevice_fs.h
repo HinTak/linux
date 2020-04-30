@@ -75,6 +75,12 @@ struct usbdevfs_connectinfo {
 	unsigned char slow;
 };
 
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+//add for usb devpath
+struct usbdevfs_devpath {
+        char  devpath[16];
+};
+#endif
 #define USBDEVFS_URB_SHORT_NOT_OK	0x01
 #define USBDEVFS_URB_ISO_ASAP		0x02
 #define USBDEVFS_URB_BULK_CONTINUATION	0x04
@@ -187,5 +193,7 @@ struct usbdevfs_streams {
 #define USBDEVFS_DISCONNECT_CLAIM  _IOR('U', 27, struct usbdevfs_disconnect_claim)
 #define USBDEVFS_ALLOC_STREAMS     _IOR('U', 28, struct usbdevfs_streams)
 #define USBDEVFS_FREE_STREAMS      _IOR('U', 29, struct usbdevfs_streams)
-
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+#define USBDEVFS_DEVPATH           _IOW('U', 30, struct usbdevfs_devpath)
+#endif
 #endif /* _UAPI_LINUX_USBDEVICE_FS_H */

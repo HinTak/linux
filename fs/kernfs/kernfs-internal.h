@@ -72,6 +72,7 @@ struct kernfs_super_info {
 
 extern const struct super_operations kernfs_sops;
 extern struct kmem_cache *kernfs_node_cache;
+extern struct kmem_cache *kernfs_iattrs_cache;
 
 /*
  * inode.c

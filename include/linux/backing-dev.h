@@ -19,6 +19,7 @@
 #include <linux/atomic.h>
 #include <linux/sysctl.h>
 #include <linux/workqueue.h>
+#include <linux/kref.h>
 
 struct page;
 struct device;
@@ -69,6 +70,7 @@ struct backing_dev_info {
 
 	char *name;
 
+	struct kref refcnt;	/* Reference counter for the structure */
 	struct percpu_counter bdi_stat[NR_BDI_STAT_ITEMS];
 
 	unsigned long bw_time_stamp;	/* last time write bw is updated */
@@ -112,11 +114,21 @@ struct backing_dev_info *inode_to_bdi(struct inode *inode);
 int __must_check bdi_init(struct backing_dev_info *bdi);
 void bdi_destroy(struct backing_dev_info *bdi);
 
+static inline struct backing_dev_info *bdi_get(struct backing_dev_info *bdi)
+{
+	kref_get(&bdi->refcnt);
+	return bdi;
+}
+
+void bdi_put(struct backing_dev_info *bdi);
 __printf(3, 4)
 int bdi_register(struct backing_dev_info *bdi, struct device *parent,
 		const char *fmt, ...);
 int bdi_register_dev(struct backing_dev_info *bdi, dev_t dev);
+void bdi_unregister(struct backing_dev_info *bdi);
 int __must_check bdi_setup_and_register(struct backing_dev_info *, char *);
+void bdi_destroy(struct backing_dev_info *bdi);
+struct backing_dev_info *bdi_alloc_node(gfp_t gfp_mask, int node_id);
 void bdi_start_writeback(struct backing_dev_info *bdi, long nr_pages,
 			enum wb_reason reason);
 void bdi_start_background_writeback(struct backing_dev_info *bdi);
@@ -231,12 +243,15 @@ int bdi_set_max_ratio(struct backing_dev_info *bdi, unsigned int max_ratio);
  * BDI_CAP_NO_WRITEBACK:   Don't write pages back
  * BDI_CAP_NO_ACCT_WB:     Don't automatically account writeback pages
  * BDI_CAP_STRICTLIMIT:    Keep number of dirty pages below bdi threshold.
+ * BDI_CAP_SYNCHRONOUS_IO: Device is so fast that asynchronous IO would be
+ *            inefficient.
  */
 #define BDI_CAP_NO_ACCT_DIRTY	0x00000001
 #define BDI_CAP_NO_WRITEBACK	0x00000002
 #define BDI_CAP_NO_ACCT_WB	0x00000004
 #define BDI_CAP_STABLE_WRITES	0x00000008
 #define BDI_CAP_STRICTLIMIT	0x00000010
+#define BDI_CAP_SYNCHRONOUS_IO 0x00000040
 
 #define BDI_CAP_NO_ACCT_AND_WRITEBACK \
 	(BDI_CAP_NO_WRITEBACK | BDI_CAP_NO_ACCT_DIRTY | BDI_CAP_NO_ACCT_WB)
@@ -279,6 +294,12 @@ long congestion_wait(int sync, long timeout);
 long wait_iff_congested(struct zone *zone, int sync, long timeout);
 int pdflush_proc_obsolete(struct ctl_table *table, int write,
 		void __user *buffer, size_t *lenp, loff_t *ppos);
+
+static inline bool bdi_cap_synchronous_io(struct backing_dev_info *bdi)
+{
+   return bdi->capabilities & BDI_CAP_SYNCHRONOUS_IO;
+}
+
 
 static inline bool bdi_cap_stable_pages_required(struct backing_dev_info *bdi)
 {

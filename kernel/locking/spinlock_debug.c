@@ -12,6 +12,12 @@
 #include <linux/debug_locks.h>
 #include <linux/delay.h>
 #include <linux/export.h>
+#include <linux/jiffies.h>
+
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+void show_kernel_patch_version(void);
+#endif
 
 void __raw_spin_lock_init(raw_spinlock_t *lock, const char *name,
 			  struct lock_class_key *key)
@@ -27,6 +33,7 @@ void __raw_spin_lock_init(raw_spinlock_t *lock, const char *name,
 	lock->magic = SPINLOCK_MAGIC;
 	lock->owner = SPINLOCK_OWNER_INIT;
 	lock->owner_cpu = -1;
+	lock->acquire_tstamp = 0;
 }
 
 EXPORT_SYMBOL(__raw_spin_lock_init);
@@ -48,24 +55,104 @@ void __rwlock_init(rwlock_t *lock, const char *name,
 }
 
 EXPORT_SYMBOL(__rwlock_init);
+#ifdef CONFIG_DUMP_SPINLOCK_MEMORY
+extern int is_valid_kernel_addr(unsigned long register_value);
 
-static void spin_dump(raw_spinlock_t *lock, const char *msg)
+#define HOWMUCH_SHIFT              8 /* 256byte. this is configurable */
+#define HOWMUCH_SIZE               (_AC(1,UL) << HOWMUCH_SHIFT)
+#define HOWMUCH_MASK               (~((1 << HOWMUCH_SHIFT) - 1))
+
+#endif
+
+#ifdef CONFIG_SDP_BUS_ERR_LOGGER
+int sdp_bus_flowctrl_get(const char *id);
+#endif
+
+/*
+ * Returns milliseconds, approximately.  We don't need nanosecond
+ * resolution, and we don't need to waste time with a big divide when
+ * 2^20ns == 1.048ms.
+ */
+static unsigned long get_timestamp(void)
+{
+	return running_clock() >> 20LL;  /* 2^20 ~= 10^6 */
+}
+
+static void __spin_dump_lock_state(const char *level,
+				raw_spinlock_t *lock, const char *msg)
 {
 	struct task_struct *owner = NULL;
+	unsigned long now = get_timestamp();
 
+#ifdef CONFIG_DUMP_SPINLOCK_MEMORY
+        unsigned long start_addr_for_printing = 0;
+        unsigned long end_addr_for_printing = 0;
+#endif 
 	if (lock->owner && lock->owner != SPINLOCK_OWNER_INIT)
 		owner = lock->owner;
-	printk(KERN_EMERG "BUG: spinlock %s on CPU#%d, %s/%d\n",
-		msg, raw_smp_processor_id(),
+	printk(KERN_EMERG "%s: spinlock %s on CPU#%d, %s/%d\n",
+		level, msg, raw_smp_processor_id(),
 		current->comm, task_pid_nr(current));
 	printk(KERN_EMERG " lock: %pS, .magic: %08x, .owner: %s/%d, "
-			".owner_cpu: %d\n",
+			".owner_cpu: %d, .raw_lock: %x\n"
+			"\t.current_ts: %lu ms .owner_acquire_ts: %lu ms\n",
 		lock, lock->magic,
 		owner ? owner->comm : "<none>",
 		owner ? task_pid_nr(owner) : -1,
-		lock->owner_cpu);
+		lock->owner_cpu,
+		lock->raw_lock.slock,
+		now,
+		lock->acquire_tstamp);
+
+#ifdef CONFIG_SDP_BUS_ERR_LOGGER
+	printk(KERN_EMERG " sdp_bus_flowctrl[CPU]:%x\n", sdp_bus_flowctrl_get("CPU"));
+#endif
+
+#ifdef CONFIG_DUMP_SPINLOCK_MEMORY
+	printk("\n* Lock address : %lx\n",(unsigned long)lock);
+	if(!is_valid_kernel_addr((unsigned long)lock))
+	{
+		printk("lock is not valid address.\n");
+		return;
+	}
+	start_addr_for_printing = ((unsigned long)lock & HOWMUCH_MASK) - HOWMUCH_SIZE ;
+	end_addr_for_printing = ((unsigned long)lock & HOWMUCH_MASK) + HOWMUCH_SIZE + HOWMUCH_SIZE-1;
+
+	if (!is_valid_kernel_addr(start_addr_for_printing)) {
+		printk("# 'start_addr_for_printing' is not valid address.\n");
+		printk("# So, we use just 'lock & HOWMUCH_MASK'\n");
+		start_addr_for_printing = ((unsigned long)lock & HOWMUCH_MASK);
+	}
+
+	if (!is_valid_kernel_addr(end_addr_for_printing)) {
+		printk("# 'end_addr_for_printing' is wrong address.\n");
+		printk("# So, we use 'lock & HOWMUCH_MASK + HOWMUCH_SIZE-1'\n");
+		end_addr_for_printing = ((unsigned long)lock & HOWMUCH_MASK) + HOWMUCH_SIZE-1;
+	}
+
+	printk("# dump_start_addr : 0x%lx, dump_end_addr : 0x%lx\n",
+			start_addr_for_printing, end_addr_for_printing);
+	printk("--------------------------------------------------------------------------------------\n");
+	dump_mem_kernel("meminfo ", start_addr_for_printing, end_addr_for_printing);
+	printk("--------------------------------------------------------------------------------------\n");
+	printk("\n");
+#endif
+}
+
+static void __spin_dump(const char *level,
+			raw_spinlock_t *lock, const char *msg)
+{
+
+	__spin_dump_lock_state(level, lock, msg);
+#ifdef CONFIG_VDLP_VERSION_INFO
+	show_kernel_patch_version();
+#endif
 	dump_stack();
 }
+
+#define spin_dump(l, m) __spin_dump("BUG", (l), (m))
+#define spin_dump_vd(l, m) __spin_dump("INFO", (l), (m))
+#define UNLOCK_DEADLINE 2000	/* 2000 milliseconds */
 
 static void spin_bug(raw_spinlock_t *lock, const char *msg)
 {
@@ -90,6 +177,7 @@ static inline void debug_spin_lock_after(raw_spinlock_t *lock)
 {
 	lock->owner_cpu = raw_smp_processor_id();
 	lock->owner = current;
+	lock->acquire_tstamp = get_timestamp();
 }
 
 static inline void debug_spin_unlock(raw_spinlock_t *lock)
@@ -99,6 +187,8 @@ static inline void debug_spin_unlock(raw_spinlock_t *lock)
 	SPIN_BUG_ON(lock->owner != current, lock, "wrong owner");
 	SPIN_BUG_ON(lock->owner_cpu != raw_smp_processor_id(),
 							lock, "wrong CPU");
+	if (time_after_eq(get_timestamp(), (lock->acquire_tstamp + UNLOCK_DEADLINE)))
+		spin_dump_vd(lock, "missed unlock deadline");
 	lock->owner = SPINLOCK_OWNER_INIT;
 	lock->owner_cpu = -1;
 }
@@ -106,12 +196,12 @@ static inline void debug_spin_unlock(raw_spinlock_t *lock)
 static void __spin_lock_debug(raw_spinlock_t *lock)
 {
 	u64 i;
-	u64 loops = loops_per_jiffy * HZ;
+	u64 loops = (loops_per_jiffy * HZ) / 3;
 
 	for (i = 0; i < loops; i++) {
 		if (arch_spin_trylock(&lock->raw_lock))
 			return;
-		__delay(1);
+		__delay(5);
 	}
 	/* lockup suspected: */
 	spin_dump(lock, "lockup suspected");

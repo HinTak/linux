@@ -513,7 +513,7 @@ static void async_completed(struct urb *urb)
 	snoop(&urb->dev->dev, "urb complete\n");
 	snoop_urb(urb->dev, as->userurb, urb->pipe, urb->actual_length,
 			as->status, COMPLETE, NULL, 0);
-	if ((urb->transfer_flags & URB_DIR_MASK) == USB_DIR_IN)
+	if ((urb->transfer_flags & URB_DIR_MASK) == URB_DIR_IN)
 		snoop_urb_data(urb, urb->actual_length);
 
 	if (as->status < 0 && as->bulk_addr && as->status != -ECONNRESET &&
@@ -1202,15 +1202,30 @@ static int proc_getdriver(struct usb_dev_state *ps, void __user *arg)
 
 static int proc_connectinfo(struct usb_dev_state *ps, void __user *arg)
 {
-	struct usbdevfs_connectinfo ci = {
-		.devnum = ps->dev->devnum,
-		.slow = ps->dev->speed == USB_SPEED_LOW
-	};
-
+	struct usbdevfs_connectinfo ci; 
+	
+	memset(&ci, 0, sizeof(ci));
+	ci.devnum = ps->dev->devnum;
+	ci.slow = ps->dev->speed == USB_SPEED_LOW;
 	if (copy_to_user(arg, &ci, sizeof(ci)))
 		return -EFAULT;
 	return 0;
 }
+// Newly add
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+static int proc_devpath(struct usb_dev_state *ps, void __user *arg)
+{
+        struct usbdevfs_devpath dp;
+
+        memset(dp.devpath, 0x0, sizeof(dp.devpath));
+        //080507
+        strncpy(dp.devpath, ps->dev->devbusportpath, sizeof(dp.devpath)-1);
+
+        if (copy_to_user(arg, &dp, sizeof(dp)))
+                return -EFAULT;
+        return 0;
+}
+#endif
 
 static int proc_resetdevice(struct usb_dev_state *ps)
 {
@@ -2216,6 +2231,13 @@ static long usbdev_do_ioctl(struct file *file, unsigned int cmd,
 		snoop(&dev->dev, "%s: CONNECTINFO\n", __func__);
 		ret = proc_connectinfo(ps, p);
 		break;
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+        //add for usb devpath
+        case USBDEVFS_DEVPATH:
+                snoop(&dev->dev, "%s: DEVPATH\n", __func__);
+                ret = proc_devpath(ps, p);
+                break;
+#endif
 
 	case USBDEVFS_SETINTERFACE:
 		snoop(&dev->dev, "%s: SETINTERFACE\n", __func__);

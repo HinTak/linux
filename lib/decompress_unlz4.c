@@ -156,7 +156,7 @@ STATIC inline int INIT unlz4(u8 *input, long in_len,
 #else
 		dest_len = uncomp_chunksize;
 		ret = lz4_decompress_unknownoutputsize(inp, chunksize, outp,
-				&dest_len);
+				&dest_len, NoDynOffset);
 #endif
 		if (ret < 0) {
 			error("Decoding failed");
@@ -196,12 +196,12 @@ exit_0:
 }
 
 #ifdef PREBOOT
-STATIC int INIT decompress(unsigned char *buf, long in_len,
+STATIC int INIT __decompress(unsigned char *buf, long in_len,
 			      long (*fill)(void*, unsigned long),
 			      long (*flush)(void*, unsigned long),
-			      unsigned char *output,
+			      unsigned char *output, long out_len,
 			      long *posp,
-			      void(*error)(char *x)
+			      void (*error)(char *x)
 	)
 {
 	return unlz4(buf, in_len - 4, fill, flush, output, posp, error);

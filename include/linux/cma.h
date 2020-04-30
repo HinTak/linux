@@ -1,6 +1,9 @@
 #ifndef __CMA_H__
 #define __CMA_H__
 
+#include <linux/init.h>
+#include <linux/types.h>
+#include <linux/mmzone.h>
 /*
  * There is always at least global CMA area and a few optional
  * areas configured in kernel .config.
@@ -28,4 +31,30 @@ extern int cma_init_reserved_mem(phys_addr_t base, phys_addr_t size,
 					struct cma **res_cma);
 extern struct page *cma_alloc(struct cma *cma, unsigned int count, unsigned int align);
 extern bool cma_release(struct cma *cma, const struct page *pages, unsigned int count);
+
+#ifdef CONFIG_CMA
+extern unsigned cma_area_count;
+extern unsigned long cma_get_free(void);
+extern bool is_zone_cma_page(const struct page *page);
+extern unsigned long cma_get_device_used_pages(void);
+
+static inline enum zone_type page_zonenum_special(const struct page *page,
+			enum zone_type zone_type)
+{
+	if (!cma_area_count)
+		return zone_type;
+
+	if (zone_type != ZONE_MOVABLE)
+		return zone_type;
+
+	if (is_zone_cma_page(page))
+		return ZONE_CMA;
+
+	return ZONE_MOVABLE;
+}
+
+#else
+static inline unsigned long cma_get_free(void) { return 0; }
+static unsigned long cma_get_device_used_pages(void) { return 0; }
+#endif
 #endif

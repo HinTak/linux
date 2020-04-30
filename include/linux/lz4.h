@@ -12,6 +12,8 @@
 #define LZ4_MEM_COMPRESS	(4096 * sizeof(unsigned char *))
 #define LZ4HC_MEM_COMPRESS	(65538 * sizeof(unsigned char *))
 
+typedef enum { NoDynOffset = 0, DynOffset = 1 } Dynamic_Offset;
+
 /*
  * lz4_compressbound()
  * Provides the maximum size that LZ4 may output in a "worst case" scenario
@@ -31,13 +33,16 @@ static inline size_t lz4_compressbound(size_t isize)
  *	dst_len : is the output size, which is returned after compress done
  *	workmem : address of the working memory.
  *		This requires 'workmem' of size LZ4_MEM_COMPRESS.
+ *	offset_type: 1 or 0.
+ *	1 specifies dynamic offset. (1 byte or 2 byte based on actual offset value),
+ *	0 specifies normal offset.  (2 bytes for each offset value).
  *	return  : Success if return 0
  *		  Error if return (< 0)
  *	note :  Destination buffer and workmem must be already allocated with
  *		the defined size.
  */
 int lz4_compress(const unsigned char *src, size_t src_len,
-		unsigned char *dst, size_t *dst_len, void *wrkmem);
+		unsigned char *dst, size_t *dst_len, void *wrkmem, const Dynamic_Offset offset_type);
 
  /*
   * lz4hc_compress()
@@ -78,10 +83,14 @@ int lz4_decompress(const unsigned char *src, size_t *src_len,
  *	dest_len: is the max size of the destination buffer, which is
  *			returned with actual size of decompressed data after
  *			decompress done
+ *	offset_type: 1 or 0.
+ *	1 specifies dynamic offset. (1 byte or 2 byte based on actual offset value),
+ *	0 specifies normal offset.  (2 bytes for each offset value).
  *	return  : Success if return 0
  *		  Error if return (< 0)
  *	note :  Destination buffer must be already allocated.
  */
 int lz4_decompress_unknownoutputsize(const unsigned char *src, size_t src_len,
-		unsigned char *dest, size_t *dest_len);
+		unsigned char *dest, size_t *dest_len, const Dynamic_Offset offset_type);
+
 #endif

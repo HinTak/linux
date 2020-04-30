@@ -23,6 +23,10 @@
 #include <asm/irq_regs.h>
 #include <linux/kvm_para.h>
 #include <linux/perf_event.h>
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+void show_kernel_patch_version(void);
+#endif
 
 /*
  * The run state of the lockup detectors is controlled by the content of the
@@ -61,6 +65,15 @@ int __read_mostly sysctl_softlockup_all_cpu_backtrace;
 
 static int __read_mostly watchdog_running;
 static u64 __read_mostly sample_period;
+
+#ifdef CONFIG_IRQ_TIME
+#include <linux/irq.h>
+#endif
+
+#ifdef CONFIG_PRINT_SMC_HISTORY_PRINT
+print_smc_info_sec_fn print_smc_info_sec;
+EXPORT_SYMBOL(print_smc_info_sec);
+#endif // CONFIG_PRINT_SMC_HISTORY_PRINT
 
 static DEFINE_PER_CPU(unsigned long, watchdog_touch_ts);
 static DEFINE_PER_CPU(struct task_struct *, softlockup_watchdog);
@@ -160,6 +173,14 @@ static int get_softlockup_thresh(void)
 	return watchdog_thresh * 2;
 }
 
+#ifdef CONFIG_CHECK_SMALL_SOFTLOCKUP
+static int get_softlockup_small_thresh(void)
+{
+	/* 1/4 from softlockup threshold */
+	return watchdog_thresh / 2;
+}
+#endif
+
 /*
  * Returns seconds, approximately.  We don't need nanosecond
  * resolution, and we don't need to waste time with a big divide when
@@ -185,6 +206,11 @@ static void set_sample_period(void)
 /* Commands for resetting the watchdog */
 static void __touch_watchdog(void)
 {
+#ifdef CONFIG_IRQ_TIME
+	int cpu = smp_processor_id();
+
+	do_gettimeofday(&irq_desc_last[cpu].last_time_kth);
+#endif
 	__this_cpu_write(watchdog_touch_ts, get_timestamp());
 }
 
@@ -260,6 +286,19 @@ static int is_softlockup(unsigned long touch_ts)
 	return 0;
 }
 
+#ifdef CONFIG_CHECK_SMALL_SOFTLOCKUP
+static int is_small_softlockup(unsigned long touch_ts)
+{
+	unsigned long now = get_timestamp();
+
+	/* Warn about potentially unreasonable delays: */
+	if (time_after(now, touch_ts + get_softlockup_small_thresh()))
+		return now - touch_ts;
+
+	return 0;
+}
+#endif
+
 #ifdef CONFIG_HARDLOCKUP_DETECTOR
 
 static struct perf_event_attr wd_hw_attr = {
@@ -320,14 +359,22 @@ static void watchdog_interrupt_count(void)
 static int watchdog_nmi_enable(unsigned int cpu);
 static void watchdog_nmi_disable(unsigned int cpu);
 
+#ifdef CONFIG_SDP_BUS_ERR_LOGGER
+int sdp_bus_err_logger(void);
+#endif
+
 /* watchdog kicker functions */
 static enum hrtimer_restart watchdog_timer_fn(struct hrtimer *hrtimer)
 {
 	unsigned long touch_ts = __this_cpu_read(watchdog_touch_ts);
 	struct pt_regs *regs = get_irq_regs();
 	int duration;
+#ifdef CONFIG_CHECK_SMALL_SOFTLOCKUP
+	/* Should the soft-lockup detector generate backtraces on all cpus. */
+	int softlockup_all_cpu_backtrace = true;
+#else
 	int softlockup_all_cpu_backtrace = sysctl_softlockup_all_cpu_backtrace;
-
+#endif
 	/* kick the hardlockup detector */
 	watchdog_interrupt_count();
 
@@ -402,12 +449,27 @@ static enum hrtimer_restart watchdog_timer_fn(struct hrtimer *hrtimer)
 			smp_processor_id(), duration,
 			current->comm, task_pid_nr(current));
 		__this_cpu_write(softlockup_task_ptr_saved, current);
-		print_modules();
+#ifdef CONFIG_VDLP_VERSION_INFO
+		show_kernel_patch_version();
+#endif
+
 		print_irqtrace_events(current);
 		if (regs)
 			show_regs(regs);
 		else
 			dump_stack();
+#ifdef CONFIG_PRINT_SMC_HISTORY_PRINT
+		if ( print_smc_info_sec )
+			print_smc_info_sec();
+#endif
+
+#ifdef CONFIG_IRQ_TIME
+		show_irq();
+#endif
+
+#ifdef CONFIG_EMRG_SAVE_KLOG
+		write_emrg_klog(regs, WRITE_RAW_KLOG_TYPE_SOFTLOCKUP);
+#endif
 
 		if (softlockup_all_cpu_backtrace) {
 			/* Avoid generating two back traces for current
@@ -423,10 +485,30 @@ static enum hrtimer_restart watchdog_timer_fn(struct hrtimer *hrtimer)
 		add_taint(TAINT_SOFTLOCKUP, LOCKDEP_STILL_OK);
 		if (softlockup_panic)
 			panic("softlockup: hung tasks");
-		__this_cpu_write(soft_watchdog_warn, true);
-	} else
-		__this_cpu_write(soft_watchdog_warn, false);
 
+#ifdef CONFIG_SDP_BUS_ERR_LOGGER
+		sdp_bus_err_logger();
+#endif
+		__this_cpu_write(soft_watchdog_warn, true);
+	} else {
+#ifdef CONFIG_CHECK_SMALL_SOFTLOCKUP
+		duration = is_small_softlockup(touch_ts);
+		if (unlikely(duration)) {
+			printk(KERN_EMERG "INFO: CPU#%d stuck for %us! [%s:%d]\n",
+				smp_processor_id(), duration,
+				current->comm, task_pid_nr(current));
+			if (regs)
+				show_regs(regs);
+			else
+				dump_stack();
+#ifdef CONFIG_IRQ_TIME
+			show_irq();
+#endif
+		}
+#endif
+
+		__this_cpu_write(soft_watchdog_warn, false);
+	}
 	return HRTIMER_RESTART;
 }
 

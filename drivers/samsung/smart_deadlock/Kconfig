@@ -1,0 +1,25 @@
+menu "Smart Deadlock Detector Support"
+
+config SMART_DEADLOCK
+	bool "Smart Deadlock Detecting Framwork"
+	default n
+	help
+	This frame-work is for detecting watchdog system of TizenTV(systemd/ANR)
+	If there is deadlock problem in TizenTV, it is very difficult to define
+	the reason. So this feature will just report whenever deadlock occurs in
+	any service.This feature is for only TizenTV system.
+
+config SMART_DEADLOCK_PROFILE_MODE
+	bool "Smart Deadlock Profile Mode"
+	default n
+	depends on SMART_DEADLOCK
+	depends on KDEBUGD
+	help
+	This option will enable profiling in smart deadlock framework. It means that
+	now deadlock detector framework will also collect backtrace information of the
+	processes. Now whenever deadlock occurs in any service, then deadlock detector
+	framework will also store the backtrace information of the deadlock process in
+	a file using dlog.
+
+endmenu
+

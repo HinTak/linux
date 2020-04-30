@@ -39,6 +39,10 @@
 #define SUBSTREAM_FLAG_DATA_EP_STARTED	0
 #define SUBSTREAM_FLAG_SYNC_EP_STARTED	1
 
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+extern unsigned int uac_security_mic_param;
+#endif
+
 /* return the estimated delay based on USB frame counters */
 snd_pcm_uframes_t snd_usb_pcm_delay(struct snd_usb_substream *subs,
 				    unsigned int rate)
@@ -1593,10 +1597,26 @@ static int snd_usb_substream_capture_trigger(struct snd_pcm_substream *substream
 
 		subs->data_endpoint->retire_data_urb = retire_capture_urb;
 		subs->running = 1;
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+		if (subs->dev->descriptor.idVendor == 0x4e8 && \
+			subs->dev->descriptor.idProduct >= 0x2063 && \
+			subs->dev->descriptor.idProduct <= 0x2066)
+		{
+			uac_security_mic_param = 1;
+		}
+#endif
 		return 0;
 	case SNDRV_PCM_TRIGGER_STOP:
 		stop_endpoints(subs, false);
 		subs->running = 0;
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+		if (subs->dev->descriptor.idVendor == 0x4e8 && \
+			subs->dev->descriptor.idProduct >= 0x2063 && \
+			subs->dev->descriptor.idProduct <= 0x2066)
+		{
+			uac_security_mic_param = 0;
+		}
+#endif
 		return 0;
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
 		subs->data_endpoint->retire_data_urb = NULL;

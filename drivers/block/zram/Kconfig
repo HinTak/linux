@@ -1,6 +1,6 @@
 config ZRAM
 	tristate "Compressed RAM block device support"
-	depends on BLOCK && SYSFS && ZSMALLOC
+	depends on BLOCK && SYSFS && (ZSMALLOC || Z4FOLD)
 	select LZO_COMPRESS
 	select LZO_DECOMPRESS
 	default n
@@ -15,16 +15,6 @@ config ZRAM
 
 	  See zram.txt for more information.
 
-config ZRAM_LZ4_COMPRESS
-	bool "Enable LZ4 algorithm support"
-	depends on ZRAM
-	select LZ4_COMPRESS
-	select LZ4_DECOMPRESS
-	default n
-	help
-	  This option enables LZ4 compression algorithm support. Compression
-	  algorithm can be changed using `comp_algorithm' device attribute.
-
 config ZRAM_DEBUG
 	bool "Compressed RAM block device debug support"
 	depends on ZRAM
@@ -32,3 +22,22 @@ config ZRAM_DEBUG
 	help
 	  This option adds additional debugging code to the compressed
 	  RAM block device driver.
+
+config ZRAM_DISKSIZE
+	string "Compressed RAM block device disksize"
+	depends on ZRAM
+	default "50%"
+	help
+	  This option set zram block device disksize.disksize can be 
+	  provided in the form of bytes like 1G or in percentage of 
+	  total ram. 50% represents, disksize is 50% of total ram size
+
+config ZRAM_Z4FOLD
+    tristate "Up to 4x density storage for compressed pages"
+	depends on Z4FOLD
+    default n
+    help
+      A special purpose allocator for storing compressed pages.
+      It is designed to store up to three compressed pages per physical
+      page. It is a ZBUD derivative so the simplicity and determinism are
+      still there.

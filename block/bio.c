@@ -564,6 +564,10 @@ void __bio_clone_fast(struct bio *bio, struct bio *bio_src)
 	 */
 	bio->bi_bdev = bio_src->bi_bdev;
 	bio->bi_flags |= 1 << BIO_CLONED;
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	if (bio_flagged(bio_src, BIO_DIRECT))
+		bio->bi_flags |= (1 << BIO_DIRECT);
+#endif
 	bio->bi_rw = bio_src->bi_rw;
 	bio->bi_iter = bio_src->bi_iter;
 	bio->bi_io_vec = bio_src->bi_io_vec;
@@ -649,6 +653,10 @@ struct bio *bio_clone_bioset(struct bio *bio_src, gfp_t gfp_mask,
 	bio->bi_rw		= bio_src->bi_rw;
 	bio->bi_iter.bi_sector	= bio_src->bi_iter.bi_sector;
 	bio->bi_iter.bi_size	= bio_src->bi_iter.bi_size;
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	if (bio_flagged(bio_src, BIO_DIRECT))
+		bio->bi_flags |= (1 << BIO_DIRECT);
+#endif
 
 	if (bio->bi_rw & REQ_DISCARD)
 		goto integrity_clone;
@@ -1287,6 +1295,7 @@ struct bio *bio_map_user_iov(struct request_queue *q,
 	int ret, offset;
 	struct iov_iter i;
 	struct iovec iov;
+	struct bio_vec *bvec;
 
 	iov_for_each(iov, i, *iter) {
 		unsigned long uaddr = (unsigned long) iov.iov_base;
@@ -1331,7 +1340,12 @@ struct bio *bio_map_user_iov(struct request_queue *q,
 		ret = get_user_pages_fast(uaddr, local_nr_pages,
 				(iter->type & WRITE) != WRITE,
 				&pages[cur_page]);
-		if (ret < local_nr_pages) {
+		if (unlikely(ret < local_nr_pages)) {
+			for (j = cur_page; j < page_limit; j++) {
+				if (!pages[j])
+					break;
+				put_page(pages[j]);
+			}
 			ret = -EFAULT;
 			goto out_unmap;
 		}
@@ -1339,6 +1353,7 @@ struct bio *bio_map_user_iov(struct request_queue *q,
 		offset = uaddr & ~PAGE_MASK;
 		for (j = cur_page; j < page_limit; j++) {
 			unsigned int bytes = PAGE_SIZE - offset;
+			unsigned short prev_bi_vcnt = bio->bi_vcnt;
 
 			if (len <= 0)
 				break;
@@ -1352,6 +1367,13 @@ struct bio *bio_map_user_iov(struct request_queue *q,
 			if (bio_add_pc_page(q, bio, pages[j], bytes, offset) <
 					    bytes)
 				break;
+
+			/*
+			 * check if vector was merged with previous
+			 * drop page reference if needed
+			 */
+			if (bio->bi_vcnt == prev_bi_vcnt)
+				put_page(pages[j]);
 
 			len -= bytes;
 			offset = 0;
@@ -1385,10 +1407,8 @@ struct bio *bio_map_user_iov(struct request_queue *q,
 	return bio;
 
  out_unmap:
-	for (j = 0; j < nr_pages; j++) {
-		if (!pages[j])
-			break;
-		page_cache_release(pages[j]);
+	bio_for_each_segment_all(bvec, bio, j) {
+		put_page(bvec->bv_page);
 	}
  out:
 	kfree(pages);
@@ -1814,8 +1834,9 @@ EXPORT_SYMBOL(bio_endio_nodec);
  * Allocates and returns a new bio which represents @sectors from the start of
  * @bio, and updates @bio to represent the remaining sectors.
  *
- * The newly allocated bio will point to @bio's bi_io_vec; it is the caller's
- * responsibility to ensure that @bio is not freed before the split.
+ * Unless this is a discard request the newly allocated bio will point
+ * to @bio's bi_io_vec; it is the caller's responsibility to ensure that
+ * @bio is not freed before the split.
  */
 struct bio *bio_split(struct bio *bio, int sectors,
 		      gfp_t gfp, struct bio_set *bs)
@@ -1825,7 +1846,15 @@ struct bio *bio_split(struct bio *bio, int sectors,
 	BUG_ON(sectors <= 0);
 	BUG_ON(sectors >= bio_sectors(bio));
 
-	split = bio_clone_fast(bio, gfp, bs);
+	/*
+	 * Discards need a mutable bio_vec to accommodate the payload
+	 * required by the DSM TRIM and UNMAP commands.
+	 */
+	if (bio->bi_rw & REQ_DISCARD)
+		split = bio_clone_bioset(bio, gfp, bs);
+	else
+		split = bio_clone_fast(bio, gfp, bs);
+
 	if (!split)
 		return NULL;
 

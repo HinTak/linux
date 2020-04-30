@@ -43,6 +43,10 @@ extern int proc_dointvec(struct ctl_table *, int,
 			 void __user *, size_t *, loff_t *);
 extern int proc_dointvec_minmax(struct ctl_table *, int,
 				void __user *, size_t *, loff_t *);
+#ifdef CONFIG_SCHED_AUTOGROUP
+extern int proc_dointvec_ag_migrate_minmax(struct ctl_table *, int,
+				void __user *, size_t *, loff_t *);
+#endif
 extern int proc_dointvec_jiffies(struct ctl_table *, int,
 				 void __user *, size_t *, loff_t *);
 extern int proc_dointvec_userhz_jiffies(struct ctl_table *, int,
@@ -188,6 +192,9 @@ struct ctl_table_header *register_sysctl_paths(const struct ctl_path *path,
 void unregister_sysctl_table(struct ctl_table_header * table);
 
 extern int sysctl_init(void);
+
+extern struct ctl_table sysctl_mount_point[];
+
 #else /* CONFIG_SYSCTL */
 static inline struct ctl_table_header *register_sysctl_table(struct ctl_table * table)
 {

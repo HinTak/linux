@@ -37,6 +37,7 @@
 #include <asm/cpu.h>
 #include <asm/cputype.h>
 #include <asm/elf.h>
+#include <asm/fixmap.h>
 #include <asm/procinfo.h>
 #include <asm/psci.h>
 #include <asm/sections.h>
@@ -910,9 +911,16 @@ void __init hyp_mode_check(void)
 #endif
 }
 
+#ifdef CONFIG_EMRG_SAVE_KLOG
+extern int kdump_part;
+#endif
+
 void __init setup_arch(char **cmdline_p)
 {
 	const struct machine_desc *mdesc;
+#ifdef CONFIG_EMRG_SAVE_KLOG
+	char *tmp;
+#endif
 
 	setup_processor();
 	mdesc = setup_machine_fdt(__atags_pointer);
@@ -930,12 +938,36 @@ void __init setup_arch(char **cmdline_p)
 	init_mm.end_data   = (unsigned long) _edata;
 	init_mm.brk	   = (unsigned long) _end;
 
+#ifdef CONFIG_EMRG_SAVE_KLOG
+	tmp = strstr(boot_command_line, "KDUMP=");
+	if (tmp) {
+		int count = 0, value = 0;
+
+		kdump_part = 0;
+		tmp = tmp + strlen("KDUMP=");
+		/* Make sure only read number */
+		while ('0' <= tmp[count] && '9' >= tmp[count]) {
+			value = tmp[count] - '0';
+			kdump_part = kdump_part * 10 + value;
+			count++;
+		}
+#ifndef CONFIG_VD_RELEASE
+		pr_info("[EMERG] kdump_part is %d\n", kdump_part);
+#endif
+	}
+#endif
+
 	/* populate cmd_line too for later use, preserving boot_command_line */
 	strlcpy(cmd_line, boot_command_line, COMMAND_LINE_SIZE);
 	*cmdline_p = cmd_line;
 
-	parse_early_param();
+	if (IS_ENABLED(CONFIG_FIX_EARLYCON_MEM))
+		early_fixmap_init();
 
+	parse_early_param();
+#ifdef CONFIG_ENABLE_DEBUG_PAGEALLOC_WITHOUT_KERNEL_PARAM
+	_debug_pagealloc_enabled = true; // to make dtb cmdline setting not required.
+#endif
 	early_paging_init(mdesc, lookup_processor_type(read_cpuid_id()));
 	setup_dma_zone(mdesc);
 	sanity_check_meminfo();
@@ -943,6 +975,11 @@ void __init setup_arch(char **cmdline_p)
 
 	paging_init(mdesc);
 	request_standard_resources(mdesc);
+
+#ifdef CONFIG_KASAN
+	kasan_init_shadow();
+	init_task.kasan_depth = 0;
+#endif
 
 	if (mdesc->restart)
 		arm_pm_restart = mdesc->restart;

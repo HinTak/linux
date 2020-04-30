@@ -82,11 +82,23 @@ EXPORT_SYMBOL(__raw_writesl);
 	/* string / mem functions */
 EXPORT_SYMBOL(strchr);
 EXPORT_SYMBOL(strrchr);
+EXPORT_SYMBOL(memchr);
+EXPORT_SYMBOL(__memset);
+EXPORT_SYMBOL(__memcpy);
+EXPORT_SYMBOL(__memmove);
+EXPORT_SYMBOL(__memzero);
+
+#undef memcpy
+#undef memset
+#undef memmove
+
+extern void *memset(void *, int, __kernel_size_t);
+extern void *memcpy(void *, const void *, __kernel_size_t);
+extern void *memmove(void *, const void *, __kernel_size_t);
+
 EXPORT_SYMBOL(memset);
 EXPORT_SYMBOL(memcpy);
 EXPORT_SYMBOL(memmove);
-EXPORT_SYMBOL(memchr);
-EXPORT_SYMBOL(__memzero);
 
 #ifdef CONFIG_MMU
 EXPORT_SYMBOL(copy_page);
@@ -169,3 +181,8 @@ EXPORT_SYMBOL(__gnu_mcount_nc);
 EXPORT_SYMBOL(__pv_phys_pfn_offset);
 EXPORT_SYMBOL(__pv_offset);
 #endif
+
+
+EXPORT_SYMBOL(sys_unlink);
+EXPORT_SYMBOL(sys_mknod);
+

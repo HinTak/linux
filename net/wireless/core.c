@@ -1179,14 +1179,14 @@ static int __init cfg80211_init(void)
 
 	err = nl80211_init();
 	if (err)
-		goto out_fail_nl80211;
-
+		goto out_fail_nl80211;	
+	  
 	ieee80211_debugfs_dir = debugfs_create_dir("ieee80211", NULL);
 
 	err = regulatory_init();
 	if (err)
 		goto out_fail_reg;
-
+		
 	cfg80211_wq = create_singlethread_workqueue("cfg80211");
 	if (!cfg80211_wq) {
 		err = -ENOMEM;
@@ -1198,10 +1198,10 @@ static int __init cfg80211_init(void)
 out_fail_wq:
 	regulatory_exit();
 out_fail_reg:
-	debugfs_remove(ieee80211_debugfs_dir);
+	debugfs_remove(ieee80211_debugfs_dir);	
 	nl80211_exit();
-out_fail_nl80211:
-	unregister_netdevice_notifier(&cfg80211_netdev_notifier);
+out_fail_nl80211:    
+    unregister_netdevice_notifier(&cfg80211_netdev_notifier);
 out_fail_notifier:
 	wiphy_sysfs_exit();
 out_fail_sysfs:

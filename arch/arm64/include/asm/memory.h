@@ -53,7 +53,12 @@
 #define MODULES_VADDR		(MODULES_END - SZ_64M)
 #define PCI_IO_END		(MODULES_VADDR - SZ_2M)
 #define PCI_IO_START		(PCI_IO_END - PCI_IO_SIZE)
+#ifdef CONFIG_DTVLOGD
+#define FIXADDR_TOP		(PCI_IO_START - SZ_2M - PAGE_SIZE)
+#define DTVLOGD_BUFFER_VIRTUAL_ADDRESS (FIXADDR_TOP - PAGE_SIZE)
+#else
 #define FIXADDR_TOP		(PCI_IO_START - SZ_2M)
+#endif
 #define TASK_SIZE_64		(UL(1) << VA_BITS)
 
 #ifdef CONFIG_COMPAT
@@ -112,6 +117,14 @@
 extern phys_addr_t		memstart_addr;
 /* PHYS_OFFSET - the physical address of the start of memory. */
 #define PHYS_OFFSET		({ memstart_addr; })
+
+/*
+ * The maximum physical address that the linear direct mapping
+ * of system RAM can cover. (PAGE_OFFSET can be interpreted as
+ * a 2's complement signed quantity and negated to derive the
+ * maximum size of the linear mapping.)
+ */
+#define MAX_MEMBLOCK_ADDR	({ memstart_addr - PAGE_OFFSET - 1; })
 
 /*
  * PFNs are used to describe any physical page; this means

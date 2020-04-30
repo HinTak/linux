@@ -50,6 +50,10 @@
 
 #define I2C_PEC		0x0708	/* != 0 to use PEC with SMBus */
 #define I2C_SMBUS	0x0720	/* SMBus transfer */
+#if defined(CONFIG_ARCH_SDP)
+#define I2C_SET_CLK	0x0730 /* sdp set clk */
+#define I2C_SET_BYTE_DELAY	0x0740 /* sdp set byte_delay */
+#endif
 
 
 /* This is the structure as used in the I2C_SMBUS ioctl call */

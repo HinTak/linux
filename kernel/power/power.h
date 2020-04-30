@@ -258,6 +258,16 @@ static inline void suspend_thaw_processes(void)
 {
 	thaw_processes();
 }
+#ifdef CONFIG_POWER_SAVING_MODE
+static inline void suspend_thaw_processes_prepare(void)
+{
+	thaw_processes_prepare();
+}
+static inline void suspend_thaw_processes_iot(void)
+{
+	thaw_processes_iot();
+}
+#endif
 #else
 static inline int suspend_freeze_processes(void)
 {
@@ -267,6 +277,14 @@ static inline int suspend_freeze_processes(void)
 static inline void suspend_thaw_processes(void)
 {
 }
+#ifdef CONFIG_POWER_SAVING_MODE
+static inline void suspend_thaw_processes_prepare(void)
+{
+}
+static inline void suspend_thaw_processes_iot(void)
+{
+}
+#endif
 #endif
 
 #ifdef CONFIG_PM_AUTOSLEEP

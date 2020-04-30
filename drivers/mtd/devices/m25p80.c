@@ -27,13 +27,64 @@
 #include <linux/spi/flash.h>
 #include <linux/mtd/spi-nor.h>
 
+#include <soc/sdp/soc.h>
+
 #define	MAX_CMD_SIZE		6
 struct m25p {
 	struct spi_device	*spi;
 	struct spi_nor		spi_nor;
 	struct mtd_info		mtd;
 	u8			command[MAX_CMD_SIZE];
+#if defined(CONFIG_ARCH_SDP1601) || defined(CONFIG_ARCH_SDP1803)
+	int			use_auth;
+#endif
 };
+
+#if defined(CONFIG_ARCH_SDP1601) || defined(CONFIG_ARCH_SDP1803)
+#define SPI_SETAUTH_MODE	0x8000
+
+static int m25p_get_mtd_device(struct mtd_info *mtd)
+{
+	int ret = 0;
+	struct m25p *flash = NULL;
+
+	if(!mtd){
+		ret = -EINVAL;
+		goto get_mtd_exit;
+	}
+
+	flash = container_of(mtd, struct m25p, mtd);
+	if(!flash){
+		ret = -ENXIO;
+		goto get_mtd_exit;
+	}
+	
+	if(flash->use_auth == 0 || mtd->usecount != 0){
+		ret = -EACCES;
+		pr_err("[%s][%d][%d]\n",__FUNCTION__
+			,flash->use_auth,mtd->usecount);
+	}
+	
+get_mtd_exit:
+	pr_err("[%s]ret[%d]\n",__FUNCTION__,ret);
+	return ret;
+}
+
+void m25p80_set_auth(struct mtd_info *mtd,int on)
+{
+	struct m25p *flash = NULL;
+	
+	pr_err("[%s]\n",__FUNCTION__);
+	if(!mtd) return;
+
+	flash = container_of(mtd, struct m25p, mtd);
+	if(!flash) return;
+
+	pr_err("[%s]set on[%d]\n",__FUNCTION__,on);
+	flash->use_auth = on;
+}
+EXPORT_SYMBOL_GPL(m25p80_set_auth);
+#endif
 
 static int m25p80_read_reg(struct spi_nor *nor, u8 code, u8 *val, int len)
 {
@@ -190,9 +241,9 @@ static int m25p_probe(struct spi_device *spi)
 	flash = devm_kzalloc(&spi->dev, sizeof(*flash), GFP_KERNEL);
 	if (!flash)
 		return -ENOMEM;
-
+	
 	nor = &flash->spi_nor;
-
+	
 	/* install the hooks */
 	nor->read = m25p80_read;
 	nor->write = m25p80_write;
@@ -207,7 +258,7 @@ static int m25p_probe(struct spi_device *spi)
 	spi_set_drvdata(spi, flash);
 	flash->mtd.priv = nor;
 	flash->spi = spi;
-
+	
 	if (spi->mode & SPI_RX_QUAD)
 		mode = SPI_NOR_QUAD;
 	else if (spi->mode & SPI_RX_DUAL)
@@ -234,6 +285,17 @@ static int m25p_probe(struct spi_device *spi)
 
 	ppdata.of_node = spi->dev.of_node;
 
+#if defined(CONFIG_ARCH_SDP1601) || defined(CONFIG_ARCH_SDP1803)
+	if((soc_is_sdp1701() && (spi->mode & SPI_SETAUTH_MODE))
+		|| (soc_is_muse() && (spi->mode & SPI_SETAUTH_MODE))
+		) {
+		flash->mtd._get_device = m25p_get_mtd_device;
+		flash->use_auth = 0x0;
+		dev_err(&spi->dev,"set mode[0x%X][0x%X]\n"
+			,spi->mode,SPI_SETAUTH_MODE);
+	}
+#endif	
+
 	return mtd_device_parse_register(&flash->mtd, NULL, &ppdata,
 			data ? data->parts : NULL,
 			data ? data->nr_parts : 0);
@@ -245,6 +307,7 @@ static int m25p_remove(struct spi_device *spi)
 	struct m25p	*flash = spi_get_drvdata(spi);
 
 	/* Clean up MTD stuff. */
+	printk("%s [nvt_mtd][%s]:[%dline] %s\n", "\e[1;31m", __FUNCTION__, __LINE__, "\e[0m\e[37;40m");	
 	return mtd_device_unregister(&flash->mtd);
 }
 

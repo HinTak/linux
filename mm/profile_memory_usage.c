@@ -1,0 +1,388 @@
+/*
+*  Copyright (C) 2014-2015 Samsung Electronics Co., Ltd.
+*
+*  This program is free software; you can redistribute it and/or
+*  modify it under the terms of the GNU General Public License
+*  as published by the Free Software Foundation; either version 2
+*  of the License, or (at your option) any later version.
+*
+*  This program is distributed in the hope that it will be useful,
+*  but WITHOUT ANY WARRANTY; without even the implied warranty of
+*  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+*  GNU General Public License for more details.
+*/
+
+#include <linux/kernel.h>
+#include <linux/mm.h>
+#include <linux/fs.h>
+#include <linux/sysctl.h>
+#include <linux/memcontrol.h>
+#include <linux/swap.h>
+#include <linux/proc_fs.h>
+#include <linux/vmalloc.h>
+#include <linux/seq_file.h>
+#include <linux/kthread.h>
+
+struct smap_mem {
+	unsigned long total;
+	unsigned long vmag[VMAG_CNT];
+};
+
+#if defined(CONFIG_VD_MEMINFO) && defined(CONFIG_PROC_PAGE_MONITOR)
+extern int smaps_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
+			   struct mm_walk *walk);
+#endif
+
+#define PSS_SHIFT 12
+#define K(x) ((x) << (PAGE_SHIFT-10))
+
+/* A global variable is a bit ugly, but it keeps the code simple */
+int sysctl_profile_memory_usage;
+static int g_start_flag;
+/* static struct timer_list my_mod_timer; */
+
+unsigned long g_start_pss;
+unsigned long g_start_gem;
+unsigned long g_start_mali;
+unsigned long g_start_kernel_mem;
+unsigned long g_start_used;
+
+unsigned long g_stop_pss;
+unsigned long g_stop_gem;
+unsigned long g_stop_mali;
+unsigned long g_stop_kernel_mem;
+unsigned long g_stop_used;
+
+unsigned long g_max_pss;
+unsigned long g_max_gem;
+unsigned long g_max_mali;
+unsigned long g_max_kernel_mem;
+unsigned long g_max_used;
+
+unsigned long g_min_pss;
+unsigned long g_min_gem;
+unsigned long g_min_mali;
+unsigned long g_min_kernel_mem;
+unsigned long g_min_used;
+
+static int get_user_pss_rss(struct task_struct *p,
+			    struct smap_mem *pss,
+			    struct smap_mem *rss)
+{
+	int idx = 0;
+	struct mm_struct *mm = NULL;
+	struct vm_area_struct *vma = NULL;
+	struct mem_size_stats mss;
+	struct mm_walk smaps_walk = {
+#if defined(CONFIG_VD_MEMINFO) && defined(CONFIG_PROC_PAGE_MONITOR)
+		.pmd_entry = smaps_pte_range,
+#endif
+		.private = &mss,
+	};
+
+	if (!thread_group_leader(p))
+		return 0;
+
+	task_lock(p);
+	mm = p->mm;
+	if (!mm) {
+		task_unlock(p);
+		return 0;
+	}
+
+	smaps_walk.mm = mm;
+	if (!down_read_trylock(&mm->mmap_sem)) {
+		pr_warn("Skipping task : %s\n", p->comm);
+		task_unlock(p);
+		return 0;
+	}
+
+	vma = mm->mmap;
+	if (!vma) {
+		up_read(&mm->mmap_sem);
+		task_unlock(p);
+		return 0;
+	}
+
+	/* Walk all VMAs to update various counters. */
+	while (vma) {
+		/* Ignore the huge TLB pages. */
+		if (vma->vm_mm && !(vma->vm_flags & VM_HUGETLB)) {
+			memset(&mss, 0, sizeof(struct mem_size_stats));
+
+			walk_page_range(vma->vm_start, vma->vm_end,
+						&smaps_walk);
+			pss->total +=
+				(unsigned long)(mss.pss >> (10 + PSS_SHIFT));
+			rss->total += (unsigned long)(mss.resident >> 10);
+
+			idx = get_group_idx(vma);
+
+			pss->vmag[idx] +=
+				(unsigned long)(mss.pss >> (10 + PSS_SHIFT));
+			rss->vmag[idx] += (unsigned long)(mss.resident >> 10);
+		}
+		vma = vma->vm_next;
+	}
+	up_read(&mm->mmap_sem);
+	task_unlock(p);
+	return 1;
+}
+
+static unsigned long get_pss_from_tasks(void)
+{
+	struct task_struct *p = NULL;
+	struct smap_mem pss;
+	struct smap_mem rss;
+	unsigned long sum_of_pss = 0;
+
+	rcu_read_lock();
+	for_each_process(p) {
+		memset(&pss, 0, sizeof(struct smap_mem));
+		memset(&rss, 0, sizeof(struct smap_mem));
+
+		if (get_user_pss_rss(p, &pss, &rss) == 0)
+			continue;
+
+		sum_of_pss += pss.total;
+	};
+	rcu_read_unlock();
+
+	return sum_of_pss;
+}
+
+static unsigned long get_gem_mem(void)
+{
+	return 0;
+}
+
+static unsigned long get_mali_mem(void)
+{
+	return 0;
+}
+
+static unsigned long get_kernel_mem(bool print)
+{
+	struct vmalloc_usedinfo svmallocused;
+	struct vmalloc_info vmi;
+	unsigned long total;
+
+	memset(&svmallocused, 0, sizeof(struct vmalloc_usedinfo));
+	memset(&vmi, 0, sizeof(struct vmalloc_info));
+
+	get_vmallocused(&svmallocused);
+	get_vmalloc_info(&vmi);
+
+	/* Caculate kernel memory usage.
+	 * Slab(reclaimable+unreclaimable) + PageTable
+	 *  + Vmalloc(except vm_map_ram and ioremap) + Kernel Stack
+	 */
+	total = K(global_page_state(NR_SLAB_UNRECLAIMABLE))
+	+ K(global_page_state(NR_SLAB_RECLAIMABLE))
+	+ K(global_page_state(NR_PAGETABLE)) + ((vmi.used >> 10)
+	- (svmallocused.ioremapsize >> 10)
+	- (svmallocused.vmapramsize >> 10))
+	+ global_page_state(NR_KERNEL_STACK) * (THREAD_SIZE/1024);
+
+	if (print) {
+		pr_info(" [Kernel]\n");
+		pr_info(" Unreclaimable slab	:  %5lu  kbyte\n",
+				K(global_page_state(NR_SLAB_UNRECLAIMABLE)));
+		pr_info(" Reclaimable slab	:  %5lu  kbyte\n",
+				K(global_page_state(NR_SLAB_RECLAIMABLE)));
+		pr_info(" PageTable		:  %5lu  kbyte\n",
+				K(global_page_state(NR_PAGETABLE)));
+		pr_info(" Vmalloc(except vm_map_ram and ioremap):  %5lu  kbyte\n",
+				(((vmi.used - svmallocused.vm_lazy_free) >> 10) 
+				- (svmallocused.ioremapsize >> 10)
+				- (svmallocused.vmapramsize >> 10)));
+		pr_info(" PageTable		:  %5lu  kbyte\n",
+				K(global_page_state(NR_PAGETABLE)));
+		pr_info(" Kernel Stack		:  %5lu  kbyte\n",
+				global_page_state(NR_KERNEL_STACK)*(THREAD_SIZE/1024));
+	}
+
+	return total;
+}
+
+static void profile(void)
+{
+	unsigned long current_pss = 0;
+	unsigned long current_gem = 0;
+	unsigned long current_mali = 0;
+	unsigned long current_kernel_mem = 0;
+	unsigned long current_used = 0;
+
+	if (sysctl_profile_memory_usage == 2 || sysctl_profile_memory_usage == 1)
+		current_pss = get_pss_from_tasks();
+
+	current_gem = get_gem_mem();
+	current_mali = get_mali_mem();
+	current_kernel_mem = get_kernel_mem(false);
+	current_used = (current_pss + current_gem
+			+ current_mali + current_kernel_mem);
+
+	/* Set high,low peak values */
+	if (g_max_pss < current_pss)
+		g_max_pss = current_pss;
+	if (g_min_pss > current_pss)
+		g_min_pss = current_pss;
+
+	if (g_max_gem < current_gem)
+		g_max_gem = current_gem;
+	if (g_min_gem > current_gem)
+		g_min_gem = current_gem;
+
+	if (g_max_mali < current_mali)
+		g_max_mali = current_mali;
+	if (g_min_mali > current_mali)
+		g_min_mali = current_mali;
+
+	if (g_max_kernel_mem < current_kernel_mem)
+		g_max_kernel_mem = current_kernel_mem;
+	if (g_min_kernel_mem > current_kernel_mem)
+		g_min_kernel_mem = current_kernel_mem;
+
+	if (g_max_used < current_used)
+		g_max_used = current_used;
+	if (g_min_used > current_used)
+		g_min_used = current_used;
+}
+
+
+int kthread_stop_flag;
+static int kmemory_profiled(void *p)
+{
+	for ( ; ; ) {
+		schedule_timeout_interruptible(HZ/2);
+		if (kthread_stop_flag)
+			break;
+
+		profile();
+	}
+	return 0;
+}
+
+
+static void profiling_start(void)
+{
+	if (g_start_flag == 1) {
+		pr_info("Profiling already started.\n");
+		return;
+	}
+	pr_info("Profiling Started...\n\n");
+	g_start_flag = 1;
+
+	/* Initialize global variables */
+	g_start_pss = g_max_pss = g_min_pss = get_pss_from_tasks();
+	g_start_kernel_mem = g_max_kernel_mem = g_min_kernel_mem =
+		get_kernel_mem(false);
+	g_start_gem = g_max_gem = g_min_gem = get_gem_mem();
+	g_start_mali = g_max_mali = g_min_mali = get_mali_mem();
+	g_start_used = g_max_used = g_min_used = (g_start_pss +
+	g_start_kernel_mem + g_start_gem + g_start_mali);
+
+	kthread_run(kmemory_profiled, NULL, "kmemory_profiled");
+	kthread_stop_flag = 0;
+}
+
+static void profiling_stop(void)
+{
+	if (g_start_flag == 0) {
+		pr_info("Profiling already stopped.\n");
+		pr_info("Please start profiling first.\n");
+		return;
+	}
+	pr_info("Profiling Stopped.\n\n");
+	g_start_flag = 0;
+	kthread_stop_flag = 1;
+
+	g_stop_pss = get_pss_from_tasks();
+	g_stop_kernel_mem = get_kernel_mem(false);
+	g_stop_gem = get_gem_mem();
+	g_stop_mali = get_mali_mem();
+	g_stop_used = (g_stop_pss + g_stop_kernel_mem
+			+ g_stop_gem + g_stop_mali);
+
+	/* Set high,low peak values */
+	if (g_max_pss < g_stop_pss)
+		g_max_pss = g_stop_pss;
+	if (g_min_pss > g_stop_pss)
+		g_min_pss = g_stop_pss;
+
+	if (g_max_gem < g_stop_gem)
+		g_max_gem = g_stop_gem;
+	if (g_min_gem > g_stop_gem)
+		g_min_gem = g_stop_gem;
+
+	if (g_max_mali < g_stop_mali)
+		g_max_mali = g_stop_mali;
+	if (g_min_mali > g_stop_mali)
+		g_min_mali = g_stop_mali;
+
+	if (g_max_kernel_mem < g_stop_kernel_mem)
+		g_max_kernel_mem = g_stop_kernel_mem;
+	if (g_min_kernel_mem > g_stop_kernel_mem)
+		g_min_kernel_mem = g_stop_kernel_mem;
+
+	if (g_max_used < g_stop_used)
+		g_max_used = g_stop_used;
+	if (g_min_used > g_stop_used)
+		g_min_used = g_stop_used;
+}
+
+int profile_memory_usage_sysctl_handler(struct ctl_table *table, int write,
+	void __user *buffer, size_t *length, loff_t *ppos)
+{
+	proc_dointvec_minmax(table, write, buffer, length, ppos);
+	if (write) {
+		if (sysctl_profile_memory_usage == 0)
+			profiling_stop();
+		else if (sysctl_profile_memory_usage == 1)
+			profiling_start();
+		else if (sysctl_profile_memory_usage == 2)
+			profiling_start();
+		else {
+			pr_info("\nWrong! Input value should be"
+			       " 0 or 1 or 2.\n");
+			pr_info(" 0 : stop to profile\n");
+			pr_info(" 1 : start to profile\n");
+			pr_info(" 2 : start to profile with "
+			       "printing info\n");
+		}
+	}
+	return 0;
+}
+
+static int memory_profile_proc_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "%ld %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld %ld",
+			(g_stop_pss-g_start_pss)+(g_stop_gem-g_start_gem)+
+			(g_stop_mali-g_start_mali)+(g_stop_kernel_mem-g_start_kernel_mem),
+			g_max_used,
+			g_start_pss, g_start_gem, g_start_mali, g_start_kernel_mem,
+			g_stop_pss-g_start_pss, g_stop_gem-g_start_gem,
+			g_stop_mali-g_start_mali, g_stop_kernel_mem-g_start_kernel_mem,
+			g_max_pss, g_max_gem, g_max_mali, g_max_kernel_mem);
+
+	return 0;
+}
+
+static int memory_profile_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, memory_profile_proc_show, NULL);
+}
+
+static const struct file_operations memory_profile_proc_fops = {
+	.open		= memory_profile_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+static int __init proc_memory_profile_init(void)
+{
+	proc_create("memory_profile", 0, NULL, &memory_profile_proc_fops);
+	return 0;
+}
+module_init(proc_memory_profile_init);

@@ -44,6 +44,22 @@
 static DEFINE_MUTEX(port_mutex);
 
 /*
+ * This indicates whether rs232 is debug or not.
+ */
+static int rs232_val;
+static int __init rs232_setup(char *str)
+{
+	rs232_val = simple_strtoul(str, NULL, 10);
+#ifdef CONFIG_FORCE_EXEC_SHELL_N_SERIAL
+        rs232_val = 0;
+#endif
+	return 1;
+}
+__setup("rs232=", rs232_setup);
+
+extern int console_portnum;
+
+/*
  * lockdep: port->lock is initialized in two places, but we
  *          want only one lock-class:
  */
@@ -497,6 +513,14 @@ static int uart_put_char(struct tty_struct *tty, unsigned char ch)
 {
 	struct uart_state *state = tty->driver_data;
 
+#ifdef CONFIG_DTVLOGD
+	/* Write printf messages to dlog buffer */
+	do_dtvlog(11, &ch, 1);
+#endif
+
+	if (rs232_val && tty->index == console_portnum)
+		return 1;
+
 	return __uart_put_char(state->uart_port, &state->xmit, ch);
 }
 
@@ -528,6 +552,14 @@ static int uart_write(struct tty_struct *tty,
 
 	if (!circ->buf)
 		return 0;
+
+#ifdef CONFIG_DTVLOGD
+	/* Write printf messages to dlog buffer */
+	do_dtvlog(11, buf, count);
+#endif
+
+	if (rs232_val && tty->index == console_portnum)
+		return count;
 
 	spin_lock_irqsave(&port->lock, flags);
 	while (1) {
@@ -1409,7 +1441,7 @@ static void uart_close(struct tty_struct *tty, struct file *filp)
 	mutex_lock(&port->mutex);
 	uart_shutdown(tty, state);
 	tty_port_tty_set(port, NULL);
-	tty->closing = 0;
+
 	spin_lock_irqsave(&port->lock, flags);
 
 	if (port->blocked_open) {
@@ -1435,6 +1467,7 @@ static void uart_close(struct tty_struct *tty, struct file *filp)
 	mutex_unlock(&port->mutex);
 
 	tty_ldisc_flush(tty);
+	tty->closing = 0;
 }
 
 static void uart_wait_until_sent(struct tty_struct *tty, int timeout)
@@ -1777,6 +1810,9 @@ void uart_console_write(struct uart_port *port, const char *s,
 			void (*putchar)(struct uart_port *, int))
 {
 	unsigned int i;
+
+	if (rs232_val)
+		return;
 
 	for (i = 0; i < count; i++, s++) {
 		if (*s == '\n')

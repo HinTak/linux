@@ -115,12 +115,19 @@ struct mmc_data {
 #define MMC_DATA_READ	(1 << 9)
 #define MMC_DATA_STREAM	(1 << 10)
 
+#if defined( CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM)
+#define MMC_DATA_NOMAP  (1 << 11)
+#endif
+
 	unsigned int		bytes_xfered;
 
 	struct mmc_command	*stop;		/* stop command */
 	struct mmc_request	*mrq;		/* associated request */
 
 	unsigned int		sg_len;		/* size of scatter list */
+#if defined(CONFIG_MMC_SDHCI_NVT) || defined(CONFIG_MTK_KERNEL_SOLUTION)
+	int			sg_count;	/* mapped sg entries */
+#endif
 	struct scatterlist	*sg;		/* I/O scatter list */
 	s32			host_cookie;	/* host private data */
 };
@@ -154,7 +161,11 @@ extern void mmc_start_bkops(struct mmc_card *card, bool from_exception);
 extern int __mmc_switch(struct mmc_card *, u8, u8, u8, unsigned int, bool,
 			bool, bool);
 extern int mmc_switch(struct mmc_card *, u8, u8, u8, unsigned int);
+#ifdef CONFIG_MTK_KERNEL_SOLUTION
+extern int mmc_send_tuning(struct mmc_host *host, u32 opcode, int *cmd_error);
+#else
 extern int mmc_send_tuning(struct mmc_host *host);
+#endif
 extern int mmc_get_ext_csd(struct mmc_card *card, u8 **new_ext_csd);
 
 #define MMC_ERASE_ARG		0x00000000

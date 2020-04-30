@@ -37,6 +37,10 @@
 #include <linux/atomic.h>
 
 #include <asm/irq.h>
+#ifdef CONFIG_SDP_MAC
+#include "../ethernet/sdp/sdp_mac_phy.h"
+#endif
+
 
 static const char *phy_speed_to_str(int speed)
 {
@@ -65,13 +69,13 @@ static const char *phy_speed_to_str(int speed)
 void phy_print_status(struct phy_device *phydev)
 {
 	if (phydev->link) {
-		netdev_info(phydev->attached_dev,
+		netdev_warn(phydev->attached_dev,
 			"Link is Up - %s/%s - flow control %s\n",
 			phy_speed_to_str(phydev->speed),
 			DUPLEX_FULL == phydev->duplex ? "Full" : "Half",
 			phydev->pause ? "rx/tx" : "off");
 	} else	{
-		netdev_info(phydev->attached_dev, "Link is Down\n");
+		netdev_warn(phydev->attached_dev, "Link is Down\n");
 	}
 }
 EXPORT_SYMBOL(phy_print_status);
@@ -493,7 +497,11 @@ EXPORT_SYMBOL(phy_start_aneg);
  */
 void phy_start_machine(struct phy_device *phydev)
 {
+#ifdef CONFIG_REDUCE_ETH_LINKUP_TIME
+	queue_delayed_work(system_power_efficient_wq, &phydev->state_queue, HZ / 10);
+#else
 	queue_delayed_work(system_power_efficient_wq, &phydev->state_queue, HZ);
+#endif
 }
 
 /**
@@ -785,6 +793,9 @@ void phy_state_machine(struct work_struct *work)
 			container_of(dwork, struct phy_device, state_queue);
 	bool needs_aneg = false, do_suspend = false;
 	int err = 0;
+#ifdef CONFIG_SDP_MAC
+	struct sdp_mac_phy_priv *ephy_priv = phydev->priv;
+#endif
 
 	mutex_lock(&phydev->lock);
 
@@ -894,6 +905,12 @@ void phy_state_machine(struct work_struct *work)
 						   PHY_INTERRUPT_ENABLED);
 		break;
 	case PHY_HALTED:
+#ifdef CONFIG_SDP_MAC
+		if(ephy_priv->selftest_enable){
+			phydev->adjust_link(phydev->attached_dev);
+			break;
+		}
+#endif
 		if (phydev->link) {
 			phydev->link = 0;
 			netif_carrier_off(phydev->attached_dev);
@@ -953,7 +970,11 @@ void phy_state_machine(struct work_struct *work)
 		phy_error(phydev);
 
 	queue_delayed_work(system_power_efficient_wq, &phydev->state_queue,
+#ifdef CONFIG_REDUCE_ETH_LINKUP_TIME
+			   PHY_STATE_TIME * HZ / 10);
+#else
 			   PHY_STATE_TIME * HZ);
+#endif
 }
 
 void phy_mac_interrupt(struct phy_device *phydev, int new_link)

@@ -398,6 +398,18 @@ config CPU_V7
 	select CPU_PABRT_V7
 	select CPU_TLB_V7 if MMU
 
+config CPU_ARM_CORTEX_A15
+	bool "Support ARM Cortex-A15 instruction set"
+	depends on CPU_32v7
+	help
+	  Select this if your CPU (and compiler) support Cortex-A15 instruction set
+
+config CPU_ARM_CORTEX_A8
+	bool "Support ARM Cortex-A8 instruction set"
+	depends on CPU_32v7 && !CPU_ARM_CORTEX_A15
+	help
+	  Select this if your CPU (and compiler) support Cortex-A8 instruction set
+
 # ARMv7M
 config CPU_V7M
 	bool
@@ -987,7 +999,7 @@ config ARM_L1_CACHE_SHIFT
 config ARM_DMA_MEM_BUFFERABLE
 	bool "Use non-cacheable memory for DMA" if (CPU_V6 || CPU_V6K) && !CPU_V7
 	depends on !(MACH_REALVIEW_PB1176 || REALVIEW_EB_ARM11MP || \
-		     MACH_REALVIEW_PB11MP)
+		     MACH_REALVIEW_PB11MP || ARCH_SDP)
 	default y if CPU_V6 || CPU_V6K || CPU_V7
 	help
 	  Historically, the kernel has used strongly ordered mappings to
@@ -1038,3 +1050,41 @@ config DEBUG_RODATA
 	  text so it can be made explicitly non-executable. This creates
 	  another section-size padded region, so it can waste more memory
 	  space while gaining the read-only protections.
+
+config SPARSE_LOWMEM_EXT_MAP
+    bool "SDP phys <-> virt with extention mapping for lowmem apart from DMA(CMA)"
+	depends on SPARSEMEM && CMA
+    default n
+    help
+	 If this is set, kernel enlarges lowmem area by more mapping from non-CMA area.
+	 It can resolve the lack of lowmem issues that lowmem is used for slab, drivers,kernel 
+	 internal memory allocation thus the lack of lowmem issues cause system critical situation.
+	 Under this configuration, kernel calculates non-CMA area and sets up a pagetable
+	 for the lowmem considering sparsely allocated CMA regions.
+
+config SPARSE_LOWMEM_MAP_DEBUG
+    bool "LOWMEM EXT MAP debug info"
+	depends on SPARSE_LOWMEM_EXT_MAP
+    default n
+    help
+	 If this is set, it shows debug information for kernel lowmem extension mapping.
+
+config DEBUG_LOWMEM_EXT_POISONING
+	bool "LOWMEM EXT MAP debug conversion between virt and phys"
+	depends on SPARSE_LOWMEM_EXT_MAP
+	default n
+	help
+	 This configuration is for detecting invalid conversion between virtual and physical address. 
+	 Corrupting lowmem can happen by accessing invalid address. This configuration is working 
+	 when SPARSE_LOWMEM_EXT_MAP is enabled.	
+
+config SPARSE_LOWMEM_EXT_LPAE
+	bool "LOWMEM EXT MAP could map lowmem up to 33bit phys memory"
+	depends on SPARSE_LOWMEM_EXT_MAP && ARM_LPAE
+	default ARM_LPAE && SPARSE_LOWMEM_EXT_MAP
+	help
+	 This configuration is for allowing CONFIG_LOWMEM_EXT_MAP to access above 32-bit physical address.
+	 Under 32-bit architecture, Kernel can map an address above 32-bit physical to a virtual address 
+	 with CONFIG_ARM_LPAE. It can overcome the limit of lowmem address with 32-bit architecture, 
+	 which is 896MB. Under this configuration, the lowmem page can be mapped to above 32-bit physical 
+	 address, which resolves issues occurred when a particular H/W uses DMA memory from page_alloc(GFP_KERNEL). 

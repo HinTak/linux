@@ -148,11 +148,14 @@ static void *arm_coherent_dma_alloc(struct device *dev, size_t size,
 	dma_addr_t *handle, gfp_t gfp, struct dma_attrs *attrs);
 static void arm_coherent_dma_free(struct device *dev, size_t size, void *cpu_addr,
 				  dma_addr_t handle, struct dma_attrs *attrs);
+static int arm_coherent_dma_mmap(struct device *dev, struct vm_area_struct *vma,
+	void *cpu_addr, dma_addr_t dma_addr, size_t size,
+	struct dma_attrs *attrs);
 
 struct dma_map_ops arm_coherent_dma_ops = {
 	.alloc			= arm_coherent_dma_alloc,
 	.free			= arm_coherent_dma_free,
-	.mmap			= arm_dma_mmap,
+	.mmap			= arm_coherent_dma_mmap,
 	.get_sgtable		= arm_dma_get_sgtable,
 	.map_page		= arm_coherent_dma_map_page,
 	.map_sg			= arm_dma_map_sg,
@@ -228,6 +231,7 @@ static void __dma_clear_buffer(struct page *page, size_t size)
 	 * lurking in the kernel direct-mapped region is invalidated.
 	 */
 	if (PageHighMem(page)) {
+		unsigned long pfn = page_to_pfn(page);
 		phys_addr_t base = __pfn_to_phys(page_to_pfn(page));
 		phys_addr_t end = base + size;
 		while (size > 0) {
@@ -235,7 +239,7 @@ static void __dma_clear_buffer(struct page *page, size_t size)
 			memset(ptr, 0, PAGE_SIZE);
 			dmac_flush_range(ptr, ptr + PAGE_SIZE);
 			kunmap_atomic(ptr);
-			page++;
+			page = pfn_to_page(++pfn);
 			size -= PAGE_SIZE;
 		}
 		outer_flush_range(base, end);
@@ -400,16 +404,37 @@ static struct dma_contig_early_reserve dma_mmu_remap[MAX_CMA_AREAS] __initdata;
 
 static int dma_mmu_remap_num __initdata;
 
+#ifdef CONFIG_VMALLOCUSED_PLUS
+unsigned long cma_remap_vaddr[MAX_CMA_AREAS];
+unsigned int cma_remap_num;
+#endif
+
 void __init dma_contiguous_early_fixup(phys_addr_t base, unsigned long size)
 {
 	dma_mmu_remap[dma_mmu_remap_num].base = base;
 	dma_mmu_remap[dma_mmu_remap_num].size = size;
 	dma_mmu_remap_num++;
+#ifdef CONFIG_SPARSE_LOWMEM_EXT_MAP
+	memblock_reserve_dma(base, size);
+	memblock_remove_puremem(base, size);
+#endif
 }
-
+#ifdef CONFIG_SPARSE_LOWMEM_EXT_MAP
+extern unsigned int lowmem_ext_initialized;
+#endif
 void __init dma_contiguous_remap(void)
 {
 	int i;
+
+#ifdef CONFIG_SPARSE_LOWMEM_EXT_MAP
+	/* 
+	 * lowmem ext map lowmem without dma memory already.
+	 * So, Don't need to clear dma area page table.
+	 */ 
+	if (IS_ENABLED(CONFIG_HIGHMEM) && lowmem_ext_initialized)
+		return;
+#endif
+
 	for (i = 0; i < dma_mmu_remap_num; i++) {
 		phys_addr_t start = dma_mmu_remap[i].base;
 		phys_addr_t end = start + dma_mmu_remap[i].size;
@@ -421,6 +446,10 @@ void __init dma_contiguous_remap(void)
 		if (start >= end)
 			continue;
 
+#ifdef CONFIG_VMALLOCUSED_PLUS
+		cma_remap_vaddr[cma_remap_num] = __phys_to_virt(start);
+		cma_remap_num++;
+#endif
 		map.pfn = __phys_to_pfn(start);
 		map.virtual = __phys_to_virt(start);
 		map.length = end - start;
@@ -435,14 +464,19 @@ void __init dma_contiguous_remap(void)
 		 * (even though they may be rare) can not cause any problems,
 		 * and ensures that this code is architecturally compliant.
 		 */
-		for (addr = __phys_to_virt(start); addr < __phys_to_virt(end);
+		for (addr = __phys_to_virt(start); addr < __phys_to_virt(end - 1) + 1;
 		     addr += PMD_SIZE)
 			pmd_clear(pmd_off_k(addr));
 
 		flush_tlb_kernel_range(__phys_to_virt(start),
 				       __phys_to_virt(end));
 
-		iotable_init(&map, 1);
+		/*
+		 * For highmem system, all the memory in CMA region will be
+		 * considered as highmem, therefore, re-mapping isn't required.
+		 */
+	if (!IS_ENABLED(CONFIG_HIGHMEM))
+			iotable_init(&map, 1);		
 	}
 }
 
@@ -645,14 +679,23 @@ static void *__dma_alloc(struct device *dev, size_t size, dma_addr_t *handle,
 	size = PAGE_ALIGN(size);
 	want_vaddr = !dma_get_attr(DMA_ATTR_NO_KERNEL_MAPPING, attrs);
 
-	if (is_coherent || nommu())
+	if (nommu())
+		addr = __alloc_simple_buffer(dev, size, gfp, &page);
+	else if (dev_get_cma_area(dev) &&
+#ifdef CONFIG_SPARSE_LOWMEM_EXT_MAP
+		(gfp & __GFP_WAIT))
+#else
+		(gfp & __GFP_WAIT) && size != PAGE_SIZE)
+#endif
+		addr = __alloc_from_contiguous(dev, size, prot, &page,
+		caller, want_vaddr);
+	else if (is_coherent)
 		addr = __alloc_simple_buffer(dev, size, gfp, &page);
 	else if (!(gfp & __GFP_WAIT))
 		addr = __alloc_from_pool(size, &page);
-	else if (!dev_get_cma_area(dev))
-		addr = __alloc_remap_buffer(dev, size, gfp, prot, &page, caller, want_vaddr);
 	else
-		addr = __alloc_from_contiguous(dev, size, prot, &page, caller, want_vaddr);
+		addr = __alloc_remap_buffer(dev, size, gfp, prot, &page,
+		caller, want_vaddr);
 
 	if (page)
 		*handle = pfn_to_dma(dev, page_to_pfn(page));
@@ -680,20 +723,16 @@ void *arm_dma_alloc(struct device *dev, size_t size, dma_addr_t *handle,
 static void *arm_coherent_dma_alloc(struct device *dev, size_t size,
 	dma_addr_t *handle, gfp_t gfp, struct dma_attrs *attrs)
 {
-	pgprot_t prot = __get_dma_pgprot(attrs, PAGE_KERNEL);
 	void *memory;
 
 	if (dma_alloc_from_coherent(dev, size, handle, &memory))
 		return memory;
 
-	return __dma_alloc(dev, size, handle, gfp, prot, true,
+	return __dma_alloc(dev, size, handle, gfp, PAGE_KERNEL, true,
 			   attrs, __builtin_return_address(0));
 }
 
-/*
- * Create userspace mapping for the DMA-coherent memory.
- */
-int arm_dma_mmap(struct device *dev, struct vm_area_struct *vma,
+static int __arm_dma_mmap(struct device *dev, struct vm_area_struct *vma,
 		 void *cpu_addr, dma_addr_t dma_addr, size_t size,
 		 struct dma_attrs *attrs)
 {
@@ -703,8 +742,6 @@ int arm_dma_mmap(struct device *dev, struct vm_area_struct *vma,
 	unsigned long nr_pages = PAGE_ALIGN(size) >> PAGE_SHIFT;
 	unsigned long pfn = dma_to_pfn(dev, dma_addr);
 	unsigned long off = vma->vm_pgoff;
-
-	vma->vm_page_prot = __get_dma_pgprot(attrs, vma->vm_page_prot);
 
 	if (dma_mmap_from_coherent(dev, vma, cpu_addr, size, &ret))
 		return ret;
@@ -718,6 +755,26 @@ int arm_dma_mmap(struct device *dev, struct vm_area_struct *vma,
 #endif	/* CONFIG_MMU */
 
 	return ret;
+}
+
+/*
+ * Create userspace mapping for the DMA-coherent memory.
+ */
+static int arm_coherent_dma_mmap(struct device *dev, struct vm_area_struct *vma,
+		 void *cpu_addr, dma_addr_t dma_addr, size_t size,
+		 struct dma_attrs *attrs)
+{
+	return __arm_dma_mmap(dev, vma, cpu_addr, dma_addr, size, attrs);
+}
+
+int arm_dma_mmap(struct device *dev, struct vm_area_struct *vma,
+		 void *cpu_addr, dma_addr_t dma_addr, size_t size,
+		 struct dma_attrs *attrs)
+{
+#ifdef CONFIG_MMU
+	vma->vm_page_prot = __get_dma_pgprot(attrs, vma->vm_page_prot);
+#endif	/* CONFIG_MMU */
+	return __arm_dma_mmap(dev, vma, cpu_addr, dma_addr, size, attrs);
 }
 
 /*
@@ -735,12 +792,16 @@ static void __arm_dma_free(struct device *dev, size_t size, void *cpu_addr,
 
 	size = PAGE_ALIGN(size);
 
-	if (is_coherent || nommu()) {
+	if (nommu()) {
 		__dma_free_buffer(page, size);
-	} else if (__free_from_pool(cpu_addr, size)) {
+	} else if (!is_coherent && __free_from_pool(cpu_addr, size)) {
 		return;
+#ifdef CONFIG_SPARSE_LOWMEM_EXT_MAP
 	} else if (!dev_get_cma_area(dev)) {
-		if (want_vaddr)
+#else
+	} else if (size == PAGE_SIZE || !dev_get_cma_area(dev)) {
+#endif
+		if (want_vaddr && !is_coherent)
 			__dma_free_remap(cpu_addr, size);
 		__dma_free_buffer(page, size);
 	} else {
@@ -764,12 +825,30 @@ static void arm_coherent_dma_free(struct device *dev, size_t size, void *cpu_add
 	__arm_dma_free(dev, size, cpu_addr, handle, attrs, true);
 }
 
+/*
+ * The whole dma_get_sgtable() idea is fundamentally unsafe - it seems
+ * that the intention is to allow exporting memory allocated via the
+ * coherent DMA APIs through the dma_buf API, which only accepts a
+ * scattertable.  This presents a couple of problems:
+ * 1. Not all memory allocated via the coherent DMA APIs is backed by
+ *    a struct page
+ * 2. Passing coherent DMA memory into the streaming APIs is not allowed
+ *    as we will try to flush the memory through a different alias to that
+ *    actually being used (and the flushes are redundant.)
+ */
 int arm_dma_get_sgtable(struct device *dev, struct sg_table *sgt,
 		 void *cpu_addr, dma_addr_t handle, size_t size,
 		 struct dma_attrs *attrs)
 {
-	struct page *page = pfn_to_page(dma_to_pfn(dev, handle));
+	unsigned long pfn = dma_to_pfn(dev, handle);
+	struct page *page;
 	int ret;
+
+	/* If the PFN is not valid, we do not have a struct page */
+	if (!pfn_valid(pfn))
+		return -ENXIO;
+
+	page = pfn_to_page(pfn);
 
 	ret = sg_alloc_table(sgt, 1, GFP_KERNEL);
 	if (unlikely(ret))
@@ -1953,7 +2032,7 @@ static int extend_iommu_mapping(struct dma_iommu_mapping *mapping)
 {
 	int next_bitmap;
 
-	if (mapping->nr_bitmaps > mapping->extensions)
+	if (mapping->nr_bitmaps >= mapping->extensions)
 		return -EINVAL;
 
 	next_bitmap = mapping->nr_bitmaps;

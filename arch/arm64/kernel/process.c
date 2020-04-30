@@ -87,6 +87,19 @@ void arch_cpu_idle(void)
 	local_irq_enable();
 }
 
+void arch_cpu_idle_enter(void)
+{
+	idle_notifier_call_chain(IDLE_START);
+#ifdef CONFIG_PL310_ERRATA_769419
+	wmb();
+#endif
+}
+
+void arch_cpu_idle_exit(void)
+{
+	idle_notifier_call_chain(IDLE_END);
+}
+
 #ifdef CONFIG_HOTPLUG_CPU
 void arch_cpu_idle_dead(void)
 {
@@ -171,6 +184,125 @@ void machine_restart(char *cmd)
 	while (1);
 }
 
+/*
+ * dump a block of kernel memory from around the given address
+ */
+static void show_data(unsigned long addr, int nbytes, const char *name)
+{
+	int	i, j;
+	int	nlines;
+	u32	*p;
+
+	/*
+	 * don't attempt to dump non-kernel addresses or
+	 * values that are probably just small negative numbers
+	 */
+	if (addr < PAGE_OFFSET || addr > -256UL)
+		return;
+
+	printk("\n%s: %#lx:\n", name, addr);
+
+	/*
+	 * round address down to a 32 bit boundary
+	 * and always dump a multiple of 32 bytes
+	 */
+	p = (u32 *)(addr & ~(sizeof(u32) - 1));
+	nbytes += (addr & (sizeof(u32) - 1));
+	nlines = (nbytes + 31) / 32;
+
+
+	for (i = 0; i < nlines; i++) {
+		/*
+		 * just display low 16 bits of address to keep
+		 * each line of the dump < 80 characters
+		 */
+		printk("%04lx ", (unsigned long)p & 0xffff);
+		for (j = 0; j < 8; j++) {
+			u32	data;
+			if (probe_kernel_address(p, data)) {
+				printk(" ********");
+			} else {
+				printk(" %08x", data);
+			}
+			++p;
+		}
+		printk("\n");
+	}
+}
+
+static void show_data64(unsigned long addr, int nbytes, const char *name)
+{
+	int	i, j;
+	int	nlines;
+	u64	*p;
+	unsigned long first;
+
+	/*
+	 * don't attempt to dump non-kernel addresses or
+	 * values that are probably just small negative numbers
+	 */
+	if (addr < PAGE_OFFSET || addr > -256UL)
+		return;
+
+	printk("\n%s: %#lx:\n", name, addr);
+
+	/*
+	 * round address down to a 64 bit boundary
+	 * and always dump a multiple of 32 bytes
+	 */
+	p = (u64 *)(addr & ~(sizeof(u64) - 1));
+	nbytes += (addr & (sizeof(u64) - 1));
+	nlines = (nbytes + 31) / 32;
+
+	first = (unsigned long)p;
+	for (i = 0; i < nlines; i++) {
+		/*
+		 * just display low 16 bits of address to keep
+		 * each line of the dump < 80 characters
+		 */
+		printk("%04lx: ", (unsigned long)first & 0xffff);
+		for (j = 0; j < 4; j++) {
+			u64	data;
+			if (probe_kernel_address(p, data))
+				printk(" ????????????????");
+			else
+				printk(" %016lx", (unsigned long)data);
+			++p;
+		}
+		first += 32;
+		printk("\n");
+	}
+}
+
+static void show_extra_register_data(struct pt_regs *regs, int nbytes)
+{
+		mm_segment_t fs;
+		unsigned int i;
+
+		fs = get_fs();
+		set_fs(KERNEL_DS);
+		if (compat_user_mode(regs)) {
+				show_data(regs->pc - nbytes, nbytes * 2, "PC");
+				show_data(regs->compat_lr - nbytes, nbytes * 2, "LR");
+				show_data(regs->compat_sp - nbytes, nbytes * 2, "SP");
+				for (i = 0; i < 30; i++) {
+						char name[4];
+						snprintf(name, sizeof(name), "X%u", i);
+						show_data(regs->regs[i] - nbytes, nbytes * 2, name);
+				}
+		} else {
+				show_data64(regs->pc - nbytes, nbytes * 2, "PC");
+				show_data64(regs->regs[30] - nbytes, nbytes * 2, "LR");
+				show_data64(regs->sp - nbytes, nbytes * 2, "SP");
+				for (i = 0; i < 30; i++) {
+						char name[4];
+						snprintf(name, sizeof(name), "X%u", i);
+						show_data64(regs->regs[i] - nbytes, nbytes * 2, name);
+				}
+		}
+		set_fs(fs);
+}
+
 void __show_regs(struct pt_regs *regs)
 {
 	int i, top_reg;
@@ -197,6 +329,8 @@ void __show_regs(struct pt_regs *regs)
 		if (i % 2 == 0)
 			printk("\n");
 	}
+	if (!user_mode(regs))
+		show_extra_register_data(regs, 128);
 	printk("\n");
 }
 
@@ -204,6 +338,7 @@ void show_regs(struct pt_regs * regs)
 {
 	printk("\n");
 	__show_regs(regs);
+	dump_stack();
 }
 
 /*
@@ -264,6 +399,10 @@ int copy_thread(unsigned long clone_flags, unsigned long stack_start,
 		if (is_compat_thread(task_thread_info(p))) {
 			if (stack_start)
 				childregs->compat_sp = stack_start;
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+				p->user_ssp = childregs->compat_sp;
+#endif
+
 		} else {
 			/*
 			 * Read the current TLS pointer from tpidr_el0 as it may be
@@ -275,6 +414,9 @@ int copy_thread(unsigned long clone_flags, unsigned long stack_start,
 				if (stack_start & 15)
 					return -EINVAL;
 				childregs->sp = stack_start;
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+				p->user_ssp = childregs->sp;
+#endif
 			}
 		}
 		/*

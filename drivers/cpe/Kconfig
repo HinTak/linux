@@ -1,0 +1,9 @@
+#
+# OTP configuration
+#
+
+config CPE_OTP
+	tristate "NVT OTP Driver"
+	default n
+	help
+	  Enable the OTP read.

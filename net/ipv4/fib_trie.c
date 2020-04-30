@@ -1385,9 +1385,10 @@ found:
 		struct fib_info *fi = fa->fa_info;
 		int nhsel, err;
 
-		if ((index >= (1ul << fa->fa_slen)) &&
-		    ((BITS_PER_LONG > KEYLENGTH) || (fa->fa_slen != KEYLENGTH)))
-			continue;
+		if ((BITS_PER_LONG > KEYLENGTH) || (fa->fa_slen < KEYLENGTH)) {
+			if (index >= (1ul << fa->fa_slen))
+				continue;
+		}
 		if (fa->fa_tos && fa->fa_tos != flp->flowi4_tos)
 			continue;
 		if (fi->fib_dead)
@@ -1780,8 +1781,6 @@ void fib_table_flush_external(struct fib_table *tb)
 		if (hlist_empty(&n->leaf)) {
 			put_child_root(pn, n->key, NULL);
 			node_free(n);
-		} else {
-			leaf_pull_suffix(pn, n);
 		}
 	}
 }
@@ -1852,8 +1851,6 @@ int fib_table_flush(struct fib_table *tb)
 		if (hlist_empty(&n->leaf)) {
 			put_child_root(pn, n->key, NULL);
 			node_free(n);
-		} else {
-			leaf_pull_suffix(pn, n);
 		}
 	}
 
@@ -2457,7 +2454,7 @@ static struct key_vector *fib_route_get_idx(struct fib_route_iter *iter,
 		key = l->key + 1;
 		iter->pos++;
 
-		if (pos-- <= 0)
+		if (--pos <= 0)
 			break;
 
 		l = NULL;

@@ -2550,6 +2550,185 @@ static void serial8250_set_divisor(struct uart_port *port, unsigned int baud,
 		serial_port_out(port, 0x2, quot_frac);
 }
 
+#if defined(CONFIG_NVT_HSUART_SUPPORT)
+int ndp_hsuart_ctl_switch (struct uart_port *port)
+{
+	unsigned int reg_base = port->mapbase;
+	unsigned int hs_uart = 0;
+	unsigned int value;
+	u32 *remap_address = NULL;
+
+	remap_address = ioremap(0xFD09C000, 0x4);
+	if (!remap_address) {
+		printk(KERN_CRIT "%s ioremap fail\n", __FUNCTION__);
+		return (-1);
+	}
+
+	hs_uart = (reg_base >> 12) & 0x3;	//check bit [12:13]
+
+	if((reg_base >> 15) & 0x1) {	//check bit15
+		/*Switch to HS_UART*/
+		value = readl(remap_address);
+		value |= (1 << hs_uart);
+		writel(value, remap_address);
+		printk(KERN_INFO "HS_UART_%d (switch 0x%08X)\n", hs_uart, readl(remap_address));
+	} else {
+		/*Switch to UART*/
+		value = readl(remap_address);
+		value &= ~(1 << hs_uart);
+		writel(value, remap_address);
+		printk(KERN_INFO "HS_UART_%d (switch 0x%08X)\n", hs_uart, readl(remap_address));
+	}
+
+	iounmap(remap_address);
+	return 0;
+}
+
+int calculate_toleration_percentage (
+	unsigned int clk_MHz, unsigned int baud, unsigned int divisor, unsigned int quotient)
+{
+	unsigned int err;
+	unsigned int act_baud;
+
+	act_baud = (clk_MHz * 1000000) / (divisor * quotient);
+
+	if( baud > act_baud)
+		err = (((baud - act_baud) * 100) / baud );
+	else
+		err = (((act_baud - baud) * 100) / baud );
+
+	return err;
+}
+
+int ndp_need_programmable_divison(unsigned int baud, unsigned int clk_MHz,
+	unsigned int *ptr_division, unsigned int *ptr_quotient)
+{
+	unsigned int i, div, dec, err, min_err;
+	unsigned int df[13]={4,5,6,7,8,9,10,11,12,13,14,15,16};
+	unsigned int div_val=0, df_val=0;
+	unsigned int sourceClk_MHz = clk_MHz;
+	unsigned int std_toleration_percentage = 2;	/*No standard, +-2%*/
+
+	/**
+	* Baud = (CLK) / (divisor * quotient )
+	* toleration < 3%
+	*
+	* If divisor is 16 and toleration is less than 3%, keep divisor is 16
+	* Or, calculate the better divisor and quotient
+	**/
+
+	/**
+	* divisor is 16, work?
+	**/
+	unsigned int quotient;
+	printk(KERN_INFO "[NDP_HSUART] Baud %d in %dMHz:\n", baud, clk_MHz);
+
+	quotient = (sourceClk_MHz * 1000000) /(baud * 16);
+
+	err = (sourceClk_MHz * 1000000) / (quotient * 16) - baud;
+	if (err & 0x80000000) {
+		/*nagative*/
+		err = baud - (sourceClk_MHz * 1000000) / (quotient * 16);
+	}
+
+	if( err < (baud * std_toleration_percentage / 100)) {
+		printk(KERN_INFO "[NDP_HSUART] STD_divisor = %d, and quotient = %d\n", 16, quotient);
+		printk(KERN_INFO "[NDP_HSUART] toleration = %d%%\n", calculate_toleration_percentage(clk_MHz, baud, 16, quotient));
+		return (0);	/*No need programming division*/
+	}
+
+	/**
+	* divisor 16 is not good,
+	* try dynamic divisor,
+	* Find the 'min. error' between target and real baudrate,
+	* DF(Divisor Factor) can be 16(fixed), or 4~16(tuneable)
+	**/
+
+	min_err = 0xffffffff;
+	for (i = 0 ; i < 13 ; i++)
+	{
+		div = (sourceClk_MHz * 1000000) / (baud * df[i]);
+		dec = (((sourceClk_MHz * 10000000) / (baud * df[i]))) % 10;
+		if (dec >= 5)
+			div += 1;
+		err = (sourceClk_MHz * 1000000) / (df[i] * div) - baud;
+		if (err & 0x80000000)
+			err = baud - (sourceClk_MHz * 1000000) / (df[i] * div);
+
+		/* if find curren min err, then store to 'div_val' & 'df_val' */
+		if (err <= min_err) {
+			min_err = err;
+			div_val = div;
+			df_val = df[i];
+		}
+	}
+
+	quotient = div_val;
+
+	printk(KERN_INFO "[NDP_HSUART] DYM_divisor = %d, and quotient = %d\n", df_val, quotient);
+	printk(KERN_INFO "[NDP_HSUART] toleration = %d%%\n", calculate_toleration_percentage(clk_MHz, baud, df_val, quotient));
+
+	if(std_toleration_percentage < calculate_toleration_percentage(clk_MHz, baud, df_val, quotient))
+	{
+		printk(KERN_CRIT "\033[1;31m[NDP_HSUART] Without any good combination (DYM_divisor = %d, and quotient = %d)\033[0m\n", df_val, quotient);
+		return 0;
+	}
+
+	/*valid value return*/
+	*ptr_division = df_val;
+	*ptr_quotient = quotient;
+
+	return 1;
+
+}
+
+void ndp_hsuart_baud_ctrl (struct uart_port *port, unsigned int baud, unsigned int *quot_reply)
+{
+	unsigned int reg_base = port->mapbase;
+	unsigned int hs_uart = 0;
+	unsigned int division, quotient;
+	unsigned int value;
+	u32 *remap_address, *ptr_df;
+
+	remap_address = ioremap(0xFD0D0444, 0x10);
+	if(!remap_address)
+		return ;
+
+	if((reg_base >> 15) & 0x1) {	//check bit15
+		hs_uart = (reg_base >> 12) & 0x3;		//check bit [12:13]
+
+		if (ndp_need_programmable_divison(baud, (port->uartclk)/1000000, &division, &quotient))
+		{
+			/*need programming division, enable*/
+			value = readl(remap_address);
+			value = value | (1 << (hs_uart + 8));
+			writel(value, remap_address);
+			printk(KERN_INFO "[NDP_HSUART] HS_UART_%d (SW_OPT 0x%08X)\n", hs_uart, readl(remap_address));
+
+			/*need programming division, setting division*/
+			ptr_df = remap_address + 1;
+			value = readl(ptr_df);
+			(value &= ~(0x1f << (hs_uart * 5)));
+			(value |= (division << (hs_uart * 5)));
+			writel(value, ptr_df);
+			printk(KERN_INFO "[NDP_HSUART] HS_UART_%d (DF 0x%08X)\n", hs_uart, readl(ptr_df));
+
+			*quot_reply = quotient;
+		}
+		else
+		{
+			value = readl(remap_address);
+			value &= ~(1 << (hs_uart + 8));
+			writel(value, remap_address);
+			printk(KERN_INFO "[NDP_HSUART] HS_UART_%d (SW_OPT 0x%08X)\n", hs_uart, readl(remap_address));
+		}
+	}
+
+	iounmap(remap_address);
+	return;
+}
+#endif
+
 void
 serial8250_do_set_termios(struct uart_port *port, struct ktermios *termios,
 		          struct ktermios *old)
@@ -2568,6 +2747,10 @@ serial8250_do_set_termios(struct uart_port *port, struct ktermios *termios,
 				  port->uartclk / 16 / 0xffff,
 				  port->uartclk / 16);
 	quot = serial8250_get_divisor(up, baud, &frac);
+#if defined(CONFIG_NVT_HSUART_SUPPORT)
+	ndp_hsuart_baud_ctrl(port, baud, &quot);
+#endif
+
 
 	/*
 	 * Ok, we're now changing the port state.  Do it with
@@ -3654,6 +3837,9 @@ void serial8250_resume_port(int line)
 		serial_port_out(port, UART_LCR, 0);
 		port->uartclk = 921600*16;
 	}
+#if defined(CONFIG_NVT_HSUART_SUPPORT)
+	ndp_hsuart_ctl_switch(port);
+#endif
 	uart_resume_port(&serial8250_reg, port);
 }
 
@@ -3728,7 +3914,11 @@ static int serial8250_suspend(struct platform_device *dev, pm_message_t state)
 	for (i = 0; i < UART_NR; i++) {
 		struct uart_8250_port *up = &serial8250_ports[i];
 
+#ifndef CONFIG_ARCH_NVT_V7
 		if (up->port.type != PORT_UNKNOWN && up->port.dev == &dev->dev)
+#else
+		if (up->port.type != PORT_UNKNOWN)
+#endif
 			uart_suspend_port(&serial8250_reg, &up->port);
 	}
 
@@ -3742,7 +3932,11 @@ static int serial8250_resume(struct platform_device *dev)
 	for (i = 0; i < UART_NR; i++) {
 		struct uart_8250_port *up = &serial8250_ports[i];
 
+#ifndef CONFIG_ARCH_NVT_V7
 		if (up->port.type != PORT_UNKNOWN && up->port.dev == &dev->dev)
+#else
+		if (up->port.type != PORT_UNKNOWN)
+#endif
 			serial8250_resume_port(i);
 	}
 

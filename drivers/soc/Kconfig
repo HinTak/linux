@@ -1,8 +1,10 @@
 menu "SOC (System On Chip) specific Drivers"
 
+source "drivers/soc/sdp/Kconfig"
 source "drivers/soc/mediatek/Kconfig"
 source "drivers/soc/qcom/Kconfig"
 source "drivers/soc/ti/Kconfig"
 source "drivers/soc/versatile/Kconfig"
+source "drivers/soc/novatek/Kconfig"
 
 endmenu

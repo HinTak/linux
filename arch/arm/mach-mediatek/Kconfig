@@ -1,27 +1,50 @@
-menuconfig ARCH_MEDIATEK
-	bool "Mediatek MT65xx & MT81xx SoC" if ARCH_MULTI_V7
-	select ARM_GIC
-	select PINCTRL
-	select MTK_TIMER
-	help
-	  Support for Mediatek MT65xx & MT81xx SoCs
+menu "Mediatek MT65xx & MT81xx SoC"
 
 if ARCH_MEDIATEK
 
-config MACH_MT6589
-	bool "MediaTek MT6589 SoCs support"
-	default ARCH_MEDIATEK
+config MTK_HW_CLOCK
+	bool
+	default n
 
-config MACH_MT6592
-	bool "MediaTek MT6592 SoCs support"
-	default ARCH_MEDIATEK
-
-config MACH_MT8127
-	bool "MediaTek MT8127 SoCs support"
-	default ARCH_MEDIATEK
-
-config MACH_MT8135
-	bool "MediaTek MT8135 SoCs support"
-	default ARCH_MEDIATEK
-
+config MACH_MT8167
+        bool "MediaTek MT8167"
+        select GENERIC_TIME
+        select GENERIC_CLOCKEVENTS
+        select ARCH_HAS_CPUFREQ
+        select ARM_AMBA
+        select CPU_V7
+        select HAVE_SMP
+        select IRQ_DOMAIN
+        select IRQ_DOMAIN_DEBUG
+        select GENERIC_SCHED_CLOCK
+        select MTK_SYS_CIRQ
+        select ARMV7_COMPAT
+        select ARMV7_COMPAT_CPUINFO
+        select CPU_IDLE
+        select PINCTRL
+        select PINCTRL_MT8167
+        select MFD_SYSCON
+        select MTK_BASE_POWER
+        select MTK_GIC_EXT
+        select SMP
+        select POWER_SUPPLY
+        select POWER_RESET
+        select HAVE_ARM_ARCH_TIMER
+        select ARM_PSCI
+        select HAVE_MTK_IN_HOUSE_TEE_SUPPORT
+        select MTK_ICE_DEBUG
+        select VFP
+        select AEABI
+        select NEON
+        select KERNEL_MODE_NEON
+        select HAVE_FUTEX_CMPXCHG
+        select HIGHMEM
+        select SPARSE_IRQ
+        select MTK_HW_CLOCK
+        help
+          This enables support for MediaTek MT8167
+          Support for arm Architecture
+          
 endif
+
+endmenu

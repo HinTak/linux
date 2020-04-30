@@ -8,9 +8,29 @@ endif
 CFLAGS_KASAN_MINIMAL := -fsanitize=kernel-address
 
 CFLAGS_KASAN := $(call cc-option, -fsanitize=kernel-address \
-		-fasan-shadow-offset=$(CONFIG_KASAN_SHADOW_OFFSET) \
-		--param asan-stack=1 --param asan-globals=1 \
 		--param asan-instrumentation-with-call-threshold=$(call_threshold))
+
+ifdef CONFIG_KASAN
+	CFLAGS_KASAN += -Wframe-larger-than=8000
+endif
+
+ifdef CONFIG_KASAN_SHADOW_OFFSET
+	CFLAGS_KASAN += -fasan-shadow-offset=$(CONFIG_KASAN_SHADOW_OFFSET)
+else
+	CFLAGS_KASAN += --param asan-fixed-shadow-offset=0
+endif
+
+ifdef CONFIG_KASAN_STACK
+	CFLAGS_KASAN += --param asan-stack=1
+else
+	CFLAGS_KASAN += --param asan-stack=0
+endif
+
+ifdef CONFIG_KASAN_GLOBALS
+	CFLAGS_KASAN += --param asan-globals=1
+else
+	CFLAGS_KASAN += --param asan-globals=0
+endif
 
 ifeq ($(call cc-option, $(CFLAGS_KASAN_MINIMAL) -Werror),)
    ifneq ($(CONFIG_COMPILE_TEST),y)

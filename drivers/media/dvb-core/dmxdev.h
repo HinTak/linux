@@ -38,6 +38,8 @@
 
 #include "dvbdev.h"
 #include "demux.h"
+#include "dvb_demux.h"
+#include "dvb_shared_llbuf.h"
 #include "dvb_ringbuffer.h"
 
 enum dmxdev_type {
@@ -59,6 +61,14 @@ struct dmxdev_feed {
 	u16 pid;
 	struct dmx_ts_feed *ts;
 	struct list_head next;
+};
+
+struct dmxdev_debug_data {
+	/* only for debug */
+	u32 w_count;
+	u32 w_size;
+	u32 r_count;
+	u32 r_size;
 };
 
 struct dmxdev_filter {
@@ -88,32 +98,73 @@ struct dmxdev_filter {
 	struct timer_list timer;
 	int todo;
 	u8 secheader[3];
-};
 
+	/* only for debug */
+	struct dmxdev_debug_data debug_data;
+	struct dmxdev_debug_data debug_old_data;
+	int is_w_timedout;
+	int is_r_timedout;
+};
+struct dmx_scr_dvr {
+        u32 capabilities;            /* Bitfield of capability flags */
+#define DMXDEV_HARDWARE_INDEX_DVR 1     
+        struct dmxdev* dmxdev;    /* Front-end connected to the dmxdev */
+        void* priv;                  /* Pointer to private data of the API client */
+        struct dvb_ringbuffer index_dvr_buffer;
+#define INDEX_DVR_BUFFER_SIZE (sizeof(dvr_index_info_t)*128)
+
+        // Open hardware DVR recorder.
+        int (*open) (struct dmx_scr_dvr* demux);
+        int (*set_data_type) (struct dmx_scr_dvr* scr_dvr, u32 data_type);
+        int (*set_scr) (struct dmx_scr_dvr* scr_dvr, dvr_scr_t *scr);
+        int (*set_descr) (struct dmx_scr_dvr* scr_dvr, dvr_scr_t *scr);
+        int (*close) (struct dmx_scr_dvr* scr_dvr);
+};
+/*~~ jur add */	
 
 struct dmxdev {
 	struct dvb_device *dvbdev;
 	struct dvb_device *dvr_dvbdev;
+	struct dvb_device *dvr_hdr_dvbdev;
 
 	struct dmxdev_filter *filter;
 	struct dmx_demux *demux;
+	struct dmx_scr_dvr *scr_dvr;
 
 	int filternum;
 	int capabilities;
 
 	unsigned int exit:1;
 #define DMXDEV_CAP_DUPLEX 1
+
+// Hardware PVR support index, scrambled data capability
+#define DMXDEV_CAP_SCRAMBLE_DVR 2
+
 	struct dmx_frontend *dvr_orig_fe;
 
 	struct dvb_ringbuffer dvr_buffer;
 #define DVR_BUFFER_SIZE (10*188*1024)
+	struct dvb_ringbuffer dvr_hdr_buffer;
+#define DVR_HDR_BUFFER_SIZE (sizeof(dvr_hdr_t))
 
 	struct mutex mutex;
 	spinlock_t lock;
+
+	/* only for debug */
+	int source;
+	int bank_id;
+	int dvr_flag;
+	int debug_flag;
+	struct dmxdev_debug_data dvr_debug_data;
+	struct dmxdev_debug_data dvr_hdr_debug_data;
 };
 
 
 int dvb_dmxdev_init(struct dmxdev *dmxdev, struct dvb_adapter *);
 void dvb_dmxdev_release(struct dmxdev *dmxdev);
+int dvb_dmxdev_index_callback(const u8 *buffer1, size_t buffer1_len,
+				  const u8 *buffer2, size_t buffer2_len,
+				  struct dmx_ts_feed *feed,
+				  enum dmx_success success);
 
 #endif /* _DMXDEV_H_ */

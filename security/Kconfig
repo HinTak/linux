@@ -159,6 +159,8 @@ choice
 
 endchoice
 
+source security/sfd/Kconfig
+
 config DEFAULT_SECURITY
 	string
 	default "selinux" if DEFAULT_SECURITY_SELINUX
@@ -167,6 +169,8 @@ config DEFAULT_SECURITY
 	default "apparmor" if DEFAULT_SECURITY_APPARMOR
 	default "yama" if DEFAULT_SECURITY_YAMA
 	default "" if DEFAULT_SECURITY_DAC
+
+source security/sim/Kconfig
 
 endmenu
 

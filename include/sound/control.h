@@ -104,8 +104,13 @@ struct snd_ctl_file {
 	struct snd_card *card;
 	struct pid *pid;
 	int preferred_subdevice[SND_CTL_SUBDEV_ITEMS];
+#ifdef __cplusplus
+	unsigned int change_sleep;
+	unsigned long long read_lock;
+#else
 	wait_queue_head_t change_sleep;
 	spinlock_t read_lock;
+#endif
 	struct fasync_struct *fasync;
 	int subscribed;			/* read interface is activated */
 	struct list_head events;	/* waiting events for read */

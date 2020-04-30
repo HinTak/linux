@@ -971,6 +971,13 @@ int tty_mode_ioctl(struct tty_struct *tty, struct file *file,
 	case TCSETSW:
 		return set_termios(real_tty, p, TERMIOS_WAIT | TERMIOS_OLD);
 	case TCSETS:
+#ifdef CONFIG_FORCE_EXEC_SHELL_N_SERIAL 
+                if(!strcmp(current->comm,"TIFADaemon"))
+                {
+                        printk(KERN_ERR"[SABSP]Comm %s try to change baudrate but not allow!\n",current->comm);
+                        return 0;
+                }
+#endif
 		return set_termios(real_tty, p, TERMIOS_OLD);
 #ifndef TCGETS2
 	case TCGETS:

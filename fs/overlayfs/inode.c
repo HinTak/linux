@@ -127,6 +127,10 @@ int ovl_permission(struct inode *inode, int mask)
 		    (S_ISREG(mode) || S_ISDIR(mode) || S_ISLNK(mode)))
 			goto out_dput;
 	}
+#ifndef CONFIG_VD_RELEASE
+	if (realinode)
+		realinode->i_flags |= S_OVERLAY;
+#endif
 
 	err = __inode_permission(realinode, mask);
 out_dput:
@@ -249,6 +253,13 @@ ssize_t ovl_getxattr(struct dentry *dentry, const char *name,
 {
 	struct path realpath;
 	enum ovl_path_type type = ovl_path_real(dentry, &realpath);
+
+#ifndef CONFIG_VD_RELEASE
+	struct inode *inode = d_backing_inode(realpath.dentry);
+
+	if (inode)
+		inode->i_flags |= S_OVERLAY;
+#endif
 
 	if (ovl_need_xattr_filter(dentry, type) && ovl_is_private_xattr(name))
 		return -ENODATA;

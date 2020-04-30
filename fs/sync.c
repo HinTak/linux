@@ -16,9 +16,14 @@
 #include <linux/quotaops.h>
 #include <linux/backing-dev.h>
 #include "internal.h"
+#include "../drivers/mmc/core/mmc_trace.h"
 
 #define VALID_FLAGS (SYNC_FILE_RANGE_WAIT_BEFORE|SYNC_FILE_RANGE_WRITE| \
 			SYNC_FILE_RANGE_WAIT_AFTER)
+
+#ifdef CONFIG_VDFS4_FS
+#include "vdfs4/vdfs4.h"
+#endif
 
 /*
  * Do the filesystem syncing work. For simple filesystems
@@ -29,9 +34,20 @@
  */
 static int __sync_filesystem(struct super_block *sb, int wait)
 {
-	if (wait)
-		sync_inodes_sb(sb);
-	else
+	/*
+	 * No need to call sync_inodes_sb for VDFS4 in vfs.
+	 */
+	if (wait) {
+#ifdef CONFIG_VDFS4_FS
+		/*
+		 * No need to call sync_inodes_sb for VDFS4 in vfs. It will be
+		 * called again in vdfs4_sync_fs. By skipping this call, some
+		 * performance improvement in sync/fsync time is possible.
+		 */
+		if (!is_vdfs4(sb))
+#endif
+			sync_inodes_sb(sb);
+	} else
 		writeback_inodes_sb(sb, WB_REASON_SYNC);
 
 	if (sb->s_op->sync_fs)
@@ -60,32 +76,58 @@ int sync_filesystem(struct super_block *sb)
 	if (sb->s_flags & MS_RDONLY)
 		return 0;
 
+	mmc_sync_profile(SYS_SYNCFS_TRACE_NO, SYNC_START, (void*)sb);
+
 	ret = __sync_filesystem(sb, 0);
 	if (ret < 0)
+	{
+		mmc_sync_profile(SYS_SYNCFS_TRACE_NO, SYNC_END, NULL);
 		return ret;
-	return __sync_filesystem(sb, 1);
+	}
+
+
+	ret = __sync_filesystem(sb, 1);
+	mmc_sync_profile(SYS_SYNCFS_TRACE_NO, SYNC_END, NULL);
+
+	return ret;
 }
 EXPORT_SYMBOL(sync_filesystem);
 
 static void sync_inodes_one_sb(struct super_block *sb, void *arg)
 {
-	if (!(sb->s_flags & MS_RDONLY))
+
+#ifdef CONFIG_VDFS4_FS
+	/*
+	 * No need to call sync_inodes_sb for VDFS4 in vfs. It will be
+	 * called again in vdfs4_sync_fs. By skipping this call, some
+	 * performance improvement in sync/fsync time is possible.
+	 */
+	if (!(sb->s_flags & MS_RDONLY) && !is_vdfs4(sb)) {
+#else
+	if (!(sb->s_flags & MS_RDONLY)) {
+#endif
+		mmc_sync_profile(SYS_SYNC_TRACE_NO, SYNC_INODES_SB, (void*)sb);
 		sync_inodes_sb(sb);
+	}
 }
 
 static void sync_fs_one_sb(struct super_block *sb, void *arg)
 {
-	if (!(sb->s_flags & MS_RDONLY) && sb->s_op->sync_fs)
+	if (!(sb->s_flags & MS_RDONLY) && sb->s_op->sync_fs) {
+		mmc_sync_profile(SYS_SYNC_TRACE_NO, SYNC_FS_SB, (void*)sb);
 		sb->s_op->sync_fs(sb, *(int *)arg);
+	}
 }
 
 static void fdatawrite_one_bdev(struct block_device *bdev, void *arg)
 {
+	mmc_sync_profile(SYS_SYNC_TRACE_NO, SYNC_FDATA_BDEV, (void*)bdev);
 	filemap_fdatawrite(bdev->bd_inode->i_mapping);
 }
 
 static void fdatawait_one_bdev(struct block_device *bdev, void *arg)
 {
+	mmc_sync_profile(SYS_SYNC_TRACE_NO, SYNC_FWAIT_BDEV, (void*)bdev);
 	filemap_fdatawait(bdev->bd_inode->i_mapping);
 }
 
@@ -103,6 +145,11 @@ SYSCALL_DEFINE0(sync)
 {
 	int nowait = 0, wait = 1;
 
+#ifdef CONFIG_TRACE_SYS_SYNC_FSYNC
+	printk(KERN_EMERG "[SA_BSP] !!!!!!! sync !!!!!!! - %s(%d)\n",current->comm, current->pid);
+#endif
+	mmc_sync_profile(SYS_SYNC_TRACE_NO, SYNC_START, NULL);
+
 	wakeup_flusher_threads(0, WB_REASON_SYNC);
 	iterate_supers(sync_inodes_one_sb, NULL);
 	iterate_supers(sync_fs_one_sb, &nowait);
@@ -111,6 +158,11 @@ SYSCALL_DEFINE0(sync)
 	iterate_bdevs(fdatawait_one_bdev, NULL);
 	if (unlikely(laptop_mode))
 		laptop_sync_completion();
+
+	mmc_sync_profile(SYS_SYNC_TRACE_NO, SYNC_END, NULL);
+#ifdef CONFIG_TRACE_SYS_SYNC_FSYNC
+	printk(KERN_EMERG "[SA_BSP] !!!!!!! sync : DONE !!!!!!! - %s(%d)\n",current->comm,current->pid);
+#endif
 	return 0;
 }
 
@@ -211,8 +263,18 @@ static int do_fsync(unsigned int fd, int datasync)
 	int ret = -EBADF;
 
 	if (f.file) {
+#ifdef CONFIG_TRACE_SYS_SYNC_FSYNC
+		char path_buf[256];
+		char* p = d_path(&(f.file->f_path),path_buf, 256);
+		printk(KERN_EMERG "[SA_BSP] fsync : %s - %s(%d)\n ",p, current->comm, current->pid);
+#endif
+		mmc_sync_profile(SYS_FSYNC_TRACE_NO, SYNC_START, (void*)f.file);
 		ret = vfs_fsync(f.file, datasync);
 		fdput(f);
+		mmc_sync_profile(SYS_FSYNC_TRACE_NO, SYNC_END, NULL);
+#ifdef CONFIG_TRACE_SYS_SYNC_FSYNC
+		printk(KERN_EMERG "[SA_BSP] fsync DONE : %s - %s(%d)\n ",p, current->comm, current->pid);
+#endif
 	}
 	return ret;
 }
@@ -335,6 +397,8 @@ SYSCALL_DEFINE4(sync_file_range, int, fd, loff_t, offset, loff_t, nbytes,
 		goto out_put;
 	}
 
+	mmc_sync_profile(SYS_SYNC_R_TRACE_NO, SYNC_START, (void*)f.file);
+
 	ret = 0;
 	if (flags & SYNC_FILE_RANGE_WAIT_BEFORE) {
 		ret = filemap_fdatawait_range(mapping, offset, endbyte);
@@ -351,6 +415,7 @@ SYSCALL_DEFINE4(sync_file_range, int, fd, loff_t, offset, loff_t, nbytes,
 	if (flags & SYNC_FILE_RANGE_WAIT_AFTER)
 		ret = filemap_fdatawait_range(mapping, offset, endbyte);
 
+	mmc_sync_profile(SYS_SYNC_R_TRACE_NO, SYNC_END, NULL);
 out_put:
 	fdput(f);
 out:

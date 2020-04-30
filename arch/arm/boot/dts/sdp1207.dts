@@ -1,0 +1,93 @@
+/*
+ * Copyright (C) 2014 Samsung Electronics Co.Ltd
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
+/dts-v1/;
+#include "sdp1207.dtsi"
+
+/ {
+	model = "Samsung DTV based on SDP1207 SoC";
+	compatible = "samsung,sdp1207";
+
+	memory {
+		device_type = "memory";
+		reg =  <0x40000000 0x8000000>;
+	};
+
+	chosen {
+		bootargs = "console=ttyS2,115200N8 root=/dev/mmcblk0p2 rootwait earlyprintk user_debug=31";
+//		bootargs = "console=ttyS2,115200N8 root=/dev/ram0 initrd=0x40800000,8M rootwait earlyprintk ";
+	};
+
+	fixed-rate-clocks {
+		fin {
+			compatible = "samsung,sdp-clock-fin";
+			clock-frequency = <24000000>;
+		};
+	};
+
+	serial@10090A00 {
+		status = "okay";
+	};
+	serial@10090A40 {
+		status = "okay";
+	};
+	serial@10090A80 {
+		status = "okay";
+	};
+
+
+	i2c@10090100 {
+		status = "disabled";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x100901F4>;
+		samsung,i2c-cpu-affinity = <0>;
+	};
+
+	i2c@10090120 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x100901F4>;
+		samsung,i2c-cpu-affinity = <0>;
+	};
+
+	i2c@10090140 { 
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x100901F4>;
+		samsung,i2c-cpu-affinity = <0>;
+	};
+
+	i2c@10090160 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x100901F4>;
+		samsung,i2c-cpu-affinity = <0>;
+	};
+
+	ehci@0x100e0000 {
+		status = "okay";
+		samsung,sw-reset = <0x10090000 0x8f4 0x1000>;
+		samsung,ehci-gpr_reg = <0x100a0000 0x10 0x2020>;
+		samsung,ehci-gpr_reg1 = <0x100a0000 0x3c 0x0>;
+		samsung,ehci-link-set =  <0x100a0000 0x14 0x803800>;
+		samsung,vbus-enable = <0x10090000 0xcb4 0x00000030 0x02>;
+	};
+
+	ehci@0x100f0000 {
+		status = "okay";
+		samsung,sw-reset = <0x10090000 0x8f4 0x2000>;
+		samsung,ehci-gpr_reg = <0x100a0000 0x18 0x2020>;
+		samsung,ehci-link-set =  <0x100a0000 0x1c 0x803800>;
+		samsung,vbus-enable = <0x10090000 0xcb4 0x00000300 0x04>;
+	};
+
+};

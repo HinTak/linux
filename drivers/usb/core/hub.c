@@ -32,6 +32,55 @@
 
 #include "hub.h"
 #include "otg_whitelist.h"
+//For HW clock log 
+#include <trace/early.h>
+
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+#include "../host/NT72668.h"
+#include "asm/io.h"
+#include <linux/usb/otg.h>
+#if defined(CONFIG_USB_EW_FEATURE)
+#include "../host/ehci.h"
+#endif
+static void hub_init_func_4(struct work_struct *ws);
+#endif
+#include "asm/io.h"
+#include "../host/ehci.h"
+
+#define PM_RUNTIME_AUTOSUSPEND_FOR_HUB	0
+
+#if defined (CONFIG_SAMSUNG_USB_SHORT_DEBOUNCE)
+#include "internal_devlist.h"
+#endif
+
+extern unsigned int tztv_sys_is_serdes_model(void);
+extern int tztv_system_serdes_lock_check(void);
+
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+extern struct instant_resume_control instant_ctrl;
+volatile unsigned long  khubd_resume_flag;
+
+void (*fn_ptr_perform_priority_device_operation)(struct usb_device *udev, struct instant_resume_tree *head)=NULL;
+void (*fn_ptr_invoke_instant_thread)(struct usb_hub *hub)=NULL;
+void (*fn_ptr_usb_kick_wq_list)(struct usb_hub *hub)=NULL;
+int (*fn_ptr_instant_resume_update_state_disconnected)(struct usb_device* udev, usbdev_state state)=NULL;
+
+EXPORT_SYMBOL(fn_ptr_perform_priority_device_operation);
+EXPORT_SYMBOL(fn_ptr_invoke_instant_thread);
+EXPORT_SYMBOL(fn_ptr_usb_kick_wq_list);
+EXPORT_SYMBOL(fn_ptr_instant_resume_update_state_disconnected);
+EXPORT_SYMBOL(khubd_resume_flag);
+
+
+#ifdef PARALLEL_RESET_RESUME_REMOVABLE_DEVICE
+/*User port devices that want to be resumed parallely should be added in below table */
+struct userport_usb_info *ptr_userport_info=NULL;
+product_info *ptr_userport_devinfo[PARALLEL_DEVICE_COUNT]={NULL};
+
+EXPORT_SYMBOL(ptr_userport_info);
+EXPORT_SYMBOL(ptr_userport_devinfo);
+#endif
+#endif
 
 #define USB_VENDOR_GENESYS_LOGIC		0x05e3
 #define HUB_QUIRK_CHECK_PORT_AUTOSUSPEND	0x01
@@ -43,6 +92,11 @@ static DEFINE_SPINLOCK(device_state_lock);
 
 /* workqueue to process hub events */
 static struct workqueue_struct *hub_wq;
+
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+static bool bnvttest;
+module_param(bnvttest, bool, S_IRUGO | S_IWUSR);
+#endif
 static void hub_event(struct work_struct *work);
 
 /* synchronize hub-port add/remove and peering operations */
@@ -121,8 +175,9 @@ struct usb_hub *usb_hub_to_struct_hub(struct usb_device *hdev)
 		return NULL;
 	return usb_get_intfdata(hdev->actconfig->interface[0]);
 }
+EXPORT_SYMBOL_GPL(usb_hub_to_struct_hub);
 
-static int usb_device_supports_lpm(struct usb_device *udev)
+int usb_device_supports_lpm(struct usb_device *udev)
 {
 	/* USB 2.1 (and greater) devices indicate LPM support through
 	 * their USB 2.0 Extended Capabilities BOS descriptor.
@@ -571,9 +626,21 @@ static int hub_port_status(struct usb_hub *hub, int port1,
 	return ret;
 }
 
-static void kick_hub_wq(struct usb_hub *hub)
+void kick_hub_wq(struct usb_hub *hub)
 {
 	struct usb_interface *intf;
+
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+    if(instant_ctrl.off_khubd)
+    {
+        if(fn_ptr_usb_kick_wq_list)
+        {
+            fn_ptr_usb_kick_wq_list(hub);
+        }
+        return;
+    }	
+
+#endif
 
 	if (hub->disconnected || work_pending(&hub->events))
 		return;
@@ -597,6 +664,7 @@ static void kick_hub_wq(struct usb_hub *hub)
 	usb_autopm_put_interface_async(intf);
 	kref_put(&hub->kref, hub_release);
 }
+EXPORT_SYMBOL_GPL(kick_hub_wq);
 
 void usb_kick_hub_wq(struct usb_device *hdev)
 {
@@ -705,6 +773,9 @@ static void hub_tt_work(struct work_struct *work)
 	struct usb_hub		*hub =
 		container_of(work, struct usb_hub, tt.clear_work);
 	unsigned long		flags;
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+	int	count = 0;
+#endif
 
 	spin_lock_irqsave (&hub->tt.lock, flags);
 	while (!list_empty(&hub->tt.clear_list)) {
@@ -721,7 +792,11 @@ static void hub_tt_work(struct work_struct *work)
 		/* drop lock so HCD can concurrently report other TT errors */
 		spin_unlock_irqrestore (&hub->tt.lock, flags);
 		status = hub_clear_tt_buffer (hdev, clear->devinfo, clear->tt);
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+		if (status && status != -ENODEV && count < 3)
+#else
 		if (status && status != -ENODEV)
+#endif
 			dev_err (&hdev->dev,
 				"clear tt %d (%04x) error %d\n",
 				clear->tt, clear->devinfo, status);
@@ -733,6 +808,9 @@ static void hub_tt_work(struct work_struct *work)
 
 		kfree(clear);
 		spin_lock_irqsave(&hub->tt.lock, flags);
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+		count++;
+#endif
 	}
 	spin_unlock_irqrestore (&hub->tt.lock, flags);
 }
@@ -1013,12 +1091,14 @@ int usb_remove_device(struct usb_device *udev)
 
 enum hub_activation_type {
 	HUB_INIT, HUB_INIT2, HUB_INIT3,		/* INITs must come first */
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+	HUB_INIT4,
+#endif
 	HUB_POST_RESET, HUB_RESUME, HUB_RESET_RESUME,
 };
 
 static void hub_init_func2(struct work_struct *ws);
 static void hub_init_func3(struct work_struct *ws);
-
 static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 {
 	struct usb_device *hdev = hub->hdev;
@@ -1029,12 +1109,26 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 	bool need_debounce_delay = false;
 	unsigned delay;
 
-	/* Continue a partial initialization */
-	if (type == HUB_INIT2)
-		goto init2;
-	if (type == HUB_INIT3)
-		goto init3;
 
+	/* Continue a partial initialization */
+	if (type == HUB_INIT2 || type == HUB_INIT3) {
+        	device_lock(&hdev->dev);  //Same lock is used during disconnect
+
+                /* Was the hub disconnected while we were waiting? */
+                if (hub->disconnected) {
+                        device_unlock(&hdev->dev);
+                        kref_put(&hub->kref, hub_release); //hub already disconnected
+                        return;
+                }
+                if (type == HUB_INIT2)
+                        goto init2;
+                goto init3;
+        }
+        kref_get(&hub->kref);
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+	if (type == HUB_INIT4)
+		goto init4;
+#endif
 	/* The superspeed hub except for root hub has to use Hub Depth
 	 * value as an offset into the route string to locate the bits
 	 * it uses to determine the downstream port number. So hub driver
@@ -1099,6 +1193,17 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 							"under this hub\n.");
 				}
 			}
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+	/* for following the normal DC or AC on/off timing requirements */
+			if (hdev->devpath[0] == '0') {
+				INIT_DELAYED_WORK(&hub->init_work, hub_init_func_4);
+				queue_delayed_work(system_power_efficient_wq,
+						&hub->init_work,
+						msecs_to_jiffies(200));
+				return;
+			}
+init4:
+#endif
 			hub_power_on(hub, true);
 		} else {
 			hub_power_on(hub, true);
@@ -1118,8 +1223,9 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 		portstatus = portchange = 0;
 		status = hub_port_status(hub, port1, &portstatus, &portchange);
 		if (udev || (portstatus & USB_PORT_STAT_CONNECTION))
-			dev_dbg(&port_dev->dev, "status %04x change %04x\n",
-					portstatus, portchange);
+		dev_dbg(&port_dev->dev, "status %04x change %04x\n",
+						portstatus, portchange);
+
 
 		/*
 		 * After anything other than HUB_RESUME (i.e., initialization
@@ -1231,6 +1337,7 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 			queue_delayed_work(system_power_efficient_wq,
 					&hub->init_work,
 					msecs_to_jiffies(delay));
+			device_unlock(&hdev->dev);
 			return;		/* Continues at init3: below */
 		} else {
 			msleep(delay);
@@ -1245,13 +1352,22 @@ static void hub_activate(struct usb_hub *hub, enum hub_activation_type type)
 	if (hub->has_indicators && blinkenlights)
 		queue_delayed_work(system_power_efficient_wq,
 				&hub->leds, LED_CYCLE_PERIOD);
-
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+        /* Invoke instant thread to scan the port on which BT and wifi is present*/
+    if(fn_ptr_invoke_instant_thread)
+    {
+        fn_ptr_invoke_instant_thread(hub);
+    }
+#endif
 	/* Scan all ports that need attention */
 	kick_hub_wq(hub);
 
 	/* Allow autosuspend if it was suppressed */
 	if (type <= HUB_INIT3)
 		usb_autopm_put_interface_async(to_usb_interface(hub->intfdev));
+	if (type == HUB_INIT2 || type == HUB_INIT3)
+		device_unlock(&hdev->dev);
+        kref_put(&hub->kref, hub_release);
 }
 
 /* Implement the continuations for the delays above */
@@ -1268,6 +1384,14 @@ static void hub_init_func3(struct work_struct *ws)
 
 	hub_activate(hub, HUB_INIT3);
 }
+
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+static void hub_init_func_4(struct work_struct *ws)
+{
+	struct usb_hub *hub = container_of(ws, struct usb_hub, init_work.work);
+	hub_activate(hub, HUB_INIT4);
+}
+#endif
 
 enum hub_quiescing_type {
 	HUB_DISCONNECT, HUB_PRE_RESET, HUB_SUSPEND
@@ -1585,7 +1709,14 @@ static int hub_configure(struct usb_hub *hub,
 		ret = -ENOMEM;
 		goto fail;
 	}
-
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+        // 02-JAN-2007
+         //patch
+         //improvement of mount speed time
+        if(hdev->parent == NULL)
+              usb_fill_int_urb(hub->urb, hdev, pipe, *hub->buffer, maxp, hub_irq, hub, 9);    //256msec interval
+	 else
+#endif
 	usb_fill_int_urb(hub->urb, hdev, pipe, *hub->buffer, maxp, hub_irq,
 		hub, endpoint->bInterval);
 
@@ -1737,6 +1868,7 @@ static int hub_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	 * - If user has indicated to prevent autosuspend by passing
 	 *   usbcore.autosuspend = -1 then keep autosuspend disabled.
 	 */
+#if PM_RUNTIME_AUTOSUSPEND_FOR_HUB
 #ifdef CONFIG_PM
 	if (hdev->dev.power.autosuspend_delay >= 0)
 		pm_runtime_set_autosuspend_delay(&hdev->dev, 0);
@@ -1755,6 +1887,7 @@ static int hub_probe(struct usb_interface *intf, const struct usb_device_id *id)
 		if (drv->bus_suspend && drv->bus_resume)
 			usb_enable_autosuspend(hdev);
 	}
+#endif
 
 	if (hdev->level == MAX_TOPO_LEVEL) {
 		dev_err(&intf->dev,
@@ -2125,14 +2258,27 @@ void usb_disconnect(struct usb_device **pdev)
 	struct usb_device *udev = *pdev;
 	struct usb_hub *hub = NULL;
 	int port1 = 1;
+    //For HW Clock log
+    char tmp_data[255];
 
 	/* mark the device as inactive, so any further urb submissions for
 	 * this device (and any of its children) will fail immediately.
 	 * this quiesces everything except pending urbs.
 	 */
 	usb_set_device_state(udev, USB_STATE_NOTATTACHED);
-	dev_info(&udev->dev, "USB disconnect, device number %d\n",
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+	/* update node in resume config tree */
+    if(fn_ptr_instant_resume_update_state_disconnected)
+    {
+        fn_ptr_instant_resume_update_state_disconnected(udev, USBDEV_DISCONNECTED);
+    }
+    dev_err(&udev->dev, "USB disconnect, device number %d\n",
 			udev->devnum);
+#endif
+
+    snprintf(tmp_data, sizeof(tmp_data), "%s :USB disconnect, device number %d\n",dev_driver_string(&udev->dev), udev->devnum);
+    trace_early_message(tmp_data);
+    
 
 	usb_lock_device(udev);
 
@@ -2194,15 +2340,15 @@ static void show_string(struct usb_device *udev, char *id, char *string)
 {
 	if (!string)
 		return;
-	dev_info(&udev->dev, "%s: %s\n", id, string);
+	dev_err(&udev->dev, "%s: %s\n", id, string);
 }
 
 static void announce_device(struct usb_device *udev)
 {
-	dev_info(&udev->dev, "New USB device found, idVendor=%04x, idProduct=%04x\n",
+	dev_err(&udev->dev, "New USB device found, idVendor=%04x, idProduct=%04x\n",
 		le16_to_cpu(udev->descriptor.idVendor),
 		le16_to_cpu(udev->descriptor.idProduct));
-	dev_info(&udev->dev,
+	dev_err(&udev->dev,
 		"New USB device strings: Mfr=%d, Product=%d, SerialNumber=%d\n",
 		udev->descriptor.iManufacturer,
 		udev->descriptor.iProduct,
@@ -2616,9 +2762,6 @@ static bool use_new_scheme(struct usb_device *udev, int retry)
 	return USE_NEW_SCHEME(retry);
 }
 
-static int hub_port_reset(struct usb_hub *hub, int port1,
-			struct usb_device *udev, unsigned int delay, bool warm);
-
 /* Is a USB 3.0 port in the Inactive or Compliance Mode state?
  * Port worm reset is required to recover
  */
@@ -2634,8 +2777,16 @@ static bool hub_port_warm_reset_required(struct usb_hub *hub, int port1,
 		return true;
 
 	link_state = portstatus & USB_PORT_STAT_LINK_STATE;
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 	return link_state == USB_SS_PORT_LS_SS_INACTIVE
 		|| link_state == USB_SS_PORT_LS_COMP_MOD;
+#else
+	if (bnvttest == 0)
+		return link_state == USB_SS_PORT_LS_SS_INACTIVE
+			|| link_state == USB_SS_PORT_LS_COMP_MOD;
+	else
+		return link_state == USB_SS_PORT_LS_SS_INACTIVE;
+#endif
 }
 
 static int hub_port_wait_reset(struct usb_hub *hub, int port1,
@@ -2703,45 +2854,32 @@ static int hub_port_wait_reset(struct usb_hub *hub, int port1,
 		udev->speed = USB_SPEED_LOW;
 	else
 		udev->speed = USB_SPEED_FULL;
-	return 0;
-}
+#if defined(CONFIG_USB_NVT_EHCI_HCD)
+#if defined(CONFIG_USB_EW_FEATURE)
+	{
+		struct ehci_hcd *ehci;
+		struct usb_hcd *hcd;
 
-static void hub_port_finish_reset(struct usb_hub *hub, int port1,
-			struct usb_device *udev, int *status)
-{
-	switch (*status) {
-	case 0:
-		/* TRSTRCY = 10 ms; plus some extra */
-		msleep(10 + 40);
-		if (udev) {
-			struct usb_hcd *hcd = bus_to_hcd(udev->bus);
-
-			update_devnum(udev, 0);
-			/* The xHC may think the device is already reset,
-			 * so ignore the status.
-			 */
-			if (hcd->driver->reset_device)
-				hcd->driver->reset_device(hcd, udev);
+		if (udev->speed == USB_SPEED_LOW ||
+			udev->speed == USB_SPEED_FULL) {
+			hcd = bus_to_hcd(hub->hdev->bus);
+			if (!strcmp(hcd->driver->description, "ehci_hcd")) {
+				ehci = hcd_to_ehci(hcd);
+				COUNT(ehci->stats.hanshake_fails);
+			}
 		}
-		/* FALL THROUGH */
-	case -ENOTCONN:
-	case -ENODEV:
-		usb_clear_port_feature(hub->hdev,
-				port1, USB_PORT_FEAT_C_RESET);
-		if (hub_is_superspeed(hub->hdev)) {
-			usb_clear_port_feature(hub->hdev, port1,
-					USB_PORT_FEAT_C_BH_PORT_RESET);
-			usb_clear_port_feature(hub->hdev, port1,
-					USB_PORT_FEAT_C_PORT_LINK_STATE);
-			usb_clear_port_feature(hub->hdev, port1,
-					USB_PORT_FEAT_C_CONNECTION);
-		}
-		if (udev)
-			usb_set_device_state(udev, *status
-					? USB_STATE_NOTATTACHED
-					: USB_STATE_DEFAULT);
-		break;
 	}
+#endif
+	if (udev->speed < USB_SPEED_HIGH
+		&& bus_to_hcd(udev->bus)->nvt_flag == 0) {
+		bus_to_hcd(udev->bus)->nvt_flag = udev->speed;
+		pr_debug("hcd speed %d\n",
+			bus_to_hcd(udev->bus)->speed);
+		return -EAGAIN;
+	}
+#endif
+
+	return 0;
 }
 
 /* Handle port reset and port warm(BH) reset (for USB3 protocol ports) */
@@ -2751,6 +2889,9 @@ static int hub_port_reset(struct usb_hub *hub, int port1,
 	int i, status;
 	u16 portchange, portstatus;
 	struct usb_port *port_dev = hub->ports[port1 - 1];
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+	struct usb_hcd *hcd =  bus_to_hcd(hub->hdev->bus);
+#endif
 
 	if (!hub_is_superspeed(hub->hdev)) {
 		if (warm) {
@@ -2767,13 +2908,10 @@ static int hub_port_reset(struct usb_hub *hub, int port1,
 		 * If the caller hasn't explicitly requested a warm reset,
 		 * double check and see if one is needed.
 		 */
-		status = hub_port_status(hub, port1,
-					&portstatus, &portchange);
-		if (status < 0)
-			goto done;
-
-		if (hub_port_warm_reset_required(hub, port1, portstatus))
-			warm = true;
+		if (hub_port_status(hub, port1, &portstatus, &portchange) == 0)
+			if (hub_port_warm_reset_required(hub, port1,
+							portstatus))
+				warm = true;
 	}
 	clear_bit(port1, hub->warm_reset_bits);
 
@@ -2799,10 +2937,18 @@ static int hub_port_reset(struct usb_hub *hub, int port1,
 
 		/* Check for disconnect or reset */
 		if (status == 0 || status == -ENOTCONN || status == -ENODEV) {
-			hub_port_finish_reset(hub, port1, udev, &status);
+			usb_clear_port_feature(hub->hdev, port1,
+					USB_PORT_FEAT_C_RESET);
 
 			if (!hub_is_superspeed(hub->hdev))
 				goto done;
+
+			usb_clear_port_feature(hub->hdev, port1,
+					USB_PORT_FEAT_C_BH_PORT_RESET);
+			usb_clear_port_feature(hub->hdev, port1,
+					USB_PORT_FEAT_C_PORT_LINK_STATE);
+			usb_clear_port_feature(hub->hdev, port1,
+					USB_PORT_FEAT_C_CONNECTION);
 
 			/*
 			 * If a USB 3.0 device migrates from reset to an error
@@ -2811,7 +2957,10 @@ static int hub_port_reset(struct usb_hub *hub, int port1,
 			if (hub_port_status(hub, port1,
 					&portstatus, &portchange) < 0)
 				goto done;
-
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+			if (!(portstatus & USB_PORT_STAT_CONNECTION))
+				hcd->driver->port_nc2(hcd);
+#endif
 			if (!hub_port_warm_reset_required(hub, port1,
 					portstatus))
 				goto done;
@@ -2836,6 +2985,26 @@ static int hub_port_reset(struct usb_hub *hub, int port1,
 	dev_err(&port_dev->dev, "Cannot enable. Maybe the USB cable is bad?\n");
 
 done:
+	if (status == 0) {
+		/* TRSTRCY = 10 ms; plus some extra */
+		msleep(10 + 40);
+		if (udev) {
+			struct usb_hcd *hcd = bus_to_hcd(udev->bus);
+
+			update_devnum(udev, 0);
+			/* The xHC may think the device is already reset,
+			 * so ignore the status.
+			 */
+			if (hcd->driver->reset_device)
+				hcd->driver->reset_device(hcd, udev);
+
+			usb_set_device_state(udev, USB_STATE_DEFAULT);
+		}
+	} else {
+		if (udev)
+			usb_set_device_state(udev, USB_STATE_NOTATTACHED);
+	}
+
 	if (!hub_is_superspeed(hub->hdev))
 		up_read(&ehci_cf_port_reset_rwsem);
 
@@ -2891,6 +3060,103 @@ static int port_is_suspended(struct usb_hub *hub, unsigned portstatus)
 	return ret;
 }
 
+#ifdef SAMSUNG_USB_BTWIFI_RESET_WAIT
+
+int (*ohci_inc_param_fn)(struct usb_hcd *hcd , int timeout, int conn_change);
+EXPORT_SYMBOL_GPL(ohci_inc_param_fn);
+void update_ew_attr(struct usb_device *udev, int elapsed_time, u16 tmp_portchange)
+{
+	struct usb_hcd *hcd = bus_to_hcd(udev->bus);
+	struct ehci_hcd *ehci;
+	struct ohci_hcd *ohci;
+	if(hcd->speed==HCD_USB2){
+		printk(KERN_EMERG"[SRI-D] HCD Speed %d\n", hcd->speed);
+		ehci = hcd_to_ehci(hcd);
+		if(elapsed_time>=PORT_RESET_WAIT_TIMEOUT){
+		      	ehci->device_resume_timeout_cnt++;
+			printk(KERN_EMERG"[SRI-D] HCD device resume timeout count %d\n", ehci->device_resume_timeout_cnt);
+		}
+		if(tmp_portchange& 0x01){
+		      	ehci->port_status_regval_cnt++;
+			printk(KERN_EMERG"[SRI-D] HCD Port Change count %d\n", ehci->port_status_regval_cnt);
+		}
+	}
+	if(hcd->speed==HCD_USB11){
+		printk(KERN_EMERG"[SRI-D] HCD Speed %d\n", hcd->speed);
+		ohci_inc_param_fn(hcd,0,0);
+		if(elapsed_time>=PORT_RESET_WAIT_TIMEOUT && ohci_inc_param_fn){
+			ohci_inc_param_fn(hcd,1,0);
+		}
+		if(tmp_portchange& 0x01 && ohci_inc_param_fn)
+		{
+			ohci_inc_param_fn(hcd,0,1);
+		}
+	}
+	
+}
+
+static inline void priority_device_reset_resume_timeout(struct usb_device *udev, struct usb_hub *hub, int port1, u16 *p_portchange, u16 *p_portstatus, int *p_status)
+{
+	int     elapsed_time = 0;
+	u16     tmp_portchange = *p_portchange;
+	u16     tmp_portstatus = *p_portstatus;
+	//For HW Clock log
+	char tmp_data[255];
+	int port_reset_wait_timeout = PORT_RESET_WAIT_TIMEOUT;
+
+	if(((udev->descriptor.idVendor == BCM_IOT_VENDOR_ID) && ((udev->descriptor.idProduct == MEDIATEK_COMBO_PRODUCT_ID)||(udev->descriptor.idProduct == MTK_MOB_PRODUCT_ID)))
+		||((udev->descriptor.idVendor == WIFI_MEDIATEK_VENDOR_ID) && (udev->descriptor.idProduct == DEV_MEDIATEK_COMBO_PRODUCT_ID))){
+
+		port_reset_wait_timeout = PORT_RESET_WAIT_TIMEOUT_2K;
+	
+	}
+
+
+	if (
+#ifdef CONFIG_ARCH_SDP
+		((udev->descriptor.idVendor ==  HUB11_VENDOR_ID) && (udev->descriptor.idProduct == HUB11_PRODUCT_ID) && (udev->bus->busnum == HUB11_BUSNO)) //if HUB1-1 on Bus number 1
+			||
+#endif            
+            (	
+				((udev->descriptor.idVendor == BCM_VENDOR_ID)||(udev->descriptor.idVendor == QCA_VENDOR_ID)||(udev->descriptor.idVendor == BCM_IOT_VENDOR_ID)||(udev->descriptor.idVendor == WIFI_MEDIATEK_VENDOR_ID))	//Broadcom or QCA Vendor ID and MTK Vendor ID
+				&& (
+					(udev->descriptor.idProduct == BTHUB_PRODUCT_ID) || (udev->descriptor.idProduct == BTCOMBO_PRODUCT_ID)			//Broadcom Single or Combo BT or
+					|| (udev->descriptor.idProduct == WIFICOMBO_PRODUCT_ID) || (udev->descriptor.idProduct == WIFI_BCM_PRODUCT_ID)	//Broadcom Single or Combo Wi-Fi or
+					|| (udev->descriptor.idProduct == WIFI_QCA_PRODUCT_ID)															//QCA Wi-Fi Product ID's
+					|| (udev->descriptor.idProduct == WIFI_IOT_PRODUCT_ID) || (udev->descriptor.idProduct == BT_IOT_PRODUCT_ID)	//Wi-Fi/BT Product ID's for IoT
+					|| (udev->descriptor.idProduct == WIFICOMBO_QCA_PRODUCT_ID) || (udev->descriptor.idProduct == BTCOMBO_QCA_PRODUCT_ID)	//Wi-Fi and BT PID for Qual-Ath.
+					|| (udev->descriptor.idProduct == BT_QCA9379_PRODUCT_ID) || (udev->descriptor.idProduct == WIFI_QCA9379_PRODUCT_ID)	// QCA9379 combo chip
+					|| (udev->descriptor.idProduct == WIFI_MEDIATEK_PRODUCT_ID) //MediaTek WIFI Chip
+					|| (udev->descriptor.idProduct == WIFI_SAM_PRODUCT_ID)	// Samsung WIFI chip
+                    || (udev->descriptor.idProduct == MEDIATEK_COMBO_PRODUCT_ID) //MediaTek WIFI/BT Combo Chip(MT7668)
+				    || (udev->descriptor.idProduct == MTK_MOB_PRODUCT_ID) //MediaTek MT7668 MOB (Module on Board) 
+                    || (udev->descriptor.idProduct == DEV_MEDIATEK_COMBO_PRODUCT_ID) //DEV_MediaTek WIFI/BT Combo Chip(MT7668), Will remove
+					)
+				)
+                ||((udev->descriptor.idVendor == ZIGBEE_IOT_VENDORID) && (udev->descriptor.idProduct == ZIGBEE_IOT_PRODUCTID)) //Iot dongle chip device id
+//				||((udev->descriptor.bDeviceClass == 0x09) && (udev->descriptor.idVendor == 0x00) && (udev->descriptor.idProduct == 0x00))	// Valens VS2310. Comment out because VS2310 uses B power.
+
+		){
+		while ((elapsed_time < port_reset_wait_timeout) && !(tmp_portstatus & USB_PORT_STAT_CONNECTION)){
+                        *p_status = hub_port_status(hub, port1, &tmp_portstatus, &tmp_portchange);
+                        elapsed_time += PORT_RESET_WAIT_SLEEP;
+                        msleep(PORT_RESET_WAIT_SLEEP);
+		}
+		update_ew_attr(udev,elapsed_time, tmp_portchange);	
+        	dev_err(&udev->dev, "%s: elapsed time <%d : %d ms>   portstatus [%d] portchange [%d] \n",
+    	   	 __func__, elapsed_time, port_reset_wait_timeout, tmp_portstatus, tmp_portchange);
+	        //For HW Clock log
+       		snprintf(tmp_data, sizeof(tmp_data), "%s %s: elapsed time <%d ms> portstatus [%d] portchange [%d] \n",
+	        dev_driver_string(&udev->dev), __func__, elapsed_time, tmp_portstatus, tmp_portchange);
+       		trace_early_message(tmp_data);
+	}
+	*p_portchange = tmp_portchange;
+	*p_portstatus = tmp_portstatus;
+#ifdef USB_AMBIENTMODE
+	msleep(50);
+#endif
+}
+#endif
 /* Determine whether the device on a port is ready for a normal resume,
  * is ready for a reset-resume, or should be disconnected.
  */
@@ -2901,6 +3167,9 @@ static int check_port_resume_type(struct usb_device *udev,
 	struct usb_port *port_dev = hub->ports[port1 - 1];
 	int retries = 3;
 
+#ifdef SAMSUNG_USB_BTWIFI_RESET_WAIT
+	priority_device_reset_resume_timeout(udev, hub, port1, &portchange, &portstatus, &status);
+#endif
  retry:
 	/* Is a warm reset needed to recover the connection? */
 	if (status == 0 && udev->reset_resume
@@ -3620,7 +3889,9 @@ static int hub_reset_resume(struct usb_interface *intf)
  */
 void usb_root_hub_lost_power(struct usb_device *rhdev)
 {
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 	dev_warn(&rhdev->dev, "root hub lost power or was reset\n");
+#endif
 	rhdev->reset_resume = 1;
 }
 EXPORT_SYMBOL_GPL(usb_root_hub_lost_power);
@@ -4238,6 +4509,8 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
 	enum usb_device_speed	oldspeed = udev->speed;
 	const char		*speed;
 	int			devnum = udev->devnum;
+    //for HW clock log
+    char tmp_data[255];
 
 	/* root hub ports have a slightly longer reset period
 	 * (from USB 2.0 spec, section 7.1.7.5)
@@ -4261,7 +4534,9 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
 	if (retval < 0)		/* error or disconnect */
 		goto fail;
 	/* success, speed is known */
-
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+	clear_bit(HCD_FLAG_NRY, &hcd->flags);
+#endif
 	retval = -ENODEV;
 
 	if (oldspeed != USB_SPEED_UNKNOWN && oldspeed != udev->speed) {
@@ -4303,10 +4578,26 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
 		speed = usb_speed_string(udev->speed);
 
 	if (udev->speed != USB_SPEED_SUPER)
+    {
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+		dev_err(&udev->dev,
+				"%s %s USB device number %d using %s\n",
+				(udev->config) ? "reset" : "new", speed,
+				devnum, udev->bus->controller->driver->name);
+
+#else
 		dev_info(&udev->dev,
 				"%s %s USB device number %d using %s\n",
 				(udev->config) ? "reset" : "new", speed,
 				devnum, udev->bus->controller->driver->name);
+#endif
+        //For HW Clock log
+        snprintf(tmp_data, sizeof(tmp_data), "%s %s: %s %s USB device number %d using %s \n",
+                dev_driver_string(&udev->dev), dev_name(&udev->dev), 
+                (udev->config) ? "reset" : "new", speed,
+                devnum, udev->bus->controller->driver->name);
+                trace_early_message(tmp_data);
+     }
 
 	/* Set up TT records, if needed  */
 	if (hdev->tt) {
@@ -4364,6 +4655,13 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
 			 */
 			for (j = 0; j < 3; ++j) {
 				buf->bMaxPacketSize0 = 0;
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+				if (test_bit(1, &hcd->porcd2)) {
+					retval = -ENOTCONN;
+					kfree(buf);
+					goto fail;
+				}
+#endif
 				r = usb_control_msg(udev, usb_rcvaddr0pipe(),
 					USB_REQ_GET_DESCRIPTOR, USB_DIR_IN,
 					USB_DT_DEVICE << 8, 0,
@@ -4384,14 +4682,40 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
 				}
 				if (r == 0)
 					break;
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+                                //VD_COMP_USB_PATCH
+                                //kyungsik, connection timeout with sarotech USB HDD(W-31UA)
+                                //kyungsik(10-09-14), some devices success the second ctrl cmd for GetDescriptor.(SELFIC Turbo2)
+                                dev_err(&udev->dev, "GetDescriptor retry count is %d \n ",j+1);
+                                if(r == -ECONNRESET || (r == -ETIMEDOUT && j == 1))
+                                {
+                                        dev_err(&udev->dev, "device descriptor " "read/%s, error %d\n", "64", r);
+                                        retval = r;
+                                        kfree(buf);
+                                        goto fail;
+                                }
+#endif
+
+
 			}
 			udev->descriptor.bMaxPacketSize0 =
 					buf->bMaxPacketSize0;
 			kfree(buf);
-
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+                        //VD_COMP_USB_PATCH
+                        //hongyabi 20070416 patch for special card reader
+                        // 1) Kwangwon Electronics, UHC381 hub + card reader
+			if((hdev->descriptor.idVendor == 0x0409) && (hdev->descriptor.idProduct == 0x005a))
+  			{
+                                dev_dbg(&udev->dev, "device reset again is not needed\n");
+                        }
+                        else
+#endif
+			{
 			retval = hub_port_reset(hub, port1, udev, delay, false);
 			if (retval < 0)		/* error or disconnect */
 				goto fail;
+			}
 			if (oldspeed != udev->speed) {
 				dev_dbg(&udev->dev,
 					"device reset changed speed!\n");
@@ -4415,6 +4739,12 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
 		 */
 		if (udev->wusb == 0) {
 			for (j = 0; j < SET_ADDRESS_TRIES; ++j) {
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+				if (test_bit(1, &hcd->porcd2)) {
+					retval = -ENOTCONN;
+					goto fail;
+				}
+#endif
 				retval = hub_set_address(udev, devnum);
 				if (retval >= 0)
 					break;
@@ -4428,10 +4758,23 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
 			}
 			if (udev->speed == USB_SPEED_SUPER) {
 				devnum = udev->devnum;
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+				dev_err(&udev->dev,
+						"%s SuperSpeed USB device number %d using %s\n",
+						(udev->config) ? "reset" : "new",
+						devnum, udev->bus->controller->driver->name);
+#else
 				dev_info(&udev->dev,
 						"%s SuperSpeed USB device number %d using %s\n",
 						(udev->config) ? "reset" : "new",
 						devnum, udev->bus->controller->driver->name);
+#endif
+               //For HW Clock log 
+               snprintf(tmp_data, sizeof(tmp_data), "%s %s: %s %s USB device number %d using %s \n",
+                       dev_driver_string(&udev->dev), dev_name(&udev->dev), 
+                       (udev->config) ? "reset" : "new", speed,
+                       devnum, udev->bus->controller->driver->name);
+               trace_early_message(tmp_data);
 			}
 
 			/* cope with hardware quirkiness:
@@ -4446,7 +4789,12 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
 			if (did_new_scheme)
 				break;
 		}
-
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+		if (test_bit(1, &hcd->porcd2)) {
+			retval = -ENOTCONN;
+			goto fail;
+		}
+#endif
 		retval = usb_get_device_descriptor(udev, 8);
 		if (retval < 8) {
 			if (retval != -ENODEV)
@@ -4498,7 +4846,12 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
 		udev->ep0.desc.wMaxPacketSize = cpu_to_le16(i);
 		usb_ep0_reinit(udev);
 	}
-
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+	if (test_bit(1, &hcd->porcd2)) {
+		retval = -ENOTCONN;
+		goto fail;
+	}
+#endif
 	retval = usb_get_device_descriptor(udev, USB_DT_DEVICE_SIZE);
 	if (retval < (signed)sizeof(udev->descriptor)) {
 		if (retval != -ENODEV)
@@ -4508,6 +4861,29 @@ hub_port_init (struct usb_hub *hub, struct usb_device *udev, int port1,
 			retval = -ENOMSG;
 		goto fail;
 	}
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+	if ((hcd->driver->flags & HCD_USB2)
+		&& (udev->speed < USB_SPEED_HIGH)
+		&& (hdev->devpath[0] == '0')
+		&& (udev->descriptor.idVendor == 0x04e8)
+		&& (udev->descriptor.idProduct == 0x5014)) {
+			writel(0x0d, (hcd->regs + 0x40));
+	}
+	if ((hcd->driver->flags & HCD_USB2) && (udev->speed < USB_SPEED_HIGH)
+		&& (hdev->devpath[0] == '0')
+		&& (udev->descriptor.idVendor == 0x054c)
+		&& (udev->descriptor.idProduct == 0x01fb)) {
+
+			writel(0x0d, (hcd->regs + 0x40));
+	}
+	if ((hcd->driver->flags & HCD_USB2)
+		&& (udev->speed == USB_SPEED_HIGH)
+		&& (hdev->devpath[0] == '0')
+		&& (udev->descriptor.idVendor == 0x12d1)) {
+		set_bit(1, &hcd->modem_dongle);
+	}
+
+#endif
 
 	if (udev->wusb == 0 && le16_to_cpu(udev->descriptor.bcdUSB) >= 0x0201) {
 		retval = usb_get_bos_descriptor(udev);
@@ -4526,6 +4902,11 @@ fail:
 	if (retval) {
 		hub_port_disable(hub, port1, 0);
 		update_devnum(udev, devnum);	/* for disconnect processing */
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+		if (udev->speed == USB_SPEED_SUPER)
+			hub_port_reset(hub, port1, udev,
+			HUB_BH_RESET_TIME, true);
+#endif
 	}
 	mutex_unlock(&hdev->bus->usb_address0_mutex);
 	return retval;
@@ -4605,6 +4986,57 @@ hub_power_remaining (struct usb_hub *hub)
 	}
 	return remaining;
 }
+#if defined(CONFIG_SAMSUNG_USB_SHORT_DEBOUNCE)
+void hub_set_port_short_debounce(struct usb_device *udev)
+{
+	while(udev)
+	{
+		udev->short_debounce = true;/* Device port num */
+		udev = udev->parent;
+	}
+
+	return;
+}
+#endif
+
+#if defined(CONFIG_USB_MODULE) && defined(CONFIG_SAMSUNG_USB_TV_PRODUCT) && \
+		(defined(CONFIG_ARCH_SDP1601) && defined(__KANTM_REV_0__))		// Only Kant.M TV
+
+extern int tztv_sys_is_ocm_model(void);
+
+int _ext_tztv_sys_is_ocm_model(void)
+{
+    int ret = 0;
+    static void *ext_fp = NULL;
+
+    USB_EXT_SYMBOL(ext_fp, ret, tztv_sys_is_ocm_model);
+
+    return ret;
+}
+#endif
+
+unsigned int _ext_tztv_sys_is_serdes_model(void)
+{
+        unsigned int ret = 0;
+        static void *ext_fp = NULL;
+
+        USB_EXT_SYMBOL(ext_fp, ret, tztv_sys_is_serdes_model);
+
+        return ret;
+}
+EXPORT_SYMBOL(_ext_tztv_sys_is_serdes_model);
+
+int _ext_tztv_system_serdes_lock_check(void)
+{
+        int ret = 0;
+        static void *ext_fp = NULL;
+
+        USB_EXT_SYMBOL(ext_fp, ret, tztv_system_serdes_lock_check);
+
+        return ret;
+}
+
+EXPORT_SYMBOL(_ext_tztv_system_serdes_lock_check);
 
 static void hub_port_connect(struct usb_hub *hub, int port1, u16 portstatus,
 		u16 portchange)
@@ -4616,7 +5048,15 @@ static void hub_port_connect(struct usb_hub *hub, int port1, u16 portstatus,
 	struct usb_port *port_dev = hub->ports[port1 - 1];
 	struct usb_device *udev = port_dev->child;
 	static int unreliable_port = -1;
+#if defined(CONFIG_USB_MODULE) && defined(CONFIG_SAMSUNG_USB_TV_PRODUCT) && \
+		(defined(CONFIG_ARCH_SDP1601) && defined(__KANTM_REV_0__))		// Only Kant.M TV
+    bool ext_hub_reset = false;
+#endif
 
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+	struct instant_resume_tree *head = instant_ctrl.instant_tree[hdev->bus->busnum - 1];
+#endif
+	
 	/* Disconnect any existing devices under this port */
 	if (udev) {
 		if (hcd->usb_phy && !hdev->parent)
@@ -4787,8 +5227,22 @@ static void hub_port_connect(struct usb_hub *hub, int port1, u16 portstatus,
 
 		if (status)
 			goto loop_disable;
+#if defined(CONFIG_SAMSUNG_USB_SHORT_DEBOUNCE)
+	/* Once children of BT are enumerated (and Wifi),
+		start setting the parent short debounce flag for these particular ports */
+		udev->short_debounce = 0;
+		if((IS_BTHUB_FAMILY) || (IS_WIFI))
+			hub_set_port_short_debounce(udev);
+#endif
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+	/* Create node and fill essential structures for priority devices */
+    if(fn_ptr_perform_priority_device_operation)
+    {   
+        fn_ptr_perform_priority_device_operation(udev,head);
+    }
 
-		status = hub_power_remaining(hub);
+#endif
+        status = hub_power_remaining(hub);
 		if (status)
 			dev_dbg(hub->intfdev, "%dmA power budget left\n", status);
 
@@ -4801,22 +5255,50 @@ loop:
 		release_devnum(udev);
 		hub_free_dev(udev);
 		usb_put_dev(udev);
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+                //kyungsik, connection timeout with sarotech USB HDD(W-31UA)
+                 if ((status == -ENOTCONN) || (status == -ENOTSUPP)||(status == -ETIMEDOUT))
+#else
 		if ((status == -ENOTCONN) || (status == -ENOTSUPP))
+#endif
 			break;
 	}
 	if (hub->hdev->parent ||
 			!hcd->driver->port_handed_over ||
 			!(hcd->driver->port_handed_over)(hcd, port1)) {
-		if (status != -ENOTCONN && status != -ENODEV)
+	    if (status != -ENOTCONN && status != -ENODEV) {
 			dev_err(&port_dev->dev,
 					"unable to enumerate USB device\n");
-	}
+#if defined(CONFIG_USB_MODULE) && defined(CONFIG_SAMSUNG_USB_TV_PRODUCT) && \
+		(defined(CONFIG_ARCH_SDP1601) && defined(__KANTM_REV_0__))		// Only Kant.M TV
+            /* Adding temporary fix for external hub in buggy condition */
+            if((1 == _ext_tztv_sys_is_ocm_model()) && (OCM_EXT_HUB_VID == hub->hdev->descriptor.idVendor) && (OCM_EXT_HUB_PID == hub->hdev->descriptor.idProduct) \
+                        && (OCM_EXT_HUB_BUSID == hub->hdev->bus->busnum)) { 
+                if(sdp_ocm_is_internal_hub() == 0) {
+                    ext_hub_reset = true;
+                    dev_err(hub->intfdev, "soon going to reset!!\n");
+                } else if(sdp_ocm_is_internal_hub() == 1) {
+                    dev_err(hub->intfdev, "Internal OCM hub\n");
+                } else {
+                    dev_err(hub->intfdev, "something wrong!!\n");
+                }
+            }
+#endif
+        }
+    }
 
 done:
 	hub_port_disable(hub, port1, 1);
 	if (hcd->driver->relinquish_port && !hub->hdev->parent)
 		hcd->driver->relinquish_port(hcd, port1);
-
+#if defined(CONFIG_USB_MODULE) && defined(CONFIG_SAMSUNG_USB_TV_PRODUCT) && \
+		(defined(CONFIG_ARCH_SDP1601) && defined(__KANTM_REV_0__))		// Only Kant.M TV
+    if(ext_hub_reset == true) {
+        ext_hub_reset = false;
+        dev_err(hub->intfdev, "hub reset started !!\n");
+        sdp_ocm_reset_ext_hub();
+    }
+#endif
 }
 
 /* Handle physical or logical connection change events.
@@ -4835,7 +5317,8 @@ static void hub_port_connect_change(struct usb_hub *hub, int port1,
 	struct usb_device *udev = port_dev->child;
 	int status = -ENODEV;
 
-	dev_dbg(&port_dev->dev, "status %04x, change %04x, %s\n", portstatus,
+	//test for ew
+	dev_err(&port_dev->dev, "status %04x, change %04x, %s\n", portstatus,
 			portchange, portspeed(hub, portstatus));
 
 	if (hub->has_indicators) {
@@ -4888,6 +5371,11 @@ static void port_event(struct usb_hub *hub, int port1)
 	struct usb_device *udev = port_dev->child;
 	struct usb_device *hdev = hub->hdev;
 	u16 portstatus, portchange;
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+	struct usb_hcd *hcd;
+
+	hcd =  bus_to_hcd(hdev->bus);
+#endif
 
 	connect_change = test_bit(port1, hub->change_bits);
 	clear_bit(port1, hub->event_bits);
@@ -4895,6 +5383,11 @@ static void port_event(struct usb_hub *hub, int port1)
 
 	if (hub_port_status(hub, port1, &portstatus, &portchange) < 0)
 		return;
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+	if (test_and_clear_bit((unsigned long)port1, &hcd->porcd)) {
+		portchange |= USB_PORT_STAT_C_CONNECTION;
+	}
+#endif
 
 	if (portchange & USB_PORT_STAT_C_CONNECTION) {
 		usb_clear_port_feature(hdev, port1, USB_PORT_FEAT_C_CONNECTION);
@@ -4995,11 +5488,17 @@ static void hub_event(struct work_struct *work)
 	u16 hubchange;
 	int i, ret;
 
+	#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+	if(instant_ctrl.off_khubd)
+	{
+		printk(KERN_ERR "Skipping Device Disconnect while running parallel resume \n");
+		return;
+	}
+	#endif	
 	hub = container_of(work, struct usb_hub, events);
 	hdev = hub->hdev;
 	hub_dev = hub->intfdev;
 	intf = to_usb_interface(hub_dev);
-
 	dev_dbg(hub_dev, "state %d ports %d chg %04x evt %04x\n",
 			hdev->state, hdev->maxchild,
 			/* NOTE: expects max 15 ports... */
@@ -5145,6 +5644,12 @@ int usb_hub_init(void)
 		return -1;
 	}
 
+//RQ180718-00669 - Do not include to seret kernel built 
+
+#ifdef CONFIG_USB_MODULE
+	ohci_inc_param_fn =  NULL;
+#endif
+
 	/*
 	 * The workqueue needs to be freezable to avoid interfering with
 	 * USB-PERSIST port handover. Otherwise it might see that a full-speed
@@ -5164,8 +5669,7 @@ int usb_hub_init(void)
 
 void usb_hub_cleanup(void)
 {
-	destroy_workqueue(hub_wq);
-
+	destroy_workqueue(hub_wq);	
 	/*
 	 * Hub resources are freed for us by usb_deregister. It calls
 	 * usb_driver_purge on every device which in turn calls that
@@ -5260,6 +5764,9 @@ static int descriptors_changed(struct usb_device *udev,
 	kfree(buf);
 	return changed;
 }
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+#include "hub_resume.c"
+#endif
 
 /**
  * usb_reset_and_verify_device - perform a USB port reset to reinitialize a device

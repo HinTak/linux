@@ -43,17 +43,27 @@
 
 #include <trace/events/sched.h>
 
+#include <linux/delay.h>
+#ifdef CONFIG_FREEZER
+#include <linux/freezer.h>
+#endif
+
 int core_uses_pid;
 unsigned int core_pipe_limit;
 char core_pattern[CORENAME_MAX_SIZE] = "core";
-static int core_name_size = CORENAME_MAX_SIZE;
 
 struct core_name {
 	char *corename;
 	int used, size;
 };
 
+#ifdef CONFIG_ELF_CORE
+
+/* Maximum Path length for USB path checking */
+#define USB_PATH_MAX 20
+
 /* The maximal length of core_pattern is also specified in sysctl.c */
+static int core_name_size = CORENAME_MAX_SIZE;
 
 static int expand_corename(struct core_name *cn, int size)
 {
@@ -230,6 +240,11 @@ static int format_corename(struct core_name *cn, struct coredump_params *cprm)
 				err = cn_printf(cn, "%lu", tv.tv_sec);
 				break;
 			}
+			/* tid */
+			case 'T': {
+				err = cn_printf(cn, "%d", (int)current->pid);
+				break;
+			}
 			/* hostname */
 			case 'h':
 				down_read(&uts_sem);
@@ -272,6 +287,7 @@ out:
 	}
 	return ispipe;
 }
+#endif /* CONFIG_ELF_CORE */
 
 static int zap_process(struct task_struct *start, int exit_code)
 {
@@ -283,6 +299,11 @@ static int zap_process(struct task_struct *start, int exit_code)
 
 	t = start;
 	do {
+		if (t->state & TASK_UNINTERRUPTIBLE) {
+			pr_alert("thread '%s' has TASK_UNINTERRUPTIBLE(%ld) state\n",
+				t->comm, t->state);
+			pr_alert("faulting thread : %s\n", start->comm);
+		}
 		task_clear_jobctl_pending(t, JOBCTL_PENDING_MASK);
 		if (t != current && t->mm) {
 			sigaddset(&t->pending.signal, SIGKILL);
@@ -445,6 +466,7 @@ static bool dump_interrupted(void)
 	return signal_pending(current);
 }
 
+#ifdef CONFIG_ELF_CORE
 static void wait_for_dump_helpers(struct file *file)
 {
 	struct pipe_inode_info *pipe = file->private_data;
@@ -496,22 +518,191 @@ static int umh_pipe_setup(struct subprocess_info *info, struct cred *new)
 
 	return err;
 }
+#endif /* CONFIG_ELF_CORE */
+
+#ifdef CONFIG_VD_RELEASE
+#define USB_CON_MAX_RETRIES 10
+#else
+#define USB_CON_MAX_RETRIES INT_MAX
+#endif
+
+#if (defined(CONFIG_DTVLOGD) && defined(CONFIG_BINFMT_ELF_COMP))
+void create_serial_log(const char *dtv_filepath)
+{
+	struct inode *inode;
+	mm_segment_t fs = get_fs();
+	char dtv_filename[CORENAME_MAX_SIZE + 1] = "";
+	char process_name[TASK_COMM_LEN] = "??";
+
+	int validlen1 = 0, validlen2 = 0;
+	char *dtvbuf1 = NULL, *dtvbuf2 = NULL;
+	struct file *dtvfile = NULL;
+	loff_t pos;
+	int ret = -1;
+	int replaced_special_chars = 0;
+
+	if (!dtv_filepath)
+		goto log_fail;
+
+	get_task_comm(process_name, current->group_leader);
+	set_fs(KERNEL_DS);
+	snprintf(dtv_filename, sizeof(dtv_filename),
+			"%s/Dtvlog.%s.%d.txt",
+			dtv_filepath,
+			process_name,
+			current->pid);
+
+recheck_special_chars:
+	dtvfile = filp_open(dtv_filename,
+			O_CREAT | O_WRONLY | O_NOFOLLOW,
+			0666);
+
+	if (IS_ERR(dtvfile)) {
+		if (((int)dtvfile == -EINVAL) && !replaced_special_chars) {
+			printk(KERN_ALERT "[DTVLOGD_WARNING] File open: invalid arg: '%s'\n",
+					dtv_filename);
+			snprintf(dtv_filename, sizeof(dtv_filename),
+					"%s/Dtvlog.%s.%d.txt",
+					dtv_filepath,
+					"ill_fmt",
+					current->pid);
+			printk(KERN_ALERT "[DTVLOGD_WARNING] Changing file to: '%s'\n",
+					dtv_filename);
+			replaced_special_chars = 1;
+			goto recheck_special_chars;
+
+		} else {
+			printk(KERN_ALERT "[DTVLOGD_FAIL|%s|File IO Error] File open error: %d\n",
+					dtv_filename, (int)dtvfile);
+			goto log_fail_set_fs;
+		}
+	}
+
+	/* error checks - reference do_coredump */
+	inode = dtvfile->f_path.dentry->d_inode;
+	if (inode->i_nlink > 1) {
+		printk(KERN_ALERT "[DTVLOGD_FAIL|%s|File IO Error] More than one Hard link to the file\n",
+				dtv_filename);
+		goto log_fail_close;
+	}
+
+	if (d_unhashed(dtvfile->f_path.dentry)) {
+		printk(KERN_ALERT "[DTVLOGD_FAIL|%s|File IO Error] file dentry not hashed\n",
+				dtv_filename);
+		goto log_fail_close;
+	}
+
+	if (!S_ISREG(inode->i_mode)) {
+		printk(KERN_ALERT "[DTVLOGD_FAIL|%s|File IO Error] Not a regular file\n",
+				dtv_filename);
+		goto log_fail_close;
+	}
+
+	if (!dtvfile->f_op) {
+		printk(KERN_ALERT "[DTVLOGD_FAIL|%s|File IO Error] File Operation handlers not registered\n",
+				dtv_filename);
+		goto log_fail_close;
+	}
+	ret = do_truncate(dtvfile->f_path.dentry, 0, 0, dtvfile);
+	if (ret) {
+		printk(KERN_ALERT "[DTVLOGD_FAIL|%s|File IO Error] Failed to truncate file, errno : %d\n",
+				dtv_filename, ret);
+		goto log_fail_close;
+	}
+
+	dtvlogd_write_stop();
+	ret = acquire_dtvlogd_all_buffer(&dtvbuf1, &validlen1,
+			&dtvbuf2, &validlen2);
+	if (!ret) {
+		/*
+		 * Buffer can be:
+		 *  empty: validlen1 = 0, validlen1 = 0
+		 *  single: validlen1 > 0, validlen2 = 0
+		 *  or of 2 parts:
+		 *   validlen1 > 0, validlen2 > 0
+		 */
+		pos = dtvfile->f_pos;
+		if (validlen1 > 0)
+			__kernel_write(dtvfile, dtvbuf1, validlen1, &pos);
+		dtvfile->f_pos = pos;
+
+		if (validlen2 > 0)
+			__kernel_write(dtvfile, dtvbuf2, validlen2, &pos);
+		dtvfile->f_pos = pos;
+	} else {
+		printk(KERN_ALERT "[DTVLOGD_FAIL] failed to get dtvlogd buffer\n");
+	}
+
+	dtvlogd_write_start();
+
+log_fail_close:
+	filp_close(dtvfile, NULL);
+log_fail_set_fs:
+	set_fs(fs);
+log_fail:
+	if (!ret)
+		printk(KERN_CRIT "Serial logs saved to %s\n", dtv_filename);
+	else
+		printk(KERN_ALERT "[DTVLOGD_FAIL]: Couldn't save serial logs\n");
+
+	return;
+}
+#endif
+
+static void print_coredump_filename(struct file *filp)
+{
+	char *pathbuf, *path;
+
+	if (!filp)
+		return;
+
+	pathbuf = kmalloc(PATH_MAX, GFP_KERNEL);
+	if (!pathbuf)
+		return;
+
+	path = d_path(&filp->f_path, pathbuf, PATH_MAX);
+	if (IS_ERR(path)) {
+		pr_alert("[COREDUMP] failed to get corefile name, error:%ld\n",
+				PTR_ERR(path));
+		goto out;
+	}
+
+	pr_alert("[COREDUMP] filename (%s)\n", path);
+out:
+	kfree(pathbuf);
+}
 
 void do_coredump(const siginfo_t *siginfo)
 {
 	struct core_state core_state;
-	struct core_name cn;
 	struct mm_struct *mm = current->mm;
-	struct linux_binfmt * binfmt;
 	const struct cred *old_cred;
 	struct cred *cred;
 	int retval = 0;
 	int flag = 0;
-	int ispipe;
-	struct files_struct *displaced;
-	bool need_nonrelative = false;
+	bool need_suid_safe = false;
 	bool core_dumped = false;
+	struct dentry *new_dentry, *dcommon_p;
+	struct dentry *trap;
+	struct path newpath_p;
+#ifdef CONFIG_ELF_CORE
+	int ispipe;
+	int comp_corename_len = 0;
+	char comp_corename[NAME_MAX + 1] = "";
+	char *file_name = NULL;
+	bool is_usbmodule_loaded = false;
+	struct files_struct *displaced;
+	struct core_name cn;
+	struct linux_binfmt *binfmt;
+	struct inode *inode;
 	static atomic_t core_dump_count = ATOMIC_INIT(0);
+	char usb_corepath[USB_PATH_MAX + 1] = "";
+	char tmp_corepath[] = {"/tmp"};
+	struct path root;
+	unsigned long old, new;
+	static const char * const chroot_coredump_allow_task_name[] = {"nacl_helper_boo", "nacl_helper_non"};
+#endif /* CONFIG_ELF_CORE */
+
 	struct coredump_params cprm = {
 		.siginfo = siginfo,
 		.regs = signal_pt_regs(),
@@ -523,18 +714,67 @@ void do_coredump(const siginfo_t *siginfo)
 		 */
 		.mm_flags = mm->flags,
 	};
+#ifdef CONFIG_BINFMT_ELF_COMP
+#define COMP_CORENAME_PATH  7
+	int err;
+	struct path path;
+	static const char * const usb_corepath_check[] = {"/opt/storage/usb", "/opt/media"};
+	extern struct module *ultimate_module_check(const char *name);
+	struct module *mod_usbcore = NULL, *mod_ehci = NULL, *mod_storage = NULL;
+	const char *usb_module_list[3] = {"usbcore", "ehci_hcd", "usb_storage"};
+	const char *usb_mount_list[2][6] = { {"sda", "sda1", "sdb", "sdb1", "sdc", "sdc1"},
+					{"USBDriveA", "USBDriveA1", "USBDriveB", "USBDriveB1",
+					"USBDriveC", "USBDriveC1"} };
+	int cnt = 0;
+	int usb_mount_list_cnt = 0;
+	struct file *binary_file;
+	struct task_struct *tsk;
+	char binary_name[NAME_MAX + 1] = "";
+	char tsk_name[TASK_COMM_LEN] = "";
+#ifdef CONFIG_DTVLOGD
+	char dtv_filepath[CORENAME_MAX_SIZE + 1] = "";
+#endif
+#endif
 
 	audit_core_dumps(siginfo->si_signo);
 
-	binfmt = mm->binfmt;
-	if (!binfmt || !binfmt->core_dump)
-		goto fail;
-	if (!__get_dumpable(cprm.mm_flags))
-		goto fail;
+#ifdef CONFIG_ELF_CORE
+	if ((!strcmp(chroot_coredump_allow_task_name[0], current->group_leader->comm))
+		|| (!strcmp(chroot_coredump_allow_task_name[1], current->group_leader->comm))) {
+		do {
+			old = ACCESS_ONCE(mm->flags);
+			new = (old & ~MMF_DUMPABLE_MASK) | SUID_DUMP_USER;
+		} while (cmpxchg(&cprm.mm_flags, old, new) != old);
+
+		/*
+		 * Using user namespaces, nacl user tasks change
+		 * their current->fs->root to point to arbitrary
+		 * directories. Since the intention of the "only dump
+		 * with a fully qualified path" rule is to control where
+		 * coredumps may be placed using root privileges,
+		 * current->fs->root must not be used. Instead, use the
+		 * root directory of init_task.
+		 */
+
+		task_lock(&init_task);
+		get_fs_root(init_task.fs, &root);
+		task_unlock(&init_task);
+		set_fs_root(current->fs, &root);
+	}
+#endif
+
+	if (!__get_dumpable(cprm.mm_flags)) {
+		pr_alert("[Pid:%d][COREDUMP_FAIL|Permission Error] Core dump files are not created for set-user-ID\n",
+			current->pid);
+		pr_alert("\t\tmm_flags- %x\n", (unsigned int)cprm.mm_flags);
+	}
 
 	cred = prepare_creds();
-	if (!cred)
+	if (!cred) {
+		pr_alert("[Pid:%d][COREDUMP_FAIL|Function Error] Creating new task credentials failed",
+			current->pid);
 		goto fail;
+	}
 	/*
 	 * We cannot trust fsuid as being the "true" uid of the process
 	 * nor do we know its entire history. We only know it was tainted
@@ -542,17 +782,33 @@ void do_coredump(const siginfo_t *siginfo)
 	 * environment (pipe handler or fully qualified path).
 	 */
 	if (__get_dumpable(cprm.mm_flags) == SUID_DUMP_ROOT) {
+		flag = O_EXCL;          /* Stop rewrite attacks */
 		/* Setuid core dump mode */
-		flag = O_EXCL;		/* Stop rewrite attacks */
 		cred->fsuid = GLOBAL_ROOT_UID;	/* Dump root private */
-		need_nonrelative = true;
+		need_suid_safe = true;
 	}
 
 	retval = coredump_wait(siginfo->si_signo, &core_state);
-	if (retval < 0)
+	if (retval < 0) {
+		pr_alert("[Pid:%d][COREDUMP_FAIL|COREDUMP_WAIT FAIL] Process termination is in progress\n",
+			current->pid);
 		goto fail_creds;
+	}
 
 	old_cred = override_creds(cred);
+
+#ifdef CONFIG_MINIMAL_CORE
+	do_minimal_core(&cprm);
+#endif
+
+#ifdef CONFIG_ELF_CORE
+	binfmt = mm->binfmt;
+	if (!binfmt || !binfmt->core_dump) {
+		pr_alert("[Pid:%d][COREDUMP_FAIL|Function Error]\n",
+			current->pid);
+		pr_alert(" Binfmt handler/functions not defined\n");
+		goto fail_unlock_nonfree;
+	}
 
 	ispipe = format_corename(&cn, &cprm);
 
@@ -562,8 +818,9 @@ void do_coredump(const siginfo_t *siginfo)
 		struct subprocess_info *sub_info;
 
 		if (ispipe < 0) {
-			printk(KERN_WARNING "format_corename failed\n");
-			printk(KERN_WARNING "Aborting core\n");
+			pr_alert("[Pid:%d][COREDUMP_FAIL] format_corename failed\n",
+				current->pid);
+			pr_alert("Aborting core\n");
 			goto fail_unlock;
 		}
 
@@ -583,97 +840,453 @@ void do_coredump(const siginfo_t *siginfo)
 			 * right pid if a thread in a multi-threaded
 			 * core_pattern process dies.
 			 */
-			printk(KERN_WARNING
-				"Process %d(%s) has RLIMIT_CORE set to 1\n",
-				task_tgid_vnr(current), current->comm);
-			printk(KERN_WARNING "Aborting core\n");
+			pr_alert("[Pid:%d][COREDUMP_FAIL] Process %d(%s) has RLIMIT_CORE set to 1\n",
+				current->pid, task_tgid_vnr(current), current->comm);
+			pr_alert("Aborting core\n");
 			goto fail_unlock;
 		}
 		cprm.limit = RLIM_INFINITY;
 
 		dump_count = atomic_inc_return(&core_dump_count);
 		if (core_pipe_limit && (core_pipe_limit < dump_count)) {
-			printk(KERN_WARNING "Pid %d(%s) over core_pipe_limit\n",
-			       task_tgid_vnr(current), current->comm);
-			printk(KERN_WARNING "Skipping core dump\n");
+			pr_alert("[Pid:%d][COREDUMP_FAIL] Process %d(%s) over core_pipe_limit\n",
+				current->pid, task_tgid_vnr(current), current->comm);
+			pr_alert("Skipping core dump\n");
 			goto fail_dropcount;
 		}
 
 		helper_argv = argv_split(GFP_KERNEL, cn.corename, NULL);
-		if (!helper_argv) {
-			printk(KERN_WARNING "%s failed to allocate memory\n",
-			       __func__);
+		if (!helper_argv) 
 			goto fail_dropcount;
-		}
 
 		retval = -ENOMEM;
 		sub_info = call_usermodehelper_setup(helper_argv[0],
 						helper_argv, NULL, GFP_KERNEL,
-						umh_pipe_setup, NULL, &cprm);
+						NULL, NULL, NULL);
 		if (sub_info)
 			retval = call_usermodehelper_exec(sub_info,
 							  UMH_WAIT_EXEC);
 
 		argv_free(helper_argv);
 		if (retval) {
-			printk(KERN_INFO "Core dump to |%s pipe failed\n",
-			       cn.corename);
-			goto close_fail;
+			pr_alert("[COREDUMP_FAIL] Core dump to |%s pipe failed (%d)\n",
+			       cn.corename, retval);
+			goto fail_dropcount;
 		}
-	} else {
-		struct inode *inode;
+	}
 
-		if (cprm.limit < binfmt->min_coredump)
-			goto fail_unlock;
+	if (cprm.limit < binfmt->min_coredump) {
+		pr_alert("[COREDUMP_FAIL|Taskname(PID):%s(%d)] RLIMIT_CORE(%lu) is less than min coredump size(%lu)\n",
+				current->comm, current->pid, cprm.limit, binfmt->min_coredump);
+		goto fail_dropcount;
+	}
 
-		if (need_nonrelative && cn.corename[0] != '/') {
-			printk(KERN_WARNING "Pid %d(%s) can only dump core "\
-				"to fully qualified path!\n",
-				task_tgid_vnr(current), current->comm);
-			printk(KERN_WARNING "Skipping core dump\n");
-			goto fail_unlock;
+#ifdef CONFIG_BINFMT_ELF_COMP
+	/* Change code for saving CoreDump file */
+	mutex_lock(&module_mutex);
+	/* looks like we don't really care about these modules, just checking
+	* if they have been loaded, so it's safe to unlock. in any other case
+	* make sure you hold this mutex. */
+	mod_usbcore = (struct module *)ultimate_module_check(usb_module_list[0]);
+	mod_ehci = (struct module *)ultimate_module_check(usb_module_list[1]);
+	mod_storage = (struct module *)ultimate_module_check(usb_module_list[2]);
+
+	mutex_unlock(&module_mutex);
+
+	 /* find the binary name */
+	binary_file = get_mm_exe_file(current->mm);
+	if (binary_file) {
+		strncpy(binary_name, binary_file->f_path.dentry->d_name.name, NAME_MAX);
+		binary_name[NAME_MAX] = '\0';
+		fput(binary_file);
+	}
+
+	/* find the parent's task name */
+	rcu_read_lock();
+	tsk = find_task_by_vpid(current->tgid);
+	if (tsk) {
+		get_task_struct(tsk);
+		get_task_comm(tsk_name, tsk);
+		put_task_struct(tsk);
+	}
+	rcu_read_unlock();
+
+	if (mod_usbcore && mod_ehci && mod_storage) {
+		int retries = 0;
+		is_usbmodule_loaded = true;        /* all usb modules loaded */
+		while (1) {
+			pr_alert("[Pid:%d] Coredump : Insert USB memory stick, mount check per 10sec\n",
+				current->pid);
+
+#ifdef CONFIG_FREEZER
+			if (pm_freezing) {
+				pr_alert("[COREDUMP_FAIL|%s %d|Suspend in Progress] Quitting Coredump.\n",
+					current->comm, current->pid);
+				goto fail_dropcount;
+			}
+#endif
+			
+			for (cnt = 0; cnt < sizeof(usb_corepath_check) / sizeof(char *); cnt++) {
+				err = kern_path(usb_corepath_check[cnt], LOOKUP_DIRECTORY, &path);
+				if (!err) {
+					strncpy(usb_corepath, usb_corepath_check[cnt], USB_PATH_MAX);
+					path_put(&path);
+					usb_mount_list_cnt = cnt;
+					break;
+				}
+			}
+
+			if (!err)
+				break;
+
+detect:
+			retries++;
+
+			if (retries >= USB_CON_MAX_RETRIES) {
+				pr_alert("[Pid:%d][COREDUMP_FAIL] USB Checking time out\n",
+					current->pid);
+				goto fail_dropcount;
+			}
+
+			mdelay(10 * 1000);
 		}
 
-		cprm.file = filp_open(cn.corename,
-				 O_CREAT | 2 | O_NOFOLLOW | O_LARGEFILE | flag,
-				 0600);
+		for (cnt = 0; cnt < (COMP_CORENAME_PATH - 1); cnt++) {
+			/* check if the task name and binary name is same */
+			if (unlikely(binary_file == NULL) || !strncmp(binary_name, tsk_name, TASK_COMM_LEN)) {
+				if (unlikely(tsk == NULL) || current->pid == current->tgid) { /* Unknown Thread or Process */
+					snprintf(comp_corename, sizeof(comp_corename),
+						"%s/%s/TEMP_Coredump.%s.%d", usb_corepath, usb_mount_list[usb_mount_list_cnt][cnt],
+					current->comm, current->pid);
+				} else { /* Thread */
+					snprintf(comp_corename, sizeof(comp_corename),
+						"%s/%s/TEMP_Coredump.%s.%s.%d", usb_corepath, usb_mount_list[usb_mount_list_cnt][cnt],
+					tsk_name, current->comm, current->pid);
+				}
+			} else {
+			if (unlikely(tsk == NULL) || current->pid == current->tgid) { /* Unknown Thread or Process */
+					snprintf(comp_corename, sizeof(comp_corename),
+							"%s/%s/TEMP_Coredump.%s(%s).%d", usb_corepath, usb_mount_list[usb_mount_list_cnt][cnt],
+						current->comm, binary_name, current->pid);
+				} else { /* Thread */
+					snprintf(comp_corename, sizeof(comp_corename),
+						"%s/%s/TEMP_Coredump.%s.%s(%s).%d", usb_corepath, usb_mount_list[usb_mount_list_cnt][cnt],
+					tsk_name, current->comm, binary_name, current->pid);
+				}
+			}
+			/* add target_version if present */
+			comp_corename_len = strlen(comp_corename);
+			comp_corename[comp_corename_len++] = '.';
+			comp_corename_len += read_target_version(&comp_corename[comp_corename_len],
+						sizeof(comp_corename) - comp_corename_len - 1);
+
+			/* add the extension */
+			strncpy(&comp_corename[comp_corename_len], ".gz", sizeof(comp_corename) - comp_corename_len - 1);
+
+recheck:
+			cprm.file = filp_open(comp_corename,
+					      O_CREAT | 2 | O_NOFOLLOW | O_LARGEFILE | flag, 0600);
+			if (!IS_ERR(cprm.file)) {
+				pr_alert("USB detected\n");
+				pr_alert("Create pid : %d coredump file to USB mount dir %s\n",
+					current->pid, comp_corename);
+				break;
+			} else {
+				if ((size_t)cprm.file == -EINVAL) {
+					pr_alert("[COREDUMP_WARNING] File Open Failed: Invalid Argument '%s'\n", comp_corename);
+					snprintf(comp_corename, sizeof(comp_corename),
+					"%s/%s/TEMP_Coredump.ill_fmt.%d.gz", usb_corepath, usb_mount_list[usb_mount_list_cnt][cnt],
+					current->pid);
+					goto recheck;
+				} else if ((size_t)cprm.file != -ENOENT) {
+#ifdef CONFIG_ARM64
+					pr_alert("[COREDUMP_WARNING] File Open Failed with error no %lld : '%s'\n",
+						(long long int)cprm.file, comp_corename);
+#else
+					pr_alert("[COREDUMP_WARNING] File Open Failed with error no %d : '%s'\n",
+						(int)cprm.file, comp_corename);
+#endif
+				}
+			}
+		}
+
 		if (IS_ERR(cprm.file))
-			goto fail_unlock;
+			goto detect;
+	} else {
+		is_usbmodule_loaded = false;        /* return NULL, usb modules not loaded */
+		pr_alert("USB modules not loaded\n");
 
-		inode = file_inode(cprm.file);
-		if (inode->i_nlink > 1)
-			goto close_fail;
-		if (d_unhashed(cprm.file->f_path.dentry))
-			goto close_fail;
+		/* check if the task name and binary name is same */
+		if (unlikely(binary_file == NULL) || !strncmp(binary_name, tsk_name, TASK_COMM_LEN)) {
+			if (unlikely(tsk == NULL) || current->pid == current->tgid) { /* Unknown Thread or Process */
+				snprintf(comp_corename, sizeof(comp_corename), "%s/Coredump.%s.%d", tmp_corepath,
+					current->comm, current->pid);
+			} else { /* Thread */
+				snprintf(comp_corename, sizeof(comp_corename), "%s/Coredump.%s.%s.%d", tmp_corepath,
+					tsk_name, current->comm, current->pid);
+			}
+		} else {
+			if (unlikely(tsk == NULL) || current->pid == current->tgid) { /* Unknown Thread or Process */
+				snprintf(comp_corename, sizeof(comp_corename), "%s/Coredump.%s(%s).%d", tmp_corepath,
+					current->comm, binary_name, current->pid);
+			} else { /* Thread */
+				snprintf(comp_corename, sizeof(comp_corename), "%s/Coredump.%s.%s(%s).%d", tmp_corepath,
+					tsk_name, current->comm, binary_name, current->pid);
+			}
+		}
+		/* add target_version if present */
+		comp_corename_len = strlen(comp_corename);
+		comp_corename[comp_corename_len++] = '.';
+		comp_corename_len += read_target_version(&comp_corename[comp_corename_len],
+					sizeof(comp_corename) - comp_corename_len - 1);
+
+		/* add the extension */
+		strncpy(&comp_corename[comp_corename_len], ".gz", sizeof(comp_corename) - comp_corename_len - 1);
+
+		pr_alert("Create coredump file to tmpfs %s\n", comp_corename);
+		cprm.file = filp_open(comp_corename, O_CREAT | 2 | O_NOFOLLOW | O_LARGEFILE | flag, 0666);
+		if (IS_ERR(cprm.file)) {
+			pr_alert("[Pid:%d] Coredump Fail can't create corefile to %s dir\n",
+				current->pid, tmp_corepath);
+#ifdef CONFIG_ARM64
+			pr_alert("[COREDUMP_FAIL|%s|File IO Error] Unable to open file errno:%lld\n",
+				comp_corename, (long long int)cprm.file);
+#else
+			pr_alert("[COREDUMP_FAIL|%s|File IO Error] Unable to open file errno:%d\n",
+					comp_corename, (int)cprm.file);
+#endif
+			goto fail_dropcount;
+		}
+	}
+#else   /* original coredump */
+	if (need_suid_safe && cn.corename[0] != '/') {
+		printk(KERN_WARNING "Pid %d(%s) can only dump core "\
+			"to fully qualified path!\n",
+			task_tgid_vnr(current), current->comm);
+		printk(KERN_WARNING "Skipping core dump\n");
+		goto fail_dropcount;
+	}
+
+	/*
+	 * Unlink the file if it exists unless this is a SUID
+	 * binary - in that case, we're running around with root
+	 * privs and don't want to unlink another user's coredump.
+	 */
+	if (!need_suid_safe) {
+		mm_segment_t old_fs;
+
+		old_fs = get_fs();
+		set_fs(KERNEL_DS);
 		/*
-		 * AK: actually i see no reason to not allow this for named
-		 * pipes etc, but keep the previous behaviour for now.
+		 * If it doesn't exist, that's fine. If there's some
+		 * other problem, we'll catch it at the filp_open().
 		 */
-		if (!S_ISREG(inode->i_mode))
-			goto close_fail;
-		/*
-		 * Dont allow local users get cute and trick others to coredump
-		 * into their pre-created files.
-		 */
-		if (!uid_eq(inode->i_uid, current_fsuid()))
-			goto close_fail;
-		if (!(cprm.file->f_mode & FMODE_CAN_WRITE))
-			goto close_fail;
-		if (do_truncate(cprm.file->f_path.dentry, 0, 0, cprm.file))
-			goto close_fail;
+		(void) sys_unlink((const char __user *)cn.corename);
+		set_fs(old_fs);
+	}
+
+	/*
+	 * There is a race between unlinking and creating the
+	 * file, but if that causes an EEXIST here, that's
+	 * fine - another process raced with us while creating
+	 * the corefile, and the other process won. To userspace,
+	 * what matters is that at least one of the two processes
+	 * writes its coredump successfully, not which one.
+	 */
+	cprm.file = filp_open(cn.corename,
+			 O_CREAT | 2 | O_NOFOLLOW |
+			 O_LARGEFILE | O_EXCL,
+			 0600);
+	if (IS_ERR(cprm.file)) {
+#ifdef CONFIG_ARM64
+		pr_alert("[COREDUMP_FAIL|%s|File IO Error] File Open Error : %lld\n",
+			cn.corename, (long long int)cprm.file);
+#else
+		pr_alert("[COREDUMP_FAIL|%s|File IO Error] File Open Error : %d\n",
+			cn.corename, (int)cprm.file);
+#endif
+		goto fail_dropcount;
+	}
+	snprintf(comp_corename, sizeof(comp_corename), "%s",
+						(char *)cprm.file->f_path.dentry->d_name.name);
+#endif
+	inode = file_inode(cprm.file);
+	if (inode->i_nlink > 1) {
+		pr_alert("[COREDUMP_FAIL|%s|File IO Error]  More than one Hard link to the file\n",
+				comp_corename);
+		goto close_fail;
+	}
+	if (d_unhashed(cprm.file->f_path.dentry)) {
+		pr_alert("[COREDUMP_FAIL|%s|File IO Error] File inode has non anonymous-DCACHE_DISCONNECTED\n",
+				comp_corename);
+		goto close_fail;
+	}
+	/*
+	 * AK: actually i see no reason to not allow this for named
+	 * pipes etc, but keep the previous behaviour for now.
+	 */
+	if (!S_ISREG(inode->i_mode)) {
+		pr_alert("[COREDUMP_FAIL|%s|File IO Error] Not a regular file\n", comp_corename);
+		goto close_fail;
+	}
+	/*
+	 * Don't dump core if the filesystem changed owner or mode
+	 * of the file during file creation. This is an issue when
+	 * a process dumps core while its cwd is e.g. on a vfat
+	 * filesystem.
+	 */
+#ifndef	CONFIG_ALLOW_ALL_USER_COREDUMP
+	if (!uid_eq(inode->i_uid, current_fsuid())) {
+		pr_alert("[COREDUMP_FAIL|%s|Permission Error] User-ID verfication failed for file\n",
+				comp_corename);
+		goto close_fail;
+	}
+#endif
+	if (!cprm.file->f_op) {
+			pr_alert("[COREDUMP_FAIL|%s|File IO Error] File Operation handlers not registered for file",
+					comp_corename);
+		goto close_fail;
+	}
+	/*if ((inode->i_mode & 0677) != 0600) {
+		pr_alert("[COREDUMP_FAIL|%s|File IO Error] File inode mode not valid\n",
+				comp_corename);
+		goto close_fail;
+	}*/
+	if (!(cprm.file->f_mode & FMODE_CAN_WRITE)) {
+		pr_alert("[COREDUMP_FAIL|%s|File IO Error] File write mode not set\n",
+				comp_corename);
+		goto close_fail;
+	}
+	retval = do_truncate(cprm.file->f_path.dentry, 0, 0, cprm.file);
+	if (retval) {
+		pr_alert("[COREDUMP_FAIL|%s|File IO Error] Failed to truncate file, errno : %d\n",
+				comp_corename, retval);
+		goto close_fail;
 	}
 
 	/* get us an unshared descriptor table; almost always a no-op */
 	retval = unshare_files(&displaced);
-	if (retval)
+	if (retval) {
+		pr_alert("[COREDUMP_FAIL|%s|File IO Error] Failed to unshare file descriptor table\n",
+				comp_corename);
 		goto close_fail;
+	}
 	if (displaced)
 		put_files_struct(displaced);
 	if (!dump_interrupted()) {
+#ifdef CONFIG_BINFMT_ELF_COMP
+		pr_alert("Ultimate CoreDump v1.0 : started dumping core \n");
+#else
+		pr_alert("Original coredump : started dumping core into '%s' file\n", comp_corename);
+#endif
 		file_start_write(cprm.file);
 		core_dumped = binfmt->core_dump(&cprm);
 		file_end_write(cprm.file);
+#ifdef CONFIG_BINFMT_ELF_COMP
+		if (is_usbmodule_loaded)
+			pr_alert("Create coredump file to USB mount dir '%s'\n", comp_corename);
+		else
+			pr_alert("Create coredump file to tmpfs '%s'\n", comp_corename);
+#ifdef CONFIG_DTVLOGD
+		if (is_usbmodule_loaded) {
+			snprintf(dtv_filepath, sizeof(dtv_filepath),
+				"%s/%s",usb_corepath,
+				usb_mount_list[usb_mount_list_cnt][cnt]);
+
+		} else {
+			snprintf(dtv_filepath, sizeof(dtv_filepath),
+				"%s",tmp_corepath);
+		}
+
+		pr_alert("[Pid:%d] Create Dtvlog file to %s directory\n",
+				current->pid, dtv_filepath);
+		create_serial_log(dtv_filepath);
+#endif
+
+#endif
+		if (core_dumped) {
+			retval = vfs_fsync(cprm.file, 0);
+			if (retval < 0)
+				pr_alert("[COREDUMP_WARNING] CoreDump can be corrupted , Sync fail [error=%d]\n", retval);
+
+			if (is_usbmodule_loaded) {
+				file_name = strrchr(comp_corename, '/');
+				if (!file_name) {
+					retval = -EINVAL;
+					pr_alert("[COREDUMP_RENAME] corename(%s) invalid path\n", comp_corename);
+					goto fail_rename;
+				}
+
+				if (file_name[1] != '\0') {
+					*file_name = '\0';
+					file_name += 6;
+				}
+
+				retval = kern_path(comp_corename, LOOKUP_FOLLOW | LOOKUP_DIRECTORY, &newpath_p);
+				if (retval) {
+					pr_alert("[COREDUMP_RENAME] corename(%s) kern_path error:%d\n",
+							comp_corename, retval);
+					goto fail_rename;
+				}
+
+				dcommon_p = newpath_p.dentry;
+				trap = lock_rename(dcommon_p, dcommon_p);
+
+				/* source file must exist */
+				if (d_is_negative(cprm.file->f_path.dentry) ||
+						d_really_is_negative(cprm.file->f_path.dentry)) {
+					retval = -ENOENT;
+					pr_alert("[COREDUMP_RENAME] coredump file(%s) does not exist\n",
+							comp_corename);
+					goto fail_unlock_rename;
+				}
+
+				if (d_is_negative(cprm.file->f_path.dentry->d_parent) ||
+						d_really_is_negative(cprm.file->f_path.dentry->d_parent)) {
+					retval = -ENOENT;
+					pr_alert("[COREDUMP_RENAME] coredump file(%s) parent does not exist\n",
+							comp_corename);
+					goto fail_unlock_rename;
+				}
+
+				if (d_inode(cprm.file->f_path.dentry->d_parent) != d_inode(dcommon_p)) {
+					retval = -EINVAL;
+					pr_alert("[COREDUMP_RENAME] coredump file(%s) parent mismatch\n",
+							comp_corename);
+					print_coredump_filename(cprm.file);
+					goto fail_unlock_rename;
+				}
+
+				new_dentry = lookup_one_len(file_name, dcommon_p, strlen(file_name));
+				if (IS_ERR(new_dentry)) {
+					pr_alert("[COREDUMP_RENAME] lookup_one_len new file error:%ld\n", PTR_ERR(new_dentry));
+					goto fail_unlock_rename;
+				}
+
+				retval = vfs_rename(dcommon_p->d_inode, cprm.file->f_path.dentry,
+							dcommon_p->d_inode, new_dentry,
+							NULL, 0);
+				if (retval) {
+						snprintf(comp_corename, sizeof(comp_corename),
+							"%s/TEMP_%s", comp_corename, file_name);
+						pr_alert("[COREDUMP_RENAME] vfs_rename error:%d\n", retval);
+				} else {
+					snprintf(comp_corename, sizeof(comp_corename),
+						"%s/%s", comp_corename, file_name);
+				}
+				dput(new_dentry);
+fail_unlock_rename:
+				unlock_rename(dcommon_p, dcommon_p);
+				path_put(&newpath_p);
+			}
+			pr_alert("CoreDump: finished dumping core for %s(%d): '%s'\n",
+					current->comm, current->pid, comp_corename);
+		}
+		else
+			pr_alert("[Pid:%d][COREDUMP_FAIL]: finished dumping core with ERRROR\n",
+				current->pid);
 	}
+fail_rename:
 	if (ispipe && core_pipe_limit)
 		wait_for_dump_helpers(cprm.file);
 close_fail:
@@ -684,6 +1297,8 @@ fail_dropcount:
 		atomic_dec(&core_dump_count);
 fail_unlock:
 	kfree(cn.corename);
+fail_unlock_nonfree:
+#endif
 	coredump_finish(mm, core_dumped);
 	revert_creds(old_cred);
 fail_creds:
@@ -702,14 +1317,25 @@ int dump_emit(struct coredump_params *cprm, const void *addr, int nr)
 	struct file *file = cprm->file;
 	loff_t pos = file->f_pos;
 	ssize_t n;
-	if (cprm->written + nr > cprm->limit)
+
+	if (cprm->written + nr > cprm->limit) {
+			pr_alert("%s failed as cprm->written(%llu) + nr(%d) > cprm->limit(%lu)",
+				__func__, cprm->written, nr, cprm->limit);
 		return 0;
+	}
+
 	while (nr) {
-		if (dump_interrupted())
+		if (dump_interrupted()) {
+			pr_alert("%s failed as dump_interrupted due to pending signal",
+					__func__);
 			return 0;
+		}
 		n = __kernel_write(file, addr, nr, &pos);
-		if (n <= 0)
+		if (n <= 0) {
+			pr_alert("%s failed as __kernel_write failure:%d",
+				__func__, n);
 			return 0;
+		}
 		file->f_pos = pos;
 		cprm->written += n;
 		nr -= n;

@@ -40,6 +40,12 @@
 
 #define SG_MEMPOOL_NR		ARRAY_SIZE(scsi_sg_pools)
 #define SG_MEMPOOL_SIZE		2
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+/* SELP.arm.3.x support A1 2007-10-22 */
+//hongyabi patch for US_FLIDX_SCSI_MAX_32_BLOCK device
+////20070716
+#define US_FLIDX_SCSI_MAX_32_BLOCK      26
+#endif
 
 struct scsi_host_sg_pool {
 	size_t		size;
@@ -583,7 +589,7 @@ static struct scatterlist *scsi_sg_alloc(unsigned int nents, gfp_t gfp_mask)
 
 static void scsi_free_sgtable(struct scsi_data_buffer *sdb, bool mq)
 {
-	if (mq && sdb->table.nents <= SCSI_MAX_SG_SEGMENTS)
+	if (mq && sdb->table.orig_nents <= SCSI_MAX_SG_SEGMENTS)
 		return;
 	__sg_free_table(&sdb->table, SCSI_MAX_SG_SEGMENTS, mq, scsi_sg_free);
 }
@@ -597,8 +603,8 @@ static int scsi_alloc_sgtable(struct scsi_data_buffer *sdb, int nents, bool mq)
 
 	if (mq) {
 		if (nents <= SCSI_MAX_SG_SEGMENTS) {
-			sdb->table.nents = nents;
-			sg_init_table(sdb->table.sgl, sdb->table.nents);
+			sdb->table.nents = sdb->table.orig_nents = nents;
+			sg_init_table(sdb->table.sgl, nents);
 			return 0;
 		}
 		first_chunk = sdb->table.sgl;
@@ -1214,7 +1220,7 @@ static struct scsi_cmnd *scsi_get_cmd_from_req(struct scsi_device *sdev,
 	return cmd;
 }
 
-static int scsi_setup_blk_pc_cmnd(struct scsi_device *sdev, struct request *req)
+int scsi_setup_blk_pc_cmnd(struct scsi_device *sdev, struct request *req)
 {
 	struct scsi_cmnd *cmd = req->special;
 
@@ -1239,12 +1245,12 @@ static int scsi_setup_blk_pc_cmnd(struct scsi_device *sdev, struct request *req)
 	cmd->allowed = req->retries;
 	return BLKPREP_OK;
 }
-
+EXPORT_SYMBOL(scsi_setup_blk_pc_cmnd);
 /*
  * Setup a REQ_TYPE_FS command.  These are simple request from filesystems
  * that still need to be translated to SCSI CDBs from the ULD.
  */
-static int scsi_setup_fs_cmnd(struct scsi_device *sdev, struct request *req)
+int scsi_setup_fs_cmnd(struct scsi_device *sdev, struct request *req)
 {
 	struct scsi_cmnd *cmd = req->special;
 
@@ -1258,6 +1264,7 @@ static int scsi_setup_fs_cmnd(struct scsi_device *sdev, struct request *req)
 	memset(cmd->cmnd, 0, BLK_MAX_CDB);
 	return scsi_cmd_to_driver(cmd)->init_command(cmd);
 }
+EXPORT_SYMBOL(scsi_setup_fs_cmnd);
 
 static int scsi_setup_cmnd(struct scsi_device *sdev, struct request *req)
 {
@@ -1280,8 +1287,7 @@ static int scsi_setup_cmnd(struct scsi_device *sdev, struct request *req)
 	}
 }
 
-static int
-scsi_prep_state_check(struct scsi_device *sdev, struct request *req)
+int scsi_prep_state_check(struct scsi_device *sdev, struct request *req)
 {
 	int ret = BLKPREP_OK;
 
@@ -1335,9 +1341,9 @@ scsi_prep_state_check(struct scsi_device *sdev, struct request *req)
 	}
 	return ret;
 }
+EXPORT_SYMBOL(scsi_prep_state_check);
 
-static int
-scsi_prep_return(struct request_queue *q, struct request *req, int ret)
+int scsi_prep_return(struct request_queue *q, struct request *req, int ret)
 {
 	struct scsi_device *sdev = q->queuedata;
 
@@ -1368,8 +1374,10 @@ scsi_prep_return(struct request_queue *q, struct request *req, int ret)
 
 	return ret;
 }
+EXPORT_SYMBOL(scsi_prep_return);
 
-static int scsi_prep_fn(struct request_queue *q, struct request *req)
+//static int scsi_prep_fn(struct request_queue *q, struct request *req)
+int scsi_prep_fn(struct request_queue *q, struct request *req)
 {
 	struct scsi_device *sdev = q->queuedata;
 	struct scsi_cmnd *cmd;
@@ -1389,6 +1397,7 @@ static int scsi_prep_fn(struct request_queue *q, struct request *req)
 out:
 	return scsi_prep_return(q, req, ret);
 }
+EXPORT_SYMBOL(scsi_prep_fn);	//Giri
 
 static void scsi_unprep_fn(struct request_queue *q, struct request *req)
 {
@@ -2099,11 +2108,23 @@ static void __scsi_init_queue(struct Scsi_Host *shost, struct request_queue *q)
 {
 	struct device *dev = shost->dma_dev;
 
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+    /* VDLP.arm.3.x support A1 2007-10-22 */
+    //hongyabi patch for US_FLIDX_SCSI_MAX_32_BLOCK device
+    //        //20070716
+    if (test_bit(US_FLIDX_SCSI_MAX_32_BLOCK, &shost->flags))
+    {
+        blk_queue_max_segments(q, SCSI_MAX_PHYS_SEGMENTS_32);
+    }
+    else
+#endif
 	/*
 	 * this limit is imposed by hardware restrictions
 	 */
-	blk_queue_max_segments(q, min_t(unsigned short, shost->sg_tablesize,
+    {
+	    blk_queue_max_segments(q, min_t(unsigned short, shost->sg_tablesize,
 					SCSI_MAX_SG_CHAIN_SEGMENTS));
+    }
 
 	if (scsi_host_prot_dma(shost)) {
 		shost->sg_prot_tablesize =

@@ -37,12 +37,46 @@
 #define MODULES_VADDR	(((unsigned long)_etext + ~PMD_MASK) & PMD_MASK)
 #endif
 
+#ifdef CONFIG_KASAN
+#ifndef CONFIG_THUMB2_KERNEL
+/*
+ * The module space lives between the addresses given by TASK_SIZE
+ * module must be it must be within 32MB of the kernel text
+ */
+#define MODULES_START   MODULES_VADDR
+#else
+/* smaller range for Thumb-2 symbols relocation (2^24) */
+#define MODULES_START   ALIGN((unsigned long)_etext - SZ_16M, PAGE_SIZE)
+#endif /* CONFIG_THUMB2_KERNEL */
+
+#else
+
+#define MODULES_START MODULES_VADDR
+#endif /* CONFIG_KASAN */
+
+#ifdef CONFIG_MODULESUSED_PLUS
+unsigned long addr_modules_start;
+unsigned long addr_modules_end;
+
+void init_addr_modules(void)
+{
+	addr_modules_start = MODULES_START;
+	addr_modules_end = MODULES_END;
+}
+#endif
+
 #ifdef CONFIG_MMU
 void *module_alloc(unsigned long size)
 {
-	return __vmalloc_node_range(size, 1, MODULES_VADDR, MODULES_END,
+		 void *ret;
+
+		 ret = __vmalloc_node_range(size, 1, MODULES_VADDR, MODULES_END,
 				GFP_KERNEL, PAGE_KERNEL_EXEC, 0, NUMA_NO_NODE,
 				__builtin_return_address(0));
+#ifdef CONFIG_KASAN
+		kasan_module_load(ret, size);
+#endif
+		return ret;
 }
 #endif
 

@@ -234,6 +234,10 @@ section_table:
 
 ENTRY(stext)
 	bl	preserve_boot_args
+#ifdef CONFIG_BOOTLOADER_ERASE
+	bl	__erase_onboot
+#endif
+
 	bl	el2_setup			// Drop to EL1, w20=cpu_boot_mode
 	adrp	x24, __PHYS_OFFSET
 	bl	set_cpu_boot_mode_flag
@@ -565,6 +569,11 @@ CPU_LE(	movk	x0, #0x30d0, lsl #16	)	// Clear EE and E0E on LE systems
 	msr	hstr_el2, xzr			// Disable CP15 traps to EL2
 #endif
 
+	/* EL2 debug */
+	mrs	x0, pmcr_el0			// Disable debug access traps
+	ubfx	x0, x0, #11, #5			// to EL2 and allow access to
+	msr	mdcr_el2, x0			// all PMU counters from EL1
+
 	/* Stage-2 translation */
 	msr	vttbr_el2, xzr
 
@@ -679,3 +688,18 @@ __enable_mmu:
 	isb
 	br	x27
 ENDPROC(__enable_mmu)
+
+#ifdef CONFIG_BOOTLOADER_ERASE
+	__HEAD
+ENTRY(__erase_onboot)
+	ldr	r3, [r2, #-4]
+	sub	r3, r3, #0x4000		@ start to erase from boot0
+	add	r4, r3, #CONFIG_BOOTLOADER_SIZE
+	mov	r5, #0;
+1:
+	str	r5, [r3], #4
+	teq	r3, r4
+	bne	1b
+	mov pc,lr
+ENDPROC(__erase_onboot)
+#endif

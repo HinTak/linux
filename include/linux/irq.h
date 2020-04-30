@@ -467,6 +467,7 @@ extern int irq_chip_set_affinity_parent(struct irq_data *data,
 					const struct cpumask *dest,
 					bool force);
 extern int irq_chip_set_wake_parent(struct irq_data *data, unsigned int on);
+extern int irq_chip_set_type_parent(struct irq_data *data, unsigned int type);
 #endif
 
 /* Handling of unhandled and spurious interrupts: */
@@ -868,5 +869,14 @@ static inline u32 irq_reg_readl(struct irq_chip_generic *gc,
 	else
 		return readl(gc->reg_base + reg_offset);
 }
+
+#ifdef CONFIG_PRESERVE_IRQ_AFFINITY
+void backup_irq_affinity(unsigned int irq, const struct cpumask *mask);
+void local_restore_irq_affinities(void);
+#else
+static inline void backup_irq_affinity(unsigned int irq, const struct cpumask *mask) { }
+static inline void local_restore_irq_affinities(void) { }
+#endif
+
 
 #endif /* _LINUX_IRQ_H */

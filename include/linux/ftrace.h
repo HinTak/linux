@@ -116,6 +116,7 @@ ftrace_func_t ftrace_ops_get_func(struct ftrace_ops *ops);
  *            SAVE_REGS. If another ops with this flag set is already registered
  *            for any of the functions that this ops will be registered for, then
  *            this ops will fail to register or set_filter_ip.
+ * PID     - Is affected by set_ftrace_pid (allows filtering on those pids)
  */
 enum {
 	FTRACE_OPS_FL_ENABLED			= 1 << 0,
@@ -132,6 +133,7 @@ enum {
 	FTRACE_OPS_FL_MODIFYING			= 1 << 11,
 	FTRACE_OPS_FL_ALLOC_TRAMP		= 1 << 12,
 	FTRACE_OPS_FL_IPMODIFY			= 1 << 13,
+	FTRACE_OPS_FL_PID			= 1 << 14,
 };
 
 #ifdef CONFIG_DYNAMIC_FTRACE
@@ -159,6 +161,7 @@ struct ftrace_ops {
 	struct ftrace_ops		*next;
 	unsigned long			flags;
 	void				*private;
+	ftrace_func_t			saved_func;
 	int __percpu			*disabled;
 #ifdef CONFIG_DYNAMIC_FTRACE
 	int				nr_trampolines;
@@ -572,6 +575,7 @@ extern int ftrace_arch_read_dyn_info(char *buf, int size);
 
 extern int skip_trace(unsigned long ip);
 extern void ftrace_module_init(struct module *mod);
+extern void ftrace_release_mod(struct module *mod);
 
 extern void ftrace_disable_daemon(void);
 extern void ftrace_enable_daemon(void);
@@ -765,16 +769,6 @@ ftrace_push_return_trace(unsigned long ret, unsigned long func, int *depth,
  */
 #define __notrace_funcgraph		notrace
 
-/*
- * We want to which function is an entrypoint of a hardirq.
- * That will help us to put a signal on output.
- */
-#define __irq_entry		 __attribute__((__section__(".irqentry.text")))
-
-/* Limits of hardirq entrypoints */
-extern char __irqentry_text_start[];
-extern char __irqentry_text_end[];
-
 #define FTRACE_NOTRACE_DEPTH 65536
 #define FTRACE_RETFUNC_DEPTH 50
 #define FTRACE_RETSTACK_ALLOC_SIZE 32
@@ -811,7 +805,6 @@ static inline void unpause_graph_tracing(void)
 #else /* !CONFIG_FUNCTION_GRAPH_TRACER */
 
 #define __notrace_funcgraph
-#define __irq_entry
 #define INIT_FTRACE_GRAPH
 
 static inline void ftrace_graph_init_task(struct task_struct *t) { }

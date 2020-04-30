@@ -41,6 +41,8 @@
 #include "blk.h"
 #include "blk-cgroup.h"
 
+#include <linux/vdfs_trace.h>	/* FlashFS : vdfs-trace */
+
 static DEFINE_SPINLOCK(elv_list_lock);
 static LIST_HEAD(elv_list);
 
@@ -71,6 +73,13 @@ bool elv_rq_merge_ok(struct request *rq, struct bio *bio)
 {
 	if (!blk_rq_merge_ok(rq, bio))
 		return 0;
+
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	/* Cannot merge directIO to non-directO requests */
+	if (!(rq->cmd_flags & REQ_DIRECTIO) !=
+		!test_bit(BIO_DIRECT, (unsigned long *)&bio->bi_flags))
+	return 0;
+#endif
 
 	if (!elv_iosched_allow_merge(rq, bio))
 		return 0;
@@ -593,6 +602,7 @@ void elv_drain_elevator(struct request_queue *q)
 void __elv_add_request(struct request_queue *q, struct request *rq, int where)
 {
 	trace_block_rq_insert(q, rq);
+	vdfs_trace_insert_req(rq);
 
 	blk_pm_add_request(q, rq);
 

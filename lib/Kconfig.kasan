@@ -47,6 +47,29 @@ config KASAN_INLINE
 
 endchoice
 
+config KASAN_STACK
+	bool "Address sanitizer for stack area"
+	depends on KASAN
+	default n
+	help
+	  Enable address sanitizer to detect out-of-bounds accesses
+	  on stack variables
+
+config KASAN_VMALLOC
+	bool "Address sanitizer for vmalloc"
+	depends on KASAN
+	default y
+	help
+	  Enable address sanitizer for vmalloc allocator.
+
+config KASAN_GLOBALS
+	bool "Address sanitizer for global variables"
+	depends on KASAN
+	select CONSTRUCTORS
+	default y
+	help
+	  Address sanitizer for global variables.
+
 config TEST_KASAN
 	tristate "Module for testing kasan for bug detection"
 	depends on m && KASAN

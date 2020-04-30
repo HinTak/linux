@@ -71,3 +71,54 @@ config PROC_PAGE_MONITOR
 	  /proc/pid/smaps, /proc/pid/clear_refs, /proc/pid/pagemap,
 	  /proc/kpagecount, and /proc/kpageflags. Disabling these
           interfaces will reduce the size of the kernel by approximately 4kb.
+
+config PROC_VD_POLICY_LIST
+	default y
+	bool "Provide vd_policy of task name for some generic exception"
+	help
+	 By enabling this feature user can enable some /proc entries for user defined
+	 purpose.
+
+config PROC_VD_TASK_LIST
+	default n
+	depends on PROC_VD_POLICY_LIST
+	bool "Default process names for coredump policy"
+	help
+	 Current allowed allowed and exception task list is added by default
+	 more entries possible with /proc file system
+
+config PROC_VD_SIGNAL_HANDLER_LIST
+	default y
+	depends on PROC_VD_POLICY_LIST
+	bool "Enable signal handler for selected process"
+	help
+	 By default user defined signal handler are not allowed for four signals namely
+	 SIGBUS,SIGABRT,SIGSEGV and SIGILL
+	 We can wrtie name of process for which user defined signal handler is allowed
+	 for these signal. File to write process name /proc/vd_signal_allow_for_task
+
+config PROC_VD_SIGNAL_HANDLER_DEFAULT_TASK
+	default y
+	depends on PROC_VD_SIGNAL_HANDLER_LIST
+	bool "Default process names for signal handling"
+	help
+	 Current allowed process is nacl_helper_boo and valgrind
+
+config PROC_VD_SUSPEND_POLICY
+	default y
+	depends on PROC_VD_POLICY_LIST && FANOTIFY_ACCESS_PERMISSIONS
+	bool "Change freeze order of userspace processes"
+	help
+	 Framework for changing freeze order of userspace processes during suspend
+	 An interface is provided using which any process can be registered:
+	 echo "process_name" > /proc/vd_suspend_policy_list
+	 This should mainly be the process (kind of server) who is responsible for
+	 replying to the other processes. And after registeration for suspend policy,
+	 the process will be considered to be suspend at last i.e., after all other
+	 processes are suspended.
+
+config PROC_SCHED_CPU_AFFINITY
+        bool "Support setting sched cpu affinity"
+        default y
+        help
+          Enable to support setting sched cpu affinity

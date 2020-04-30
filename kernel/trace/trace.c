@@ -3218,11 +3218,17 @@ static int tracing_open(struct inode *inode, struct file *file)
 	/* If this file was open for write, then erase contents */
 	if ((file->f_mode & FMODE_WRITE) && (file->f_flags & O_TRUNC)) {
 		int cpu = tracing_get_cpu(inode);
+		struct trace_buffer *trace_buf = &tr->trace_buffer;
+
+#ifdef CONFIG_TRACER_MAX_TRACE
+		if (tr->current_trace->print_max)
+			trace_buf = &tr->max_buffer;
+#endif
 
 		if (cpu == RING_BUFFER_ALL_CPUS)
-			tracing_reset_online_cpus(&tr->trace_buffer);
+			tracing_reset_online_cpus(trace_buf);
 		else
-			tracing_reset(&tr->trace_buffer, cpu);
+			tracing_reset(trace_buf, cpu);
 	}
 
 	if (file->f_mode & FMODE_READ) {
@@ -4668,7 +4674,7 @@ static int tracing_wait_pipe(struct file *filp)
 		 *
 		 * iter->pos will be 0 if we haven't read anything.
 		 */
-		if (!tracing_is_on() && iter->pos)
+		if (!tracer_tracing_is_on(iter->tr) && iter->pos)
 			break;
 
 		mutex_unlock(&iter->mutex);
@@ -5066,9 +5072,10 @@ tracing_mark_write(struct file *filp, const char __user *ubuf,
 	struct ring_buffer *buffer;
 	struct print_entry *entry;
 	unsigned long irq_flags;
+	char buf[256];
 	struct page *pages[2];
 	void *map_page[2];
-	int nr_pages = 1;
+	int nr_pages;
 	ssize_t written;
 	int offset;
 	int size;
@@ -5101,23 +5108,35 @@ tracing_mark_write(struct file *filp, const char __user *ubuf,
 	 */
 	BUILD_BUG_ON(TRACE_BUF_SIZE >= PAGE_SIZE);
 
-	/* check if we cross pages */
-	if ((addr & PAGE_MASK) != ((addr + cnt) & PAGE_MASK))
-		nr_pages = 2;
+	/*
+	 * For small sized traces, we uses local buffer to avoid page mapping
+	 * overhead. It reduces write latency by 50%.
+	 */ 
+	if (likely(cnt < 256)) {
+		if (copy_from_user(buf, ubuf, 256))
+			return -EFAULT;
+		nr_pages = 0;
+	} else {
+		/* check if we cross pages */
+		if ((addr & PAGE_MASK) != ((addr + cnt) & PAGE_MASK))
+			nr_pages = 2;
+		else
+			nr_pages = 1;
 
-	offset = addr & (PAGE_SIZE - 1);
-	addr &= PAGE_MASK;
+		offset = addr & (PAGE_SIZE - 1);
+		addr &= PAGE_MASK;
 
-	ret = get_user_pages_fast(addr, nr_pages, 0, pages);
-	if (ret < nr_pages) {
-		while (--ret >= 0)
-			put_page(pages[ret]);
-		written = -EFAULT;
-		goto out;
+		ret = get_user_pages_fast(addr, nr_pages, 0, pages);
+		if (ret < nr_pages) {
+			while (--ret >= 0)
+				put_page(pages[ret]);
+			written = -EFAULT;
+			goto out;
+		}
+
+		for (i = 0; i < nr_pages; i++)
+			map_page[i] = kmap_atomic(pages[i]);
 	}
-
-	for (i = 0; i < nr_pages; i++)
-		map_page[i] = kmap_atomic(pages[i]);
 
 	local_save_flags(irq_flags);
 	size = sizeof(*entry) + cnt + 2; /* possible \n added */
@@ -5133,12 +5152,19 @@ tracing_mark_write(struct file *filp, const char __user *ubuf,
 	entry = ring_buffer_event_data(event);
 	entry->ip = _THIS_IP_;
 
-	if (nr_pages == 2) {
+	switch (nr_pages) {
+	case 0:
+		memcpy(&entry->buf, buf, cnt);
+		break;
+	case 1:
+		memcpy(&entry->buf, map_page[0] + offset, cnt);
+		break;
+	case 2:
 		len = PAGE_SIZE - offset;
 		memcpy(&entry->buf, map_page[0] + offset, len);
 		memcpy(&entry->buf[len], map_page[1], cnt - len);
-	} else
-		memcpy(&entry->buf, map_page[0] + offset, cnt);
+		break;
+	}
 
 	if (entry->buf[cnt - 1] != '\n') {
 		entry->buf[cnt] = '\n';
@@ -5200,7 +5226,7 @@ static int tracing_set_clock(struct trace_array *tr, const char *clockstr)
 	tracing_reset_online_cpus(&tr->trace_buffer);
 
 #ifdef CONFIG_TRACER_MAX_TRACE
-	if (tr->flags & TRACE_ARRAY_FL_GLOBAL && tr->max_buffer.buffer)
+	if (tr->max_buffer.buffer)
 		ring_buffer_set_clock(tr->max_buffer.buffer, trace_clocks[i].func);
 	tracing_reset_online_cpus(&tr->max_buffer);
 #endif
@@ -5720,7 +5746,7 @@ tracing_buffers_splice_read(struct file *file, loff_t *ppos,
 		.spd_release	= buffer_spd_release,
 	};
 	struct buffer_ref *ref;
-	int entries, size, i;
+	int entries, i;
 	ssize_t ret = 0;
 
 #ifdef CONFIG_TRACER_MAX_TRACE
@@ -5770,14 +5796,6 @@ tracing_buffers_splice_read(struct file *file, loff_t *ppos,
 			kfree(ref);
 			break;
 		}
-
-		/*
-		 * zero out any left over data, this is going to
-		 * user land.
-		 */
-		size = ring_buffer_page_len(ref->page);
-		if (size < PAGE_SIZE)
-			memset(ref->page + size, 0, PAGE_SIZE - size);
 
 		page = virt_to_page(ref->page);
 
@@ -6019,11 +6037,13 @@ ftrace_trace_snapshot_callback(struct ftrace_hash *hash,
 		return ret;
 
  out_reg:
+	ret = alloc_snapshot(&global_trace);
+	if (ret < 0)
+		goto out;
+
 	ret = register_ftrace_function_probe(glob, ops, count);
 
-	if (ret >= 0)
-		alloc_snapshot(&global_trace);
-
+ out:
 	return ret < 0 ? ret : 0;
 }
 
@@ -6445,6 +6465,7 @@ allocate_trace_buffer(struct trace_array *tr, struct trace_buffer *buf, int size
 	buf->data = alloc_percpu(struct trace_array_cpu);
 	if (!buf->data) {
 		ring_buffer_free(buf->buffer);
+		buf->buffer = NULL;
 		return -ENOMEM;
 	}
 
@@ -6468,7 +6489,9 @@ static int allocate_trace_buffers(struct trace_array *tr, int size)
 				    allocate_snapshot ? size : 1);
 	if (WARN_ON(ret)) {
 		ring_buffer_free(tr->trace_buffer.buffer);
+		tr->trace_buffer.buffer = NULL;
 		free_percpu(tr->trace_buffer.data);
+		tr->trace_buffer.data = NULL;
 		return -ENOMEM;
 	}
 	tr->allocated_snapshot = allocate_snapshot;
