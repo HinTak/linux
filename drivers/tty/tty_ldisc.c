@@ -26,6 +26,12 @@
  *	callers who will do ldisc lookups and cannot sleep.
  */
 
+/* VDLinux, based SELP.Mstar default patch No.15,
+   n_tty serial input disable, SP Team 2010-01-29 */
+#ifdef CONFIG_SERIAL_INPUT_MANIPULATION
+extern struct tty_struct *INPUT_tty;
+#endif
+
 static DEFINE_RAW_SPINLOCK(tty_ldisc_lock);
 static DECLARE_WAIT_QUEUE_HEAD(tty_ldisc_wait);
 /* Line disc dispatch table */
@@ -879,9 +885,35 @@ int tty_ldisc_setup(struct tty_struct *tty, struct tty_struct *o_tty)
 	struct tty_ldisc *ld = tty->ldisc;
 	int retval;
 
+#ifdef CONFIG_SERIAL_INPUT_MANIPULATION
+#if CONFIG_SERIAL_INPUT_MANIPULATION_PORTNUM >= 10
+#error  "Serial port number is over one digit, check CONFIG_SERIAL_INPUT_MANIPULATION_PORTNUM"
+#endif
+	char buf[6];    /* console name of one digit port number */
+	snprintf(buf, 6, "ttyS%d", CONFIG_SERIAL_INPUT_MANIPULATION_PORTNUM);
+
+	if ((ld->ops->open) && (!strncmp(buf, tty->name, strlen(buf)))) {
+#ifdef CONFIG_SERIAL_INPUT_ENABLE_HELP_MSG
+		printk(KERN_CONT "[SERIAL INPUT MANAGE]"
+			" Managed tty_struct(.name:%s) Setup!!!\n", tty->name);
+#endif
+		INPUT_tty = tty;
+	}
+#endif
+
 	retval = tty_ldisc_open(tty, ld);
-	if (retval)
+	if (retval) {
+#ifdef CONFIG_SERIAL_INPUT_MANIPULATION
+		if((INPUT_tty != NULL) && (!strncmp(tty->name, buf, strlen(buf)))) {
+			INPUT_tty = NULL;
+#ifdef CONFIG_SERIAL_INPUT_ENABLE_HELP_MSG
+			printk(KERN_CONT "[SERIAL INPUT MANAGE]"
+				" Managed tty_struct(.name:%s) failed!!!\n", tty->name);
+#endif
+		}
+#endif
 		return retval;
+	}
 
 	if (o_tty) {
 		retval = tty_ldisc_open(o_tty, o_tty->ldisc);

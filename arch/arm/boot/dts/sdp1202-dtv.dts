@@ -1,0 +1,157 @@
+/*
+ * Copyright (C) 2013 Samsung Electronics Co.Ltd
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
+/dts-v1/;
+/include/ "sdp1202.dtsi"
+
+/ {
+	model = "Samsung DTV based on SDP1202 SoC";
+	compatible = "samsung,dtv", "samsung,sdp1202";
+
+	memory {
+		reg =  <0x50000000 0x60000000>;
+	};
+
+	chosen {
+		bootargs = "console=ttyS0,115200N8 root=/dev/mmcblk0p8 rootfstype=squashfs rw rootwait earlyprintk";
+	};
+
+	fixed-rate-clocks {
+		fin {
+			compatible = "samsung,sdp1202-clock-fin";
+			clock-frequency = <24000000>;
+		};
+	};
+
+	serial@10090A00 {
+		status = "okay";
+	};
+
+	serial@10090A80 {
+		compatible = "samsung,sdp1202-uart-micom";
+		status = "okay";
+	};
+
+	i2c@10090100 {
+		status = "disabled";
+	};
+
+	i2c@10090120 {
+		status = "disabled";
+	};
+
+	i2c@10090140 {
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x100901F4>;
+
+		tps56921@37 {
+			compatible = "ti,tps56921";
+			reg = <0x37>;
+
+			regulator-name = "AP_CPU_1.1V_PW";
+			regulator-min-microvolt = <1130000>;
+			regulator-max-microvolt = <1130000>;
+			regulator-always-on;
+			regulator-boot-on;
+		};
+	};
+
+	i2c@10090160 {
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x100901F4>;
+
+		tps65279@0x60 {
+			compatible = "ti,tps65279";
+			reg = <0x60>;
+
+			regulators {
+				ap_gpu: VOUT1 {
+					regulator-name = "AP_GPU_1.1V_PW";
+					regulator-min-microvolt = <1100000>;
+					regulator-max-microvolt = <1100000>;
+					regulator-always-on;
+					regulator-boot-on;
+				};
+
+				mp: VOUT2 {
+					regulator-name = "MP_1.1V_PW";
+					regulator-min-microvolt = <1100000>;
+					regulator-max-microvolt = <1100000>;
+					regulator-always-on;
+					regulator-boot-on;
+				};
+			};
+		};
+	};
+
+	i2c@10090180 {
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x100901F4>;
+
+
+		panel@64 {
+			compatible = "samsung,foxft1-frc";
+			reg = <0x64>;
+		};
+	};
+
+	i2c@100901A0 {
+		status = "disabled";
+	};
+
+	i2c@100901C0 {
+		status = "disabled";
+	};
+
+	i2c@100901E0 {
+		status = "disabled";
+	};
+
+	i2c-gpio-0 {
+		compatible = "i2c-gpio";
+		gpios = <&gpio1 2 0>, <&gpio1 1 0>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		panel@76 {
+			compatible = "samsung,foxft1-tcon";
+			reg = <0x76>;
+		};
+	};
+
+	dummy_panel {
+		compatible = "dummy_panel";
+
+		display-timings {
+			native-mode = <&timing0>;
+
+			timing0: timing-0 {
+				 clock-frequency = <0>;
+				 hactive = <1920>;
+				 vactive = <1080>;
+				 hfront-porch = <0>;
+				 hback-porch = <0>;
+				 hsync-len = <0>;
+				 vfront-porch = <0>;
+				 vback-porch = <0>;
+				 vsync-len = <0>;
+			};
+		};
+	};
+
+	ehci@100E0000 {
+		status = "okay";
+	};
+
+	ohci@100E8000 {
+		status = "okay";
+	};
+};

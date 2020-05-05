@@ -23,6 +23,17 @@
 
 #include "internal.h"
 
+#ifdef CONFIG_PER_PROCESS
+#include <linux/dep_aslr_process_list.h>
+#ifdef CONFIG_REGISTER_PROCESSLIST_BY_PROC
+DEFINE_MUTEX(process_aslr_dep_lock);
+LIST_HEAD(pax_process_list);
+bool is_accessible = true;
+static char dep_aslr_procfs_buffer[DEP_ASLR_PROCFS_MAX_SIZE];
+struct proc_dir_entry *dep_aslr_proc_file;
+#endif
+#endif /*CONFIG_PER_PROCESS*/
+
 static int proc_test_super(struct super_block *sb, void *data)
 {
 	return sb->s_fs_info == data;
@@ -152,6 +163,250 @@ static struct file_system_type proc_fs_type = {
 	.fs_flags	= FS_USERNS_MOUNT,
 };
 
+#ifdef CONFIG_REGISTER_PROCESSLIST_BY_PROC
+/**
+ * is_duplicate_in_process_list - Check duplication of process name
+ *                                in process list
+ * @procname: Name of the process
+ *
+ * Returns linklist node on success or NULL otherwise
+ */
+static struct process_list *is_duplicate_in_process_list(const char *procname)
+{
+	struct process_list *plist;
+	rcu_read_lock();
+	list_for_each_entry_rcu(plist, &pax_process_list, list) {
+			if (!strcmp(plist->process_name, procname)) {
+				rcu_read_unlock();
+				return plist;
+			}
+	}
+	rcu_read_unlock();
+	return NULL;
+}
+
+/**
+ * add_process_list - this function creates a linked list of
+ *                    processes and their aslr/dep enable/disable values after
+ *                    getting values from /proc/dep_aslr_disable_process_list
+ *                    interface
+ * @procname: Name of the process
+ * @aslr: aslr value for the process
+ * @dep: dep value for the process
+ *
+ * Returns 0 on success or -ENOMEM otherwise
+ */
+static int add_process_list(char *procname, char *aslr, char *dep)
+{
+	struct process_list *plist;
+	struct process_list *tmplist = NULL;
+	int error = -ENOMEM;
+
+	if (!strcmp(procname, "INTERFACE") &&
+		!strcmp(aslr, "DONE") && !strcmp(dep, "DONE")) {
+		mutex_lock(&process_aslr_dep_lock);
+		is_accessible = false;
+		mutex_unlock(&process_aslr_dep_lock);
+		return 0;
+	}
+
+	plist = kzalloc(sizeof(struct process_list), GFP_KERNEL);
+	if (plist) {
+		error = 0;
+		if (aslr && !strcmp(aslr, "NOASLR"))
+			plist->aslr_enable = 0;
+		else if (aslr && !strcmp(aslr, "ASLR"))
+			plist->aslr_enable = 1;
+		else
+			goto out;
+
+		if (dep && !strcmp(dep, "NODEP"))
+			plist->dep_enable = 0;
+		else if (dep && !strcmp(dep, "DEP"))
+			plist->dep_enable = 1;
+		else
+			goto out;
+
+		/*if ASLR and DEP both are enable then no need
+		to add in process list*/
+		if (!plist->aslr_enable && !plist->dep_enable)
+			goto out;
+
+		/*if process name is already there in process
+		lits then no need to make duplicate entry in
+		process list*/
+		tmplist = is_duplicate_in_process_list(procname);
+		if (!tmplist) {
+			plist->process_name =
+			(char *)kzalloc((strlen(procname)+1), GFP_KERNEL);
+			if (plist->process_name)
+				strncpy(plist->process_name, procname,
+						strlen(procname) + 1);
+			mutex_lock(&process_aslr_dep_lock);
+			list_add_rcu(&(plist->list), &(pax_process_list));
+			mutex_unlock(&process_aslr_dep_lock);
+		} else {
+			if ((tmplist->dep_enable == plist->dep_enable) &&
+				(tmplist->aslr_enable == plist->aslr_enable))
+				goto out; /*entry is duplicate*/
+
+			if (tmplist->dep_enable != plist->dep_enable)
+				tmplist->dep_enable =  plist->dep_enable;
+			if (tmplist->aslr_enable != plist->aslr_enable)
+				tmplist->aslr_enable =  plist->aslr_enable;
+
+			kfree(plist);
+		}
+
+	}
+
+	return error;
+out:
+	kfree(plist);
+	return -EINVAL;
+}
+
+/**
+ * dep_aslr_procfile_read - This function is used to read
+ *                          process list from /proc/dep_aslr_dep_per_process
+ * @buffer: buffer to copy data
+ * @buffer_location: location in buffer
+ * @offset: offset in buffer
+ * @buffer_length: length of buffer
+ * @eof: end of buffer
+ * @data: data
+ *
+ * Returns 0 on success
+ */
+static int dep_aslr_procfile_read(char *buffer, char **buffer_location,
+			 off_t offset, int buffer_length,
+			 int *eof, void *data)
+{
+	struct process_list *plist;
+
+	mutex_lock(&process_aslr_dep_lock);
+	if (!is_accessible) {
+		mutex_unlock(&process_aslr_dep_lock);
+		return -EPERM;
+	}
+	mutex_unlock(&process_aslr_dep_lock);
+	rcu_read_lock();
+	list_for_each_entry_rcu(plist, &pax_process_list, list) {
+			/*Just trying to align*/
+			printk("%-100s  ", plist->process_name);
+			if (plist->aslr_enable)
+				printk("ASLR");
+			else
+				printk("NOASLR");
+
+#ifdef CONFIG_PAX_MPROTECT
+			if (plist->dep_enable)
+				printk("    DEP\n");
+			else
+				printk("    NODEP\n");
+#else
+			printk("\n");
+#endif
+	}
+	rcu_read_unlock();
+
+	return 0;
+}
+
+/**
+ * dep_aslr_procfile_write - this function provides write interface
+ *                           for proc entry /proc/dep_aslr_disable_per_process
+ * @file: file structure
+ * @buffer: buffer to store data
+ * @count: counter
+ * @data: data to be used
+ *
+ * Return counter value on success or error otherwise
+ */
+static int dep_aslr_procfile_write(struct file *file, const char *buffer,
+			 unsigned long count, void *data)
+{
+	char *procname;
+	char *aslr;
+	char *dep;
+	int  error = -1;
+
+	mutex_lock(&process_aslr_dep_lock);
+	if (!is_accessible) {
+		mutex_unlock(&process_aslr_dep_lock);
+		return -EPERM;
+	}
+	mutex_unlock(&process_aslr_dep_lock);
+
+	if (count >= DEP_ASLR_PROCFS_MAX_SIZE)
+		return -EINVAL;
+
+	/* get buffer size          */
+	/* write data to the buffer */
+	if (copy_from_user(dep_aslr_procfs_buffer, buffer, count))
+		return -EFAULT;
+
+	dep_aslr_procfs_buffer[count] = '\0';
+
+	procname = kzalloc(count+1, GFP_KERNEL);
+	if (procname == NULL)
+		return -1;
+	aslr = kzalloc(count, GFP_KERNEL);
+	if (aslr == NULL)
+		goto free_out_aslr;
+	dep = kzalloc(count, GFP_KERNEL);
+	if (dep == NULL)
+		goto free_out_dep;
+
+	/*due to this parsing it is compulsory to write entries in
+	"/etc/process_list"  like this (otherwise theer will be problem
+	in getting currect values)
+	"process_name NOASLR  NODEP"=>for process name ASLR DEP
+				      both are disabled
+	"process_name NOASLR  DEP"=>for process name ASLR
+				      is disabled and DEP is enabled
+	"process_name ASLR    NODEP"=>for process name
+				      ASLR is enabled and  DEP is disabled
+	*/
+	if (sscanf(dep_aslr_procfs_buffer, "%s %s %s",
+					procname, aslr, dep) == 3)
+		error = add_process_list(procname, aslr, dep);
+
+	kfree(dep);
+free_out_dep:
+	kfree(aslr);
+free_out_aslr:
+	kfree(procname);
+
+	if (error < 0)
+		return error;
+	return count;
+}
+
+
+/**
+ * proc_grsecurity_per_process_init - function creats proc interface
+ *                                    "/proc/dep_aslr_disable_process_list"
+ *
+ * Creates interface in proc file system on success.
+ */
+void proc_grsecurity_per_process_init(void)
+{
+	if (dep_aslr_proc_file == NULL)
+		dep_aslr_proc_file = create_proc_entry(dep_aslr_procfs_name,
+							0644, NULL);
+	if (dep_aslr_proc_file) {
+		dep_aslr_proc_file->read_proc = dep_aslr_procfile_read;
+		dep_aslr_proc_file->write_proc = dep_aslr_procfile_write;
+		dep_aslr_proc_file->mode      = S_IFREG | S_IRUGO;
+		dep_aslr_proc_file->uid       = 0;
+		dep_aslr_proc_file->gid       = 0;
+		dep_aslr_proc_file->size      = 2056;
+	}
+}
+
+#endif /*end config CONFIG_REGISTER_PROCESSLIST_BY_PROC*/
+
 void __init proc_root_init(void)
 {
 	int err;
@@ -182,6 +437,10 @@ void __init proc_root_init(void)
 #endif
 	proc_mkdir("bus", NULL);
 	proc_sys_init();
+#ifdef CONFIG_REGISTER_PROCESSLIST_BY_PROC
+	/*Make /proc/interface to provide a list of process*/
+	proc_grsecurity_per_process_init();
+#endif
 }
 
 static int proc_root_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat

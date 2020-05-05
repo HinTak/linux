@@ -75,7 +75,7 @@ if [ $(words $(UIMAGE_LOADADDR)) -gt 1 ]; then \
 	false; \
 fi
 
-$(obj)/uImage:	$(obj)/zImage FORCE
+$(obj)/uImage:	$(obj)/Image FORCE
 	@$(check_for_multiple_loadaddr)
 	$(call if_changed,uimage)
 	@$(kecho) '  Image $@ is ready'

@@ -34,6 +34,20 @@ config NET_CORE
 
 if NET_CORE
 
+config SMSC_9500_USB_NET
+	tristate "SMSC LAN95XX Family USB network framework"
+	select SMSC_9500
+	help
+	  Linux v1.01.28 Driver for SMSC LAN95XX Family USB 2.0
+	  to Ethernet Controller and USB Hub with Ethernet.
+
+config SMSC_9500
+	tristate "SMSC LAN95XX Family USB 2.0 to Ethernet Controller"
+	depends on SMSC_9500_USB_NET
+	help
+	  Linux v1.01.28 Driver for SMSC LAN95XX Family USB 2.0
+	  to Ethernet Controller and USB Hub with Ethernet.
+
 config BONDING
 	tristate "Bonding driver support"
 	depends on INET

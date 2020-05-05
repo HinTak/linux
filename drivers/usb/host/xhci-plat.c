@@ -14,9 +14,13 @@
 #include <linux/platform_device.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/of.h>
+#include <linux/dma-mapping.h>
 
 #include "xhci.h"
-
+#ifdef CONFIG_ARCH_SDP1202
+extern unsigned int sdp_revision_id;
+#endif
 static void xhci_plat_quirks(struct device *dev, struct xhci_hcd *xhci)
 {
 	/*
@@ -30,7 +34,32 @@ static void xhci_plat_quirks(struct device *dev, struct xhci_hcd *xhci)
 /* called during probe() after chip reset completes */
 static int xhci_plat_setup(struct usb_hcd *hcd)
 {
+#ifdef CONFIG_ARCH_SDP1202
+#define XHCI_GRXTHRCFG_OFFSET   (0xc10c)
+
+	/*RX FIFO threadshold*/
+	/*
+		[29]receive packet count enable
+		[27:24]Receive packet count
+		[23:19]Max Receive Burst Szie 		
+	*/
+	int ret = 0;
+	int temp;
+	
+	ret = xhci_gen_setup(hcd, xhci_plat_quirks);
+
+	if (hcd->regs && usb_hcd_is_primary_hcd(hcd)) {
+		temp = 1 << 29 | 3 << 24 | 3 << 19;
+		writel(temp, (hcd->regs + XHCI_GRXTHRCFG_OFFSET));
+		pr_info("xhci(Fox-AP) : Apply RxFifo Threshold control\n");
+	}
+
+	return ret;
+#else
 	return xhci_gen_setup(hcd, xhci_plat_quirks);
+#endif
+
+	
 }
 
 static const struct hc_driver xhci_plat_xhci_driver = {
@@ -63,6 +92,9 @@ static const struct hc_driver xhci_plat_xhci_driver = {
 	.free_streams =		xhci_free_streams,
 	.add_endpoint =		xhci_add_endpoint,
 	.drop_endpoint =	xhci_drop_endpoint,
+#ifdef SAMSUNG_PATCH_WITH_NEW_xHCI_API_FOR_BUGGY_DEVICE
+	.enable_control_endpoint= xhci_enable_control_endpoint,	/*Aman, added for BSR=1 address command*/
+#endif	
 	.endpoint_reset =	xhci_endpoint_reset,
 	.check_bandwidth =	xhci_check_bandwidth,
 	.reset_bandwidth =	xhci_reset_bandwidth,
@@ -82,6 +114,10 @@ static const struct hc_driver xhci_plat_xhci_driver = {
 	.bus_resume =		xhci_bus_resume,
 };
 
+#if defined(CONFIG_ARCH_SDP)
+static u64 sdp_dma_mask = DMA_BIT_MASK(32);
+#endif
+
 static int xhci_plat_probe(struct platform_device *pdev)
 {
 	const struct hc_driver	*driver;
@@ -91,6 +127,15 @@ static int xhci_plat_probe(struct platform_device *pdev)
 	int			ret;
 	int			irq;
 
+#if defined(CONFIG_ARCH_SDP)
+	pdev->dev.dma_mask = &sdp_dma_mask;
+#if defined(CONFIG_ARM_LPAE)
+	pdev->dev.coherent_dma_mask = DMA_BIT_MASK(64);
+#else
+	if (!pdev->dev.coherent_dma_mask)
+	     pdev->dev.coherent_dma_mask = DMA_BIT_MASK(32);
+#endif	
+#endif
 	if (usb_disabled())
 		return -ENODEV;
 
@@ -118,12 +163,30 @@ static int xhci_plat_probe(struct platform_device *pdev)
 		goto put_hcd;
 	}
 
+#ifdef CONFIG_ARCH_SDP1202
+	if ( sdp_revision_id ) {
+		hcd->regs = ioremap_nocache(hcd->rsrc_start, hcd->rsrc_len);
+		if (!hcd->regs) {
+			dev_dbg(&pdev->dev, "error mapping memory\n");
+			ret = -EFAULT;
+			goto release_mem_region;
+		}
+	}else {
+		hcd->regs = ioremap_wc(hcd->rsrc_start, hcd->rsrc_len);
+		if (!hcd->regs) {
+			dev_dbg(&pdev->dev, "error mapping memory\n");
+			ret = -EFAULT;
+			goto release_mem_region;
+		}
+	}
+#else
 	hcd->regs = ioremap_nocache(hcd->rsrc_start, hcd->rsrc_len);
 	if (!hcd->regs) {
 		dev_dbg(&pdev->dev, "error mapping memory\n");
 		ret = -EFAULT;
 		goto release_mem_region;
 	}
+#endif	
 
 	ret = usb_add_hcd(hcd, irq, IRQF_SHARED);
 	if (ret)
@@ -179,17 +242,109 @@ static int xhci_plat_remove(struct platform_device *dev)
 
 	usb_remove_hcd(hcd);
 	iounmap(hcd->regs);
+	release_mem_region(hcd->rsrc_start, hcd->rsrc_len);
 	usb_put_hcd(hcd);
+
 	kfree(xhci);
 
 	return 0;
 }
 
-static struct platform_driver usb_xhci_driver = {
+#if defined(CONFIG_PM)
+static int xhci_plat_suspend(struct platform_device *dev, pm_message_t state)
+{
+	struct usb_hcd	*hcd = platform_get_drvdata(dev);
+	struct xhci_hcd	*xhci = hcd_to_xhci(hcd);
+
+	return xhci_suspend(xhci);
+}
+
+static int xhci_plat_resume(struct platform_device *dev)
+{
+	struct usb_hcd	*hcd = platform_get_drvdata(dev);
+	struct xhci_hcd	*xhci = hcd_to_xhci(hcd);
+#if defined(CONFIG_ARCH_SDP)
+	struct usb_hcd		*secondary_hcd;
+	int			retval = 0;
+
+	/* Wait a bit if either of the roothubs need to settle from the
+	 * transition into bus suspend.
+	 */
+	if (time_before(jiffies, xhci->bus_state[0].next_statechange) ||
+			time_before(jiffies,xhci->bus_state[1].next_statechange))
+		msleep(100);
+
+	set_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags);
+	set_bit(HCD_FLAG_HW_ACCESSIBLE, &xhci->shared_hcd->flags);
+
+	
+	xhci_dbg(xhci, "cleaning up memory\n");
+	xhci_mem_cleanup(xhci);
+	xhci_dbg(xhci, "xhci_stop completed - status = %x\n",
+		    xhci_readl(xhci, &xhci->op_regs->status));
+
+	/* USB core calls the PCI reinit and start functions twice:
+	 * first with the primary HCD, and then with the secondary HCD.
+	 * If we don't do the same, the host will never be started.
+	 */
+	if (!usb_hcd_is_primary_hcd(hcd))
+		secondary_hcd = hcd;
+	else
+		secondary_hcd = xhci->shared_hcd;
+
+	xhci_dbg(xhci, "Initialize the xhci_hcd\n");
+	retval = xhci_init(hcd->primary_hcd);
+	if (retval)
+		return retval;
+	xhci_dbg(xhci, "Start the primary HCD\n");
+	retval = xhci_run(hcd->primary_hcd);
+	if (!retval) {
+		xhci_dbg(xhci, "Start the secondary HCD\n");
+		retval = xhci_run(secondary_hcd);
+	}
+	hcd->state = HC_STATE_SUSPENDED;
+	xhci->shared_hcd->state = HC_STATE_SUSPENDED;
+
+	if (retval == 0) {
+		usb_hcd_resume_root_hub(hcd);
+		usb_hcd_resume_root_hub(xhci->shared_hcd);
+	}
+
+	/* Re-enable port polling. */
+	xhci_dbg(xhci, "%s: starting port polling.\n", __func__);
+	set_bit(HCD_FLAG_POLL_RH, &hcd->flags);
+	usb_hcd_poll_rh_status(hcd);
+	
+	return retval;	
+
+#else
+	return = xhci_resume(xhci, false);	
+#endif
+
+}
+#endif
+
+#if defined(CONFIG_OF)
+static const struct of_device_id plat_xhci_match[] = {
+    {.compatible = "samsung,xhci-hcd"},
+    {},
+};
+#endif
+
+static struct platform_driver usb_xhci_driver  = {
 	.probe	= xhci_plat_probe,
 	.remove	= xhci_plat_remove,
+#if defined(CONFIG_PM)	
+	.suspend = xhci_plat_suspend,
+	.resume = xhci_plat_resume,
+#endif
 	.driver	= {
 		.name = "xhci-hcd",
+#if defined(CONFIG_OF)
+		.owner = THIS_MODULE,
+		.bus = &platform_bus_type,
+		.of_match_table = of_match_ptr(plat_xhci_match),
+#endif		
 	},
 };
 MODULE_ALIAS("platform:xhci-hcd");
@@ -203,3 +358,4 @@ void xhci_unregister_plat(void)
 {
 	platform_driver_unregister(&usb_xhci_driver);
 }
+

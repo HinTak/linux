@@ -79,8 +79,10 @@ extern ssize_t squashfs_listxattr(struct dentry *, char *, size_t);
 /* dir.c */
 extern const struct file_operations squashfs_dir_ops;
 
+#ifdef CONFIG_ENABLE_SQUASHFS_EXPORT
 /* export.c */
 extern const struct export_operations squashfs_export_ops;
+#endif
 
 /* file.c */
 extern const struct address_space_operations squashfs_aops;
@@ -97,3 +99,16 @@ extern const struct inode_operations squashfs_symlink_inode_ops;
 
 /* xattr.c */
 extern const struct xattr_handler *squashfs_xattr_handlers[];
+
+#ifdef CONFIG_SQUASHFS_DEBUGGER
+/* debug_print.c */
+struct debug_print_state;
+extern void debug_print(struct debug_print_state *state);
+extern void debug_set_file_name(struct file *file);
+#else
+struct debug_print_state;
+static inline void debug_print(struct debug_print_state *state)
+{}
+static inline void debug_set_file_name(struct file *file)
+{}
+#endif

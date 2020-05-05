@@ -1192,7 +1192,7 @@ struct drm_device {
 
 	/** \name GEM information */
 	/*@{ */
-	spinlock_t object_name_lock;
+	struct mutex object_name_lock;
 	struct idr object_name_idr;
 	/*@} */
 	int switch_power_state;
@@ -1566,6 +1566,9 @@ int drm_prime_add_dma_buf(struct drm_device *dev, struct drm_gem_object *obj);
 int drm_prime_lookup_obj(struct drm_device *dev, struct dma_buf *buf,
 			 struct drm_gem_object **obj);
 
+extern void drm_prime_remove_buf_handle_locked(struct drm_prime_file_private *prime_fpriv,
+					struct dma_buf *dma_buf);
+
 #if DRM_DEBUG_CODE
 extern int drm_vma_info(struct seq_file *m, void *data);
 #endif
@@ -1642,6 +1645,9 @@ drm_gem_object_unreference_unlocked(struct drm_gem_object *obj)
 	}
 }
 
+int drm_gem_handle_create_tail(struct drm_file *file_priv,
+			       struct drm_gem_object *obj,
+			       u32 *handlep);
 int drm_gem_handle_create(struct drm_file *file_priv,
 			  struct drm_gem_object *obj,
 			  u32 *handlep);
@@ -1672,6 +1678,17 @@ drm_gem_object_handle_unreference(struct drm_gem_object *obj)
 	drm_gem_object_unreference(obj);
 }
 
+extern void dma_buf_put(struct dma_buf *dmabuf);
+static inline void 
+drm_gem_object_exported_dma_buf_free(struct drm_gem_object *obj)
+{
+        /* Unbreak the reference cycle if we have an exported dma_buf. */
+        if (obj->export_dma_buf) {
+                dma_buf_put(obj->export_dma_buf);
+                obj->export_dma_buf = NULL;
+        }
+}
+
 static inline void
 drm_gem_object_handle_unreference_unlocked(struct drm_gem_object *obj)
 {
@@ -1688,7 +1705,10 @@ drm_gem_object_handle_unreference_unlocked(struct drm_gem_object *obj)
 	*/
 
 	if (atomic_dec_and_test(&obj->handle_count))
+        {
 		drm_gem_object_handle_free(obj);
+		drm_gem_object_exported_dma_buf_free(obj);
+	}
 	drm_gem_object_unreference_unlocked(obj);
 }
 

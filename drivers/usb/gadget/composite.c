@@ -1367,9 +1367,9 @@ static void update_unchanged_dev_desc(struct usb_device_descriptor *new,
 	__le16 idVendor;
 	__le16 idProduct;
 	__le16 bcdDevice;
-	u8 iSerialNumber;
+	u8 iSerialNumber; 
 	u8 iManufacturer;
-	u8 iProduct;
+	u8 iProduct; 
 
 	/*
 	 * these variables may have been set in

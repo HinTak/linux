@@ -1095,6 +1095,11 @@ MODULE_LICENSE ("GPL");
 #define PCI_DRIVER		ohci_pci_driver
 #endif
 
+#if defined(CONFIG_ARCH_SDP) && (defined(CONFIG_OF)||defined(CONFIG_ARCH_SDP1202)||defined(CONFIG_ARCH_SDP1106)||defined(CONFIG_ARCH_SDP1207))
+#include "ohci-sdp.c"
+#define PLATFORM_DRIVER		sdp_ohci_driver
+#endif
+
 #if defined(CONFIG_ARCH_SA1100) && defined(CONFIG_SA1111)
 #include "ohci-sa1111.c"
 #define SA1111_DRIVER		ohci_hcd_sa1111_driver

@@ -44,6 +44,8 @@
 
 #include <trace/events/sched.h>
 
+#include <linux/delay.h>
+
 int core_uses_pid;
 char core_pattern[CORENAME_MAX_SIZE] = "core";
 unsigned int core_pipe_limit;
@@ -269,6 +271,11 @@ static int zap_process(struct task_struct *start, int exit_code)
 
 	t = start;
 	do {
+		if(t->state & TASK_UNINTERRUPTIBLE) {
+			printk(KERN_ALERT "thread '%s' has TASK_UNINTERRUPTIBLE(%ld) state \n",
+				t->comm, t->state);
+			printk(KERN_ALERT "faulting thread : %s\n", start->comm);
+		}
 		task_clear_jobctl_pending(t, JOBCTL_PENDING_MASK);
 		if (t != current && t->mm) {
 			sigaddset(&t->pending.signal, SIGKILL);
@@ -289,6 +296,17 @@ static inline int zap_threads(struct task_struct *tsk, struct mm_struct *mm,
 
 	spin_lock_irq(&tsk->sighand->siglock);
 	if (!signal_group_exit(tsk->signal)) {
+#ifdef CONFIG_ACCURATE_COREDUMP
+		/* Designate this task execution context as the one who owns
+		 * the core_state. This will be later used within do_coredump()
+		 * to check whether the currently executing task has to be
+		 * responsible for creating the core file.
+		 * If this is not done, then each thread execution context will
+		 * cause a new coredump file to be created, which is incorrect.
+		 */
+
+		core_state->owner = tsk;
+#endif
 		mm->core_state = core_state;
 		nr = zap_process(tsk, exit_code);
 	}
@@ -352,6 +370,13 @@ done:
 	return nr;
 }
 
+#ifdef CONFIG_ACCURATE_COREDUMP
+static void *early_core_state_alloc(void);
+static void early_core_state_free(void *);
+void block_other_cpus_on_core_dump(void);
+void unblock_other_cpus_on_core_dump(void);
+#endif
+
 static int coredump_wait(int exit_code, struct core_state *core_state)
 {
 	struct task_struct *tsk = current;
@@ -363,8 +388,14 @@ static int coredump_wait(int exit_code, struct core_state *core_state)
 	core_state->dumper.next = NULL;
 
 	down_write(&mm->mmap_sem);
+#ifdef CONFIG_ACCURATE_COREDUMP
+	block_other_cpus_on_core_dump();
+#endif
 	if (!mm->core_state)
 		core_waiters = zap_threads(tsk, mm, core_state, exit_code);
+#ifdef CONFIG_ACCURATE_COREDUMP
+	unblock_other_cpus_on_core_dump();
+#endif
 	up_write(&mm->mmap_sem);
 
 	if (core_waiters > 0) {
@@ -391,6 +422,26 @@ static void coredump_finish(struct mm_struct *mm)
 	struct core_thread *curr, *next;
 	struct task_struct *task;
 
+#ifdef CONFIG_ACCURATE_COREDUMP
+	if (mm->core_state && mm->core_state->owner == current) {
+		next = mm->core_state->dumper.next;
+		while ((curr = next) != NULL) {
+			next = curr->next;
+			task = curr->task;
+			/*
+			 * see exit_mm(), curr->task must not see
+			 * ->task == NULL before we read ->next.
+			 */
+			smp_mb();
+			curr->task = NULL;
+			wake_up_process(task);
+		}
+
+		early_core_state_free(mm->core_state);
+
+		mm->core_state = NULL;
+	}
+#else
 	next = mm->core_state->dumper.next;
 	while ((curr = next) != NULL) {
 		next = curr->next;
@@ -405,6 +456,7 @@ static void coredump_finish(struct mm_struct *mm)
 	}
 
 	mm->core_state = NULL;
+#endif
 }
 
 static void wait_for_dump_helpers(struct file *file)
@@ -458,9 +510,143 @@ static int umh_pipe_setup(struct subprocess_info *info, struct cred *new)
 	return err;
 }
 
+#if (defined(CONFIG_DTVLOGD) && defined(CONFIG_BINFMT_ELF_COMP))
+extern int dump_write(struct file *file, const void *addr, int nr);
+
+void create_serial_log(const char *dtv_filepath)
+{
+	struct inode *inode;
+	mm_segment_t fs = get_fs();
+	char dtv_filename[CORENAME_MAX_SIZE + 1] = "";
+	char process_name[TASK_COMM_LEN] = "??";
+
+	int validlen1 = 0, validlen2 = 0;
+	char *dtvbuf1 = NULL, *dtvbuf2 = NULL;
+	struct file *dtvfile = NULL;
+	int ret = -1;
+	int replaced_special_chars = 0;
+
+	if (!dtv_filepath)
+		goto log_fail;
+
+	get_task_comm(process_name, current->group_leader);
+	set_fs(KERNEL_DS);
+	snprintf(dtv_filename, sizeof(dtv_filename),
+			"%s/Dtvlog.%s.%d.txt",
+			dtv_filepath,
+			process_name,
+			current->pid);
+
+recheck_special_chars:
+	dtvfile = filp_open(dtv_filename,
+			O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW,
+			0666);
+
+	if (IS_ERR(dtvfile)) {
+		if (((int)dtvfile == -EINVAL) && !replaced_special_chars) {
+			printk(KERN_ALERT "[DTVLOGD_WARNING] File open: invalid arg: '%s'\n",
+					dtv_filename);
+			snprintf(dtv_filename, sizeof(dtv_filename),
+					"%s/Dtvlog.%s.%d.txt",
+					dtv_filepath,
+					"ill_fmt",
+					current->pid);
+			printk(KERN_ALERT "[DTVLOGD_WARNING] Changing file to: '%s'\n",
+					dtv_filename);
+			replaced_special_chars = 1;
+			goto recheck_special_chars;
+
+		} else {
+			printk(KERN_ALERT "[DTVLOGD_FAIL|%s|File IO Error] File open error: %d\n",
+					dtv_filename, (int)dtvfile);
+			goto log_fail_set_fs;
+		}
+	}
+
+	/* error checks - reference do_coredump */
+	inode = dtvfile->f_path.dentry->d_inode;
+	if (inode->i_nlink > 1) {
+		printk(KERN_ALERT "[DTVLOGD_FAIL|%s|File IO Error] More than one Hard link to the file\n",
+				dtv_filename);
+		goto log_fail_close;
+	}
+
+	if (d_unhashed(dtvfile->f_path.dentry)) {
+		printk(KERN_ALERT "[DTVLOGD_FAIL|%s|File IO Error] file dentry not hashed\n",
+				dtv_filename);
+		goto log_fail_close;
+	}
+
+	if (!S_ISREG(inode->i_mode)) {
+		printk(KERN_ALERT "[DTVLOGD_FAIL|%s|File IO Error] Not a regular file\n",
+				dtv_filename);
+		goto log_fail_close;
+	}
+
+	if (!dtvfile->f_op || !dtvfile->f_op->write) {
+		if (!dtvfile->f_op)
+			printk(KERN_ALERT "[DTVLOGD_FAIL|%s|File IO Error] File Operation handlers not registered\n",
+					dtv_filename);
+		else
+			printk(KERN_ALERT "[DTVLOGD_FAIL|%s|File IO Error] write handler not registered\n",
+					dtv_filename);
+		goto log_fail_close;
+	}
+	ret = do_truncate(dtvfile->f_path.dentry, 0, 0, dtvfile);
+	if (ret) {
+		printk(KERN_ALERT "[DTVLOGD_FAIL|%s|File IO Error] Failed to truncate file, errno : %d\n",
+				dtv_filename, ret);
+		goto log_fail_close;
+	}
+
+	dtvlogd_write_stop();
+	ret = acquire_dtvlogd_all_buffer(&dtvbuf1, &validlen1,
+			&dtvbuf2, &validlen2);
+	if (!ret) {
+		/*
+		 * Buffer can be:
+		 *  empty: validlen1 = 0, validlen1 = 0
+		 *  single: validlen1 > 0, validlen2 = 0
+		 *  or of 2 parts:
+		 *   validlen1 > 0, validlen2 > 0
+		 */
+		if (validlen1 > 0)
+			dump_write(dtvfile, dtvbuf1, validlen1);
+
+		if (validlen2 > 0)
+			dump_write(dtvfile, dtvbuf2, validlen2);
+	} else {
+		printk(KERN_ALERT "[DTVLOGD_FAIL] failed to get dtvlogd buffer\n");
+	}
+
+	dtvlogd_write_start();
+
+log_fail_close:
+	filp_close(dtvfile, NULL);
+log_fail_set_fs:
+	set_fs(fs);
+log_fail:
+	if (!ret)
+		printk(KERN_CRIT "Serial logs saved to %s\n", dtv_filename);
+	else
+		printk(KERN_ALERT "[DTVLOGD_FAIL]: Couldn't save serial logs\n");
+
+	return;
+}
+#endif
+
+/* Only allowTask is need to show information */
+const char *allowTask[ALLOWED_TASK_NUM] = {"exeTV", "exeAPP", "exeSBB", "X", "Compositor"};
+/* exceptTask list for not to display show information */
+const char *exceptTask[EXCEPT_TASK_NUM] = {"AppUpdate", "BIServer", "MainServer", "PDSServer"};
+
 void do_coredump(siginfo_t *siginfo)
 {
+#ifdef CONFIG_ACCURATE_COREDUMP
+	struct core_state *core_state;
+#else
 	struct core_state core_state;
+#endif
 	struct core_name cn;
 	struct mm_struct *mm = current->mm;
 	struct linux_binfmt * binfmt;
@@ -484,17 +670,54 @@ void do_coredump(siginfo_t *siginfo)
 		.mm_flags = mm->flags,
 	};
 
+#ifdef CONFIG_BINFMT_ELF_COMP
+#define COMP_CORENAME_PATH  7
+	extern struct module *ultimate_module_check(const char * name);
+	struct module *mod_usbcore=NULL, *mod_ehci=NULL, *mod_storage=NULL;
+	const char *usb_module_list[3] = {"usbcore", "ehci_hcd", "usb_storage"};
+	unsigned char is_usbmodule_loaded = 0;
+	const char *usb_mount_list[6] = {"sda", "sda1", "sdb", "sdb1", "sdc", "sdc1"};
+	int cnt = 0;
+#ifdef CONFIG_DTVLOGD
+	char dtv_filepath[CORENAME_MAX_SIZE + 1] = "";
+#endif
+#endif
+	char comp_corename[CORENAME_MAX_SIZE + 1] = "";
+	int i;
+
 	audit_core_dumps(siginfo->si_signo);
 
-	binfmt = mm->binfmt;
-	if (!binfmt || !binfmt->core_dump)
+	/* Check for exception task */
+	for (i=0; i<EXCEPT_TASK_NUM; i++) {
+		if ((!strncmp(current->group_leader->comm, exceptTask[i], TASK_COMM_LEN)) || \
+			(!strncmp(current->comm, exceptTask[i], TASK_COMM_LEN))) {
+			printk("[COREDUMP_EXCEPTION] It's not do_coredump() case for Process Name[%s], Thread Name[%s] PID[%d].\n", 
+			 current->group_leader->comm, current->comm, current->pid);
+			goto fail;
+		}
+	}
+	if (!__get_dumpable(cprm.mm_flags)) {
+		printk(KERN_ALERT "[COREDUMP_FAIL|Permission Error] Core dump files are not created for set-user-ID\n");
+		printk(KERN_ALERT "\t\tmm_flags- %x\n", (unsigned int)cprm.mm_flags);
 		goto fail;
-	if (!__get_dumpable(cprm.mm_flags))
-		goto fail;
+	}
 
 	cred = prepare_creds();
-	if (!cred)
+	if (!cred) {
+		printk(KERN_ALERT "[COREDUMP_FAIL|Function Error] Creating new task credentials failed..");
 		goto fail;
+	}
+#ifdef CONFIG_PNACL
+	if (current->group_leader) {
+		get_task_struct(current->group_leader);
+		if(0 == strcmp(current->group_leader->comm, "nacl_helper_boo")) {
+			printk(KERN_ALERT "[VDLP COREDUMP STEPS] PNACL [nacl_helper_bootstrap skips coredump]~\n\n" );
+			put_task_struct(current->group_leader);
+			goto fail_creds;
+		}
+		put_task_struct(current->group_leader);
+	}
+#endif
 	/*
 	 * We cannot trust fsuid as being the "true" uid of the process
 	 * nor do we know its entire history. We only know it was tainted
@@ -508,9 +731,27 @@ void do_coredump(siginfo_t *siginfo)
 		need_nonrelative = true;
 	}
 
+#ifdef CONFIG_ACCURATE_COREDUMP
+	if (unlikely(!mm->core_state)) {
+		/* Using GFP_ATOMIC so that no sleep is possible. */
+		core_state = early_core_state_alloc();
+		if (likely(core_state)) {
+			retval = coredump_wait(siginfo->si_signo, core_state);
+			if (retval < 0) {
+				early_core_state_free(core_state);
+				goto fail_creds;
+			}
+		}
+	}
+	/* If this is not the task which got the first SIGSEGV, then we need to
+	 * ignore all the do_coredump processing for this execution context. */
+	else if (current != mm->core_state->owner)
+		goto fail_creds;
+#else
 	retval = coredump_wait(siginfo->si_signo, &core_state);
 	if (retval < 0)
 		goto fail_creds;
+#endif
 
 	old_cred = override_creds(cred);
 
@@ -519,6 +760,16 @@ void do_coredump(siginfo_t *siginfo)
 	 * be seen by the filesystem code called to write the core file.
 	 */
 	clear_thread_flag(TIF_SIGPENDING);
+#ifdef CONFIG_MINIMAL_CORE
+	do_minimal_core(&cprm);
+#endif
+#ifdef CONFIG_ELF_CORE
+	binfmt = mm->binfmt;
+	if (!binfmt || !binfmt->core_dump) {
+		printk(KERN_ALERT "[COREDUMP_FAIL|Function Error]"
+						" Binfmt handler/functions not defined\n");
+		goto fail_corename;
+	}
 
 	ispipe = format_corename(&cn, &cprm);
 
@@ -586,6 +837,86 @@ void do_coredump(siginfo_t *siginfo)
 		if (cprm.limit < binfmt->min_coredump)
 			goto fail_unlock;
 
+#ifdef  CONFIG_BINFMT_ELF_COMP
+	/* Change code for saving CoreDump file */
+	mod_usbcore = (struct module *)ultimate_module_check(usb_module_list[0]);
+	mod_ehci = (struct module *)ultimate_module_check(usb_module_list[1]);
+	mod_storage = (struct module *)ultimate_module_check(usb_module_list[2]);
+
+	if (mod_usbcore && mod_ehci && mod_storage)
+	{
+		is_usbmodule_loaded = 1;        /* all usb modules loaded */
+detect:
+		printk(KERN_ALERT "***** Coredump : Insert USB memory stick, mount check per 10sec... *****\n");
+
+		for (cnt = 0; cnt < (COMP_CORENAME_PATH - 1); cnt++) {
+			if (current->pid == current->tgid) { /* Process */
+				snprintf(comp_corename, sizeof(comp_corename),
+				 "/dtv/usb/%s/Coredump.%s.%d.gz", usb_mount_list[cnt],
+				 current->comm, current->pid);
+			} else { /* Thread */
+				struct task_struct *p_tsk = find_task_by_vpid(current->tgid);
+				if (unlikely(p_tsk == NULL)) /* For Prevent defect. */
+					snprintf(comp_corename, sizeof(comp_corename),
+					 "/dtv/usb/%s/Coredump.%s.%d.gz", usb_mount_list[cnt],
+					 current->comm, current->pid);
+				else
+					snprintf(comp_corename, sizeof(comp_corename),
+					 "/dtv/usb/%s/Coredump.%s.%s.%d.gz", usb_mount_list[cnt],
+					 p_tsk->comm, current->comm, current->pid);
+			}
+recheck:
+			cprm.file = filp_open(comp_corename,
+					      O_CREAT | 2 | O_NOFOLLOW | O_LARGEFILE | flag, 0600);
+			if (!IS_ERR(cprm.file)) {
+				printk(KERN_ALERT "***** USB detected *****\n");
+				printk(KERN_ALERT "***** Create pid : %d coredump file to USB mount dir %s ******\n",
+					current->pid, comp_corename);
+				break;
+			}
+			else {
+				if((int)cprm.file == -EINVAL) {
+					printk(KERN_ALERT " [COREDUMP_WARNING] File Open Failed: Invalid Argument '%s'\n",comp_corename);
+					snprintf(comp_corename, sizeof(comp_corename),
+					 "/dtv/usb/%s/Coredump.ill_fmt.%d.gz", usb_mount_list[cnt],
+					current->pid);
+					goto recheck;
+				}
+			}
+		}
+
+		if (IS_ERR(cprm.file)) {
+			mdelay(10 * 1000);
+			goto detect;
+		}
+	} else {
+		is_usbmodule_loaded = 0;        /* return NULL, usb modules not loaded */
+		printk(KERN_ALERT "***** USB modules not loaded ******\n");
+
+		if (current->pid == current->tgid) { /* Process */
+			snprintf(comp_corename, sizeof(comp_corename), "/core/Coredump.%s.%d.gz",
+			 current->comm, current->pid);
+		} else { /* Thread */
+			struct task_struct *p_tsk = find_task_by_vpid(current->tgid);
+			if (unlikely(p_tsk == NULL)) /* For Prevent defect. */
+				snprintf(comp_corename, sizeof(comp_corename), "/core/Coredump.%s.%d.gz",
+				 current->comm, current->pid);
+			else
+				snprintf(comp_corename, sizeof(comp_corename), "/core/Coredump.%s.%s.%d.gz",
+				 p_tsk->comm, current->comm, current->pid);
+		}
+
+		printk(KERN_ALERT "***** Create coredump file to tmpfs %s ******\n", comp_corename);
+		cprm.file = filp_open(comp_corename, O_CREAT | 2 | O_NOFOLLOW | O_LARGEFILE | flag, 0666);
+		if (IS_ERR(cprm.file)) {
+			printk(KERN_ALERT "***** Coredump Fail... can't create corefile to /core dir *****\n");
+			printk(KERN_ALERT "[COREDUMP_FAIL|%s|File IO Error] Unable to open file errno:%d\n",
+					comp_corename, (int)cprm.file);
+			goto fail_unlock;
+		}
+	}
+#else   /* original coredump */
+
 		if (need_nonrelative && cn.corename[0] != '/') {
 			printk(KERN_WARNING "Pid %d(%s) can only dump core "\
 				"to fully qualified path!\n",
@@ -597,41 +928,106 @@ void do_coredump(siginfo_t *siginfo)
 		cprm.file = filp_open(cn.corename,
 				 O_CREAT | 2 | O_NOFOLLOW | O_LARGEFILE | flag,
 				 0600);
-		if (IS_ERR(cprm.file))
+		if (IS_ERR(cprm.file)) {
+			printk(KERN_ALERT "[COREDUMP_FAIL|%s|File IO Error] File Open Error : %d\n",
+					cn.corename, (int)cprm.file);
 			goto fail_unlock;
-
+		}
+		snprintf(comp_corename, sizeof(comp_corename), "%s",
+                         (char *)cprm.file->f_path.dentry->d_name.name);
+#endif
 		inode = cprm.file->f_path.dentry->d_inode;
-		if (inode->i_nlink > 1)
+		if (inode->i_nlink > 1) {
+			printk(KERN_ALERT "[COREDUMP_FAIL|%s|File IO Error]  More than one Hard link to the file\n",
+					comp_corename);
 			goto close_fail;
-		if (d_unhashed(cprm.file->f_path.dentry))
+		}
+		if (d_unhashed(cprm.file->f_path.dentry)) {
+			printk(KERN_ALERT "[COREDUMP_FAIL|%s|File IO Error] File inode has non anonymous-DCACHE_DISCONNECTED\n",
+					comp_corename);
 			goto close_fail;
+		}
 		/*
 		 * AK: actually i see no reason to not allow this for named
 		 * pipes etc, but keep the previous behaviour for now.
 		 */
-		if (!S_ISREG(inode->i_mode))
+		if (!S_ISREG(inode->i_mode)) {
+			printk(KERN_ALERT "[COREDUMP_FAIL|%s|File IO Error] Not a regular file\n", comp_corename);
 			goto close_fail;
+		}
 		/*
 		 * Dont allow local users get cute and trick others to coredump
 		 * into their pre-created files.
 		 */
-		if (!uid_eq(inode->i_uid, current_fsuid()))
+#ifndef	CONFIG_ALLOW_ALL_USER_COREDUMP
+		if (!uid_eq(inode->i_uid, current_fsuid())) {
+			printk(KERN_ALERT "[COREDUMP_FAIL|%s|Permission Error] User-ID verfication failed for file\n",
+					comp_corename);
 			goto close_fail;
-		if (!cprm.file->f_op || !cprm.file->f_op->write)
+		}
+#endif
+		if (!cprm.file->f_op || !cprm.file->f_op->write) {
+			if(!cprm.file->f_op)
+				printk(KERN_ALERT "[COREDUMP_FAIL|%s|File IO Error] File Operation handlers not registered for file",
+						comp_corename);
+			else
+				printk(KERN_ALERT "[COREDUMP_FAIL|%s|File IO Error] file_write handlers not registered for file",
+						comp_corename);
 			goto close_fail;
-		if (do_truncate(cprm.file->f_path.dentry, 0, 0, cprm.file))
+		}
+		retval = do_truncate(cprm.file->f_path.dentry, 0, 0, cprm.file);
+		if(retval) {
+			printk(KERN_ALERT "[COREDUMP_FAIL|%s|File IO Error] Failed to truncate file, errno : %d\n",
+					comp_corename, retval);
 			goto close_fail;
+		}
 	}
 
 	/* get us an unshared descriptor table; almost always a no-op */
 	retval = unshare_files(&displaced);
-	if (retval)
+	if (retval) {
+		printk(KERN_ALERT "[COREDUMP_FAIL|%s|File IO Error] Failed to unshare file descriptor table\n",
+				comp_corename);
 		goto close_fail;
+	}
 	if (displaced)
 		put_files_struct(displaced);
+
+#ifdef  CONFIG_BINFMT_ELF_COMP
+	printk(KERN_ALERT "* Ultimate CoreDump v1.0 : started dumping core into '%s' file *\n", comp_corename);
+#else
+	printk(KERN_ALERT "* Original coredump : started dumping core into '%s' file *\n", comp_corename);
+#endif
+
 	retval = binfmt->core_dump(&cprm);
-	if (retval)
+#ifdef  CONFIG_BINFMT_ELF_COMP
+	if (is_usbmodule_loaded)
+		printk(KERN_ALERT "***** Create coredump file to USB mount dir '%s' ******\n", comp_corename);
+	else
+		printk(KERN_ALERT "***** Create coredump file to tmpfs '%s' ******\n", comp_corename);
+
+#ifdef CONFIG_DTVLOGD
+	if (is_usbmodule_loaded) {
+		snprintf(dtv_filepath, sizeof(dtv_filepath),
+				"/dtv/usb/%s",
+				usb_mount_list[cnt]);
+
+	} else {
+		snprintf(dtv_filepath, sizeof(dtv_filepath),
+				"/core");
+	}
+
+	printk(KERN_ALERT "***** Create Dtvlog file to %s directory *****\n",
+			dtv_filepath);
+	create_serial_log(dtv_filepath);
+#endif
+#endif
+	if (retval) {
+		printk(KERN_ALERT "* finished dumping core *\n");
 		current->signal->group_exit_code |= 0x80;
+	}
+	else
+		printk(KERN_ALERT "[COREDUMP_FAIL]: finished dumping core with ERRROR\n");
 
 	if (ispipe && core_pipe_limit)
 		wait_for_dump_helpers(cprm.file);
@@ -644,11 +1040,18 @@ fail_dropcount:
 fail_unlock:
 	kfree(cn.corename);
 fail_corename:
+#endif
+
+#ifndef CONFIG_ACCURATE_COREDUMP
 	coredump_finish(mm);
+#endif
 	revert_creds(old_cred);
 fail_creds:
 	put_cred(cred);
 fail:
+#ifdef CONFIG_ACCURATE_COREDUMP
+	coredump_finish(mm);
+#endif
 	return;
 }
 
@@ -659,7 +1062,22 @@ fail:
  */
 int dump_write(struct file *file, const void *addr, int nr)
 {
-	return access_ok(VERIFY_READ, addr, nr) && file->f_op->write(file, addr, nr, &file->f_pos) == nr;
+	int r0;
+	int r1;
+
+	r0 = access_ok(VERIFY_READ, addr, nr);
+	r1 = file->f_op->write(file, addr, nr, &file->f_pos);
+	if (r1 < 0) {
+		printk(KERN_ALERT "##### %s() failed with error no : %d\n", __FUNCTION__, r1);
+		if(r1 == -ENOSPC)
+			printk(KERN_ALERT "##### ERROR : No space left on device(disk full), check your device space \n");
+	}
+	if (r1 < nr) {
+		printk(KERN_ALERT "##### ERROR : Write request not complete \n");
+		printk(KERN_ALERT "##### Requested Bytes : %d, Bytes Written : %d \n", nr, r1);
+	}
+
+	return r0 && r1 == nr;
 }
 EXPORT_SYMBOL(dump_write);
 
@@ -691,3 +1109,134 @@ int dump_seek(struct file *file, loff_t off)
 	return ret;
 }
 EXPORT_SYMBOL(dump_seek);
+
+#ifdef CONFIG_ACCURATE_COREDUMP
+#include <linux/mempool.h>
+
+struct early_core_state {
+	struct core_state cs;
+	short next, prev;
+} ;
+
+#define MAX_CORE_STATES 256
+
+static mempool_t *core_state_pool;
+
+static struct early_core_state early_core_states[MAX_CORE_STATES];
+static short free_head_index;
+static spinlock_t core_states_lock;
+
+static void *core_state_alloc(gfp_t gfp_mask, void *data)
+{
+	return kmalloc(sizeof(struct core_state), gfp_mask);
+}
+
+static void core_state_free(void *cs, void *pool_data)
+{
+	kfree(cs);
+}
+
+static int __init early_coredump_init(void)
+{
+	int i;
+
+	core_state_pool = mempool_create(20, core_state_alloc,
+						core_state_free, (void *) 0);
+	BUG_ON(!core_state_pool);
+
+	spin_lock_init(&core_states_lock);
+	free_head_index = 0;
+
+	early_core_states[0].next = 1;
+	early_core_states[0].prev = MAX_CORE_STATES-1;
+
+	for (i = 1; i < MAX_CORE_STATES-1; i++) {
+		early_core_states[i].next = i+1;
+		early_core_states[i].prev = i-1;
+	}
+
+	early_core_states[MAX_CORE_STATES-1].next = 0;
+	early_core_states[MAX_CORE_STATES-1].prev = MAX_CORE_STATES-2;
+
+	return 0;
+}
+__initcall(early_coredump_init);
+
+static void *early_core_state_alloc(void)
+{
+	short ret_index ;
+
+	spin_lock(&core_states_lock);
+
+	if (unlikely(-1 == free_head_index)) {
+		spin_unlock(&core_states_lock);
+		return mempool_alloc(core_state_pool, GFP_ATOMIC);
+	} else {
+		ret_index = free_head_index;
+
+		/* If head is being allocated, then reset head. */
+		if (unlikely(free_head_index ==
+			     early_core_states[free_head_index].next))
+			free_head_index = -1;
+		else {
+			early_core_states[early_core_states[free_head_index].next].prev
+				= early_core_states[free_head_index].prev;
+			early_core_states[early_core_states[free_head_index].prev].next
+				= early_core_states[free_head_index].next;
+			free_head_index
+				= early_core_states[free_head_index].next;
+		}
+		early_core_states[ret_index].next = -1;
+		early_core_states[ret_index].prev = -1;
+
+		spin_unlock(&core_states_lock);
+	}
+	return &early_core_states[ret_index].cs;
+}
+
+static void early_core_state_free(void *cs)
+{
+	struct early_core_state *ecs = ((struct early_core_state *)cs);
+
+	if (likely(ecs >= early_core_states &&
+				ecs < (early_core_states+MAX_CORE_STATES))) {
+		short free_index = ecs - early_core_states;
+
+		spin_lock(&core_states_lock);
+		memset(&early_core_states[free_index].cs, 0,
+						sizeof(struct core_state));
+		/* If all core_states were allocated, then reset the head. */
+		if (unlikely(-1 == free_head_index)) {
+			free_head_index = free_index;
+			early_core_states[free_head_index].next =
+							free_head_index;
+			early_core_states[free_head_index].prev =
+							free_head_index;
+		} else {
+			early_core_states[free_index].next = free_head_index;
+			early_core_states[free_index].prev =
+				early_core_states[free_head_index].prev;
+			early_core_states[early_core_states[\
+				free_head_index].prev].next = free_index;
+			early_core_states[free_head_index].prev = free_index;
+		}
+		spin_unlock(&core_states_lock);
+	} else
+		mempool_free(cs, core_state_pool);
+}
+
+void early_coredump_wait(unsigned int sig)
+{
+	struct core_state *core_state;
+	extern int coredump_wait(int, struct core_state *);
+
+	if (likely(sig_kernel_coredump(sig))) {
+		/* Using GFP_ATOMIC so that no sleep is possible. */
+		core_state = early_core_state_alloc();
+		if (likely(core_state)) {
+			if (coredump_wait(sig, core_state) < 0)
+				early_core_state_free(core_state);
+		}
+	}
+}
+#endif

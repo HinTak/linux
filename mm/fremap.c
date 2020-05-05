@@ -37,10 +37,13 @@ static void zap_pte(struct mm_struct *mm, struct vm_area_struct *vma,
 		if (page) {
 			if (pte_dirty(pte))
 				set_page_dirty(page);
+			dec_ptmu_counter(mm, vma, page, addr, 1);
 			page_remove_rmap(page);
 			page_cache_release(page);
 			update_hiwater_rss(mm);
 			dec_mm_counter(mm, MM_FILEPAGES);
+			dec_rss_counter(vma, 1); /* VD_SP */
+			dec_mupt_counter(vma, page, addr, 1);
 		}
 	} else {
 		if (!pte_file(pte))

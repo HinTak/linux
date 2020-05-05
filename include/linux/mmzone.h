@@ -39,9 +39,13 @@ enum {
 	MIGRATE_UNMOVABLE,
 	MIGRATE_RECLAIMABLE,
 	MIGRATE_MOVABLE,
+#ifdef CONFIG_CMA_APP_ALLOC
+	/* New type of pcp lists to cache CMA pages for selected processes */
+	MIGRATE_CMA,
+#endif
 	MIGRATE_PCPTYPES,	/* the number of types on the pcp lists */
 	MIGRATE_RESERVE = MIGRATE_PCPTYPES,
-#ifdef CONFIG_CMA
+#if defined(CONFIG_CMA) && !(defined(CONFIG_CMA_APP_ALLOC))
 	/*
 	 * MIGRATE_CMA migration type is designed to mimic the way
 	 * ZONE_MOVABLE works.  Only movable pages can be allocated

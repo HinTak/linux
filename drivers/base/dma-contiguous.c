@@ -340,6 +340,8 @@ struct page *dma_alloc_from_contiguous(struct device *dev, int count,
 			page = pfn_to_page(pfn);
 			break;
 		} else if (ret != -EBUSY) {
+			pr_warn_ratelimited("%s(): alloc_contig_range returned %d\n",
+					    __func__, ret);
 			break;
 		}
 		pr_debug("%s(): memory range at %p is busy, retrying\n",

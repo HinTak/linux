@@ -777,6 +777,18 @@ static void wb_update_bandwidth(struct bdi_writeback *wb,
 	__bdi_update_bandwidth(wb->bdi, 0, 0, 0, 0, 0, start_time);
 }
 
+bool over_dirty_bground_bytes(struct backing_dev_info *bdi)
+{
+	if (!bdi->dirty_background_bytes)
+		return false;
+
+	if ((bdi_stat(bdi, BDI_RECLAIMABLE) << PAGE_SHIFT) >
+			bdi->dirty_background_bytes)
+		return true;
+
+	return false;
+}
+
 /*
  * Explicit flushing or periodic writeback of "old" data.
  *
@@ -826,7 +838,8 @@ static long wb_writeback(struct bdi_writeback *wb,
 		 * For background writeout, stop when we are below the
 		 * background dirty threshold
 		 */
-		if (work->for_background && !over_bground_thresh(wb->bdi))
+		if (work->for_background && !over_bground_thresh(wb->bdi) &&
+				!over_dirty_bground_bytes(wb->bdi))
 			break;
 
 		/*
@@ -918,7 +931,7 @@ static unsigned long get_nr_dirty_pages(void)
 
 static long wb_check_background_flush(struct bdi_writeback *wb)
 {
-	if (over_bground_thresh(wb->bdi)) {
+	if (over_bground_thresh(wb->bdi) || over_dirty_bground_bytes(wb->bdi)) {
 
 		struct wb_writeback_work work = {
 			.nr_pages	= LONG_MAX,

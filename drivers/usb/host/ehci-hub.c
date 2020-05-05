@@ -29,6 +29,11 @@
 /*-------------------------------------------------------------------------*/
 #include <linux/usb/otg.h>
 
+#ifdef CONFIG_ARCH_NVT72668
+#include "NT72668.h"
+#endif
+
+
 #define	PORT_WAKE_BITS	(PORT_WKOC_E|PORT_WKDISC_E|PORT_WKCONN_E)
 
 #ifdef	CONFIG_PM
@@ -535,6 +540,8 @@ static void set_owner(struct ehci_hcd *ehci, int portnum, int new_owner)
 
 /*-------------------------------------------------------------------------*/
 
+#define HS_HANDSHAKE_RETRY_CNT	(2)
+
 static int check_reset_complete (
 	struct ehci_hcd	*ehci,
 	int		index,
@@ -543,6 +550,21 @@ static int check_reset_complete (
 ) {
 	if (!(port_status & PORT_CONNECT))
 		return port_status;
+
+	/* 27 Jan 2014 ij.jang : retry HS handshake when reset failed with FS detected. */
+	if (ehci->retry_negotiation) {
+		ehci_err (ehci, "current retry-handshake cnt=%d/%d\n",
+				ehci->retry_negotiation_cnt, HS_HANDSHAKE_RETRY_CNT);
+	       if (!(port_status & PORT_PE) && (ehci->retry_negotiation_cnt < HS_HANDSHAKE_RETRY_CNT)) {
+			ehci_err (ehci, "HS port reset failed. retry handshake.\n");
+			ehci->retry_negotiation_cnt++;
+			port_status |= PORT_RESET;
+			port_status &= ~PORT_RWC_BITS;
+			ehci_writel(ehci, port_status, status_reg);
+			return port_status;
+		}
+		ehci->retry_negotiation_cnt = 0;
+	}
 
 	/* if reset finished and it's still not enabled -- handoff */
 	if (!(port_status & PORT_PE)) {
@@ -555,7 +577,7 @@ static int check_reset_complete (
 			return port_status;
 		}
 
-		ehci_dbg (ehci, "port %d full speed --> companion\n",
+		ehci_err (ehci, "port %d full speed --> companion\n",
 			index + 1);
 
 		// what happens if HCS_N_CC(params) == 0 ?
@@ -567,7 +589,7 @@ static int check_reset_complete (
 		if (ehci->has_amcc_usb23)
 			set_ohci_hcfs(ehci, 1);
 	} else {
-		ehci_dbg(ehci, "port %d reset complete, port enabled\n",
+		ehci_err (ehci, "port %d reset complete, port enabled\n",
 			index + 1);
 		/* ensure 440EPx ohci controller state is suspended */
 		if (ehci->has_amcc_usb23)
@@ -575,6 +597,45 @@ static int check_reset_complete (
 	}
 
 	return port_status;
+}
+
+#define FORCE_RESET_ON_LS_MAXCNT	(3)
+/* 27 Mar 2014 ij.jang: deceive the host into seeing port as h/f-speed connection even on K-state.
+ * return values:
+ * 	0 = host will proceed to execute port-reset.
+ * 	1 = host will release ownership of this port. */
+static int lowspeed_before_reset(struct ehci_hcd *ehci, int index, u32 __iomem *status_reg)
+{
+	u32 __iomem portsc = ehci_readl(ehci, status_reg);
+	int wait_for_j_timeout = 8;	/* 8 msec */
+
+	if ( ((portsc & (PORT_PE|PORT_CONNECT)) == PORT_CONNECT) &&
+			!ehci_is_TDI(ehci) &&
+			PORT_USB11 (portsc)) {
+		if (ehci->force_reset_on_ls && 
+			(ehci->force_reset_on_ls_cnt) < FORCE_RESET_ON_LS_MAXCNT) {
+			/* This is the case! */
+			ehci_err (ehci, "port %d low speeed detection, force to go(%d/%d).\n",
+					index + 1, ehci->force_reset_on_ls_cnt,
+					FORCE_RESET_ON_LS_MAXCNT);
+			ehci->force_reset_on_ls_cnt++;
+
+			while (wait_for_j_timeout-- > 0)  {
+				portsc = ehci_readl(ehci, status_reg);
+				if (!PORT_USB11(portsc)) {
+					ehci_err (ehci, "port %d status morphed back to normal line state. portsc := 0x%x\n",
+						index + 1, portsc);
+					break;
+				}
+				udelay(1000);
+			}
+
+			return 0;
+		} else
+			return 1;
+	}
+	ehci->force_reset_on_ls_cnt = 0;
+	return 0;
 }
 
 /*-------------------------------------------------------------------------*/
@@ -648,8 +709,17 @@ ehci_hub_status_data (struct usb_hcd *hcd, char *buf)
 			    buf [1] |= 1 << (i - 7);
 			status = STS_PCD;
 		}
+#ifdef CONFIG_ARCH_NVT72668
+		if ((temp & mask) == 0 && test_bit(i+1, &hcd->porcd) 
+				&& status != STS_PCD){ 
+			if (i < 7)
+			    buf [0] |= 1 << (i + 1);
+			else
+			    buf [1] |= 1 << (i - 7);
+			status = STS_PCD;
+		}
+#endif
 	}
-
 	/* If a resume is in progress, make sure it can finish */
 	if (ehci->resuming_ports)
 		mod_timer(&hcd->rh_timer, jiffies + msecs_to_jiffies(25));
@@ -895,14 +965,30 @@ static int ehci_hub_control (
 			ehci->reset_done [wIndex] = 0;
 			clear_bit(wIndex, &ehci->resuming_ports);
 
+#ifdef CONFIG_ARCH_NVT72668
+			ehci_writel(ehci, 0, (__u32 *)(((__u32)ehci->apbs)+0x434)); //fix dongle cannot be recgonized
+			ehci_readl(ehci, (__u32 *)(((__u32 )ehci->apbs)+0x434)); 
+#endif
+
 			/* force reset to complete */
 			ehci_writel(ehci, temp & ~(PORT_RWC_BITS | PORT_RESET),
 					status_reg);
+#ifdef CONFIG_ARCH_NVT72668
+			//for SAMUX BT issue, we leave phy status as normal
+			ehci_writel(ehci, 0x0, (__u32 *)(((__u32)ehci->apbs)+0x4c8));
+			ehci_readl(ehci, (__u32 *)(((__u32 )ehci->apbs)+0x4c8));
+#endif
+
 			/* REVISIT:  some hardware needs 550+ usec to clear
 			 * this bit; seems too long to spin routinely...
 			 */
+#ifdef CONFIG_ARCH_NVT72668
+			retval = handshake(ehci, status_reg,
+					PORT_RESET, 0, 3000);
+#else
 			retval = handshake(ehci, status_reg,
 					PORT_RESET, 0, 1000);
+#endif
 			if (retval != 0) {
 				ehci_err (ehci, "port %d reset error %d\n",
 					wIndex + 1, retval);
@@ -925,7 +1011,7 @@ static int ehci_hub_control (
 			temp &= ~PORT_RWC_BITS;
 			temp |= PORT_OWNER;
 			ehci_writel(ehci, temp, status_reg);
-			ehci_dbg(ehci, "port %d --> companion\n", wIndex + 1);
+			ehci_err(ehci, "port %d --> companion\n", wIndex + 1);
 			temp = ehci_readl(ehci, status_reg);
 		}
 
@@ -938,11 +1024,15 @@ static int ehci_hub_control (
 		if (temp & PORT_CONNECT) {
 			status |= USB_PORT_STAT_CONNECTION;
 			// status may be from integrated TT
+#ifdef CONFIG_ARCH_NVT72668
+			status |= ehci_port_speed(ehci, ehci_readl(ehci,(__u32 __iomem *) ((hcd->regs)+0x80)));
+#else
 			if (ehci->has_hostpc) {
 				temp1 = ehci_readl(ehci, hostpc_reg);
 				status |= ehci_port_speed(ehci, temp1);
 			} else
 				status |= ehci_port_speed(ehci, temp);
+#endif
 		}
 		if (temp & PORT_PE)
 			status |= USB_PORT_STAT_ENABLE;
@@ -958,8 +1048,11 @@ static int ehci_hub_control (
 				set_bit(wIndex, &ehci->port_c_suspend);
 			usb_hcd_end_port_resume(&hcd->self, wIndex);
 		}
-
+#ifdef CONFIG_ARCH_NVT72668
+		if (temp & PORT_OC && !ignore_oc)
+#else
 		if (temp & PORT_OC)
+#endif
 			status |= USB_PORT_STAT_OVERCURRENT;
 		if (temp & PORT_RESET)
 			status |= USB_PORT_STAT_RESET;
@@ -967,6 +1060,17 @@ static int ehci_hub_control (
 			status |= USB_PORT_STAT_POWER;
 		if (test_bit(wIndex, &ehci->port_c_suspend))
 			status |= USB_PORT_STAT_C_SUSPEND << 16;
+
+#ifdef CONFIG_ARCH_NVT72668
+
+        //clear flag for SAMUX BT issue
+        if (!(temp & PORT_CONNECT) && (hcd->nvt_flag == 1)) {
+			ehci_writel(ehci, 0x0, (__u32 *)(((__u32)ehci->apbs)+0x4c8));
+			ehci_readl(ehci, (__u32 *)(((__u32 )ehci->apbs)+0x4c8));
+			hcd->nvt_flag = 0;
+        }
+#endif
+
 
 #ifndef	VERBOSE_DEBUG
 	if (status & ~0xffff)	/* only if wPortChange is interesting */
@@ -1041,22 +1145,31 @@ static int ehci_hub_control (
 		case USB_PORT_FEAT_RESET:
 			if (temp & PORT_RESUME)
 				goto error;
+			
+#ifdef CONFIG_ARCH_NVT72668		
+			if (!(temp & PORT_CONNECT))
+				goto disconnect;
+#endif
 			/* line status bits may report this as low speed,
 			 * which can be fine if this root hub has a
 			 * transaction translator built in.
 			 */
-			if ((temp & (PORT_PE|PORT_CONNECT)) == PORT_CONNECT
-					&& !ehci_is_TDI(ehci)
-					&& PORT_USB11 (temp)) {
-				ehci_dbg (ehci,
+			if (lowspeed_before_reset(ehci, wIndex, status_reg)) {
+				ehci_err (ehci,
 					"port %d low speed --> companion\n",
 					wIndex + 1);
 				temp |= PORT_OWNER;
 			} else {
 				ehci_vdbg (ehci, "port %d reset\n", wIndex + 1);
-				temp |= PORT_RESET;
 				temp &= ~PORT_PE;
-
+				if (ehci->has_synopsys_portreset) {
+					/* 4 Feb 2014 ij.jang sdp synopsys WA: disable port first.
+					* in HSIC mode, setting port_reset and port_disable at the same time can be problem.
+					* Be aware that 'port_disable' makes host's HS termination off. */
+					ehci_err(ehci, "port_reset in synopsys manner!\n");
+					ehci_writel(ehci, temp, status_reg);
+				}
+				temp |= PORT_RESET;
 				/*
 				 * caller must wait, then call GetPortStatus
 				 * usb 2.0 spec says 50 ms resets on root
@@ -1064,6 +1177,15 @@ static int ehci_hub_control (
 				ehci->reset_done [wIndex] = jiffies
 						+ msecs_to_jiffies (50);
 			}
+#ifdef CONFIG_ARCH_NVT72668
+		ehci_writel(ehci, 0x8, (__u32 *)(((__u32)ehci->apbs)+0x434)); //fix dongle cannot be recgonized
+
+		//for SAMUX BT issue, we fix phy status
+		if(hcd->nvt_flag == 1){
+				ehci_writel(ehci, 0xc0, (__u32 *)(((__u32)ehci->apbs)+0x4c8));
+				ehci_readl(ehci, (__u32 *)(((__u32 )ehci->apbs)+0x4c8));
+		}
+#endif
 			ehci_writel(ehci, temp, status_reg);
 			break;
 
@@ -1110,6 +1232,10 @@ static int ehci_hub_control (
 error:
 		/* "stall" on error */
 		retval = -EPIPE;
+#ifdef CONFIG_ARCH_NVT72668		
+disconnect:
+		retval = -ENOTCONN;
+#endif
 	}
 error_exit:
 	spin_unlock_irqrestore (&ehci->lock, flags);

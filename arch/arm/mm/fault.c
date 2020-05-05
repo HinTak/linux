@@ -28,6 +28,12 @@
 
 #include "fault.h"
 
+#ifdef CONFIG_SUPPORT_REBOOT
+extern int micom_reboot( void );
+extern int reboot_permit(void);
+extern int print_permit(void);
+#endif
+
 #ifdef CONFIG_MMU
 
 #ifdef CONFIG_KPROBES
@@ -125,6 +131,10 @@ void show_pte(struct mm_struct *mm, unsigned long addr)
 { }
 #endif					/* CONFIG_MMU */
 
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+extern void show_info(struct task_struct *task, struct pt_regs *regs, unsigned long addr);
+#endif
+
 /*
  * Oops.  The kernel tried to access some page that wasn't present.
  */
@@ -137,19 +147,40 @@ __do_kernel_fault(struct mm_struct *mm, unsigned long addr, unsigned int fsr,
 	 */
 	if (fixup_exception(regs))
 		return;
+#ifdef CONFIG_SUPPORT_REBOOT
+	if( !print_permit() && reboot_permit() )
+	{
+		micom_reboot();
+		while(1);
+	}
+#endif
 
 	/*
 	 * No handler, we'll have to terminate things with extreme prejudice.
 	 */
 	bust_spinlocks(1);
+#if defined(CONFIG_ARCH_NVT_V7) && !defined(CONFIG_VD_RELEASE)
+	printk(KERN_ALERT
+		"[%s:%d] Unable to handle kernel %s at virtual address %08lx\n", current->comm, current->pid,
+		(addr < PAGE_SIZE) ? "NULL pointer dereference" :
+		"paging request", addr);
+#else
 	printk(KERN_ALERT
 		"Unable to handle kernel %s at virtual address %08lx\n",
 		(addr < PAGE_SIZE) ? "NULL pointer dereference" :
 		"paging request", addr);
+#endif
 
 	show_pte(mm, addr);
 	die("Oops", regs, fsr);
 	bust_spinlocks(0);
+#ifdef CONFIG_SUPPORT_REBOOT
+	if( reboot_permit() )
+	{
+		micom_reboot();
+		while(1);
+	}
+#endif
 	do_exit(SIGKILL);
 }
 
@@ -164,14 +195,36 @@ __do_user_fault(struct task_struct *tsk, unsigned long addr,
 {
 	struct siginfo si;
 
-#ifdef CONFIG_DEBUG_USER
-	if (((user_debug & UDBG_SEGV) && (sig == SIGSEGV)) ||
-	    ((user_debug & UDBG_BUS)  && (sig == SIGBUS))) {
-		printk(KERN_DEBUG "%s: unhandled page fault (%d) at 0x%08lx, code 0x%03x\n",
-		       tsk->comm, sig, addr, fsr);
-		show_pte(tsk->mm, addr);
-		show_regs(regs);
+#ifdef CONFIG_ACCURATE_COREDUMP
+	early_coredump_wait(sig);
+#endif
+
+#ifdef CONFIG_SUPPORT_REBOOT
+	if( !print_permit() && reboot_permit() )
+	{
+		micom_reboot();
+		while(1);
 	}
+#endif
+
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+	printk(KERN_ALERT "%s: unhandled page fault (%d) at 0x%08lx, code 0x%03x\n",
+							tsk->comm, sig, addr, fsr);
+	show_info(tsk, regs, addr);
+#endif
+
+#ifdef CONFIG_SUPPORT_REBOOT
+	if( reboot_permit() )
+	{
+		micom_reboot();
+		while(1);
+	}
+#endif
+
+#ifdef CONFIG_PAX_PAGEEXEC
+	if (fsr & FSR_LNX_PF)
+		pax_report_fault();
+
 #endif
 
 	tsk->thread.address = addr;
@@ -546,6 +599,11 @@ do_DataAbort(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 	if (!inf->fn(addr, fsr & ~FSR_LNX_PF, regs))
 		return;
 
+#ifdef CONFIG_ACCURATE_COREDUMP
+	if (user_mode(regs))
+		early_coredump_wait(inf->sig);
+#endif
+
 	printk(KERN_ALERT "Unhandled fault: %s (0x%03x) at 0x%08lx\n",
 		inf->name, fsr, addr);
 
@@ -577,6 +635,11 @@ do_PrefetchAbort(unsigned long addr, unsigned int ifsr, struct pt_regs *regs)
 
 	if (!inf->fn(addr, ifsr | FSR_LNX_PF, regs))
 		return;
+
+#ifdef CONFIG_ACCURATE_COREDUMP
+	if (user_mode(regs))
+		early_coredump_wait(inf->sig);
+#endif
 
 	printk(KERN_ALERT "Unhandled prefetch abort: %s (0x%03x) at 0x%08lx\n",
 		inf->name, ifsr, addr);

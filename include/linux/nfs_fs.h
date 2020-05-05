@@ -163,6 +163,9 @@ struct nfs_inode {
 	/* Open contexts for shared mmap writes */
 	struct list_head	open_files;
 
+	/* file open count at nfs client */
+	atomic_t		open_count;
+
 	/* Number of in-flight sillydelete RPC calls */
 	atomic_t		silly_count;
 	/* List of deferred sillydelete requests */

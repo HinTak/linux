@@ -141,6 +141,13 @@ extern struct task_group root_task_group;
 # define INIT_PERF_EVENTS(tsk)
 #endif
 
+#ifdef CONFIG_CMA_APP_ALLOC
+# define INIT_CMA_ALLOC						\
+	.cma_alloc = false,
+#else
+# define INIT_CMA_ALLOC
+#endif
+
 #define INIT_TASK_COMM "swapper"
 
 /*
@@ -210,6 +217,7 @@ extern struct task_group root_task_group;
 	INIT_TRACE_RECURSION						\
 	INIT_TASK_RCU_PREEMPT(tsk)					\
 	INIT_CPUSET_SEQ							\
+	INIT_CMA_ALLOC							\
 }
 
 

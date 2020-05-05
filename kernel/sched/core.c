@@ -74,6 +74,10 @@
 #include <linux/binfmts.h>
 #include <linux/context_tracking.h>
 
+#ifdef CONFIG_KDEBUGD_FTRACE
+#include <linux/irqflags.h>
+#endif /* CONFIG_KDEBUGD_FTRACE */
+
 #include <asm/switch_to.h>
 #include <asm/tlb.h>
 #include <asm/irq_regs.h>
@@ -85,6 +89,12 @@
 #include "sched.h"
 #include "../workqueue_sched.h"
 #include "../smpboot.h"
+
+#ifdef CONFIG_KDEBUGD
+#include <kdebugd/kdebugd.h>
+#include <kdebugd/sec_topthread.h>
+#include <linux/sort.h>     /* For sort() */
+#endif
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/sched.h>
@@ -2743,7 +2753,11 @@ void __kprobes add_preempt_count(int val)
 	DEBUG_LOCKS_WARN_ON((preempt_count() & PREEMPT_MASK) >=
 				PREEMPT_MASK - 10);
 #endif
+#ifndef CONFIG_KDEBUGD_FTRACE
 	if (preempt_count() == val)
+#else
+	if (check_preempt_trace() && preempt_count() == val)
+#endif /* CONFIG_KDEBUGD_FTRACE */
 		trace_preempt_off(CALLER_ADDR0, get_parent_ip(CALLER_ADDR1));
 }
 EXPORT_SYMBOL(add_preempt_count);
@@ -2764,7 +2778,11 @@ void __kprobes sub_preempt_count(int val)
 		return;
 #endif
 
+#ifndef CONFIG_KDEBUGD_FTRACE
 	if (preempt_count() == val)
+#else
+	if (check_preempt_trace() && preempt_count() == val)
+#endif /* CONFIG_KDEBUGD_FTRACE */
 		trace_preempt_on(CALLER_ADDR0, get_parent_ip(CALLER_ADDR1));
 	preempt_count() -= val;
 }
@@ -2844,6 +2862,46 @@ pick_next_task(struct rq *rq)
 
 	BUG(); /* the idle class will always have a runnable task */
 }
+
+#ifndef CONFIG_SMP
+#ifdef CONFIG_MEMORY_VALIDATOR
+
+static inline void memory_value_watcher(struct task_struct *prev)
+{
+	if (prev && kdbg_mem_watcher.watching && kdbg_mem_watcher.tgid == prev->tgid) {
+		mm_segment_t fs;
+		unsigned int buffer;
+
+		fs = get_fs();
+		set_fs(KERNEL_DS);
+
+		if (!access_ok(VERIFY_READ, (unsigned long *)kdbg_mem_watcher.u_addr,
+					sizeof(unsigned long *))) {
+			set_fs(fs);
+			return;
+		}
+		__get_user(buffer, (unsigned long *)kdbg_mem_watcher.u_addr);
+		set_fs(fs);
+
+		if (kdbg_mem_watcher.buff != buffer) {
+
+			kdbg_mem_watcher.watching = 0;
+
+			printk("==============================================================================\n");
+			printk(" Memory Corruption DETECTED.........!!!!!!!!!!!!!!!!!!\n");
+			printk("==============================================================================\n");
+			printk(" Original : PID:%d value:0x%08x (addr:0x%08x)\n", kdbg_mem_watcher.pid, kdbg_mem_watcher.buff, kdbg_mem_watcher.u_addr);
+			printk(" NOW      : PID:%d value:0x%08x \n" , prev->pid, buffer);
+			printk("          : PID:%d PC:0x%08x\n" , prev->pid, (unsigned)KSTK_EIP(prev));
+			printk("------------------------------------------------------------------------------\n");
+			printk("Caution: The PC value could get invalid-value.\n");
+			printk("         So don't trust that value :)\n");
+			printk("==============================================================================\n");
+		}
+	}
+}
+#endif
+#endif /*CONFIG_SMP*/
 
 /*
  * __schedule() is the main scheduler function.
@@ -2942,6 +3000,29 @@ need_resched:
 		rq->curr = next;
 		++*switch_count;
 
+#ifdef CONFIG_KDEBUGD_COUNTER_MONITOR
+		per_cpu(sec_topthread_ctx_cnt, cpu)++;
+#endif
+		/* For kdebugd - schedule history logger */
+#if defined(CONFIG_KDEBUGD_MISC)
+#if defined(CONFIG_SCHED_HISTORY)
+		if (next->mm) /* for excepting kernel thread */
+			schedule_history(next, cpu);
+#endif
+#ifndef CONFIG_SMP
+#ifdef CONFIG_MEMORY_VALIDATOR
+		/* For meory Value Watcher*/
+		memory_value_watcher(prev);
+#endif
+#endif /*CONFIG_SMP*/
+#endif
+
+
+#ifdef CONFIG_SCHED_HISTORY_ON_DDR
+		extern void schedule_history_on_ddr(struct task_struct *pre ,struct task_struct *next, int cpu);
+		if (next->mm) /* for excepting kernel thread */
+			schedule_history_on_ddr(prev, next, cpu);
+#endif
 		context_switch(rq, prev, next); /* unlocks the rq */
 		/*
 		 * The context switch have flipped the stack from under us
@@ -3136,13 +3217,53 @@ static void __wake_up_common(wait_queue_head_t *q, unsigned int mode,
 			int nr_exclusive, int wake_flags, void *key)
 {
 	wait_queue_t *curr, *next;
+#if defined(CONFIG_MSTAR_X14) && !defined(CONFIG_VD_RELEASE)
+	wait_queue_t old;
+	int cnt=0;
+
+	old.func = NULL;
+	old.flags = 0;
+	old.private = NULL;
+#endif
 
 	list_for_each_entry_safe(curr, next, &q->task_list, task_list) {
 		unsigned flags = curr->flags;
 
+#if defined(CONFIG_MSTAR_X14) && !defined(CONFIG_VD_RELEASE)
+		if( unlikely(curr->func==NULL) )
+		{
+			printk( "[SABSP] (count:%d) curr->func is NULL in __wake_up_common()\n", cnt);
+			printk( "[SABSP] flags : 0x%x \n", curr->flags);
+			if( curr->private )
+			{
+				struct task_struct *p = (struct task_struct *) curr->private;
+				printk("[SABSP] task : %s\n", p->comm );
+			}
+			else
+				printk("[SABSP] task is NULL\n");
+
+			printk( "[SABSP-OLD] flags : 0x%x \n", old.flags);
+			if( old.private )
+			{
+				struct task_struct *p = (struct task_struct *) old.private;
+				printk("[SABSP-OLD] task : %s\n", p->comm );
+			}
+			else
+				printk("[SABSP-OLD] task is NULL\n");
+			printk( "[SABSP-OLD] function : 0x%p \n", old.func);
+		}
+#endif
+
 		if (curr->func(curr, mode, wake_flags, key) &&
 				(flags & WQ_FLAG_EXCLUSIVE) && !--nr_exclusive)
 			break;
+#if defined(CONFIG_MSTAR_X14) && !defined(CONFIG_VD_RELEASE)
+		old.func = curr->func;
+		old.flags = curr->flags;
+		old.private = curr->private;
+		cnt++;
+#endif
+
 	}
 }
 
@@ -4556,7 +4677,8 @@ void sched_show_task(struct task_struct *p)
 
 	state = p->state ? __ffs(p->state) + 1 : 0;
 	printk(KERN_INFO "%-15.15s %c", p->comm,
-		state < sizeof(stat_nam) - 1 ? stat_nam[state] : '?');
+		state < sizeof(TASK_STATE_TO_CHAR_STR) - 1 ? stat_nam[state] : '?');
+
 #if BITS_PER_LONG == 32
 	if (state == TASK_RUNNING)
 		printk(KERN_CONT " running  ");
@@ -4568,18 +4690,27 @@ void sched_show_task(struct task_struct *p)
 	else
 		printk(KERN_CONT " %016lx ", thread_saved_pc(p));
 #endif
+
 #ifdef CONFIG_DEBUG_STACK_USAGE
 	free = stack_not_used(p);
 #endif
+
 	rcu_read_lock();
 	ppid = task_pid_nr(rcu_dereference(p->real_parent));
 	rcu_read_unlock();
 	printk(KERN_CONT "%5lu %5d %6d 0x%08lx\n", free,
-		task_pid_nr(p), ppid,
-		(unsigned long)task_thread_info(p)->flags);
+			task_pid_nr(p), ppid,
+			(unsigned long)task_thread_info(p)->flags);
 
 	show_stack(p, NULL);
 }
+
+#ifdef CONFIG_TASK_STATE_BACKTRACE
+void wrap_show_task(struct task_struct *tsk)
+{
+	sched_show_task(tsk);
+}
+#endif
 
 void show_state_filter(unsigned long state_filter)
 {

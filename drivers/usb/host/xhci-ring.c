@@ -68,6 +68,19 @@
 #include <linux/slab.h>
 #include "xhci.h"
 
+#if (defined CONFIG_ARCH_SDP) && (defined DWC_BULK_WA)
+#include <mach/soc.h>
+
+int is_apply_dwc_bulk_wa(u32 speed, struct usb_endpoint_descriptor *desc)
+{	
+	if (speed == USB_SPEED_HIGH && usb_endpoint_dir_in(desc)
+			&& soc_is_sdp1304() ){
+		return 1;
+	}
+	return 0;
+}
+#endif
+
 static int handle_cmd_in_cmd_wait_list(struct xhci_hcd *xhci,
 		struct xhci_virt_device *virt_dev,
 		struct xhci_event_cmd *event);
@@ -434,7 +447,7 @@ static void ring_doorbell_for_active_rings(struct xhci_hcd *xhci,
 
 	/* A ring has pending URBs if its TD list is not empty */
 	if (!(ep->ep_state & EP_HAS_STREAMS)) {
-		if (!(list_empty(&ep->ring->td_list)))
+		if (ep->ring && !(list_empty(&ep->ring->td_list)))
 			xhci_ring_ep_doorbell(xhci, slot_id, ep_index, 0);
 		return;
 	}
@@ -2468,9 +2481,13 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 			 */
 			if (!(trb_comp_code == COMP_STOP ||
 						trb_comp_code == COMP_STOP_INVAL)) {
+						
+				/* <amitabh.d@samsung.com>
+				 * FixMe: 
 				xhci_warn(xhci, "WARN Event TRB for slot %d ep %d with no TDs queued?\n",
 						TRB_TO_SLOT_ID(le32_to_cpu(event->flags)),
 						ep_index);
+				*/
 				xhci_dbg(xhci, "Event TRB with TRB type ID %u\n",
 						(le32_to_cpu(event->flags) &
 						 TRB_TYPE_BITMASK)>>10);
@@ -2627,6 +2644,10 @@ cleanup:
 	 * the event.
 	 */
 	} while (ep->skip && trb_comp_code != COMP_MISSED_INT);
+
+#ifdef DWC_BULK_WA
+	ring_doorbell_for_active_rings(xhci, slot_id, ep_index);
+#endif
 
 	return 0;
 }
@@ -2931,6 +2952,11 @@ static int prepare_transfer(struct xhci_hcd *xhci,
 	struct xhci_ring *ep_ring;
 	struct xhci_ep_ctx *ep_ctx = xhci_get_ep_ctx(xhci, xdev->out_ctx, ep_index);
 
+#if (defined CONFIG_ARCH_SDP) && (defined DWC_BULK_WA) 
+	if (is_apply_dwc_bulk_wa(urb->dev->speed, &urb->ep->desc)){
+		num_trbs = num_trbs *(DWC_BULK_NOPS+1);
+	}
+#endif	
 	ep_ring = xhci_stream_id_to_ring(xdev, ep_index, stream_id);
 	if (!ep_ring) {
 		xhci_dbg(xhci, "Can't prepare ring for bad stream ID %u\n",
@@ -2971,6 +2997,13 @@ static unsigned int count_sg_trbs_needed(struct xhci_hcd *xhci, struct urb *urb)
 {
 	int num_sgs, num_trbs, running_total, temp, i;
 	struct scatterlist *sg;
+	u32 trb_max_buff_size = TRB_MAX_BUFF_SIZE;
+
+#if (defined CONFIG_ARCH_SDP) && (defined DWC_BULK_WA) 
+	if (is_apply_dwc_bulk_wa(urb->dev->speed, &urb->ep->desc)){
+		trb_max_buff_size = 512;
+	}
+#endif
 
 	sg = NULL;
 	num_sgs = urb->num_mapped_sgs;
@@ -2981,16 +3014,16 @@ static unsigned int count_sg_trbs_needed(struct xhci_hcd *xhci, struct urb *urb)
 		unsigned int len = sg_dma_len(sg);
 
 		/* Scatter gather list entries may cross 64KB boundaries */
-		running_total = TRB_MAX_BUFF_SIZE -
-			(sg_dma_address(sg) & (TRB_MAX_BUFF_SIZE - 1));
-		running_total &= TRB_MAX_BUFF_SIZE - 1;
+		running_total = trb_max_buff_size -
+			(sg_dma_address(sg) & (trb_max_buff_size - 1));
+		running_total &= trb_max_buff_size - 1;
 		if (running_total != 0)
 			num_trbs++;
 
 		/* How many more 64KB chunks to transfer, how many more TRBs? */
 		while (running_total < sg_dma_len(sg) && running_total < temp) {
 			num_trbs++;
-			running_total += TRB_MAX_BUFF_SIZE;
+			running_total += trb_max_buff_size;
 		}
 		len = min_t(int, len, temp);
 		temp -= len;
@@ -3138,10 +3171,14 @@ static int queue_bulk_sg_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	bool first_trb;
 	u64 addr;
 	bool more_trbs_coming;
-
+	u32 trb_max_buff_size = TRB_MAX_BUFF_SIZE;
 	struct xhci_generic_trb *start_trb;
 	int start_cycle;
 
+#if (defined CONFIG_ARCH_SDP) && (defined DWC_BULK_WA) 
+	if (is_apply_dwc_bulk_wa(urb->dev->speed, &urb->ep->desc))
+		trb_max_buff_size = 512;
+#endif
 	ep_ring = xhci_urb_to_transfer_ring(xhci, urb);
 	if (!ep_ring)
 		return -EINVAL;
@@ -3181,7 +3218,7 @@ static int queue_bulk_sg_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	sg = urb->sg;
 	addr = (u64) sg_dma_address(sg);
 	this_sg_len = sg_dma_len(sg);
-	trb_buff_len = TRB_MAX_BUFF_SIZE - (addr & (TRB_MAX_BUFF_SIZE - 1));
+	trb_buff_len = trb_max_buff_size - (addr & (trb_max_buff_size - 1));
 	trb_buff_len = min_t(int, trb_buff_len, this_sg_len);
 	if (trb_buff_len > urb->transfer_buffer_length)
 		trb_buff_len = urb->transfer_buffer_length;
@@ -3195,12 +3232,28 @@ static int queue_bulk_sg_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 
 		/* Don't change the cycle bit of the first TRB until later */
 		if (first_trb) {
-			first_trb = false;
 			if (start_cycle == 0)
 				field |= 0x1;
 		} else
 			field |= ep_ring->cycle_state;
 
+#if (defined CONFIG_ARCH_SDP) && (defined DWC_BULK_WA) 
+		if (trb_max_buff_size == 512)
+		{
+			int i;
+			for ( i = 0; i < DWC_BULK_NOPS; i++){
+				queue_trb(xhci, ep_ring, true, 0, 0, 0, field |
+						TRB_CHAIN | TRB_TYPE(TRB_TR_NOOP));
+				if (first_trb){
+					first_trb=false;
+					field = ep_ring->cycle_state;
+				}
+			}
+		}else
+#endif		
+		{
+			first_trb = false;
+		}
 		/* Chain all the TRBs together; clear the chain bit in the last
 		 * TRB to indicate it's the last TRB in the chain.
 		 */
@@ -3216,11 +3269,11 @@ static int queue_bulk_sg_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 		if (usb_urb_dir_in(urb))
 			field |= TRB_ISP;
 
-		if (TRB_MAX_BUFF_SIZE -
-				(addr & (TRB_MAX_BUFF_SIZE - 1)) < trb_buff_len) {
+		if (trb_max_buff_size -
+				(addr & (trb_max_buff_size - 1)) < trb_buff_len) {
 			xhci_warn(xhci, "WARN: sg dma xfer crosses 64KB boundaries!\n");
 			xhci_dbg(xhci, "Next boundary at %#x, end dma = %#x\n",
-					(unsigned int) (addr + TRB_MAX_BUFF_SIZE) & ~(TRB_MAX_BUFF_SIZE - 1),
+					(unsigned int) (addr + trb_max_buff_size) & ~(trb_max_buff_size - 1),
 					(unsigned int) addr + trb_buff_len);
 		}
 
@@ -3265,8 +3318,8 @@ static int queue_bulk_sg_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 			addr += trb_buff_len;
 		}
 
-		trb_buff_len = TRB_MAX_BUFF_SIZE -
-			(addr & (TRB_MAX_BUFF_SIZE - 1));
+		trb_buff_len = trb_max_buff_size -
+			(addr & (trb_max_buff_size - 1));
 		trb_buff_len = min_t(int, trb_buff_len, this_sg_len);
 		if (running_total + trb_buff_len > urb->transfer_buffer_length)
 			trb_buff_len =
@@ -3296,9 +3349,15 @@ int xhci_queue_bulk_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	int running_total, trb_buff_len, ret;
 	unsigned int total_packet_count;
 	u64 addr;
+	u32 trb_max_buff_size = TRB_MAX_BUFF_SIZE;
 
 	if (urb->num_sgs)
 		return queue_bulk_sg_tx(xhci, mem_flags, urb, slot_id, ep_index);
+	
+#if (defined CONFIG_ARCH_SDP) && (defined DWC_BULK_WA) 
+	if (is_apply_dwc_bulk_wa(urb->dev->speed, &urb->ep->desc))
+		trb_max_buff_size = 512;
+#endif
 
 	ep_ring = xhci_urb_to_transfer_ring(xhci, urb);
 	if (!ep_ring)
@@ -3306,9 +3365,9 @@ int xhci_queue_bulk_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 
 	num_trbs = 0;
 	/* How much data is (potentially) left before the 64KB boundary? */
-	running_total = TRB_MAX_BUFF_SIZE -
-		(urb->transfer_dma & (TRB_MAX_BUFF_SIZE - 1));
-	running_total &= TRB_MAX_BUFF_SIZE - 1;
+	running_total = trb_max_buff_size -
+		(urb->transfer_dma & (trb_max_buff_size - 1));
+	running_total &= trb_max_buff_size - 1;
 
 	/* If there's some data on this 64KB chunk, or we have to send a
 	 * zero-length transfer, we need at least one TRB
@@ -3318,7 +3377,7 @@ int xhci_queue_bulk_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 	/* How many more 64KB chunks to transfer, how many more TRBs? */
 	while (running_total < urb->transfer_buffer_length) {
 		num_trbs++;
-		running_total += TRB_MAX_BUFF_SIZE;
+		running_total += trb_max_buff_size;
 	}
 	/* FIXME: this doesn't deal with URB_ZERO_PACKET - need one more */
 
@@ -3344,8 +3403,8 @@ int xhci_queue_bulk_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 			usb_endpoint_maxp(&urb->ep->desc));
 	/* How much data is in the first TRB? */
 	addr = (u64) urb->transfer_dma;
-	trb_buff_len = TRB_MAX_BUFF_SIZE -
-		(urb->transfer_dma & (TRB_MAX_BUFF_SIZE - 1));
+	trb_buff_len = trb_max_buff_size -
+		(urb->transfer_dma & (trb_max_buff_size - 1));
 	if (trb_buff_len > urb->transfer_buffer_length)
 		trb_buff_len = urb->transfer_buffer_length;
 
@@ -3358,12 +3417,29 @@ int xhci_queue_bulk_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 
 		/* Don't change the cycle bit of the first TRB until later */
 		if (first_trb) {
-			first_trb = false;
 			if (start_cycle == 0)
 				field |= 0x1;
 		} else
 			field |= ep_ring->cycle_state;
 
+#if (defined CONFIG_ARCH_SDP) && (defined DWC_BULK_WA) 
+		if (trb_max_buff_size == 512)
+		{
+			int i;
+			for (i = 0; i < DWC_BULK_NOPS; i++){
+				queue_trb(xhci, ep_ring, true, 0, 0, 0, field |
+						TRB_CHAIN | TRB_TYPE(TRB_TR_NOOP));
+				if (first_trb){
+					first_trb=false;
+					field = ep_ring->cycle_state;
+				}
+			}
+		}else
+#endif			
+		{
+			first_trb = false;
+		}
+	
 		/* Chain all the TRBs together; clear the chain bit in the last
 		 * TRB to indicate it's the last TRB in the chain.
 		 */
@@ -3408,8 +3484,8 @@ int xhci_queue_bulk_tx(struct xhci_hcd *xhci, gfp_t mem_flags,
 		/* Calculate length for next transfer */
 		addr += trb_buff_len;
 		trb_buff_len = urb->transfer_buffer_length - running_total;
-		if (trb_buff_len > TRB_MAX_BUFF_SIZE)
-			trb_buff_len = TRB_MAX_BUFF_SIZE;
+		if (trb_buff_len > trb_max_buff_size)
+			trb_buff_len = trb_max_buff_size;
 	} while (running_total < urb->transfer_buffer_length);
 
 	check_trb_math(urb, num_trbs, running_total);
@@ -3913,6 +3989,18 @@ int xhci_queue_address_device(struct xhci_hcd *xhci, dma_addr_t in_ctx_ptr,
 			TRB_TYPE(TRB_ADDR_DEV) | SLOT_ID_FOR_TRB(slot_id),
 			false);
 }
+
+#ifdef SAMSUNG_PATCH_WITH_NEW_xHCI_API_FOR_BUGGY_DEVICE
+/* Queue an address device command TRB */
+int xhci_queue_enable_control_endpoint(struct xhci_hcd *xhci, dma_addr_t in_ctx_ptr,
+		u32 slot_id)
+{
+	return queue_command(xhci, lower_32_bits(in_ctx_ptr),
+			upper_32_bits(in_ctx_ptr), 0,
+			TRB_TYPE(TRB_ADDR_DEV) | SLOT_ID_FOR_TRB(slot_id) | BSR_FOR_TRB(1) ,
+			false);
+}
+#endif
 
 int xhci_queue_vendor_command(struct xhci_hcd *xhci,
 		u32 field1, u32 field2, u32 field3, u32 field4)

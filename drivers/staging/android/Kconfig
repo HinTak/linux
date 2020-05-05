@@ -40,6 +40,14 @@ config ANDROID_LOW_MEMORY_KILLER
 	---help---
 	  Register processes to be killed when memory is low
 
+config LMK_PRELOAD_APP
+	bool "LMK policy to kill Preloaded Applications"
+	depends on ANDROID_LOW_MEMORY_KILLER
+	default y
+	help
+	  With this option enabled, LMK first kills tasks with highest
+	  preload_prio value.
+
 config ANDROID_INTF_ALARM_DEV
 	bool "Android alarm driver"
 	depends on RTC_CLASS

@@ -1,0 +1,104 @@
+# drivers/MStar/Kconfig
+
+menu "MStar Platform Configuration"
+
+#===================================================
+# MStar Chip Selection
+#===================================================
+choice
+	prompt "MStar Chip Selection"
+	default None
+
+config MSTAR_NONE
+	bool "None"
+
+
+config MSTAR_PreX14
+        bool "X14"
+	select ARCH_SPARSEMEM_ENABLE
+	select COMMON_CLKDEV
+        select PLAT_MSTAR
+        help
+          This enables support for the ARM Ltd Versatile Express boards.
+
+config MSTAR_X14
+        bool "X14"
+		select ARCH_SPARSEMEM_ENABLE
+    	select COMMON_CLKDEV
+	 	select PLAT_MSTAR
+	  	help
+	      This enables support for the ARM Ltd Versatile Express boards.
+
+endchoice
+
+#===================================================
+# MStar Chip (auto-select)
+# 0: None
+#===================================================
+config MSTAR_CHIP_TYPE
+	int
+	default 0
+
+#===================================================
+# MStar Chip Name (auto-select)
+#===================================================
+config MSTAR_CHIP_NAME
+	string
+	default "x14" if MSTAR_PreX14 || MSTAR_X14
+	default "error"
+
+#===================================================
+# USB MIU1 PATCH
+#===================================================
+config MS_USB_MIU1_PATCH
+    bool
+    default n
+
+#===================================================
+# USB PATCH
+#===================================================
+config MSTAR_COOCAA_AUTH
+    bool "Link with COOCAA Authorization"
+    default n
+
+if !MSTAR_NONE
+#==========================================
+# Remove this latter - cc.chen
+#==========================================
+source "drivers/mstar/Kconfig-Board"
+source "drivers/mstar/Kconfig-MMap"
+
+#===================================================
+# MStar Device Drivers
+#===================================================
+comment "MStar Device Drivers"
+#source "drivers/mstar/g3d/Kconfig"
+#source "drivers/mstar/iomap/Kconfig"
+#source "drivers/mstar/msystem/Kconfig"
+#source "drivers/mstar/mpool/Kconfig"
+#source "drivers/mstar/ramdisk/Kconfig"
+#source "drivers/mstar/gpio/Kconfig"
+#source "drivers/mstar/iic/Kconfig"
+#source "drivers/mstar/emac/Kconfig"
+source "drivers/mstar/usb/Kconfig"
+#source "drivers/mstar/system/Kconfig"
+#source "drivers/mstar/ir/Kconfig"
+#source "drivers/mstar/nand/Kconfig"
+#source "drivers/mstar/flash/Kconfig"
+#source "drivers/mstar/mbx/Kconfig"
+#source "drivers/mstar/fusion/Kconfig"
+#source "drivers/mstar/firmware/Kconfig"
+#source "drivers/mstar/onenand/Kconfig"
+#source "drivers/mstar/gflip/Kconfig"
+#source "drivers/mstar/rfid/Kconfig"
+#source "drivers/mstar/vid_pre_alloc_mem/Kconfig"
+#source "drivers/mstar/msglog/Kconfig"
+#source "drivers/mstar/tsp/Kconfig"
+#source "drivers/mstar/shire/Kconfig"
+#source "drivers/mstar/sc/Kconfig"
+#source "drivers/mstar/mpif/Kconfig"
+#source "drivers/mstar/alsa_audio_driver/Kconfig"
+#source "drivers/mstar/uarttp/Kconfig"
+endif
+
+endmenu

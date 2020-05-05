@@ -198,10 +198,15 @@ static void disable_ep(struct usb_composite_dev *cdev, struct usb_ep *ep)
 
 void disable_endpoints(struct usb_composite_dev *cdev,
 		struct usb_ep *in, struct usb_ep *out,
-		struct usb_ep *iso_in, struct usb_ep *iso_out)
+		struct usb_ep *iso_in, struct usb_ep *iso_out,
+		struct usb_ep *int_in, struct usb_ep *int_out)
 {
 	disable_ep(cdev, in);
 	disable_ep(cdev, out);
+	if (int_in)
+		disable_ep(cdev, int_in);
+	if (int_out)
+		disable_ep(cdev, int_out);
 	if (iso_in)
 		disable_ep(cdev, iso_in);
 	if (iso_out)

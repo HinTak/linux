@@ -136,6 +136,157 @@ static const struct file_operations proc_tty_drivers_operations = {
 	.release	= seq_release,
 };
 
+#ifdef CONFIG_UART_BROADCAST
+extern void broadcast_tty_flip_buffer_push(void);
+extern void push_char_delayed_tty( unsigned int ch );
+
+static ssize_t broadcast_write(struct file *file, const char __user *buf,
+		size_t count, loff_t *ppos)
+{
+	int i;
+
+	if (!count)
+		return count;
+
+	// refer static void receive_chars() logic .... in tty/serial/8250.c
+	for( i=0; i<count; i++)
+		push_char_delayed_tty( (unsigned int) buf[i] );
+	broadcast_tty_flip_buffer_push();
+
+	return count;
+}
+
+static const struct file_operations proc_tty_broadcast_operations = {
+	.write  = broadcast_write,
+};
+#endif
+
+#ifdef CONFIG_SUPPORT_REBOOT
+#ifdef CONFIG_ENABLE_REBOOT
+static int allow_reboot=1;
+#else
+static int allow_reboot=0;
+#endif
+
+#ifdef CONFIG_ENABLE_MSG_WITH_REBOOT
+static int allow_msg_reboot = 1;
+#else
+static int allow_msg_reboot = 0;
+#endif
+
+int reboot_permit(void)
+{
+	return allow_reboot;
+}
+EXPORT_SYMBOL(reboot_permit);
+
+int print_permit(void)
+{
+	return allow_msg_reboot;
+}
+EXPORT_SYMBOL(print_permit);
+
+
+static ssize_t reboot_write(struct file *file, const char __user *buf,
+        size_t count, loff_t *ppos)
+{
+	char reboot_level[20];
+	int ret;
+
+	if (!count)
+		return count;
+
+	ret = copy_from_user(reboot_level, buf, count);
+	if (ret)
+	{
+		printk("copy_from_user error\n");
+		return -EFAULT;
+	}
+
+	reboot_level[count] = '\0';
+	if (reboot_level[count - 1] == '\n')
+	{
+		reboot_level[count - 1] = '\0';
+	}
+
+    if (!strcmp(reboot_level, "0"))
+    {
+		printk( "[SABSP] reboot Disallow!!!!!!!\n");
+		allow_reboot = 0;
+    }
+    else if (!strcmp(reboot_level, "1"))
+    {
+		printk( "[SABSP] reboot Allow!!!!!!!\n");
+		allow_reboot = 1;
+    }
+	else
+    {
+        printk("Usage : echo [0 | 1 ] > /proc/tty/reboot\r\n");
+        printk("        0 : reboot Disallow, 1 : reboot Allow\r\n");
+    }
+
+   return count;
+}
+
+static const struct file_operations proc_reboot_operations = {
+   .write  = reboot_write,
+};
+#ifdef CONFIG_SUPPORT_MSG_WITH_REBOOT
+static ssize_t reboot_msg_write(struct file *file, const char __user *buf,
+        size_t count, loff_t *ppos)
+{
+	char reboot_level[20];
+	int ret;
+
+	if (!count)
+		return count;
+
+	ret = copy_from_user(reboot_level, buf, count);
+	if (ret)
+	{
+		printk("copy_from_user error\n");
+		return -EFAULT;
+	}
+
+	reboot_level[count] = '\0';
+	if (reboot_level[count - 1] == '\n')
+	{
+		reboot_level[count - 1] = '\0';
+	}
+
+	if ( !allow_reboot )
+    {
+		printk( "[SABSP] Please enable reboot support first....!!!!\n");
+        printk("example) echo 1  > /proc/tty/reboot\r\n");
+		return count;
+    }
+
+    if (!strcmp(reboot_level, "0"))
+    {
+		printk( "[SABSP] print message Disallow!!!!!!!\n");
+		allow_msg_reboot = 0;
+    }
+    else if (!strcmp(reboot_level, "1"))
+    {
+		printk( "[SABSP] print message Allow!!!!!!!\n");
+		allow_msg_reboot = 1;
+    }
+	else
+    {
+        printk("Usage : echo [0 | 1 ] > /proc/tty/msg_reboot\r\n");
+        printk("        0 : print message Disallow, 1 : print message Allow\r\n");
+    }
+
+   return count;
+}
+
+
+static const struct file_operations proc_msg_operations = {
+   .write  = reboot_msg_write,
+};
+#endif
+#endif
+
 /*
  * This function is called by tty_register_driver() to handle
  * registering the driver's /proc handler into /proc/tty/driver/<foo>
@@ -186,4 +337,13 @@ void __init proc_tty_init(void)
 	proc_tty_driver = proc_mkdir_mode("tty/driver", S_IRUSR|S_IXUSR, NULL);
 	proc_create("tty/ldiscs", 0, NULL, &tty_ldiscs_proc_fops);
 	proc_create("tty/drivers", 0, NULL, &proc_tty_drivers_operations);
+#ifdef CONFIG_UART_BROADCAST
+	proc_create("tty/broadcast", S_IRUSR | S_IWUSR, NULL, &proc_tty_broadcast_operations);
+#endif
+#ifdef CONFIG_SUPPORT_REBOOT
+	proc_create("tty/reboot", S_IRUSR | S_IWUSR, NULL, &proc_reboot_operations);
+#endif
+#ifdef CONFIG_SUPPORT_MSG_WITH_REBOOT
+	proc_create("tty/msg_reboot", S_IRUSR | S_IWUSR, NULL, &proc_msg_operations);
+#endif
 }

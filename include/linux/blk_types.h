@@ -119,6 +119,9 @@ struct bio {
 #define BIO_RESET_BITS	12
 
 #define bio_flagged(bio, flag)	((bio)->bi_flags & (1 << (flag)))
+#if defined (CONFIG_BD_CACHE_ENABLED)
+#define BIO_DIRECT      13       /* direct IO from originating file request */
+#endif
 
 /*
  * top 4 bits of bio flags indicate the pool this bio came from
@@ -174,6 +177,10 @@ enum rq_flag_bits {
 	__REQ_FLUSH_SEQ,	/* request for flush sequence */
 	__REQ_IO_STAT,		/* account I/O stat */
 	__REQ_MIXED_MERGE,	/* merge of different types, fail separately */
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	__REQ_DIRECTIO,         /* original file-based request was O_DIRECT */
+//	__REQ_ISSUED,           /* request was issued by lower driver layers */
+#endif
 	__REQ_KERNEL, 		/* direct IO to kernel pages */
 	__REQ_NR_BITS,		/* stops here */
 };

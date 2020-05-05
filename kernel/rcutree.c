@@ -860,6 +860,11 @@ static void print_other_cpu_stall(struct rcu_state *rsp)
 	rsp->jiffies_stall = jiffies + 3 * jiffies_till_stall_check() + 3;
 	raw_spin_unlock_irqrestore(&rnp->lock, flags);
 
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+	extern void show_irq(void);
+	show_irq();
+#endif
+
 	/*
 	 * OK, time to rat on our buddy...
 	 * See Documentation/RCU/stallwarn.txt for info on how to debug

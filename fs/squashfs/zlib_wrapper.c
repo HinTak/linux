@@ -61,6 +61,63 @@ static void zlib_free(void *strm)
 }
 
 
+#define GZIP_HEADER_SIZE 10
+static int gzip_verify_header(struct squashfs_sb_info *msblk,
+			      struct buffer_head **bh, int *k_, int b,
+			      int *offset_, int *length_)
+{
+	char hdr[GZIP_HEADER_SIZE];
+	int k = *k_;
+	int offset = *offset_;
+	int length = *length_;
+	int ret = 0;
+
+	int avail = min(length, msblk->devblksize - offset);
+	int copied = 0;
+
+	if (k == b || length < GZIP_HEADER_SIZE)
+		goto out;
+	wait_on_buffer(bh[k]);
+	if (!buffer_uptodate(bh[k]))
+		goto out;
+
+	if (avail < GZIP_HEADER_SIZE) {
+		memcpy(hdr, bh[k]->b_data + offset, avail);
+		put_bh(bh[k++]);
+
+		if (k == b)
+			goto out;
+		wait_on_buffer(bh[k]);
+		if (!buffer_uptodate(bh[k]))
+			goto out;
+
+		copied = avail;
+		offset = 0;
+	}
+
+	/* Copy remains or full header */
+	memcpy(hdr + copied, bh[k]->b_data + offset, GZIP_HEADER_SIZE - copied);
+	offset += GZIP_HEADER_SIZE - copied;
+	length -= GZIP_HEADER_SIZE;
+
+	/* Verify gzip */
+	if (hdr[0] != 0x1f || hdr[1] != 0x8b ||
+	    hdr[2] != 0x08 || hdr[3] != 0x00) {
+		ERROR("%s: not gzip header\n", __func__);
+		goto out;
+	}
+
+	ret = 1;
+
+out:
+	*k_ = k;
+	*offset_ = offset;
+	*length_ = length;
+
+	return ret;
+}
+
+
 static int zlib_uncompress(struct squashfs_sb_info *msblk, void **buffer,
 	struct buffer_head **bh, int b, int offset, int length, int srclength,
 	int pages)
@@ -68,6 +125,15 @@ static int zlib_uncompress(struct squashfs_sb_info *msblk, void **buffer,
 	int zlib_err, zlib_init = 0;
 	int k = 0, page = 0;
 	z_stream *stream = msblk->stream;
+	int err = -EINVAL;
+	int is_gzip = (msblk->decompressor->id == GZIP_COMPRESSION);
+
+	/* In case of gzip verify header and advance bh,offset pair if needed */
+	if (is_gzip &&
+	    !gzip_verify_header(msblk, bh, &k, b, &offset, &length)) {
+		err = -EIO;
+		goto out;
+	}
 
 	mutex_lock(&msblk->read_data_mutex);
 
@@ -79,8 +145,10 @@ static int zlib_uncompress(struct squashfs_sb_info *msblk, void **buffer,
 			int avail = min(length, msblk->devblksize - offset);
 			length -= avail;
 			wait_on_buffer(bh[k]);
-			if (!buffer_uptodate(bh[k]))
+			if (!buffer_uptodate(bh[k])) {
+				err = -EIO;
 				goto release_mutex;
+			}
 
 			stream->next_in = bh[k]->b_data + offset;
 			stream->avail_in = avail;
@@ -93,7 +161,9 @@ static int zlib_uncompress(struct squashfs_sb_info *msblk, void **buffer,
 		}
 
 		if (!zlib_init) {
-			zlib_err = zlib_inflateInit(stream);
+			int wbits = (is_gzip ? -MAX_WBITS : DEF_WBITS);
+
+			zlib_err = zlib_inflateInit2(stream, wbits);
 			if (zlib_err != Z_OK) {
 				ERROR("zlib_inflateInit returned unexpected "
 					"result 0x%x, srclength %d\n",
@@ -120,6 +190,26 @@ static int zlib_uncompress(struct squashfs_sb_info *msblk, void **buffer,
 		goto release_mutex;
 	}
 
+	/* gzip has 8 byte trailer (crc32 + isize), also we have to do
+	   8 byte alignment because of hw requirements, so in case of gzip
+	   we will always have some remainings */
+	if (is_gzip && k < b) {
+		int next_k = k;
+		int total_remains = stream->avail_in + length;
+		/* 8b trailer + 8b alignment */
+		if (total_remains >= 16) {
+			ERROR("zlib_uncompress(gzip) error, data remaining: "
+			      "available %u, length %u\n",
+			      stream->avail_in, length);
+			goto release_mutex;
+		}
+		next_k += !!stream->avail_in;
+		next_k += !!length;
+
+		for (; k < next_k && k < b; )
+			put_bh(bh[k++]);
+	}
+
 	if (k < b) {
 		ERROR("zlib_uncompress error, data remaining\n");
 		goto release_mutex;
@@ -132,10 +222,11 @@ static int zlib_uncompress(struct squashfs_sb_info *msblk, void **buffer,
 release_mutex:
 	mutex_unlock(&msblk->read_data_mutex);
 
+out:
 	for (; k < b; k++)
 		put_bh(bh[k]);
 
-	return -EIO;
+	return err;
 }
 
 const struct squashfs_decompressor squashfs_zlib_comp_ops = {
@@ -147,3 +238,11 @@ const struct squashfs_decompressor squashfs_zlib_comp_ops = {
 	.supported = 1
 };
 
+const struct squashfs_decompressor squashfs_gzip_comp_ops = {
+	.init = zlib_init,
+	.free = zlib_free,
+	.decompress = zlib_uncompress,
+	.id = GZIP_COMPRESSION,
+	.name = "gzip",
+	.supported = 1
+};

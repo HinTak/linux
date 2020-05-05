@@ -145,6 +145,7 @@ static void ehci_disable_ASE(struct ehci_hcd *ehci)
 }
 
 
+#ifndef CONFIG_ARCH_NVT72668
 /* Poll the STS_PSS status bit; see when it agrees with CMD_PSE */
 static void ehci_poll_PSS(struct ehci_hcd *ehci)
 {
@@ -183,13 +184,56 @@ static void ehci_poll_PSS(struct ehci_hcd *ehci)
 		}
 	}
 }
+#else
+/* Poll the STS_PSS status bit; see when it agrees with CMD_PSE */
+static void ehci_poll_PSS(struct ehci_hcd *ehci)
+{
+	unsigned	actual, want;
+	// remove warning 20140103 sm79.bae@samsung.com
+//	u32 cmd;
+	/* Don't do anything if the controller isn't running (e.g., died) */
+	if (ehci->rh_state != EHCI_RH_RUNNING)
+		return;
 
+	want = (ehci->command & CMD_PSE) ? STS_PSS : 0;
+	actual = ehci_readl(ehci, &ehci->regs->status) & STS_PSS;
+
+	if (want != actual) {
+
+		/* Poll again later */
+		if (ehci->PSS_poll_count++ < 10)
+			ehci_enable_event(ehci, EHCI_HRTIMER_POLL_PSS, true);
+		return;
+	}
+
+	if (ehci->PSS_poll_count >= 10)
+		ehci_dbg(ehci, "PSS poll count reached %d\n",
+				ehci->PSS_poll_count);
+	ehci->PSS_poll_count = 0;
+
+	/* The status is up-to-date; restart or stop the schedule as needed */
+	if (want == 0) {	/* Stopped */
+		if (ehci->periodic_count > 0)
+			ehci_set_command_bit(ehci, CMD_PSE);
+
+	} else {		/* Running */
+		if (ehci->periodic_count == 0) {
+
+			/* Turn off the schedule after a while */
+			ehci_enable_event(ehci, EHCI_HRTIMER_DISABLE_PERIODIC,
+					true);
+		}
+	}
+}
+
+#endif
 /* Turn off the periodic schedule after a brief delay */
 static void ehci_disable_PSE(struct ehci_hcd *ehci)
 {
 	ehci_clear_command_bit(ehci, CMD_PSE);
 }
 
+#ifndef CONFIG_ARCH_NVT72668
 
 /* Poll the STS_HALT status bit; see when a dead controller stops */
 static void ehci_handle_controller_death(struct ehci_hcd *ehci)
@@ -214,6 +258,32 @@ static void ehci_handle_controller_death(struct ehci_hcd *ehci)
 
 	/* Not in process context, so don't try to reset the controller */
 }
+
+#else
+/* Poll the STS_HALT status bit; see when a dead controller stops */
+static void ehci_handle_controller_death(struct ehci_hcd *ehci)
+{
+	if (!(ehci_readl(ehci, &ehci->regs->status) & STS_HALT)) {
+
+		/* Give up after a few milliseconds */
+		if (ehci->died_poll_count++ < 5) {
+			/* Try again later */
+			ehci_enable_event(ehci, EHCI_HRTIMER_POLL_DEAD, true);
+			return;
+		}
+		ehci_warn(ehci, "Waited too long for the controller to stop, giving up\n");
+	}
+
+	/* Clean up the mess */
+	ehci->rh_state = EHCI_RH_HALTED;
+	ehci_writel(ehci, 0, &ehci->regs->intr_enable);
+	ehci_work(ehci);
+	end_unlink_async(ehci);
+
+	/* Not in process context, so don't try to reset the controller */
+}
+
+#endif
 
 
 /* Handle unlinked interrupt QHs once they are gone from the hardware */

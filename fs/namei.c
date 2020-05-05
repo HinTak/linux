@@ -33,9 +33,13 @@
 #include <linux/fcntl.h>
 #include <linux/device_cgroup.h>
 #include <linux/fs_struct.h>
+#include <linux/loop.h>
+#include <linux/genhd.h>
 #include <linux/posix_acl.h>
 #include <asm/uaccess.h>
-
+#ifdef CONFIG_SKIP_DAC_PERMISSION_NFS
+#include <linux/magic.h>
+#endif
 #include "internal.h"
 #include "mount.h"
 
@@ -117,6 +121,72 @@
  * POSIX.1 2.4: an empty pathname is invalid (ENOENT).
  * PATH_MAX includes the nul terminator --RR.
  */
+
+#ifdef CONFIG_DAC_CAP_ERROR_LOG_MSG
+#define IS_U_READ(mode)        ((mode & S_IRUSR) ? 'r' : '-')
+#define IS_U_WRITE(mode)       ((mode & S_IWUSR) ? 'w' : '-')
+#define IS_U_EXE(mode)         ((mode & S_IXUSR) ? 'x' : '-')
+#define IS_G_READ(mode)        ((mode & S_IRGRP) ? 'r' : '-')
+#define IS_G_WRITE(mode)       ((mode & S_IWGRP) ? 'w' : '-')
+#define IS_G_EXE(mode)         ((mode & S_IXGRP) ? 'x' : '-')
+#define IS_O_READ(mode)        ((mode & S_IROTH) ? 'r' : '-')
+#define IS_O_WRITE(mode)       ((mode & S_IWOTH) ? 'w' : '-')
+#define IS_O_EXE(mode)         ((mode & S_IXOTH) ? 'x' : '-')
+
+#define IS_FILE_READ(mode)     ((mode & MAY_READ) ? 'r' : '-')
+#define IS_FILE_WRITE(mode)    ((mode & MAY_WRITE) ? 'w' : '-')
+#define IS_FILE_EXE(mode)      ((mode & MAY_EXEC) ? 'x' : '-')
+
+void print_dac_error_info(struct inode *inode, int mask,
+				const char *func, int err)
+{
+	umode_t mode = inode->i_mode;
+	struct dentry *dac_dentry = d_find_alias(inode);
+	char p_comm[TASK_COMM_LEN+1] = "_";
+	rcu_read_lock();
+	if (current->real_parent != NULL)
+		strncpy(p_comm,
+				current->real_parent->group_leader->comm,
+				TASK_COMM_LEN);
+	rcu_read_unlock();
+	printk(KERN_ALERT"\n\n\n\n#################################\n");
+	printk(KERN_ALERT"[ERROR(%d)][DAC:%s(%s)][%s(%s:%x)][dev=%s][%c%c%c][%c%c%c][%c%c%c][U(%d)G(%d)]<->[TH(%s:%d)PTH(%s)][U(r[%d]:s[%d]:e[%d]:fs[%d])G(r[%d]:s[%d]:e[%d]:fs[%d])][%c%c%c]\n" ,
+			err , func ,
+#ifdef CONFIG_SKIP_DAC_CAP_PERMISSION
+			"SKIP",
+#else
+			"NoSKIP",
+#endif
+			dac_dentry == NULL ?
+			"-----" : (char *)dac_dentry->d_iname,
+			(S_ISDIR(mode) == true) ? "dir" : "file",
+			(mode & S_IFMT) , inode->i_sb->s_id,
+			IS_U_READ(mode), IS_U_WRITE(mode), IS_U_EXE(mode),
+			IS_G_READ(mode), IS_G_WRITE(mode), IS_G_EXE(mode),
+			IS_O_READ(mode), IS_O_WRITE(mode), IS_O_EXE(mode),
+			inode->i_uid, inode->i_gid,
+			current->comm, current->pid, p_comm,
+			current_uid(), current_suid(), current_euid(),
+			current_fsuid(), current_gid(), current_sgid(),
+			current_egid(), current_fsgid(),
+			IS_FILE_READ(mask), IS_FILE_WRITE(mask),
+			IS_FILE_EXE(mask));
+	printk(KERN_ALERT"###################################\n\n\n\n");
+	if (dac_dentry)
+		dput(dac_dentry);
+
+}
+#endif
+
+#ifdef CONFIG_SKIP_DAC_PERMISSION_NFS
+bool check_dac_skip(struct inode *check_node)
+{
+	if (check_node->i_sb->s_magic == NFS_SUPER_MAGIC)
+		return true;
+	return false;
+}
+#endif
+
 void final_putname(struct filename *name)
 {
 	if (name->separate) {
@@ -272,7 +342,6 @@ static int check_acl(struct inode *inode, int mask)
 static int acl_permission_check(struct inode *inode, int mask)
 {
 	unsigned int mode = inode->i_mode;
-
 	if (likely(uid_eq(current_fsuid(), inode->i_uid)))
 		mode >>= 6;
 	else {
@@ -291,6 +360,7 @@ static int acl_permission_check(struct inode *inode, int mask)
 	 */
 	if ((mask & ~mode & (MAY_READ | MAY_WRITE | MAY_EXEC)) == 0)
 		return 0;
+
 	return -EACCES;
 }
 
@@ -319,14 +389,37 @@ int generic_permission(struct inode *inode, int mask)
 	if (ret != -EACCES)
 		return ret;
 
+#ifdef CONFIG_SKIP_DAC_PERMISSION_NFS
+	if (check_dac_skip(inode))
+		return 0;
+#endif
+
 	if (S_ISDIR(inode->i_mode)) {
 		/* DACs are overridable for directories */
+#if defined(CONFIG_SKIP_DAC_CAP_PERMISSION) || \
+		defined(CONFIG_DAC_CAP_ERROR_LOG_MSG)
+		if (inode_capable_dac(inode, CAP_DAC_OVERRIDE))
+#else
 		if (inode_capable(inode, CAP_DAC_OVERRIDE))
+#endif
 			return 0;
 		if (!(mask & MAY_WRITE))
+#if defined(CONFIG_SKIP_DAC_CAP_PERMISSION) || \
+			defined(CONFIG_DAC_CAP_ERROR_LOG_MSG)
+			if (inode_capable_dac(inode, CAP_DAC_READ_SEARCH))
+#else
 			if (inode_capable(inode, CAP_DAC_READ_SEARCH))
+#endif
 				return 0;
+#ifdef CONFIG_DAC_CAP_ERROR_LOG_MSG
+		print_dac_error_info(inode , mask , "generic", -EACCES);
+#endif
+
+#ifdef CONFIG_SKIP_DAC_CAP_PERMISSION
+		return 0;
+#else
 		return -EACCES;
+#endif
 	}
 	/*
 	 * Read/write DACs are always overridable.
@@ -334,7 +427,12 @@ int generic_permission(struct inode *inode, int mask)
 	 * at least one exec bit set.
 	 */
 	if (!(mask & MAY_EXEC) || (inode->i_mode & S_IXUGO))
+#if defined(CONFIG_SKIP_DAC_CAP_PERMISSION) || \
+		defined(CONFIG_DAC_CAP_ERROR_LOG_MSG)
+		if (inode_capable_dac(inode, CAP_DAC_OVERRIDE))
+#else
 		if (inode_capable(inode, CAP_DAC_OVERRIDE))
+#endif
 			return 0;
 
 	/*
@@ -342,10 +440,22 @@ int generic_permission(struct inode *inode, int mask)
 	 */
 	mask &= MAY_READ | MAY_WRITE | MAY_EXEC;
 	if (mask == MAY_READ)
+#if defined(CONFIG_SKIP_DAC_CAP_PERMISSION) || \
+		defined(CONFIG_DAC_CAP_ERROR_LOG_MSG)
+		if (inode_capable_dac(inode, CAP_DAC_READ_SEARCH))
+#else
 		if (inode_capable(inode, CAP_DAC_READ_SEARCH))
+#endif
 			return 0;
 
+#ifdef CONFIG_DAC_CAP_ERROR_LOG_MSG
+	print_dac_error_info(inode , mask , "generic", -EACCES);
+#endif
+#ifdef CONFIG_SKIP_DAC_CAP_PERMISSION
+	return 0;
+#else
 	return -EACCES;
+#endif
 }
 
 /*
@@ -393,8 +503,26 @@ int __inode_permission(struct inode *inode, int mask)
 	}
 
 	retval = do_inode_permission(inode, mask);
-	if (retval)
+
+#ifdef CONFIG_SKIP_DAC_PERMISSION_NFS
+	if ((retval == -EACCES) && (check_dac_skip(inode)))
+		return 0;
+#endif
+
+	if (retval) {
+#ifdef CONFIG_DAC_CAP_ERROR_LOG_MSG
+		if (retval != -ECHILD)
+			print_dac_error_info(inode , mask , "inode", retval);
+#endif
+#ifdef CONFIG_SKIP_DAC_CAP_PERMISSION
+		if (retval == -ECHILD)
+			return retval;
+		else
+			retval = 0;
+#else
 		return retval;
+#endif
+	}
 
 	retval = devcgroup_inode_permission(inode, mask);
 	if (retval)
@@ -3910,6 +4038,7 @@ retry:
 				     &newnd.path, new_dentry);
 	if (error)
 		goto exit5;
+
 	error = vfs_rename(old_dir->d_inode, old_dentry,
 				   new_dir->d_inode, new_dentry);
 exit5:

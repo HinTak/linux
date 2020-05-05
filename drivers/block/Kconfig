@@ -289,11 +289,20 @@ config BLK_DEV_CRYPTOLOOP
 	  instead, which can be configured to be on-disk compatible with the
 	  cryptoloop device.
 
+config LOOP_MOUNT_CHECK
+        bool "Loop Mount Check"
+	depends on BLK_DEV_LOOP
+        default y
+        help
+         This option enables at time of mount to check loopback
+         used by any process , if used by process don't mount.
+
 source "drivers/block/drbd/Kconfig"
 
 config BLK_DEV_NBD
 	tristate "Network block device support"
 	depends on NET
+	depends on KNBD_SUPPORT
 	---help---
 	  Saying Y here will allow your computer to be a client for network
 	  block devices, i.e. it will be able to use block devices exported by
@@ -328,6 +337,15 @@ config BLK_DEV_NVME
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called nvme.
+
+config NBD_KNBD_SUPPORT
+	bool "Add support of KNBD to nbd driver"
+	depends on BLK_DEV_NBD
+	default n
+	---help---
+	  Saying Y here will allow usage of the special NBD interface based on
+	  callbacks. This interface can help with own requests injecting and
+	  replies handling. Very useful for various nbd hacking purposes.
 
 config BLK_DEV_OSD
 	tristate "OSD object-as-blkdev support"

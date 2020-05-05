@@ -200,6 +200,8 @@ struct ehci_hcd {			/* one per controller */
 	unsigned		use_dummy_qh:1;	/* AMD Frame List table quirk*/
 	unsigned		has_synopsys_hc_bug:1; /* Synopsys HC */
 	unsigned		frame_index_bug:1; /* MosChip (AKA NetMos) */
+	unsigned		retry_negotiation:1;
+	unsigned		force_reset_on_ls:1;
 
 	/* required for usb32 quirk */
 	#define OHCI_CTRL_HCFS          (3 << 6)
@@ -211,7 +213,10 @@ struct ehci_hcd {			/* one per controller */
 	__hc32			*ohci_hcctrl_reg;
 	unsigned		has_hostpc:1;
 	unsigned		has_ppcd:1; /* support per-port change bits */
+	unsigned		has_synopsys_portreset:1;	/* HSIC portreset WA */
 	u8			sbrn;		/* packed release number */
+	int			retry_negotiation_cnt;
+	int			force_reset_on_ls_cnt;
 
 	/* irq statistics */
 #ifdef EHCI_STATS
@@ -228,6 +233,11 @@ struct ehci_hcd {			/* one per controller */
 
 	/* platform-specific data -- must come last */
 	unsigned long		priv[0] __aligned(sizeof(s64));
+#ifdef CONFIG_ARCH_NVT72668
+	void __iomem		*apbs;		/* device memory/io */
+	resource_size_t		rsrc_start;	/* memory/io resource start */
+	resource_size_t		rsrc_len;	/* memory/io resource length */
+#endif
 };
 
 /* convert between an HCD pointer and the corresponding EHCI_HCD */
@@ -393,8 +403,11 @@ struct ehci_qh {
 #define	QH_STATE_COMPLETING	5		/* don't touch token.HALT */
 
 	u8			xacterrs;	/* XactErr retry counter */
+#if defined (CONFIG_ARCH_NVT72668)
+#define	QH_XACTERR_MAX		2		/* XactErr retry limit */
+#else
 #define	QH_XACTERR_MAX		32		/* XactErr retry limit */
-
+#endif
 	/* periodic schedule info */
 	u8			usecs;		/* intr bandwidth */
 	u8			gap_uf;		/* uframes split/csplit gap */
@@ -478,6 +491,8 @@ struct ehci_iso_stream {
  *
  * Schedule records for high speed iso xfers
  */
+#ifndef CONFIG_ARCH_NVT72668
+ 
 struct ehci_itd {
 	/* first part defined by EHCI spec */
 	__hc32			hw_next;           /* see EHCI 3.3.1 */
@@ -507,7 +522,38 @@ struct ehci_itd {
 	unsigned		pg;
 	unsigned		index[8];	/* in urb->iso_frame_desc */
 } __attribute__ ((aligned (32)));
+#else
+struct ehci_itd {
+	/* first part defined by EHCI spec */
+	__hc32			hw_next;           /* see EHCI 3.3.1 */
+	__hc32			hw_transaction [8]; /* see EHCI 3.3.2 */
+#define EHCI_ISOC_ACTIVE        (1<<31)        /* activate transfer this slot */
+#define EHCI_ISOC_BUF_ERR       (1<<30)        /* Data buffer error */
+#define EHCI_ISOC_BABBLE        (1<<29)        /* babble detected */
+#define EHCI_ISOC_XACTERR       (1<<28)        /* XactErr - transaction error */
+#define	EHCI_ITD_LENGTH(tok)	(((tok)>>16) & 0x0fff)
+#define	EHCI_ITD_IOC		(1 << 15)	/* interrupt on complete */
 
+#define ITD_ACTIVE(ehci)	cpu_to_hc32(ehci, EHCI_ISOC_ACTIVE)
+
+	__hc32			hw_bufp [7];	/* see EHCI 3.3.3 */
+	__hc32			hw_bufp_hi [7];	/* Appendix B */
+
+	/* the rest is HCD-private */
+	dma_addr_t		itd_dma;	/* for this itd */
+	union ehci_shadow	itd_next;	/* ptr to periodic q entry */
+
+	struct urb		*urb;
+	struct ehci_iso_stream	*stream;	/* endpoint's queue */
+	struct list_head	itd_list;	/* list of stream's itds */
+
+	/* any/all hw_transactions here may be used by that urb */
+	unsigned		frame;		/* where scheduled */
+	unsigned		pg;
+	unsigned		index[8];	/* in urb->iso_frame_desc */
+} __attribute__ ((aligned (64)));
+
+#endif
 /*-------------------------------------------------------------------------*/
 
 /*
@@ -583,6 +629,35 @@ struct ehci_fstn {
 
 /*-------------------------------------------------------------------------*/
 
+#ifdef CONFIG_ARCH_NVT72668
+
+/*
+ * Some EHCI controllers have a Transaction Translator built into the
+ * root hub. This is a non-standard feature.  Each controller will need
+ * to add code to the following inline functions, and call them as
+ * needed (mostly in root hub code).
+ */
+
+#define	ehci_is_TDI(e)			(ehci_to_hcd(e)->has_tt)
+
+/* Returns the speed of a device attached to a port on the root hub. */
+static inline unsigned int
+ehci_port_speed(struct ehci_hcd *ehci, unsigned int portsc)
+{
+	if (ehci_is_TDI(ehci)) {
+		switch ((portsc>>22)&3) {
+		case 0:
+			return 0;
+		case 1:
+			return USB_PORT_STAT_LOW_SPEED;
+		case 2:
+		default:
+			return USB_PORT_STAT_HIGH_SPEED;
+		}
+	}
+	return USB_PORT_STAT_HIGH_SPEED;
+}
+#else
 #ifdef CONFIG_USB_EHCI_ROOT_HUB_TT
 
 /*
@@ -618,6 +693,8 @@ ehci_port_speed(struct ehci_hcd *ehci, unsigned int portsc)
 
 #define	ehci_port_speed(ehci, portsc)	USB_PORT_STAT_HIGH_SPEED
 #endif
+#endif
+
 
 /*-------------------------------------------------------------------------*/
 

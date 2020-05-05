@@ -178,7 +178,6 @@ int blk_rq_map_sg(struct request_queue *q, struct request *rq,
 				     &nsegs, &cluster);
 	} /* segments in rq */
 
-
 	if (unlikely(rq->cmd_flags & REQ_COPY_USER) &&
 	    (blk_rq_bytes(rq) & q->dma_pad_mask)) {
 		unsigned int pad_len =
@@ -258,6 +257,18 @@ static inline int ll_new_hw_segment(struct request_queue *q,
 	if (bio_integrity(bio) && blk_integrity_merge_bio(q, req, bio))
 		goto no_merge;
 
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	/* Cannot merge directIO to non-directIO requests */
+	if (q->last_merge) {
+		if (test_bit(__REQ_DIRECTIO, (unsigned long *)&q->last_merge->cmd_flags) !=
+				test_bit(__REQ_DIRECTIO, (unsigned long *)&req->cmd_flags) ) {
+
+			/*printk(KERN_DEBUG "%s: Cannot merge __REQ_DIRECTIO to non-directIO request\n", __FUNCTION__);*/
+			goto no_merge;
+		}
+	}
+#endif
+
 	/*
 	 * This will form the start of a new hw segment.  Bump both
 	 * counters.
@@ -321,6 +332,15 @@ static int ll_merge_requests_fn(struct request_queue *q, struct request *req,
 	 */
 	if (req->special || next->special)
 		return 0;
+
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	/* Cannot merge directIO to non-directIO requests */
+	if (test_bit(__REQ_DIRECTIO, (unsigned long *)&req->cmd_flags) !=
+		test_bit(__REQ_DIRECTIO, (unsigned long *)&next->cmd_flags) ) {
+		/*printk(KERN_DEBUG "%s: Cannot merge __REQ_DIRECTIO to non-directIO request\n", __FUNCTION__);*/
+		return 0;
+	}
+#endif
 
 	/*
 	 * Will it become too large?
@@ -431,6 +451,15 @@ static int attempt_merge(struct request_queue *q, struct request *req,
 	 */
 	if (!ll_merge_requests_fn(q, req, next))
 		return 0;
+
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	/* Cannot merge directIO to non-directO requests */
+	if (test_bit(__REQ_DIRECTIO, (unsigned long *)&req->cmd_flags) !=
+			test_bit(__REQ_DIRECTIO, (unsigned long *)&next->cmd_flags) ) {
+		/*printk(KERN_DEBUG "%s: Cannot merge __REQ_DIRECTIO to non-directIO request\n", __FUNCTION__);*/
+		return 0;
+	}
+#endif
 
 	/*
 	 * If failfast settings disagree or any of the two is already

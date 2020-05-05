@@ -42,6 +42,10 @@
 
 /* fill a qtd, returning how much of the buffer we were able to queue up */
 
+//#define QTD_DEBUG 
+#ifdef QTD_DEBUG
+#define DDR_DATA(val) (*(volatile unsigned int*)val)
+#endif
 static int
 qtd_fill(struct ehci_hcd *ehci, struct ehci_qtd *qtd, dma_addr_t buf,
 		  size_t len, int token, int maxpacket)
@@ -77,6 +81,7 @@ qtd_fill(struct ehci_hcd *ehci, struct ehci_qtd *qtd, dma_addr_t buf,
 			count -= (count % maxpacket);
 	}
 	qtd->hw_token = cpu_to_hc32(ehci, (count << 16) | token);
+	wmb();//Golf MPW,AP,B
 	qtd->length = count;
 
 	return count;
@@ -111,7 +116,12 @@ qh_update (struct ehci_hcd *ehci, struct ehci_qh *qh, struct ehci_qtd *qtd)
 		}
 	}
 
+	wmb ();//Golf MPW,AP,B
 	hw->hw_token &= cpu_to_hc32(ehci, QTD_TOGGLE | QTD_STS_PING);
+#ifdef CONFIG_ARCH_NVT72668
+	ACCESS_ONCE(hw->hw_token);
+	wmb();
+#endif
 }
 
 /* if it weren't for a common silicon quirk (writing the dummy into the qh
@@ -245,6 +255,17 @@ static int qtd_copy_status (
 				usb_pipein(urb->pipe) ? "in" : "out");
 			status = -EPROTO;
 		} else {	/* unknown */
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+			/* 20070514, patch for STALL endpoint case with TP-U20W.
+			 * 20111228, patch for TT clear case with MicroSoft's wireless keyboard dongle.
+			 * unless we already know the urb's status through ping, update token's status.
+			 */
+			if(!(token & QTD_STS_ACTIVE)
+					&& !(token & QTD_STS_PING))
+				urb->status = -EPIPE;
+			else
+
+#endif
 			status = -EPROTO;
 		}
 
@@ -311,6 +332,9 @@ qh_completions (struct ehci_hcd *ehci, struct ehci_qh *qh)
 	int			stopped;
 	unsigned		count = 0;
 	u8			state;
+#ifdef CONFIG_ARCH_NVT72668
+	const __le32        halt = HALT_BIT(ehci);
+#endif
 	struct ehci_qh_hw	*hw = qh->hw;
 
 	if (unlikely (list_empty (&qh->qtd_list)))
@@ -330,6 +354,11 @@ qh_completions (struct ehci_hcd *ehci, struct ehci_qh *qh)
 	qh->qh_state = QH_STATE_COMPLETING;
 	stopped = (state == QH_STATE_IDLE);
 
+#ifdef CONFIG_ARCH_NVT72668
+	if (test_bit(1,&(ehci_to_hcd(ehci)->porcd2))) {
+		stopped = 1;
+	}
+#endif
  rescan:
 	last = NULL;
 	last_status = -EINPROGRESS;
@@ -369,6 +398,19 @@ qh_completions (struct ehci_hcd *ehci, struct ehci_qh *qh)
 
 		/* always clean up qtds the hc de-activated */
  retry_xacterr:
+
+ #ifdef QTD_DEBUG
+
+		if(stopped==1)
+			{
+				int ddr_base=0;
+				ddr_base=phys_to_virt(qtd->hw_next);
+				
+				printk("current QTD(0x%08X) =0x%08X |0x%08X |0x%08X |0x%08X \n",qtd,*qtd,*(qtd+4),*(qtd+8),*(qtd+12));
+				printk("QTD token = 0x%02X ex) Halted:0x40, Data buffer Error:0x20, Babble Detected:0x10, Trans error(Xacterr):0x08, Missed MF:0x04\n",token&0xff);
+				printk("next     QTD(0x%08X) =0x%08X |0x%08X |0x%08X |0x%08X \n",ddr_base,DDR_DATA(ddr_base),DDR_DATA((ddr_base+4)),DDR_DATA((ddr_base+8)),DDR_DATA((ddr_base+12)));
+		}
+#endif
 		if ((token & QTD_STS_ACTIVE) == 0) {
 
 			/* Report Data Buffer Error: non-fatal but useful */
@@ -411,6 +453,10 @@ qh_completions (struct ehci_hcd *ehci, struct ehci_qh *qh)
 					wmb();
 					hw->hw_token = cpu_to_hc32(ehci,
 							token);
+					wmb();//Golf MPW,AP,B
+#ifdef CONFIG_ARCH_NVT72668
+					ACCESS_ONCE(hw->hw_token);
+#endif
 					goto retry_xacterr;
 				}
 				stopped = 1;
@@ -428,6 +474,9 @@ qh_completions (struct ehci_hcd *ehci, struct ehci_qh *qh)
 					&& !(qtd->hw_alt_next
 						& EHCI_LIST_END(ehci))) {
 				stopped = 1;
+#ifdef CONFIG_ARCH_NVT72668
+				goto halt;
+#endif
 			}
 
 		/* stop scanning when we reach qtds the hc is using */
@@ -438,7 +487,11 @@ qh_completions (struct ehci_hcd *ehci, struct ehci_qh *qh)
 		/* scan the whole queue for unlinks whenever it stops */
 		} else {
 			stopped = 1;
-
+#ifdef CONFIG_ARCH_NVT72668
+			if (test_bit(1,&(ehci_to_hcd(ehci)->porcd2))) {
+				last_status = -ENOTCONN;
+			}
+#endif
 			/* cancel everything if we halt, suspend, etc */
 			if (ehci->rh_state < EHCI_RH_RUNNING)
 				last_status = -ESHUTDOWN;
@@ -469,6 +522,19 @@ qh_completions (struct ehci_hcd *ehci, struct ehci_qh *qh)
 				 */
 				ehci_clear_tt_buffer(ehci, qh, urb, token);
 			}
+
+#ifdef CONFIG_ARCH_NVT72668
+			/* force halt for unlinked or blocked qh, so we'll
+			 * patch the qh later and so that completions can't
+			 * activate it while we "know" it's stopped.
+			 */
+			if ((halt & hw->hw_token) == 0) {
+halt:
+				hw->hw_token |= halt;
+				wmb ();
+				ACCESS_ONCE(hw->hw_token);
+			}
+#endif
 		}
 
 		/* unless we already know the urb's status, collect qtd status
@@ -501,8 +567,20 @@ qh_completions (struct ehci_hcd *ehci, struct ehci_qh *qh)
 				 * is a violation of the spec.
 				 */
 				if (last_status != -EPIPE)
-					ehci_clear_tt_buffer(ehci, qh, urb,
+				{
+				#ifdef	SAMSUNG_PATCH_WITH_USB_HID_DISCONNECT_BUGFIX
+				/* We already tried to clear xact error in the begining, if it has exceeded QH_XACTERR_MAX
+ 		                then tt command is not at fault, so don't burden the hub and EHC by sending too many clear tt comands */		 
+					if(last_status == -EPROTO)
+					{
+						if(qh->xacterrs < QH_XACTERR_MAX)
+							ehci_clear_tt_buffer(ehci, qh, urb,
 							token);
+					}
+					else
+				#endif
+						ehci_clear_tt_buffer(ehci, qh, urb, token);
+				}
 			}
 		}
 
@@ -513,6 +591,10 @@ qh_completions (struct ehci_hcd *ehci, struct ehci_qh *qh)
 			last = list_entry (qtd->qtd_list.prev,
 					struct ehci_qtd, qtd_list);
 			last->hw_next = qtd->hw_next;
+			/*
+ 			 * Using wmb() which though a barrier will do a write-buffer flush
+ 			 */
+			wmb(); 
 		}
 
 		/* remove qtd; it's recycled after possible urb completion */
@@ -961,7 +1043,9 @@ done:
 	qh->qh_state = QH_STATE_IDLE;
 	hw = qh->hw;
 	hw->hw_info1 = cpu_to_hc32(ehci, info1);
+	wmb ();
 	hw->hw_info2 = cpu_to_hc32(ehci, info2);
+	wmb ();
 	qh->is_out = !is_input;
 	usb_settoggle (urb->dev, usb_pipeendpoint (urb->pipe), !is_input, 1);
 	qh_refresh (ehci, qh);
@@ -1008,6 +1092,11 @@ static void qh_link_async (struct ehci_hcd *ehci, struct ehci_qh *qh)
 
 	WARN_ON(qh->qh_state != QH_STATE_IDLE);
 
+#ifdef CONFIG_ARCH_NVT72668
+	if((qh->dev->parent->devpath[0] == '0') && unlikely(qh->dev->descriptor.idVendor == 0x04e8) && unlikely(qh->dev->descriptor.idProduct == 0x5014)) {
+		udelay(1);
+	}
+#endif
 	/* clear halt and/or toggle; and maybe recover from silicon quirk */
 	qh_refresh(ehci, qh);
 
@@ -1016,6 +1105,11 @@ static void qh_link_async (struct ehci_hcd *ehci, struct ehci_qh *qh)
 	qh->qh_next = head->qh_next;
 	qh->hw->hw_next = head->hw->hw_next;
 	wmb ();
+
+#ifdef CONFIG_ARCH_NVT72668
+	ACCESS_ONCE(qh->hw->hw_next);
+	wmb();
+#endif
 
 	head->qh_next.qh = qh;
 	head->hw->hw_next = dma;
@@ -1084,7 +1178,12 @@ static struct ehci_qh *qh_append_tds (
 			 */
 			token = qtd->hw_token;
 			qtd->hw_token = HALT_BIT(ehci);
-
+#ifdef CONFIG_ARCH_NVT72668
+			ACCESS_ONCE(qtd->hw_token);
+			wmb ();
+#endif			
+			wmb ();//Golf MPW,AP,B
+			
 			dummy = qh->dummy;
 
 			dma = dummy->qtd_dma;
@@ -1106,7 +1205,11 @@ static struct ehci_qh *qh_append_tds (
 
 			/* let the hc process these next qtds */
 			wmb ();
+#ifdef CONFIG_ARCH_NVT72668
+			ACCESS_ONCE(qtd->hw_next);
+#endif
 			dummy->hw_token = token;
+			wmb ();//Golf MPW,AP,B
 
 			urb->hcpriv = qh;
 		}
@@ -1148,6 +1251,13 @@ submit_async (
 		rc = -ESHUTDOWN;
 		goto done;
 	}
+#ifdef CONFIG_ARCH_NVT72668
+	if (unlikely(test_bit(HCD_FLAG_NRY,
+					&ehci_to_hcd(ehci)->flags))) {
+		rc = -ENODEV;
+		goto done;
+	}
+#endif
 	rc = usb_hcd_link_urb_to_ep(ehci_to_hcd(ehci), urb);
 	if (unlikely(rc))
 		goto done;
@@ -1251,9 +1361,12 @@ static void end_unlink_async(struct ehci_hcd *ehci)
 {
 	struct ehci_qh		*qh;
 
+#ifndef CONFIG_ARCH_NVT72668
 	if (ehci->has_synopsys_hc_bug)
 		ehci_writel(ehci, (u32) ehci->async->qh_dma,
 			    &ehci->regs->async_next);
+#endif
+
 
 	/* Process the idle QHs */
  restart:
@@ -1317,7 +1430,7 @@ static void unlink_empty_async(struct ehci_hcd *ehci)
 }
 
 /* The root hub is suspended; unlink all the async QHs */
-static void unlink_empty_async_suspended(struct ehci_hcd *ehci)
+static void __maybe_unused unlink_empty_async_suspended(struct ehci_hcd *ehci)
 {
 	struct ehci_qh		*qh;
 
@@ -1355,6 +1468,12 @@ static void scan_async (struct ehci_hcd *ehci)
 {
 	struct ehci_qh		*qh;
 	bool			check_unlinks_later = false;
+#ifndef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+	 //20071218 for strength usb	 
+	udelay(50);
+#endif
+#endif	// CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
 
 	ehci->qh_scan_next = ehci->async->qh_next.qh;
 	while (ehci->qh_scan_next) {

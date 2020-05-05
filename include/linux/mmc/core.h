@@ -98,6 +98,21 @@ struct mmc_command {
 	struct mmc_request	*mrq;		/* associated request */
 };
 
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+/*
+ * hw decompress req
+ */
+struct mmc_hw_req {
+	struct page  **out_pages;
+	unsigned int out_cnt;
+	sector_t     sector_off;
+	unsigned int off;
+	unsigned int compr_len;
+	unsigned int to_read_b;
+	void         *ibuff; /*< Should be set and used by mmc driver */
+};
+#endif
+
 struct mmc_data {
 	unsigned int		timeout_ns;	/* data timeout (in ns, max 80ms) */
 	unsigned int		timeout_clks;	/* data timeout (in clocks) */
@@ -118,6 +133,9 @@ struct mmc_data {
 	unsigned int		sg_len;		/* size of scatter list */
 	struct scatterlist	*sg;		/* I/O scatter list */
 	s32			host_cookie;	/* host private data */
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+	struct mmc_hw_req	*hw_req;
+#endif
 };
 
 struct mmc_request {

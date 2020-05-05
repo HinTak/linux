@@ -719,6 +719,15 @@ static inline void cap_emulate_setxuid(struct cred *new, const struct cred *old)
  */
 int cap_task_fix_setuid(struct cred *new, const struct cred *old, int flags)
 {
+#ifdef CONFIG_PROHIBIT_GROUP_SETUID
+	/* someone is trying to change user privilege to root(0) with group setuid syscall */
+	if((__kuid_val(new->uid) == 0 && __kuid_val(old->uid) != 0) ||
+		(__kuid_val(new->euid) == 0 && __kuid_val(old->euid) != 0 ))
+	{
+		return -EINVAL;
+	}
+#endif
+
 	switch (flags) {
 	case LSM_SETID_RE:
 	case LSM_SETID_ID:

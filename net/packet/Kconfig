@@ -22,3 +22,12 @@ config PACKET_DIAG
 	---help---
 	  Support for PF_PACKET sockets monitoring interface used by the ss tool.
 	  If unsure, say Y.
+
+config PACKET_PORT_SUPPORT
+        bool "Packet Socket: Port Support"
+        depends on PACKET
+        default n
+        ---help---
+          Support for Network Ports (like- INET Ports) on Packet sockets, providing end to end communication using- Network Interface Index and Port Number.
+          This provides an alternate method for end to end communication other than INET Protocol Family. Suitable for peer to peer lossless connection.
+          If unsure, say Y.

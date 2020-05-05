@@ -2307,6 +2307,8 @@ int copy_hugetlb_page_range(struct mm_struct *dst, struct mm_struct *src,
 			get_page(ptepage);
 			page_dup_rmap(ptepage);
 			set_huge_pte_at(dst, addr, dst_pte, entry);
+			inc_ptmu_counter(vma->vm_mm, vma, ptepage,
+					 addr, sz/PAGE_SIZE);
 		}
 		spin_unlock(&src->page_table_lock);
 		spin_unlock(&dst->page_table_lock);
@@ -2410,6 +2412,7 @@ again:
 			set_page_dirty(page);
 
 		page_remove_rmap(page);
+		dec_ptmu_counter(mm, vma, page, start, sz/PAGE_SIZE);
 		force_flush = !__tlb_remove_page(tlb, page);
 		if (force_flush)
 			break;
@@ -2631,6 +2634,8 @@ retry_avoidcopy:
 		huge_ptep_clear_flush(vma, address, ptep);
 		set_huge_pte_at(mm, address, ptep,
 				make_huge_pte(vma, new_page, 1));
+		inc_ptmu_counter(mm, vma, new_page, address,
+				 huge_page_size(h)/PAGE_SIZE);
 		page_remove_rmap(old_page);
 		hugepage_add_new_anon_rmap(new_page, vma, address);
 		/* Make the old page be freed below */
@@ -2795,7 +2800,9 @@ retry:
 	if ((flags & FAULT_FLAG_WRITE) && !(vma->vm_flags & VM_SHARED)) {
 		/* Optimization, do the COW without a second fault */
 		ret = hugetlb_cow(mm, vma, address, ptep, new_pte, page);
-	}
+	} else
+		inc_ptmu_counter(mm, vma, page, address,
+				 huge_page_size(h)/PAGE_SIZE);
 
 	spin_unlock(&mm->page_table_lock);
 	unlock_page(page);

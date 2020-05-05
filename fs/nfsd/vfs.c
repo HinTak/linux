@@ -725,6 +725,46 @@ nfsd_access(struct svc_rqst *rqstp, struct svc_fh *fhp, u32 *access, u32 *suppor
 }
 #endif /* CONFIG_NFSD_V3 */
 
+#ifdef CONFIG_FAT_FS
+#include "../fat/fat.h"
+#endif
+
+__be32
+nfsd_fat_set_open_cnt(struct svc_rqst *rqstp, struct svc_fh *fhp,
+			u32 *open_count)
+{
+	struct dentry *dentry;
+	__be32 error;
+	u32 clnt_open_count = *open_count;
+	struct file *file;
+
+	error = fh_verify(rqstp, fhp, 0, NFSD_MAY_NOP);
+	if (error)
+		goto out;
+
+	dentry = fhp->fh_dentry;
+
+#ifdef CONFIG_FAT_FS
+	fat_set_nfs_clnt_open_count(dentry->d_inode, clnt_open_count);
+
+	if (fat_get_nfs_clnt_open_count(dentry->d_inode) == 0) {
+		/*
+		 * file open_count at NFS Client reached zero, so emulate a
+		 * call to fat_file_release so that we can change the inode
+		 * number finally.
+		 */
+		error = nfsd_open(rqstp, fhp, 0, NFSD_MAY_NOP, &file);
+		if (error)
+			return error;
+
+		nfsd_close(file);
+	}
+#endif
+
+out:
+	return error;
+}
+
 static int nfsd_open_break_lease(struct inode *inode, int access)
 {
 	unsigned int mode;
@@ -1070,6 +1110,17 @@ __be32 nfsd_read(struct svc_rqst *rqstp, struct svc_fh *fhp,
 	err = nfsd_open(rqstp, fhp, S_IFREG, NFSD_MAY_READ, &file);
 	if (err)
 		return err;
+
+	if (rqstp->rq_vers == NFS3_VERSION) {
+		struct nfsd3_readargs *argp; /* NFS READ arguments */
+		argp = (struct nfsd3_readargs *)rqstp->rq_argp;
+
+		if (argp->f_mode & FMODE_RANDOM) {
+			spin_lock(&file->f_lock);
+			file->f_mode |= FMODE_RANDOM;
+			spin_unlock(&file->f_lock);
+		}
+	}
 
 	inode = file->f_path.dentry->d_inode;
 

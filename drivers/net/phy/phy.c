@@ -49,12 +49,12 @@
 void phy_print_status(struct phy_device *phydev)
 {
 	if (phydev->link)
-		pr_info("%s - Link is Up - %d/%s\n",
+		pr_alert("%s - Link is Up - %d/%s\n",
 			dev_name(&phydev->dev),
 			phydev->speed,
 			DUPLEX_FULL == phydev->duplex ? "Full" : "Half");
 	else
-		pr_info("%s - Link is Down\n", dev_name(&phydev->dev));
+		pr_alert("%s - Link is Down\n", dev_name(&phydev->dev));
 }
 EXPORT_SYMBOL(phy_print_status);
 

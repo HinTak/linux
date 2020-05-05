@@ -221,6 +221,11 @@ static void vfp_raise_sigfpe(unsigned int sicode, struct pt_regs *regs)
 {
 	siginfo_t info;
 
+#ifdef CONFIG_ACCURATE_COREDUMP
+	if (user_mode(regs))
+		early_coredump_wait(SIGFPE);
+#endif
+
 	memset(&info, 0, sizeof(info));
 
 	info.si_signo = SIGFPE;

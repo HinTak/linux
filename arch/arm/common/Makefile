@@ -2,6 +2,7 @@
 # Makefile for the linux kernel.
 #
 
+obj-$(CONFIG_MSTAR_CHIP)  += mstar_irq.o
 obj-$(CONFIG_ARM_GIC)		+= gic.o
 obj-$(CONFIG_ARM_VIC)		+= vic.o
 obj-$(CONFIG_ICST)		+= icst.o

@@ -355,6 +355,7 @@ int unhandled_signal(struct task_struct *tsk, int sig);
 	rt_sigmask(SIGTTIN)   |  rt_sigmask(SIGTTOU)   )
 
 #define SIG_KERNEL_COREDUMP_MASK (\
+		rt_sigmask(SIGPIPE)   |  rt_sigmask(SIGALRM) | \
         rt_sigmask(SIGQUIT)   |  rt_sigmask(SIGILL)    | \
 	rt_sigmask(SIGTRAP)   |  rt_sigmask(SIGABRT)   | \
         rt_sigmask(SIGFPE)    |  rt_sigmask(SIGSEGV)   | \
@@ -387,5 +388,9 @@ void signals_init(void);
 
 int restore_altstack(const stack_t __user *);
 int __save_altstack(stack_t __user *, unsigned long);
+
+#ifdef CONFIG_ACCURATE_COREDUMP
+extern void early_coredump_wait(unsigned int);
+#endif
 
 #endif /* _LINUX_SIGNAL_H */

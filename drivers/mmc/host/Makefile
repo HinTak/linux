@@ -2,6 +2,14 @@
 # Makefile for MMC/SD host controller drivers
 #
 
+ifeq ($(CONFIG_MMC_MSTAR_MMC_EMMC_SEC),y)
+obj-$(CONFIG_MMC_MSTAR_MMC_EMMC_SEC)	+= mstar_mci.o
+obj-$(CONFIG_MMC_MSTAR_MMC_EMMC_SEC)	+= eMMCDrv/src/common/eMMC_hal.o
+obj-$(CONFIG_MMC_MSTAR_MMC_EMMC_SEC)	+= eMMCDrv/src/config/eMMC_platform.o
+EXTRA_CFLAGS		+= -Idrivers/mmc/host/eMMCDrv/inc/api/
+EXTRA_CFLAGS		+= -Idrivers/mmc/host/eMMCDrv/inc/common/
+EXTRA_CFLAGS		+= -Idrivers/mmc/host/eMMCDrv/inc/config/
+endif
 obj-$(CONFIG_MMC_ARMMMCI)	+= mmci.o
 obj-$(CONFIG_MMC_PXA)		+= pxamci.o
 obj-$(CONFIG_MMC_MXC)		+= mxcmmc.o
@@ -55,10 +63,12 @@ obj-$(CONFIG_MMC_SDHCI_PLTFM)		+= sdhci-pltfm.o
 obj-$(CONFIG_MMC_SDHCI_CNS3XXX)		+= sdhci-cns3xxx.o
 obj-$(CONFIG_MMC_SDHCI_ESDHC_IMX)	+= sdhci-esdhc-imx.o
 obj-$(CONFIG_MMC_SDHCI_DOVE)		+= sdhci-dove.o
+obj-$(CONFIG_MMC_SDHCI_NVT)		+= sdhci-nvt.o
 obj-$(CONFIG_MMC_SDHCI_TEGRA)		+= sdhci-tegra.o
 obj-$(CONFIG_MMC_SDHCI_OF_ESDHC)	+= sdhci-of-esdhc.o
 obj-$(CONFIG_MMC_SDHCI_OF_HLWD)		+= sdhci-of-hlwd.o
 
+obj-$(CONFIG_WRITE_PROTECT)		+= host-protection.o
 ifeq ($(CONFIG_CB710_DEBUG),y)
 	CFLAGS-cb710-mmc	+= -DDEBUG
 endif

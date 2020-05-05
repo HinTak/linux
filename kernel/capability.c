@@ -379,6 +379,49 @@ bool has_capability_noaudit(struct task_struct *t, int cap)
  */
 bool ns_capable(struct user_namespace *ns, int cap)
 {
+#ifdef CONFIG_DAC_CAP_ERROR_LOG_MSG
+	char p_comm[TASK_COMM_LEN+1] = "_";
+#endif
+	if (unlikely(!cap_valid(cap))) {
+		printk(KERN_CRIT "capable() called with invalid cap=%u\n", cap);
+		BUG();
+	}
+
+	if (security_capable(current_cred(), ns, cap) == 0) {
+		current->flags |= PF_SUPERPRIV;
+		return true;
+	}
+#ifdef CONFIG_DAC_CAP_ERROR_LOG_MSG
+	rcu_read_lock();
+	if (current->real_parent != NULL)
+		strncpy(p_comm,
+			current->real_parent->group_leader->comm,
+						TASK_COMM_LEN);
+	rcu_read_unlock();
+	printk(KERN_ALERT"\n\n\n\n#########################################\n");
+	printk(KERN_ALERT"[ERROR][CAP:%s][CAP(%d)][TH(%s:%d)PTH(%s)][U(%d)G(%d)]\n",
+#ifdef CONFIG_SKIP_DAC_CAP_PERMISSION
+			"SKIP",
+#else
+			"NoSKIP",
+#endif
+			cap, current->comm, current->pid, p_comm, current_uid(),
+							current_gid());
+	printk(KERN_ALERT"###########################################\n\n\n\n");
+
+#endif
+#ifdef CONFIG_SKIP_DAC_CAP_PERMISSION
+	return true;
+#else
+	return false;
+#endif
+}
+EXPORT_SYMBOL(ns_capable);
+
+#if defined(CONFIG_SKIP_DAC_CAP_PERMISSION) || \
+		defined(CONFIG_DAC_CAP_ERROR_LOG_MSG)
+bool ns_capable_dac(struct user_namespace *ns, int cap)
+{
 	if (unlikely(!cap_valid(cap))) {
 		printk(KERN_CRIT "capable() called with invalid cap=%u\n", cap);
 		BUG();
@@ -390,7 +433,16 @@ bool ns_capable(struct user_namespace *ns, int cap)
 	}
 	return false;
 }
-EXPORT_SYMBOL(ns_capable);
+EXPORT_SYMBOL(ns_capable_dac);
+
+bool inode_capable_dac(const struct inode *inode, int cap)
+{
+	struct user_namespace *ns = current_user_ns();
+
+	return ns_capable_dac(ns, cap) && kuid_has_mapping(ns, inode->i_uid);
+}
+
+#endif
 
 /**
  * file_ns_capable - Determine if the file's opener had a capability in effect

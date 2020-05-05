@@ -624,8 +624,12 @@ static char * const migratetype_names[MIGRATE_TYPES] = {
 	"Unmovable",
 	"Reclaimable",
 	"Movable",
+#ifdef CONFIG_CMA_APP_ALLOC
+	/* To reflect changes to pcp lists */
+	"CMA",
+#endif
 	"Reserve",
-#ifdef CONFIG_CMA
+#if defined(CONFIG_CMA) && !(defined(CONFIG_CMA_APP_ALLOC))
 	"CMA",
 #endif
 	"Isolate",
@@ -783,6 +787,10 @@ const char * const vmstat_text[] = {
 #ifdef CONFIG_MIGRATION
 	"pgmigrate_success",
 	"pgmigrate_fail",
+#ifdef CONFIG_HDMA_DEVICE
+	"pgmigrate_hdma_success",
+	"pgmigrate_hdma_fail",
+#endif
 #endif
 #ifdef CONFIG_COMPACTION
 	"compact_migrate_scanned",
@@ -1085,6 +1093,88 @@ static const struct file_operations proc_zoneinfo_file_operations = {
 	.release	= seq_release,
 };
 
+static int mem_usage_show(struct seq_file *m, void *arg)
+{
+	pg_data_t *pgdat = (pg_data_t *)arg;
+	struct kernel_mem_usage kernel_usage;
+	struct user_mem_usage user_usage;
+	seq_printf(m, "\nMem_usage_show node_id %d\n", pgdat->node_id);
+	vd_get_mem_usage(&kernel_usage, &user_usage);
+
+	seq_printf(m, "\nkernel memory usage\n"
+		"total_mem_size\t\t%lu\n"
+		"free_mem_size\t\t%lu\n"
+#ifdef CONFIG_HDMA_DEVICE
+		"\thdma_declared\t%lu\thdma_allocated\t%lu\n"
+#endif
+		"slab_size\t\t%lu\n"
+		"vmalloc_used_size\t%lu\n"
+		"ioremap_size\t\t%lu\n"
+		"pagetable_size\t\t%lu\n"
+		"kernelstack_size\t%lu\n"
+		"zram_size\t\t%lu\n"
+		"buddy_size\t\t%lu\n"
+		"sum_kernel_size\t\t%lu\n",
+		kernel_usage.total_mem_size,
+		kernel_usage.free_mem_size,
+#ifdef CONFIG_HDMA_DEVICE
+		kernel_usage.hdma_declared, kernel_usage.hdma_allocated,
+#endif
+		kernel_usage.slab_size,
+		kernel_usage.vmallocused_size,
+		kernel_usage.ioremap_size,
+		kernel_usage.pagetable_size,
+		kernel_usage.kernelstack_size,
+		kernel_usage.zram_size,
+		kernel_usage.buddy_size,
+		kernel_usage.sum_kernel_size);
+
+	seq_printf(m, "\nuser memory usage\n"
+		"page_cache_size\t\t%lu\n"
+		"active_anon_size\t%lu\n"
+		"inactive_anon_size\t%lu\n"
+		"active_file_size\t%lu\n"
+		"inactive_file_size\t%lu\n"
+		"unevictable_size\t%lu\n"
+		"anon_pages_size\t\t%lu\n"
+		"mapped_size\t\t%lu\n"
+		"shmem_size\t\t%lu\n"
+		"sum_user_size\t\t%lu\n",
+		user_usage.page_cache_size,
+		user_usage.active_anon_size,
+		user_usage.inactive_anon_size,
+		user_usage.active_file_size,
+		user_usage.inactive_file_size,
+		user_usage.unevictable_size,
+		user_usage.anon_pages_size,
+		user_usage.mapped_size,
+		user_usage.shmem_size,
+		user_usage.sum_user_size);
+
+	return 0;
+}
+
+static const struct seq_operations mem_usage_op = {
+	.start	= frag_start, /* iterate over all zones. The same as in
+			       * fragmentation. */
+	.next	= frag_next,
+	.stop	= frag_stop,
+	.show	= mem_usage_show,
+};
+
+static int mem_usage_open(struct inode *inode, struct file *file)
+{
+	return seq_open(file, &mem_usage_op);
+}
+
+static const struct file_operations proc_mem_usage_file_operations = {
+	.open		= mem_usage_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
+};
+
+
 enum writeback_stat_item {
 	NR_DIRTY_THRESHOLD,
 	NR_DIRTY_BG_THRESHOLD,
@@ -1242,6 +1332,8 @@ static int __init setup_vmstat(void)
 	proc_create("pagetypeinfo", S_IRUGO, NULL, &pagetypeinfo_file_ops);
 	proc_create("vmstat", S_IRUGO, NULL, &proc_vmstat_file_operations);
 	proc_create("zoneinfo", S_IRUGO, NULL, &proc_zoneinfo_file_operations);
+	proc_create("mem_usage", S_IRUGO, NULL,
+		&proc_mem_usage_file_operations);
 #endif
 	return 0;
 }

@@ -46,6 +46,9 @@ ENTRY(cpu_v7_switch_mm)
 #ifdef CONFIG_ARM_ERRATA_430973
 	mcr	p15, 0, r2, c7, c5, 6		@ flush BTAC/BTB
 #endif
+#ifdef CONFIG_CA9_SYSTEM_HANG
+	mcr p15, 0, r2, c7, c5, 6       @ flush BTAC/BTB
+#endif
 #ifdef CONFIG_PID_IN_CONTEXTIDR
 	mrc	p15, 0, r2, c13, c0, 1		@ read current context ID
 	lsr	r2, r2, #8			@ extract the PID

@@ -19,6 +19,15 @@ config MMC_DEBUG
 	  This is an option for use by developers; most people should
 	  say N here.  This enables MMC core and driver debugging.
 
+config HW_DECOMP_BLK_MMC_SUBSYSTEM 
+	bool "Use HW Decompression in MMC, Bypass the block layer and use MMC cache"
+	depends on MMC
+	select SDP_UNZIP if ARCH_SDP
+	default N
+	help
+	  This will bypass the block layer and use MMC cache for input buffer and 
+	  do the decompression at the time of reading the data.
+
 if MMC
 
 source "drivers/mmc/core/Kconfig"

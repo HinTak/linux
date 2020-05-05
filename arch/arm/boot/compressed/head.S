@@ -138,6 +138,10 @@ start:
 #ifdef CONFIG_ARM_VIRT_EXT
 		bl	__hyp_stub_install	@ get into SVC mode, reversibly
 #endif
+#if defined(CONFIG_ARCH_NVT_V7)
+		ldr r1, =0x104d		@ arch = cortex-A9
+		ldr r2, =0x26008000	@ atags locate at 0x2600_8000
+#endif
 		mov	r7, r1			@ save architecture ID
 		mov	r8, r2			@ save atags pointer
 
@@ -176,10 +180,35 @@ not_angel:
 #ifdef CONFIG_AUTO_ZRELADDR
 		@ determine final kernel image address
 		mov	r4, pc
+#ifdef CONFIG_ARCH_NVT_V7
+		and	r4, r4, #0xfe000000
+#else
 		and	r4, r4, #0xf8000000
+#endif
 		add	r4, r4, #TEXT_OFFSET
 #else
 		ldr	r4, =zreladdr
+#endif
+
+#if defined(CONFIG_ARCH_NVT_V7)
+#define BOOT1_LOADADDR (0x10000000)
+		/*
+		 * Clean onboot content in DRAM
+		 *  Use AXI DMA to fill '0' into address of onboot (fixed length: 128K)
+		 */
+		ldr	r0, =0xfc090000
+		ldr	r1, =BOOT1_LOADADDR
+		ldr	r2, =0x20000	@ 128K
+		ldr	r3, =0x1		@ 
+		str	r1, [r0, #0x04]	@ Set DMA Destination
+		str	r2, [r0, #0x08]	@ Set DMA byte count
+		str	r3, [r0, #0x18]	@ Set specified data into Destination (default value is '0')
+		str	r3, [r0, #0x20]	@ DMA trigger
+
+1:
+		ldr	r1, [r0, #0x24]	@ Check DMA finish
+		teq	r1, #1
+		bne	1b
 #endif
 
 		bl	cache_on
@@ -390,6 +419,22 @@ dtb_check_done:
 #endif
 
 		bl	cache_clean_flush
+#if defined(CONFIG_ARCH_NVT_V7)
+		/*
+		 *	Clean and invalidate L2 cache
+		 *	Check Operation finish
+		 */
+		ldr	r0, =0xffe00000
+		ldr	r1, =0xffff
+		str	r1, [r0, #0x7fc]
+1:
+		ldr	r1, [r0, #0x7fc]
+		teq	r1, #0
+		bne	1b
+
+		ldr	r1, =0x1
+		str	r1, [r0, #0x730]
+#endif
 
 		adr	r0, BSYM(restart)
 		add	r0, r0, r6
@@ -477,6 +522,22 @@ not_relocated:	mov	r0, #0
 		mov	r3, r7
 		bl	decompress_kernel
 		bl	cache_clean_flush
+#if defined(CONFIG_ARCH_NVT_V7)
+		/*
+		 *	Clean and invalidate L2 cache
+		 *	Check Operation finish
+		 */
+		ldr	r0, =0xffe00000
+		ldr	r1, =0xffff
+		str	r1, [r0, #0x7fc]
+1:
+		ldr	r1, [r0, #0x7fc]
+		teq	r1, #0
+		bne	1b
+
+		ldr	r1, =0x1
+		str	r1, [r0, #0x730]
+#endif
 		bl	cache_off
 		mov	r1, r7			@ restore architecture number
 		mov	r2, r8			@ restore atags pointer

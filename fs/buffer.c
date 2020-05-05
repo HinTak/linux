@@ -965,9 +965,13 @@ grow_dev_page(struct block_device *bdev, sector_t block,
 	struct buffer_head *bh;
 	sector_t end_block;
 	int ret = 0;		/* Will call free_more_memory() */
-
+#ifndef CONFIG_PREVENT_ALLOC_BUFFER_IN_CMA
 	page = find_or_create_page(inode->i_mapping, index,
 		(mapping_gfp_mask(inode->i_mapping) & ~__GFP_FS)|__GFP_MOVABLE);
+#else
+	page = find_or_create_page(inode->i_mapping, index,
+		(mapping_gfp_mask(inode->i_mapping) & ~__GFP_FS));
+#endif
 	if (!page)
 		return ret;
 

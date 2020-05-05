@@ -673,12 +673,14 @@ int dwc3_debugfs_init(struct dwc3 *dwc)
 		goto err1;
 	}
 
+#if 0
 	file = debugfs_create_file("mode", S_IRUGO | S_IWUSR, root,
 			dwc, &dwc3_mode_fops);
 	if (!file) {
 		ret = -ENOMEM;
 		goto err1;
 	}
+#endif
 
 	file = debugfs_create_file("testmode", S_IRUGO | S_IWUSR, root,
 			dwc, &dwc3_testmode_fops);

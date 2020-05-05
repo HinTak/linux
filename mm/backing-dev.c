@@ -221,12 +221,32 @@ static ssize_t max_ratio_store(struct device *dev,
 }
 BDI_SHOW(max_ratio, bdi->max_ratio)
 
+static ssize_t dirty_background_bytes_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct backing_dev_info *bdi = dev_get_drvdata(dev);
+	unsigned long bytes;
+	ssize_t ret;
+
+	ret = kstrtoul(buf, 10, &bytes);
+	if (ret < 0)
+		return ret;
+
+	bdi->dirty_background_bytes = bytes;
+	if (over_dirty_bground_bytes(bdi))
+		bdi_start_background_writeback(bdi);
+
+	return count;
+}
+BDI_SHOW(dirty_background_bytes, bdi->dirty_background_bytes)
+
 #define __ATTR_RW(attr) __ATTR(attr, 0644, attr##_show, attr##_store)
 
 static struct device_attribute bdi_dev_attrs[] = {
 	__ATTR_RW(read_ahead_kb),
 	__ATTR_RW(min_ratio),
 	__ATTR_RW(max_ratio),
+	__ATTR_RW(dirty_background_bytes),
 	__ATTR_NULL,
 };
 
@@ -628,6 +648,7 @@ int bdi_init(struct backing_dev_info *bdi)
 	bdi->min_ratio = 0;
 	bdi->max_ratio = 100;
 	bdi->max_prop_frac = FPROP_FRAC_BASE;
+	bdi->dirty_background_bytes = 0;
 	spin_lock_init(&bdi->wb_lock);
 	INIT_LIST_HEAD(&bdi->bdi_list);
 	INIT_LIST_HEAD(&bdi->work_list);

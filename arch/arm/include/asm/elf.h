@@ -118,6 +118,10 @@ int dump_task_regs(struct task_struct *t, elf_gregset_t *elfregs);
 
 #define ELF_ET_DYN_BASE	(2 * TASK_SIZE / 3)
 
+#ifdef CONFIG_PAX_RANDMMAP
+#define PAX_ELF_ET_DYN_BASE    0x00008000UL
+#endif
+
 /* When the program starts, a1 contains a pointer to a function to be 
    registered with atexit, as per the SVR4 ABI.  A value of 0 means we 
    have no such handler.  */

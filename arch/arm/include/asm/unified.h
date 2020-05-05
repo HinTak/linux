@@ -40,6 +40,10 @@
 #define BSYM(sym)	sym + 1
 #endif
 
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+#define BSYM(sym)      sym + 1
+#endif
+
 #else	/* !CONFIG_THUMB2_KERNEL */
 
 /* The CPSR bit describing the instruction set (ARM) */
@@ -50,6 +54,10 @@
 #ifdef __ASSEMBLY__
 #define W(instr)	instr
 #define BSYM(sym)	sym
+#endif
+
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+#define BSYM(sym)      sym
 #endif
 
 #endif	/* CONFIG_THUMB2_KERNEL */

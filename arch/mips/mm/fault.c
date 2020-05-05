@@ -207,6 +207,12 @@ bad_area_nosemaphore:
 		       field, (unsigned long) regs->cp0_epc,
 		       field, (unsigned long) regs->regs[31]);
 #endif
+
+		/* VDLinux, based VDLP.Mstar default patch No.5,show fault user stack, 2010-01-29 */
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+		printk(KERN_ALERT "%s() : sending SIGSEGV to %s, PID:%d\n",__func__, current->comm, current->pid);
+		show_info(current, regs);
+#endif
 		info.si_signo = SIGSEGV;
 		info.si_errno = 0;
 		/* info.si_code has been set above */
@@ -262,6 +268,12 @@ do_sigbus:
 		       field, address,
 		       field, (unsigned long) regs->cp0_epc,
 		       field, (unsigned long) regs->regs[31]);
+#endif
+
+	/* VDLinux, based VDLP.Mstar default patch No.5,show fault user stack, 2010-01-29 */
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+	printk(KERN_ALERT "%s() : sending SIGBUS to %s, PID:%d\n",__func__, current->comm, current->pid);
+	show_info(current, regs);
 #endif
 	tsk->thread.cp0_badvaddr = address;
 	info.si_signo = SIGBUS;

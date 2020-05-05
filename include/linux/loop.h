@@ -81,5 +81,4 @@ struct loop_func_table {
 
 int loop_register_transfer(struct loop_func_table *funcs);
 int loop_unregister_transfer(int number); 
-
 #endif

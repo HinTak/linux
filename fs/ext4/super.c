@@ -40,6 +40,7 @@
 #include <linux/crc16.h>
 #include <linux/cleancache.h>
 #include <asm/uaccess.h>
+#include <linux/ratelimit.h>
 
 #include <linux/kthread.h>
 #include <linux/freezer.h>
@@ -699,7 +700,7 @@ void __ext4_warning(struct super_block *sb, const char *function,
 	va_start(args, fmt);
 	vaf.fmt = fmt;
 	vaf.va = &args;
-	printk(KERN_WARNING "EXT4-fs warning (device %s): %s:%d: %pV\n",
+	printk_ratelimited(KERN_WARNING "EXT4-fs warning (device %s): %s:%d: %pV\n",
 	       sb->s_id, function, line, &vaf);
 	va_end(args);
 }
@@ -1223,7 +1224,7 @@ enum {
 	Opt_stripe, Opt_delalloc, Opt_nodelalloc, Opt_mblk_io_submit,
 	Opt_nomblk_io_submit, Opt_block_validity, Opt_noblock_validity,
 	Opt_inode_readahead_blks, Opt_journal_ioprio,
-	Opt_dioread_nolock, Opt_dioread_lock,
+	Opt_dioread_nolock, Opt_dioread_lock, Opt_insensitive,
 	Opt_discard, Opt_nodiscard, Opt_init_itable, Opt_noinit_itable,
 	Opt_max_dir_size_kb,
 };
@@ -1305,6 +1306,7 @@ static const match_table_t tokens = {
 	{Opt_removed, "reservation"},	/* mount option from ext2/3 */
 	{Opt_removed, "noreservation"}, /* mount option from ext2/3 */
 	{Opt_removed, "journal=%u"},	/* mount option from ext2/3 */
+	{Opt_insensitive, "case_insensitive"},
 	{Opt_err, NULL},
 };
 
@@ -1476,6 +1478,7 @@ static const struct mount_opts {
 	{Opt_jqfmt_vfsv0, QFMT_VFS_V0, MOPT_QFMT},
 	{Opt_jqfmt_vfsv1, QFMT_VFS_V1, MOPT_QFMT},
 	{Opt_max_dir_size_kb, 0, MOPT_GTE0},
+	{Opt_insensitive, 0, MOPT_SET},
 	{Opt_err, 0, 0}
 };
 
@@ -1502,6 +1505,9 @@ static int handle_mount_opt(struct super_block *sb, char *opt, int token,
 	if (args->from && match_int(args, &arg))
 		return -1;
 	switch (token) {
+	case Opt_insensitive:
+		sbi->is_case_insensitive = 1;
+		break;
 	case Opt_noacl:
 	case Opt_nouser_xattr:
 		ext4_msg(sb, KERN_WARNING, deprecated_msg, opt, "3.5");
@@ -1836,6 +1842,8 @@ static int _ext4_show_options(struct seq_file *seq, struct super_block *sb,
 		SEQ_OPTS_PRINT("max_dir_size_kb=%u", sbi->s_max_dir_size_kb);
 
 	ext4_show_quota_options(seq, sb);
+	if(sbi->is_case_insensitive)
+		SEQ_OPTS_PUTS("case_insensitive");
 	return 0;
 }
 

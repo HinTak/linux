@@ -73,6 +73,28 @@ static int perdev_minors = CONFIG_MMC_BLOCK_MINORS;
  */
 static int max_devices;
 
+#ifndef CONFIG_VD_RELEASE
+
+#define GET_SMART_REPORT 0x5627
+#define RESTORE_BOOT_PARTITION 0x5628
+#define RESTORE_PARTITION 0x5629
+#define VENDOR_CMD_ARG 0xEFAC62EC
+#define OPEN_CMD_ARG 0xCCEE
+#define CLOSE_CMD_ARG 0xDECCEE
+#define SECTOR_SIZE 512 
+
+typedef struct 
+{
+	char buf[PAGE_SIZE];
+	unsigned int offset;
+}_mmc_arg;
+
+unsigned int high_capacity;
+static struct mmc_blk_data *mmc_blk_get(struct gendisk *disk);
+static void mmc_blk_put(struct mmc_blk_data *md);
+
+#endif /* !CONFIG_VD_RELEASE */
+
 /* 256 minors, so at most 256 separate devices */
 static DECLARE_BITMAP(dev_use, 256);
 static DECLARE_BITMAP(name_use, 256);
@@ -123,6 +145,348 @@ enum mmc_blk_status {
 	MMC_BLK_ECC_ERR,
 	MMC_BLK_NOMEDIUM,
 };
+
+#ifndef CONFIG_VD_RELEASE
+
+/*
+ * Wait for the card to finish the busy state
+ */
+static int mmc_wait_busy(struct mmc_card *card)
+{
+	int ret, busy;
+	struct mmc_command cmd;
+
+	busy = 0;
+	do {
+		memset(&cmd, 0, sizeof(struct mmc_command));
+
+		cmd.opcode = MMC_SEND_STATUS;
+		cmd.arg = card->rca << 16;
+		cmd.flags = MMC_RSP_R1 | MMC_CMD_AC;
+
+		ret = mmc_wait_for_cmd(card->host, &cmd, 0);
+		if (ret)
+			break;
+
+		if (!busy && !(cmd.resp[0] & R1_READY_FOR_DATA)) {
+			busy = 1;
+		}
+	} while (!(cmd.resp[0] & R1_READY_FOR_DATA));
+
+	return ret;
+}
+
+
+static int mmc_send_smart_report_cmd(struct mmc_card *card, u32 arg)
+{
+	struct mmc_command cmd;
+	int err;
+	memset(&cmd, 0, sizeof(struct mmc_command));
+
+	cmd.opcode = MMC_VERDOR_CMD;
+	cmd.arg = arg;
+	cmd.flags = MMC_RSP_SPI_R1B | MMC_RSP_R1B | MMC_CMD_AC;
+
+	err = mmc_wait_for_cmd(card->host, &cmd, 0);
+	if (err) {
+		printk("mmc_send_smart_report_cmd error \n");
+		return err;
+	}
+	mmc_wait_busy(card);
+	return 0;
+}
+
+static int mmc_read_smart_report(struct mmc_card *card, struct  mmc_host *host, void *buf)
+{
+	struct mmc_request mrq;
+	struct mmc_command cmd;
+	struct mmc_data data;
+	struct scatterlist sg;
+	void *data_buf;
+
+	data_buf = kmalloc(512, GFP_KERNEL);
+	if (data_buf == NULL)
+		return -ENOMEM;
+
+	memset(&mrq, 0, sizeof(struct mmc_request));
+	memset(&cmd, 0, sizeof(struct mmc_command));
+	memset(&data, 0, sizeof(struct mmc_data));
+
+	mrq.cmd = &cmd;
+	mrq.data = &data;
+
+	cmd.opcode = MMC_READ_SINGLE_BLOCK;
+	cmd.arg = 0;
+
+	cmd.flags = MMC_RSP_SPI_R1 | MMC_RSP_R1 | MMC_CMD_ADTC;
+
+	data.blksz = 512;
+	data.blocks = 1;
+	data.flags = MMC_DATA_READ;
+	data.sg = &sg;
+	data.sg_len = 1;
+
+	sg_init_one(&sg, data_buf, 512);
+
+	mmc_set_data_timeout(&data, card);
+
+	mmc_wait_for_req(host, &mrq);
+	
+	memcpy(buf, data_buf, 512);
+	kfree(data_buf);
+
+	if (cmd.error) {
+		printk("mmc cmd error !! %u\n", cmd.error);
+		return cmd.error;
+		}
+	if (data.error) {
+		printk("mmc data error !! %u\n", data.error);
+		return data.error;
+		}
+
+	return 0;
+}
+
+static int mmc_restore_partition(struct mmc_card *card, void *buf, unsigned int offset, unsigned int rw_cmd)
+{
+	struct mmc_request mrq;
+	struct mmc_command cmd;
+	struct mmc_command stop;
+	struct mmc_data data;
+	struct scatterlist sg;
+
+
+	memset(&mrq, 0, sizeof(struct mmc_request));
+	memset(&cmd, 0, sizeof(struct mmc_command));
+	memset(&data, 0, sizeof(struct mmc_data));
+	memset(&stop, 0, sizeof(struct mmc_command));
+
+	mrq.cmd = &cmd;
+	mrq.stop = &stop;
+	mrq.data = &data;
+	
+	cmd.arg = offset;
+	cmd.flags = MMC_RSP_SPI_R1 | MMC_RSP_R1 | MMC_CMD_ADTC;
+	data.blksz = 1 << 9;
+	stop.opcode = MMC_STOP_TRANSMISSION;
+	stop.arg = 0;
+	stop.flags = MMC_RSP_SPI_R1B | MMC_RSP_R1B | MMC_CMD_AC;
+	data.blocks = 8;
+
+    if(rw_cmd == READ)
+    {
+        data.flags |= MMC_DATA_READ;
+        if (data.blocks > 1)
+        {
+            cmd.opcode = MMC_READ_MULTIPLE_BLOCK;
+        }
+        else
+        {
+            cmd.opcode = MMC_READ_SINGLE_BLOCK;
+        }
+    }
+    else if(rw_cmd == WRITE)
+    {
+        data.flags |= MMC_DATA_WRITE;
+        if (data.blocks > 1)
+        {
+            cmd.opcode = MMC_WRITE_MULTIPLE_BLOCK;
+        }
+        else
+        {
+            cmd.opcode = MMC_WRITE_BLOCK;
+        }        
+    }
+    else 
+    {
+        printk("no read/write cmd error\n");
+        return 0;
+    }
+    
+	mmc_set_data_timeout(&data, card);
+
+	data.sg = &sg;
+	data.sg_len = 1;
+
+	sg_init_one(&sg, buf, PAGE_SIZE);
+	
+	mmc_wait_for_req(card->host, &mrq);
+
+	if (cmd.error) {
+		printk(KERN_ERR "error %d sending read/write command\n",
+				cmd.error);
+	}
+
+	if (data.error) {
+		printk(KERN_ERR "error %d transferring data\n",
+				 data.error);
+	}
+
+	if (stop.error) {
+		printk(KERN_ERR "error %d sending stop command\n",
+				stop.error);
+	}
+
+	
+	mmc_wait_busy(card);
+
+	return 0;
+}
+
+static int mmc_boot_part_enable(struct mmc_card *card)
+{
+	int err = 0;
+	
+	err = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
+			BOOT_CONFIG,
+			BOOT_CONFIG_ENABLE, card->ext_csd.part_time);
+
+	if(err) {
+		printk("BOOT_CONFIG_ENABLE error\n");
+		return err;
+	}
+	mmc_wait_busy(card);
+
+	err = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
+			BOOT_BUS_WIDTH,
+			BOOT_BUS_WIDTH_8, card->ext_csd.part_time);
+	if (err) {
+		printk("BOOT_BUS_WIDTH_8 error\n");
+		return err;
+	}
+
+	mmc_wait_busy(card);
+	return err;
+}
+
+static int mmc_boot_part_disable(struct mmc_card *card)
+{
+	int err = 0;
+	err = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
+			BOOT_CONFIG,
+			BOOT_CONFIG_DISABLE, card->ext_csd.part_time);
+	
+	if(err) {
+		printk("BOOT_CONFIG_DISABLE error\n");
+		return err;
+	}
+
+	mmc_wait_busy(card);
+	return err;
+}
+
+/* Written by namjae.jeon@samsung.com 
+   I make update routine to restore boot and normal partition throughtout ioctl. */
+
+static int mmc_ioctl(struct block_device *bdev, fmode_t mode, unsigned int cmd, unsigned long arg)
+{
+	void *buf;
+	_mmc_arg *mmc_arg;
+	unsigned int m_offset;
+	u32 vendor_cmd_arg;
+	u32 open_cmd_arg;
+	u32 close_cmd_arg;
+	struct mmc_blk_data *md;
+	struct mmc_card *ioctl_card;
+
+	md = mmc_blk_get(bdev->bd_disk);
+	if (!md) {
+		return -EFAULT;
+	}
+	
+	ioctl_card = md->queue.card;
+	if (IS_ERR(ioctl_card)) {
+		return -EFAULT;
+	}
+
+	switch(cmd)
+	{
+		case GET_SMART_REPORT:
+		{
+			if(!(buf = kmalloc(512,GFP_KERNEL))) {
+					return -ENOMEM;
+			}
+			vendor_cmd_arg = VENDOR_CMD_ARG;
+			open_cmd_arg = OPEN_CMD_ARG;
+			close_cmd_arg = CLOSE_CMD_ARG;
+
+			mmc_claim_host(ioctl_card->host);
+
+			mmc_send_smart_report_cmd(ioctl_card,vendor_cmd_arg);
+			mmc_send_smart_report_cmd(ioctl_card,open_cmd_arg);
+			mmc_read_smart_report(ioctl_card, ioctl_card->host, buf);
+			if(copy_to_user((void *) arg,buf, 512)) {
+				kfree(buf);
+				return -EFAULT;
+			}
+			mmc_send_smart_report_cmd(ioctl_card,vendor_cmd_arg);
+			mmc_send_smart_report_cmd(ioctl_card,close_cmd_arg);
+			mmc_release_host(ioctl_card->host);
+			kfree(buf);
+			break;
+		}
+		case RESTORE_BOOT_PARTITION:
+		{
+            
+			if(!(mmc_arg = kmalloc(sizeof(_mmc_arg), GFP_KERNEL))) {
+					return -ENOMEM;
+			}
+            
+			if(copy_from_user(mmc_arg, (void *) arg,sizeof(_mmc_arg) )) {
+				kfree(mmc_arg);
+				return -EFAULT;
+			}
+			
+			if(high_capacity)
+			{
+				m_offset = (mmc_arg->offset)/SECTOR_SIZE;
+			}
+			else
+			{
+				m_offset =  mmc_arg->offset;
+			} 
+
+			mmc_claim_host(ioctl_card->host);
+			mmc_boot_part_enable(ioctl_card);
+			mmc_restore_partition(ioctl_card,mmc_arg->buf,m_offset, WRITE);
+			mmc_boot_part_disable(ioctl_card);
+			mmc_release_host(ioctl_card->host);
+            
+			kfree(mmc_arg);
+            
+			break;
+		}
+		case RESTORE_PARTITION:
+		{
+			if(!(mmc_arg = kmalloc(sizeof(_mmc_arg), GFP_KERNEL))) {
+					return -ENOMEM;
+			}
+			if(copy_from_user(mmc_arg, (void *) arg,sizeof(_mmc_arg) )) {
+				kfree(mmc_arg);
+				return -EFAULT;
+			}
+			
+			if(high_capacity)
+			{
+				m_offset =  get_start_sect(bdev) +  mmc_arg->offset/SECTOR_SIZE;
+			}
+			else
+			{
+				m_offset =  (get_start_sect(bdev) * SECTOR_SIZE) +  mmc_arg->offset;
+			}   
+
+			mmc_claim_host(ioctl_card->host);
+			mmc_restore_partition(ioctl_card,mmc_arg->buf,m_offset, WRITE);
+			mmc_release_host(ioctl_card->host);
+			kfree(mmc_arg);
+			break;
+		}
+	}
+	mmc_blk_put(md);
+	return 0;
+}
+
+#endif /* !CONFIG_VD_RELEASE */
 
 module_param(perdev_minors, int, 0444);
 MODULE_PARM_DESC(perdev_minors, "Minors numbers to allocate per device");
@@ -420,6 +784,8 @@ static int mmc_blk_ioctl_cmd(struct block_device *bdev,
 	if (IS_ERR(idata))
 		return PTR_ERR(idata);
 
+        //printk("\33[1;31m%s() --> CMD%02d_%08Xh\n\33[m", __FUNCTION__, idata->ic.opcode, idata->ic.arg);
+
 	md = mmc_blk_get(bdev->bd_disk);
 	if (!md) {
 		err = -EINVAL;
@@ -560,6 +926,10 @@ static int mmc_blk_ioctl(struct block_device *bdev, fmode_t mode,
 	int ret = -EINVAL;
 	if (cmd == MMC_IOC_CMD)
 		ret = mmc_blk_ioctl_cmd(bdev, (struct mmc_ioc_cmd __user *)arg);
+#ifndef CONFIG_VD_RELEASE
+	else 
+		ret = mmc_ioctl(bdev, mode, cmd, arg);
+#endif /* !CONFIG_VD_RELEASE */
 	return ret;
 }
 
@@ -571,6 +941,106 @@ static int mmc_blk_compat_ioctl(struct block_device *bdev, fmode_t mode,
 }
 #endif
 
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+
+static inline void bio_partition_remap(struct bio *bio)
+{
+	struct block_device *bdev = bio->bi_bdev;
+
+	if (bio_sectors(bio) && bdev != bdev->bd_contains) {
+		struct hd_struct *p = bdev->bd_part;
+
+		bio->bi_sector += p->start_sect;
+		bio->bi_bdev = bdev->bd_contains;
+	}
+}
+
+static void init_bio(struct block_device *bdev,
+		     struct bio *bio, size_t size, sector_t pos,
+		     bio_end_io_t bi_end_io, void *data)
+{
+	bio_init(bio);
+	bio->bi_io_vec = NULL;
+	bio->bi_vcnt = 0;
+	bio->bi_size = size;
+	bio->bi_bdev = bdev;
+	bio->bi_sector = pos;
+	bio->bi_private = data;
+	bio->bi_end_io = bi_end_io;
+
+	bio_partition_remap(bio);
+}
+
+static void init_req(struct block_device *bdev,
+		     struct request *req,
+		     struct bio *bio,
+		     void *special)
+{
+	struct request_queue *q = bdev_get_queue(bdev);
+
+	blk_rq_init(q, req);
+	req->cmd_type = REQ_TYPE_SPECIAL;
+	req->cmd_flags |= bio->bi_rw & REQ_COMMON_MASK;
+	req->end_io = NULL;
+	req->special = special;
+
+	req->errors = 0;
+	req->__sector = bio->bi_sector;
+	req->ioprio = bio_prio(bio);
+
+	if (bio_has_data(bio)) {
+		req->nr_phys_segments = bio_phys_segments(q, bio);
+		req->buffer = bio_data(bio);
+	}
+	req->__data_len = bio->bi_size;
+	req->bio = req->biotail = bio;
+
+	if (bio->bi_bdev)
+		req->rq_disk = bio->bi_bdev->bd_disk;
+}
+
+/*
+ * MMC device can support hardware decompression.
+ * So, if fs layer calls hw_decompress this function simply creates
+ * request with REQ_TYPE_SPECIAL and execute request on the queue.
+ */
+static int mmc_blk_hw_decompress_fn(struct block_device *bdev,
+				    struct page **out_pages,
+				    unsigned int out_cnt,
+				    sector_t sector_off,
+				    unsigned int off,
+				    unsigned int compr_len)
+{
+	struct request req;
+	struct bio bio;
+	struct mmc_hw_req hw_req = {
+		.out_pages  = out_pages,
+		.out_cnt    = out_cnt,
+		.sector_off = sector_off,
+		.off        = off,
+		.compr_len  = compr_len,
+		.to_read_b  = 0,
+		.ibuff      = NULL
+	};
+
+	if (!out_cnt || !compr_len || !bdev || !out_pages)
+		return -EINVAL;
+	if (off > PAGE_SIZE)
+		return -EINVAL;
+
+	hw_req.to_read_b = round_up(off + compr_len, bdev->bd_block_size);
+	if (hw_req.to_read_b > MMC_HW_MAX_IBUFF_SZ)
+		return -EINVAL;
+
+	init_bio(bdev, &bio, hw_req.to_read_b, hw_req.sector_off,
+		 NULL, &hw_req);
+	init_req(bdev, &req, &bio, &hw_req);
+
+	return blk_execute_rq(req.q, req.rq_disk, &req, 0);
+}
+
+#endif /* CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM */
+
 static const struct block_device_operations mmc_bdops = {
 	.open			= mmc_blk_open,
 	.release		= mmc_blk_release,
@@ -579,6 +1049,9 @@ static const struct block_device_operations mmc_bdops = {
 	.ioctl			= mmc_blk_ioctl,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl		= mmc_blk_compat_ioctl,
+#endif
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+	.hw_decompress		= mmc_blk_hw_decompress_fn,
 #endif
 };
 
@@ -1210,8 +1683,9 @@ static void mmc_blk_rw_rq_prep(struct mmc_queue_req *mqrq,
 
 		/* Some controllers can't do multiblock reads due to hw bugs */
 		if (card->host->caps2 & MMC_CAP2_NO_MULTI_READ &&
-		    rq_data_dir(req) == READ)
+		    rq_data_dir(req) == READ){
 			brq->data.blocks = 1;
+		}
 	}
 
 	if (brq->data.blocks > 1 || do_rel_wr) {
@@ -1282,6 +1756,8 @@ static void mmc_blk_rw_rq_prep(struct mmc_queue_req *mqrq,
 
 	brq->data.sg = mqrq->sg;
 	brq->data.sg_len = mmc_queue_map_sg(mq, mqrq);
+	/*printk(KERN_EMERG"[%s] blks %d Sz %d sg_len %d\n",__FUNCTION__,brq->data.blocks,\
+			brq->data.blksz,brq->data.sg_len);*/
 
 	/*
 	 * Adjust the sg list so it is the same size as the
@@ -1374,11 +1850,15 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *rqc)
 		mmc_queue_bounce_post(mq_rq);
 
 		switch (status) {
-		case MMC_BLK_SUCCESS:
 		case MMC_BLK_PARTIAL:
+		case MMC_BLK_SUCCESS:
 			/*
 			 * A block was successfully transferred.
 			 */
+			/*printk(KERN_EMERG"[%s] MMC_BLK_SUCCESS %d \n",__FUNCTION__,brq->data.bytes_xfered);
+			printk(KERN_EMERG"[%s] data blk %d blkSz %d sglen %d\n",__FUNCTION__,brq->data.blocks,\
+								brq->data.blksz,brq->data.sg_len);
+			*/
 			mmc_blk_reset_success(md, type);
 			ret = blk_end_request(req, 0,
 						brq->data.bytes_xfered);
@@ -1526,6 +2006,7 @@ static struct mmc_blk_data *mmc_blk_alloc_req(struct mmc_card *card,
 {
 	struct mmc_blk_data *md;
 	int devidx, ret;
+
 
 	devidx = find_first_zero_bit(dev_use, max_devices);
 	if (devidx >= max_devices)

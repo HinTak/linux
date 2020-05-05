@@ -566,6 +566,7 @@ struct dwc3_hwparams {
 #define DWC3_MODE_HOST		1
 #define DWC3_MODE_DRD		2
 #define DWC3_MODE_HUB		3
+#define DWC3_MODE_UNKNOWN	4
 
 #define DWC3_MDWIDTH(n)		(((n) & 0xff00) >> 8)
 
@@ -595,6 +596,13 @@ struct dwc3_request {
  */
 struct dwc3_scratchpad_array {
 	__le64	dma_adr[DWC3_MAX_HIBER_SCRATCHBUFS];
+};
+
+#define DWC3_PDATA_PM_NEED_REINIT		(1 << 0)
+
+struct dwc3_platform_data {
+	u32	mode;
+	u32	flags;
 };
 
 /**

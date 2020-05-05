@@ -259,6 +259,15 @@ config FB_TILEBLITTING
 comment "Frame buffer hardware drivers"
 	depends on FB
 
+config FB_SDP
+	tristate "Samsung STB Frame Buffer Driver"
+ 	depends on FB && ARCH_SDP 
+	select FB_CFB_FILLRECT
+	select FB_CFB_COPYAREA
+	select FB_CFB_IMAGEBLIT
+	--help--- 
+	Samsung STB Frame Buffer
+
 config FB_GRVGA
 	tristate "Aeroflex Gaisler framebuffer support"
 	depends on FB && SPARC

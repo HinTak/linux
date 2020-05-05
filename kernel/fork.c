@@ -132,6 +132,26 @@ static inline void free_task_struct(struct task_struct *tsk)
 }
 #endif
 
+#ifdef CONFIG_MUPT_TRACE
+#define alloc_terminate_thread_struct()	\
+		kmem_cache_alloc(terminate_thread_struct_cachep, GFP_KERNEL)
+#define free_terminate_thread_struct(tt_info)	\
+		kmem_cache_free(terminate_thread_struct_cachep, (tt_info))
+
+struct kmem_cache *terminate_thread_struct_cachep;
+EXPORT_SYMBOL(terminate_thread_struct_cachep);
+#endif
+
+#ifdef CONFIG_PTMU_TRACE
+#define alloc_page_usage_struct()	\
+		kmem_cache_alloc(page_usage_struct_cachep, GFP_KERNEL)
+#define free_page_usage_struct(pp_usage)	\
+		kmem_cache_free(page_usage_struct_cachep, (pp_usage))
+
+struct kmem_cache *page_usage_struct_cachep;
+EXPORT_SYMBOL(page_usage_struct_cachep);
+#endif
+
 void __weak arch_release_thread_info(struct thread_info *ti)
 {
 }
@@ -204,8 +224,141 @@ static void account_kernel_stack(struct thread_info *ti, int account)
 	mod_zone_page_state(zone, NR_KERNEL_STACK, account);
 }
 
+#ifdef CONFIG_MUPT_TRACE
+DEFINE_SPINLOCK(h_lock);
+/* Accounting info for terminating thread of alive process. */
+static void mupt_terminate_thread(struct task_struct *tsk)
+{
+	struct terminate_thread_struct *p, *n;
+	int i;
+	unsigned long flags;
+	if (false == thread_group_leader(tsk)) { /* thread */
+		n = alloc_terminate_thread_struct();
+		if (!n) {
+			printk(KERN_ALERT "** Couldn't allocate terminate_thread_struct for task **\n");
+			return;
+		}
+
+		memset(n, 0, sizeof(struct terminate_thread_struct));
+
+		spin_lock_irqsave(&h_lock, flags);
+
+		for (i = 0; i < VMAG_CNT; i++) {
+			n->curr_mupt[i] = tsk->curr_mupt[i];
+			n->max_mupt[i]  = tsk->max_mupt[i];
+		}
+		n->pid = tsk->pid;
+		n->tgid = tsk->tgid;
+		strlcpy(n->comm, tsk->comm, TASK_COMM_LEN);
+		n->next = NULL;
+
+		struct task_struct *p_tsk = find_task_by_vpid(tsk->tgid);
+		if (p_tsk != NULL) {
+			if (p_tsk->tt_info == NULL) {
+				p_tsk->tt_info = n;
+				p_tsk->tt_info->next = NULL;
+			} else {
+				p = p_tsk->tt_info;
+				while (p->next != NULL)
+					p = p->next;
+				p->next = n;
+			}
+		} else {
+			free_terminate_thread_struct(n);
+			n = NULL;
+		}
+
+		spin_unlock_irqrestore(&h_lock, flags);
+	} else { /* Process */
+		if (tsk->tt_info != NULL) {
+			struct terminate_thread_struct *q;
+			q = n = tsk->tt_info;
+			while (n != NULL) {
+				q = n;
+				n = n->next;
+				/* Free allocated memory for terminate_thread_struct. */
+				free_terminate_thread_struct(q);
+				q = NULL;
+			}
+			tsk->tt_info = NULL;
+		}
+	}
+}
+#endif
+
+#ifdef CONFIG_PTMU_TRACE
+static void delete_thread_trace(struct task_struct *tsk)
+{
+	struct page_usage_struct *p, *n;
+	extern spinlock_t h_lock;
+	if (false == thread_group_leader(tsk)) { /* thread */
+		int lock_taken = 0;
+
+		p = tsk->group_leader->pp_usage;
+		if (unlikely(p == NULL)) {
+			/* It may happen that the process (thread group leader)
+			 * got deleted first before its child thread.
+			 * In that scenario the group leader entry of pp_usage
+			 * will be in history buffer, and
+			 * tsk->group_leader->pp_usage will be NULL.
+			 * get_group_leader_entry is called to get the group
+			 * leader entry and thread's pp_usage is appended to the
+			 * group leader list.
+			 */
+			spin_lock(&h_lock);
+			lock_taken = 1;
+
+			p = get_group_leader_entry(tsk->tgid);
+			if (unlikely(p == NULL))	{
+				spin_unlock(&h_lock);
+				if (tsk->pp_usage)
+					free_page_usage_struct(tsk->pp_usage);
+				tsk->pp_usage = NULL;
+				return;
+			}
+		}
+		if (tsk->pp_usage) {
+			if (atomic_read(&tsk->pp_usage->trace_enable)) {
+				spin_lock(&p->u_lock); /* applicable only for
+							* the main thread */
+				n = p->next;
+				p->next = tsk->pp_usage; /* add to list */
+				p->next->next = n;
+				spin_unlock(&p->u_lock);
+			} else
+				free_page_usage_struct(tsk->pp_usage);
+
+			tsk->pp_usage = NULL;
+		}
+
+		if (lock_taken)
+			spin_unlock(&h_lock);
+	} else { /* process */
+		if (tsk->pp_usage) {
+			p = tsk->pp_usage;
+			insert_usage_history(p); /* should be unconditional
+						  * because the main process
+						  * may be trace disabled but
+						  * threads are enabled */
+
+			/* The actual deletion will happen when ring wraps
+			 * around. Please refer insert_usage_history for more
+			 * info on this.
+			 */
+			tsk->pp_usage = NULL;
+		}
+	}
+}
+#endif
+
 void free_task(struct task_struct *tsk)
 {
+#ifdef CONFIG_PTMU_TRACE
+	delete_thread_trace(tsk);
+#endif
+#ifdef CONFIG_MUPT_TRACE
+	mupt_terminate_thread(tsk);
+#endif
 	account_kernel_stack(tsk->stack, -1);
 	arch_release_thread_info(tsk->stack);
 	free_thread_info(tsk->stack);
@@ -248,6 +401,32 @@ EXPORT_SYMBOL_GPL(__put_task_struct);
 
 void __init __weak arch_task_cache_init(void) { }
 
+#ifdef CONFIG_PTMU_TRACE
+static void page_usage_struct_init(void *v)
+{
+	struct page_usage_struct *pu = (struct page_usage_struct *) v;
+
+	atomic_set(&pu->cur_cp, 0);
+	atomic_set(&pu->max_cp, 0);
+	atomic_set(&pu->cur_dp, 0);
+	atomic_set(&pu->max_dp, 0);
+	atomic_set(&pu->cur_sp, 0);
+	atomic_set(&pu->max_sp, 0);
+	atomic_set(&pu->cur_hp, 0);
+	atomic_set(&pu->max_hp, 0);
+	atomic_set(&pu->cur_mp, 0);
+	atomic_set(&pu->max_mp, 0);
+	atomic_set(&pu->cur_page, 0);
+	atomic_set(&pu->max_page, 0);
+	atomic_set(&pu->trace_enable, 1); /* default enabled */
+	memset(pu->comm, 0, TASK_COMM_LEN);
+	pu->pid = 0;
+	pu->tgid = 0;
+	pu->next = NULL;
+	spin_lock_init(&pu->u_lock);
+}
+#endif
+
 void __init fork_init(unsigned long mempages)
 {
 #ifndef CONFIG_ARCH_TASK_STRUCT_ALLOCATOR
@@ -258,6 +437,23 @@ void __init fork_init(unsigned long mempages)
 	task_struct_cachep =
 		kmem_cache_create("task_struct", sizeof(struct task_struct),
 			ARCH_MIN_TASKALIGN, SLAB_PANIC | SLAB_NOTRACK, NULL);
+#endif
+
+#ifdef CONFIG_PTMU_TRACE
+	page_usage_struct_cachep =
+		kmem_cache_create("page_usage_struct",
+				  sizeof(struct page_usage_struct),
+				  L1_CACHE_BYTES, SLAB_PANIC | SLAB_NOTRACK,
+				  page_usage_struct_init);
+#endif
+
+#ifdef CONFIG_MUPT_TRACE
+	/* create a slab on which terminate_thread_structs can be allocated. */
+	terminate_thread_struct_cachep =
+		kmem_cache_create("terminate_thread_struct",
+				  sizeof(struct terminate_thread_struct),
+				  L1_CACHE_BYTES, SLAB_PANIC | SLAB_NOTRACK,
+				  NULL);
 #endif
 
 	/* do the arch specific task caches init */
@@ -293,6 +489,9 @@ static struct task_struct *dup_task_struct(struct task_struct *orig)
 {
 	struct task_struct *tsk;
 	struct thread_info *ti;
+#ifdef CONFIG_PTMU_TRACE
+	struct page_usage_struct *pu;
+#endif
 	unsigned long *stackend;
 	int node = tsk_fork_get_node(orig);
 	int err;
@@ -305,11 +504,31 @@ static struct task_struct *dup_task_struct(struct task_struct *orig)
 	if (!ti)
 		goto free_tsk;
 
+#ifdef CONFIG_PTMU_TRACE
+	pu = alloc_page_usage_struct();
+	if (!pu)
+		printk(KERN_ALERT "***** Couldn't allocate page_usage_struct for task *****\n");
+#endif
+
 	err = arch_dup_task_struct(tsk, orig);
 	if (err)
 		goto free_ti;
 
+#ifdef CONFIG_MUPT_TRACE
+	memset(tsk->curr_mupt, 0, sizeof(unsigned long) * VMAG_CNT);
+	memset(tsk->max_mupt, 0, sizeof(unsigned long) * VMAG_CNT);
+	tsk->tt_info = NULL;
+#endif
+
 	tsk->stack = ti;
+
+#ifdef CONFIG_PTMU_TRACE
+	tsk->pp_usage = pu;
+	strlcpy(tsk->pp_usage->comm, tsk->comm, sizeof(tsk->comm));
+	if (tsk->pp_usage && orig->pp_usage)
+		atomic_set(&tsk->pp_usage->trace_enable,
+			   atomic_read(&orig->pp_usage->trace_enable));
+#endif
 
 	setup_thread_stack(tsk, orig);
 	clear_user_return_notifier(tsk);
@@ -337,6 +556,9 @@ static struct task_struct *dup_task_struct(struct task_struct *orig)
 	return tsk;
 
 free_ti:
+#ifdef CONFIG_PTMU_TRACE
+	free_page_usage_struct(pu);
+#endif
 	free_thread_info(ti);
 free_tsk:
 	free_task_struct(tsk);
@@ -392,8 +614,14 @@ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 		if (mpnt->vm_flags & VM_ACCOUNT) {
 			unsigned long len = vma_pages(mpnt);
 
+#ifdef CONFIG_SKIP_CHECKING_MEMORY_WHILE_FORK
+			/* VDLinux,system() syscall patch, skip jump to fail_nomem routine,2010-10-21 */
+			security_vm_enough_memory_mm(oldmm, len); /* sic */
+#else
+			/* Original vanilla kernel codes */
 			if (security_vm_enough_memory_mm(oldmm, len)) /* sic */
 				goto fail_nomem;
+#endif
 			charge = len;
 		}
 		tmp = kmem_cache_alloc(vm_area_cachep, GFP_KERNEL);
@@ -455,7 +683,13 @@ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 		rb_parent = &tmp->vm_rb;
 
 		mm->map_count++;
+#ifdef CONFIG_RSS_INFO
+		/* use tmp as 3rd arg for RSS counting */
+		/* orig code : retval = copy_page_range(mm, oldmm, mpnt); */
+		retval = copy_page_range(mm, oldmm, tmp);
+#else
 		retval = copy_page_range(mm, oldmm, mpnt);
+#endif
 
 		if (tmp->vm_ops && tmp->vm_ops->open)
 			tmp->vm_ops->open(tmp);
@@ -543,6 +777,15 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p)
 	mm->cached_hole_size = ~0UL;
 	mm_init_aio(mm);
 	mm_init_owner(mm, p);
+
+#ifdef CONFIG_RSS_INFO
+	memset(mm->curr_rss, 0, sizeof(unsigned long) * VMAG_CNT);
+	memset(mm->max_rss, 0, sizeof(unsigned long) * VMAG_CNT);
+#endif
+#ifdef CONFIG_MUPT_TRACE
+	memset(p->curr_mupt, 0, sizeof(unsigned long) * VMAG_CNT);
+	memset(p->max_mupt, 0, sizeof(unsigned long) * VMAG_CNT);
+#endif
 
 	if (likely(!mm_alloc_pgd(mm))) {
 		mm->def_flags = 0;
@@ -892,6 +1135,11 @@ static int copy_mm(unsigned long clone_flags, struct task_struct *tsk)
 		mm = oldmm;
 		goto good_mm;
 	}
+#ifdef CONFIG_CMA_APP_ALLOC
+	/* Prevent children from using CMA pages */
+	if (!(clone_flags & CLONE_VM))
+		tsk->cma_alloc = false;
+#endif
 
 	retval = -ENOMEM;
 	mm = dup_mm(tsk);
@@ -1066,6 +1314,10 @@ static int copy_signal(unsigned long clone_flags, struct task_struct *tsk)
 
 	sig->oom_score_adj = current->signal->oom_score_adj;
 	sig->oom_score_adj_min = current->signal->oom_score_adj_min;
+#ifdef CONFIG_LMK_PRELOAD_APP
+	sig->lmk_preload_prio = current->signal->lmk_preload_prio;
+	sig->lmk_background_time = current->signal->lmk_background_time;
+#endif
 
 	sig->has_child_subreaper = current->signal->has_child_subreaper ||
 				   current->signal->is_child_subreaper;
@@ -1336,6 +1588,8 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 	if (retval)
 		goto bad_fork_cleanup_io;
 
+//#endif
+
 	if (pid != &init_struct_pid) {
 		retval = -ENOMEM;
 		pid = alloc_pid(p->nsproxy->pid_ns);
@@ -1598,6 +1852,26 @@ long do_fork(unsigned long clone_flags,
 		trace_sched_process_fork(current, p);
 
 		nr = task_pid_vnr(p);
+#ifdef CONFIG_MUPT_TRACE
+		/* Add thread stack usage accounting for individual thread and reduce same
+		 * from main process. */
+		p->curr_mupt[VMAG_STACK]  += THREAD_SIZE/PAGE_SIZE;
+		if (p->max_mupt[VMAG_STACK] <= p->curr_mupt[VMAG_STACK])
+			p->max_mupt[VMAG_STACK] += THREAD_SIZE/PAGE_SIZE;
+
+		if (p->tgid == current->pid) {
+			current->curr_mupt[VMAG_OTHER] -= THREAD_SIZE/PAGE_SIZE;
+			current->max_mupt[VMAG_OTHER] -= THREAD_SIZE/PAGE_SIZE;
+		}
+		else {
+			struct task_struct *p_tsk = find_task_by_vpid(p->tgid);
+			if (p_tsk) {
+				p_tsk->curr_mupt[VMAG_OTHER] -= THREAD_SIZE/PAGE_SIZE;
+				p_tsk->max_mupt[VMAG_OTHER] -= THREAD_SIZE/PAGE_SIZE;
+			}
+		}
+#endif
+
 
 		if (clone_flags & CLONE_PARENT_SETTID)
 			put_user(nr, parent_tidptr);

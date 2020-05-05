@@ -38,6 +38,33 @@
 
 #include "mm.h"
 
+#ifdef CMA_DEFAULT_REGION
+#error Unexpected situation CMA_DEFAULT_REGION defined
+#endif
+
+#ifdef CONFIG_CMA
+	#ifdef CONFIG_CMA_SIZE_SEL_MIN
+		#if (CONFIG_CMA_SIZE_MBYTES != 0 && CONFIG_CMA_SIZE_PERCENTAGE != 0)
+			#define CMA_DEFAULT_REGION 1
+		#endif
+	#elif defined(CONFIG_CMA_SIZE_SEL_MAX)
+		#if (CONFIG_CMA_SIZE_MBYTES > 0 || CONFIG_CMA_SIZE_PERCENTAGE > 0)
+			#define CMA_DEFAULT_REGION 1
+		#endif
+	#elif defined(CONFIG_CMA_SIZE_MBYTES)
+		#if (CONFIG_CMA_SIZE_MBYTES > 0)
+			#define CMA_DEFAULT_REGION 1
+		#endif
+	#elif defined(CONFIG_CMA_SIZE_PERCENTAGE)
+		#if (CONFIG_CMA_SIZE_PERCENTAGE > 0)
+			#define CMA_DEFAULT_REGION 1
+		#endif
+	#endif
+#endif
+#ifndef CMA_DEFAULT_REGION
+	#define CMA_DEFAULT_REGION 0
+#endif
+
 /*
  * The DMA API is built upon the notion of "buffer ownership".  A buffer
  * is either exclusively owned by the CPU (and therefore may be accessed
@@ -186,13 +213,24 @@ static u64 get_coherent_dma_mask(struct device *dev)
 
 static void __dma_clear_buffer(struct page *page, size_t size)
 {
-	void *ptr;
 	/*
 	 * Ensure that the allocated pages are zeroed, and that any data
 	 * lurking in the kernel direct-mapped region is invalidated.
 	 */
-	ptr = page_address(page);
-	if (ptr) {
+	if (PageHighMem(page)) {
+		phys_addr_t base = __pfn_to_phys(page_to_pfn(page));
+		phys_addr_t end = base + size;
+		while (size > 0) {
+			void *ptr = kmap_atomic(page);
+			memset(ptr, 0, PAGE_SIZE);
+			dmac_flush_range(ptr, ptr + PAGE_SIZE);
+			kunmap_atomic(ptr);
+			page++;
+			size -= PAGE_SIZE;
+		}
+		outer_flush_range(base, end);
+	} else {
+		void *ptr = page_address(page);
 		memset(ptr, 0, size);
 		dmac_flush_range(ptr, ptr + size);
 		outer_flush_range(__pa(ptr), __pa(ptr) + size);
@@ -243,7 +281,8 @@ static void __dma_free_buffer(struct page *page, size_t size)
 #endif
 
 static void *__alloc_from_contiguous(struct device *dev, size_t size,
-				     pgprot_t prot, struct page **ret_page);
+				     pgprot_t prot, struct page **ret_page,
+				     const void *caller);
 
 static void *__alloc_remap_buffer(struct device *dev, size_t size, gfp_t gfp,
 				 pgprot_t prot, struct page **ret_page,
@@ -346,11 +385,11 @@ static int __init atomic_pool_init(void)
 	if (!pages)
 		goto no_pages;
 
-	if (IS_ENABLED(CONFIG_CMA))
-		ptr = __alloc_from_contiguous(NULL, pool->size, prot, &page);
+	if (CMA_DEFAULT_REGION)
+		ptr = __alloc_from_contiguous(NULL, pool->size, prot, &page, atomic_pool_init);
 	else
 		ptr = __alloc_remap_buffer(NULL, pool->size, gfp, prot, &page,
-					   NULL);
+					   atomic_pool_init);
 	if (ptr) {
 		int i;
 
@@ -543,27 +582,41 @@ static int __free_from_pool(void *start, size_t size)
 }
 
 static void *__alloc_from_contiguous(struct device *dev, size_t size,
-				     pgprot_t prot, struct page **ret_page)
+				     pgprot_t prot, struct page **ret_page,
+				     const void *caller)
 {
 	unsigned long order = get_order(size);
 	size_t count = size >> PAGE_SHIFT;
 	struct page *page;
+	void *ptr;
 
 	page = dma_alloc_from_contiguous(dev, count, order);
 	if (!page)
 		return NULL;
 
 	__dma_clear_buffer(page, size);
-	__dma_remap(page, size, prot);
 
+	if (PageHighMem(page)) {
+		ptr = __dma_alloc_remap(page, size, GFP_KERNEL, prot, caller);
+		if (!ptr) {
+			dma_release_from_contiguous(dev, page, count);
+			return NULL;
+		}
+	} else {
+		__dma_remap(page, size, prot);
+		ptr = page_address(page);
+	}
 	*ret_page = page;
-	return page_address(page);
+	return ptr;
 }
 
 static void __free_from_contiguous(struct device *dev, struct page *page,
-				   size_t size)
+				   void *cpu_addr, size_t size)
 {
-	__dma_remap(page, size, pgprot_kernel);
+	if (PageHighMem(page))
+		__dma_free_remap(cpu_addr, size);
+	else
+		__dma_remap(page, size, pgprot_kernel);
 	dma_release_from_contiguous(dev, page, size >> PAGE_SHIFT);
 }
 
@@ -584,9 +637,9 @@ static inline pgprot_t __get_dma_pgprot(struct dma_attrs *attrs, pgprot_t prot)
 #define __get_dma_pgprot(attrs, prot)	__pgprot(0)
 #define __alloc_remap_buffer(dev, size, gfp, prot, ret, c)	NULL
 #define __alloc_from_pool(size, ret_page)			NULL
-#define __alloc_from_contiguous(dev, size, prot, ret)		NULL
+#define __alloc_from_contiguous(dev, size, prot, ret, c)	NULL
 #define __free_from_pool(cpu_addr, size)			0
-#define __free_from_contiguous(dev, page, size)			do { } while (0)
+#define __free_from_contiguous(dev, page, cpu_addr, size)	do { } while (0)
 #define __dma_free_remap(cpu_addr, size)			do { } while (0)
 
 #endif	/* CONFIG_MMU */
@@ -643,10 +696,10 @@ static void *__dma_alloc(struct device *dev, size_t size, dma_addr_t *handle,
 		addr = __alloc_simple_buffer(dev, size, gfp, &page);
 	else if (!(gfp & __GFP_WAIT))
 		addr = __alloc_from_pool(size, &page);
-	else if (!IS_ENABLED(CONFIG_CMA))
+	else if (!CMA_DEFAULT_REGION)
 		addr = __alloc_remap_buffer(dev, size, gfp, prot, &page, caller);
 	else
-		addr = __alloc_from_contiguous(dev, size, prot, &page);
+		addr = __alloc_from_contiguous(dev, size, prot, &page, caller);
 
 	if (addr)
 		*handle = pfn_to_dma(dev, page_to_pfn(page));
@@ -732,7 +785,7 @@ static void __arm_dma_free(struct device *dev, size_t size, void *cpu_addr,
 		__dma_free_buffer(page, size);
 	} else if (__free_from_pool(cpu_addr, size)) {
 		return;
-	} else if (!IS_ENABLED(CONFIG_CMA)) {
+	} else if (!CMA_DEFAULT_REGION) {
 		__dma_free_remap(cpu_addr, size);
 		__dma_free_buffer(page, size);
 	} else {
@@ -740,7 +793,7 @@ static void __arm_dma_free(struct device *dev, size_t size, void *cpu_addr,
 		 * Non-atomic allocations cannot be freed with IRQs disabled
 		 */
 		WARN_ON(irqs_disabled());
-		__free_from_contiguous(dev, page, size);
+		__free_from_contiguous(dev, page, cpu_addr, size);
 	}
 }
 
@@ -826,7 +879,7 @@ static void dma_cache_maint_page(struct page *page, unsigned long offset,
 static void __dma_page_cpu_to_dev(struct page *page, unsigned long off,
 	size_t size, enum dma_data_direction dir)
 {
-	unsigned long paddr;
+	phys_addr_t paddr;
 
 	dma_cache_maint_page(page, off, size, dir, dmac_map_area);
 
@@ -842,7 +895,7 @@ static void __dma_page_cpu_to_dev(struct page *page, unsigned long off,
 static void __dma_page_dev_to_cpu(struct page *page, unsigned long off,
 	size_t size, enum dma_data_direction dir)
 {
-	unsigned long paddr = page_to_phys(page) + off;
+	phys_addr_t paddr = page_to_phys(page) + off;
 
 	/* FIXME: non-speculating: not required */
 	/* don't bother invalidating if DMA to device */

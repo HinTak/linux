@@ -352,6 +352,15 @@ enum {
 /* This include will go away once we isolated irq_desc usage to core code */
 #include <linux/irqdesc.h>
 
+#ifdef CONFIG_MSTAR_CHIP
+/*
+ * Migration helpers for obsolete names, they will go away:
+ */
+#define hw_interrupt_type	irq_chip
+#define no_irq_type		no_irq_chip
+typedef struct irq_desc	irq_desc_t;
+#endif
+
 /*
  * Pick up the arch-dependent methods:
  */

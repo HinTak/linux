@@ -25,6 +25,12 @@
 
 #include "xhci.h"
 
+#ifdef CONFIG_ARCH_NVT72668
+#include <linux/usb/otg.h>
+#include <linux/io.h>
+#include "NT72668.h"
+
+#endif
 #define	PORT_WAKE_BITS	(PORT_WKOC_E | PORT_WKDISC_E | PORT_WKCONN_E)
 #define	PORT_RWC_BITS	(PORT_CSC | PORT_PEC | PORT_WRC | PORT_OCC | \
 			 PORT_RC | PORT_PLC | PORT_PE)
@@ -549,6 +555,13 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 	u16 wake_mask = 0;
 	u16 timeout = 0;
 
+#ifdef CONFIG_ARCH_NVT72668
+	struct nvt_u3_phy *pphy;
+	u32 temp2;
+	struct usb_phy *phy = usb_get_phy(USB_PHY_TYPE_USB3);
+	pphy = container_of(phy, struct nvt_u3_phy, u_phy);
+#endif
+
 	max_ports = xhci_get_ports(hcd, &port_array);
 	bus_state = &xhci->bus_state[hcd_index(hcd)];
 
@@ -605,7 +618,38 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 			break;
 		}
 		xhci_dbg(xhci, "get port status, actual port %d status  = 0x%x\n", wIndex, temp);
-
+#ifdef CONFIG_ARCH_NVT72668
+		if (hcd->speed == HCD_USB3) {
+			if(DEV_SUPERSPEED(temp) && ((temp & PORT_POWER)) && ((temp & PORT_PLS_MASK) == XDEV_U0) && ((temp & PORT_CONNECT))) {
+				//comparator 
+				writel(0,(volatile void *)((unsigned int)pphy->regs[2] + 0xbfc));
+				writel(0x10,(volatile void *)((unsigned int)pphy->regs[2] + 0x870));
+				clear(((unsigned int)pphy->regs[0] + 0xc110) , 1 << 8);
+				del_timer_sync(&pphy->phy_timer);
+			} else {	    
+				//comparator
+				writel(0,(volatile void *)((unsigned int)pphy->regs[2] + 0xbfc));
+				mod_timer(&pphy->phy_timer, jiffies + msecs_to_jiffies(300));
+			    	writel(0,(volatile void *)((unsigned int)pphy->regs[2] + 0xbfc));
+			    	writel(0x0,(volatile void *)((unsigned int)pphy->regs[2] + 0x870));
+				writel(2,(volatile void *)((unsigned int)pphy->regs[2] + 0xbfc));
+				temp2 = readl((volatile void *)((unsigned int)pphy->regs[2] + 0x18));
+				if((temp2 & (0xF0)) == 0x50) {
+					if(temp & PORT_POWER){
+retry:						
+						xhci_writel(xhci, temp & ~PORT_POWER,port_array[wIndex]);
+						udelay(50);
+						xhci_writel(xhci, PORT_POWER,port_array[wIndex]);
+					}
+					set(((unsigned int)pphy->regs[0] + 0xc110) , 1 << 8);
+					mdelay(100);
+				}
+				temp2 = readl((volatile void *)((unsigned int)pphy->regs[2] + 0x18));
+				if((temp2 & 0xFF)== 0x74)
+						goto retry;
+			}
+		}
+#endif		
 		/* wPortChange bits */
 		if (temp & PORT_CSC)
 			status |= USB_PORT_STAT_C_CONNECTION << 16;
@@ -844,6 +888,14 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 			spin_lock_irqsave(&xhci->lock, flags);
 			break;
 		case USB_PORT_FEAT_RESET:
+#ifdef CONFIG_ARCH_NVT72668
+			if (hcd->speed == HCD_USB3) {
+				temp2 = readl((volatile void *)((unsigned int)pphy->regs[2] + 0x18));
+				if((temp2 & 0xF0)!= 0){
+					break;
+	     			}
+			}
+#endif
 			temp = (temp | PORT_RESET);
 			xhci_writel(xhci, temp, port_array[wIndex]);
 

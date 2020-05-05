@@ -4,7 +4,13 @@
 
 # Object files in subdirectories
 
+ifeq ($(CONFIG_ARCH_NVT72668),y)
+	EXTRA_CFLAGS += -I$(srctree)/arch/arm/mach-nvt72668/include/
+endif
+
+ifneq ($(CONFIG_USE_MSTAR_DRIVER),y)
 obj-$(CONFIG_USB)		+= core/
+endif
 
 obj-$(CONFIG_USB_OTG_UTILS)	+= otg/
 
@@ -12,6 +18,7 @@ obj-$(CONFIG_USB_DWC3)		+= dwc3/
 
 obj-$(CONFIG_USB_MON)		+= mon/
 
+ifneq ($(CONFIG_USE_MSTAR_DRIVER),y)
 obj-$(CONFIG_PCI)		+= host/
 obj-$(CONFIG_USB_EHCI_HCD)	+= host/
 obj-$(CONFIG_USB_ISP116X_HCD)	+= host/
@@ -27,6 +34,7 @@ obj-$(CONFIG_USB_HWA_HCD)	+= host/
 obj-$(CONFIG_USB_ISP1760_HCD)	+= host/
 obj-$(CONFIG_USB_IMX21_HCD)	+= host/
 obj-$(CONFIG_USB_FSL_MPH_DR_OF)	+= host/
+endif
 
 obj-$(CONFIG_USB_C67X00_HCD)	+= c67x00/
 
@@ -37,8 +45,10 @@ obj-$(CONFIG_USB_PRINTER)	+= class/
 obj-$(CONFIG_USB_WDM)		+= class/
 obj-$(CONFIG_USB_TMC)		+= class/
 
+ifneq ($(CONFIG_USE_MSTAR_DRIVER),y)
 obj-$(CONFIG_USB_STORAGE)	+= storage/
 obj-$(CONFIG_USB)		+= storage/
+endif
 
 obj-$(CONFIG_USB_MDC800)	+= image/
 obj-$(CONFIG_USB_MICROTEK)	+= image/
@@ -57,4 +67,6 @@ obj-$(CONFIG_USB_CHIPIDEA)	+= chipidea/
 obj-$(CONFIG_USB_RENESAS_USBHS)	+= renesas_usbhs/
 obj-$(CONFIG_USB_GADGET)	+= gadget/
 
+ifneq ($(CONFIG_USE_MSTAR_DRIVER),y)
 obj-$(CONFIG_USB_COMMON)	+= usb-common.o
+endif

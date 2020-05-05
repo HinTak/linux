@@ -260,13 +260,11 @@ static int vm_is_stack_for_task(struct task_struct *t,
  * just check in the current task. Returns the pid of the task that
  * the vma is stack for.
  */
-pid_t vm_is_stack(struct task_struct *task,
-		  struct vm_area_struct *vma, int in_group)
+struct task_struct * vm_is_stack(struct task_struct *task,
+				 struct vm_area_struct *vma, int in_group)
 {
-	pid_t ret = 0;
-
 	if (vm_is_stack_for_task(task, vma))
-		return task->pid;
+		return task;
 
 	if (in_group) {
 		struct task_struct *t;
@@ -277,15 +275,15 @@ pid_t vm_is_stack(struct task_struct *task,
 		t = task;
 		do {
 			if (vm_is_stack_for_task(t, vma)) {
-				ret = t->pid;
-				goto done;
+				rcu_read_unlock();
+				return t;
 			}
 		} while_each_thread(task, t);
 done:
 		rcu_read_unlock();
 	}
 
-	return ret;
+	return NULL;
 }
 
 #if defined(CONFIG_MMU) && !defined(HAVE_ARCH_PICK_MMAP_LAYOUT)

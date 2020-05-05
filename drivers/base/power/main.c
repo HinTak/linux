@@ -675,6 +675,10 @@ void dpm_resume(pm_message_t state)
 {
 	struct device *dev;
 	ktime_t starttime = ktime_get();
+#ifdef CONFIG_PM_DEBUG
+	struct timeval start, end;
+	u64 elapsed_us;
+#endif
 
 	might_sleep();
 
@@ -698,7 +702,17 @@ void dpm_resume(pm_message_t state)
 
 			mutex_unlock(&dpm_list_mtx);
 
+#ifdef CONFIG_PM_DEBUG
+			printk("  Resuming %s ", dev->kobj.name);
+			do_gettimeofday(&start);
+#endif
 			error = device_resume(dev, state, false);
+#ifdef CONFIG_PM_DEBUG
+			do_gettimeofday(&end);
+			elapsed_us = timeval_to_ns(&end) - timeval_to_ns(&start);
+			do_div(elapsed_us, NSEC_PER_SEC / 1000000);
+			printk("took %llu us\n", elapsed_us);
+#endif
 			if (error) {
 				suspend_stats.failed_resume++;
 				dpm_save_failed_step(SUSPEND_RESUME);
@@ -1176,6 +1190,10 @@ int dpm_suspend(pm_message_t state)
 {
 	ktime_t starttime = ktime_get();
 	int error = 0;
+#ifdef CONFIG_PM_DEBUG
+	struct timeval start, end;
+	u64 elapsed_us;
+#endif
 
 	might_sleep();
 
@@ -1188,7 +1206,17 @@ int dpm_suspend(pm_message_t state)
 		get_device(dev);
 		mutex_unlock(&dpm_list_mtx);
 
+#ifdef CONFIG_PM_DEBUG
+		printk("  Suspending %s ", dev->kobj.name);
+		do_gettimeofday(&start);
+#endif
 		error = device_suspend(dev);
+#ifdef CONFIG_PM_DEBUG
+		do_gettimeofday(&end);
+		elapsed_us = timeval_to_ns(&end) - timeval_to_ns(&start);
+		do_div(elapsed_us, NSEC_PER_SEC / 1000000);
+		printk("took %llu us\n", elapsed_us);
+#endif
 
 		mutex_lock(&dpm_list_mtx);
 		if (error) {

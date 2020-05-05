@@ -1636,6 +1636,14 @@ SYSCALL_DEFINE2(nanosleep, struct timespec __user *, rqtp,
 	if (!timespec_valid(&tu))
 		return -EINVAL;
 
+#ifdef CONFIG_PROHIBIT_USLEEP_0
+	if (rqtp->tv_nsec == 0 && rqtp->tv_sec == 0)
+	{
+		printk(KERN_ALERT "##### Prohibit %s(%d) Usleep(0), kill USER......\n", current->comm, current->pid);
+		force_sig(SIGBUS, current);
+	}
+#endif
+
 	return hrtimer_nanosleep(&tu, rmtp, HRTIMER_MODE_REL, CLOCK_MONOTONIC);
 }
 

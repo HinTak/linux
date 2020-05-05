@@ -102,6 +102,43 @@ config CPU_FREQ_DEFAULT_GOV_CONSERVATIVE
 	  Be aware that not all cpufreq drivers support the conservative
 	  governor. If unsure have a look at the help section of the
 	  driver. Fallback governor will be the performance governor.
+
+config CPU_FREQ_DEFAULT_GOV_FOXAP
+	bool "foxap"
+	select CPU_FREQ_GOV_FOXAP
+	select CPU_FREQ_GOV_PERFORMANCE
+	help
+	  Use the CPUFreq governor "foxap' as default. This allows
+	  you to get a full dynamic frequency capable system by simply
+	  loading your cpufreq low-level hardware driver.
+
+config CPU_FREQ_DEFAULT_GOV_GOLF
+	bool "golf"
+	select CPU_FREQ_GOV_GOLF
+	select CPU_FREQ_GOV_PERFORMANCE
+	help
+	  Use the CPUFreq governor "golf' as default. This allows
+	  you to get a full dynamic frequency capable system by simply
+	  loading your cpufreq low-level hardware driver.
+
+config CPU_FREQ_DEFAULT_GOV_GOLFP
+	bool "golfp"
+	select CPU_FREQ_GOV_GOLFP
+	select CPU_FREQ_GOV_PERFORMANCE
+	help
+	  Use the CPUFreq governor "golfp' as default. This allows
+	  you to get a full dynamic frequency capable system by simply
+	  loading your cpufreq low-level hardware driver.
+
+config CPU_FREQ_DEFAULT_GOV_GOLFS
+	bool "golfs"
+	select CPU_FREQ_GOV_GOLFS
+	select CPU_FREQ_GOV_PERFORMANCE
+	help
+	  Use the CPUFreq governor "golfs' as default. This allows
+	  you to get a full dynamic frequency capable system by simply
+	  loading your cpufreq low-level hardware driver.
+
 endchoice
 
 config CPU_FREQ_GOV_PERFORMANCE
@@ -183,6 +220,71 @@ config CPU_FREQ_GOV_CONSERVATIVE
 	  For details, take a look at linux/Documentation/cpu-freq.
 
 	  If in doubt, say N.
+
+config CPU_FREQ_GOV_FOXAP
+	tristate "'foxap' cpufreq governor"
+	depends on CPU_FREQ
+	select CPU_FREQ_GOV_COMMON
+	select CPU_FREQ_TABLE
+	help
+	  'foxap' - this driver adds a dynamic cpufreq policy governor.
+	  The governor does a periodic polling and
+	  changes frequency based on the CPU utilization.
+	  The support for this governor depends on CPU capability to
+	  do fast frequency switching (i.e, very low latency frequency
+	  transistions).
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called cpufreq_foxap.
+
+
+config CPU_FREQ_GOV_GOLF
+	tristate "'golf's common cpufreq governor"
+	depends on CPU_FREQ
+	select CPU_FREQ_GOV_COMMON
+	select CPU_FREQ_TABLE
+	help
+	  'golf' - this driver adds a dynamic cpufreq policy governor.
+	  The governor does a periodic polling and
+	  changes frequency based on the CPU utilization.
+	  The support for this governor depends on CPU capability to
+	  do fast frequency switching (i.e, very low latency frequency
+	  transistions).
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called cpufreq_golf.
+
+config CPU_FREQ_GOV_GOLFP
+	tristate "'golfp's cpufreq governor"
+	depends on CPU_FREQ
+	select CPU_FREQ_GOV_COMMON
+	select CPU_FREQ_TABLE
+	help
+	  'golfp' - this driver adds a dynamic cpufreq policy governor.
+	  The governor does a periodic polling and
+	  changes frequency based on the CPU utilization.
+	  The support for this governor depends on CPU capability to
+	  do fast frequency switching (i.e, very low latency frequency
+	  transistions).
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called cpufreq_golfp.
+
+config CPU_FREQ_GOV_GOLFS
+	tristate "'golfs's cpufreq governor"
+	depends on CPU_FREQ
+	select CPU_FREQ_GOV_COMMON
+	select CPU_FREQ_TABLE
+	help
+	  'golfs' - this driver adds a dynamic cpufreq policy governor.
+	  The governor does a periodic polling and
+	  changes frequency based on the CPU utilization.
+	  The support for this governor depends on CPU capability to
+	  do fast frequency switching (i.e, very low latency frequency
+	  transistions).
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called cpufreq_golfs.
 
 config GENERIC_CPUFREQ_CPU0
 	bool "Generic CPU0 cpufreq driver"

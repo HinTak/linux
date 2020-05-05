@@ -36,6 +36,15 @@ static void proc_evict_inode(struct inode *inode)
 	truncate_inode_pages(&inode->i_data, 0);
 	clear_inode(inode);
 
+#if defined(CONFIG_MACH_NT14U) && !defined(CONFIG_VD_RELEASE)
+	de = PROC_I(inode)->pde;
+	if (PROC_I(inode)->pid && (unsigned long) PROC_I(inode)->pid < 0x100) {
+		if (de)
+			pr_err("DENAME for PROC_I(inode)->pid[%p] -> [%s]\n"
+				, PROC_I(inode)->pid, de->name);
+	}
+#endif
+
 	/* Stop tracking associated processes */
 	put_pid(PROC_I(inode)->pid);
 

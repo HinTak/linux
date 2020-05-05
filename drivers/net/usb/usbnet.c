@@ -47,6 +47,11 @@
 #include <linux/kernel.h>
 #include <linux/pm_runtime.h>
 
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_MODEMLOG
+#include <linux/proc_fs.h>
+#include <linux/vmalloc.h>
+#endif    //CONFIG_SAMSUNG_PATCH_WITH_USB_MODEMLOG
+
 #define DRIVER_VERSION		"22-Aug-2005"
 
 
@@ -90,6 +95,15 @@ static const char driver_name [] = "usbnet";
 static int msg_level = -1;
 module_param (msg_level, int, 0);
 MODULE_PARM_DESC (msg_level, "Override default message level");
+
+#ifdef SAMSUNG_PATCH_WITH_USB_GADGET_ENHANCEMENT
+struct timespec	dbg_set_scan_time;
+struct timespec dbg_reset_scan_time;
+unsigned int	ehci_periodic_switch;
+EXPORT_SYMBOL_GPL(dbg_set_scan_time);
+EXPORT_SYMBOL_GPL(dbg_reset_scan_time);
+EXPORT_SYMBOL_GPL(ehci_periodic_switch);
+#endif	// SAMSUNG_PATCH_WITH_USB_GADGET_ENHANCEMENT
 
 /*-------------------------------------------------------------------------*/
 
@@ -150,6 +164,10 @@ int usbnet_get_endpoints(struct usbnet *dev, struct usb_interface *intf)
 		if (tmp < 0)
 			return tmp;
 	}
+
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+	dev->intf_id = alt->desc.bInterfaceNumber;
+#endif	// CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
 
 	dev->in = usb_rcvbulkpipe (dev->udev,
 			in->desc.bEndpointAddress & USB_ENDPOINT_NUMBER_MASK);
@@ -234,9 +252,17 @@ static int init_status (struct usbnet *dev, struct usb_interface *intf)
 	period = max ((int) dev->status->desc.bInterval,
 		(dev->udev->speed == USB_SPEED_HIGH) ? 7 : 3);
 
+#ifdef CONFIG_OOM_RESCUER
+	buf = kmalloc (maxp, GFP_KERNEL|__GFP_NORESCUE);
+#else
 	buf = kmalloc (maxp, GFP_KERNEL);
+#endif
 	if (buf) {
+#ifdef CONFIG_OOM_RESCUER
+		dev->interrupt = usb_alloc_urb (0, GFP_KERNEL|__GFP_NORESCUE);
+#else
 		dev->interrupt = usb_alloc_urb (0, GFP_KERNEL);
+#endif
 		if (!dev->interrupt) {
 			kfree (buf);
 			return -ENOMEM;
@@ -494,7 +520,38 @@ static void rx_complete (struct urb *urb)
 			dev->net->stats.rx_length_errors++;
 			netif_dbg(dev, rx_err, dev->net,
 				  "rx length %d\n", skb->len);
+			break;
 		}
+
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+	if(dev->intf_id)
+	{
+		unsigned long	flags;	//// USB1 Crash BUGFIX patch
+
+#ifdef SAMSUNG_PATCH_WITH_USB_GADGET_ENHANCEMENT
+		getnstimeofday(&dbg_set_scan_time);
+		ehci_periodic_switch = 1;
+#endif	// SAMSUNG_PATCH_WITH_USB_GADGET_ENHANCEMENT
+		if(dev->driver_info->rx_fixup && !dev->driver_info->rx_fixup(dev, skb))
+		  goto error_usb1;
+		if(skb->len)
+		{
+		  spin_lock_irqsave(&dev->rxq.lock, flags);
+		  __skb_unlink(skb, &dev->rxq);
+		  spin_unlock_irqrestore(&dev->rxq.lock, flags);
+		  usbnet_skb_return(dev, skb);
+		}
+		else
+		{
+		  netif_dbg(dev, rx_err, dev->net, "drop\n");
+error_usb1:
+		  dev->net->stats.rx_errors++;
+		  entry->state = rx_cleanup;
+		  state = rx_cleanup;	
+		}
+	}
+#endif	// CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+
 		break;
 
 	/* stalls need manual reset. this is rare ... except that
@@ -555,8 +612,14 @@ block:
 		if (dev->pkt_err > 20)
 			set_bit(EVENT_RX_KILL, &dev->flags);
 	}
-
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+	if(!dev->intf_id)
+	   state = defer_bh(dev, skb, &dev->rxq, state);
+	else if(state == rx_cleanup)
+	   state = defer_bh(dev, skb, &dev->rxq, state);
+#else	
 	state = defer_bh(dev, skb, &dev->rxq, state);
+#endif
 
 	if (urb) {
 		if (netif_running (dev->net) &&
@@ -787,7 +850,11 @@ int usbnet_open (struct net_device *net)
 
 	/* start any status interrupt transfer */
 	if (dev->interrupt) {
+#ifdef CONFIG_OOM_RESCUER
+		retval = usb_submit_urb (dev->interrupt, GFP_KERNEL|__GFP_NORESCUE);
+#else
 		retval = usb_submit_urb (dev->interrupt, GFP_KERNEL);
+#endif
 		if (retval < 0) {
 			netif_err(dev, ifup, dev->net,
 				  "intr submit %d\n", retval);
@@ -997,7 +1064,11 @@ fail_halt:
 		int resched = 1;
 
 		if (netif_running (dev->net))
+#ifdef CONFIG_OOM_RESCUER
+			urb = usb_alloc_urb (0, GFP_KERNEL|__GFP_NORESCUE);
+#else
 			urb = usb_alloc_urb (0, GFP_KERNEL);
+#endif
 		else
 			clear_bit (EVENT_RX_MEMORY, &dev->flags);
 		if (urb != NULL) {
@@ -1007,7 +1078,11 @@ fail_halt:
 				usb_free_urb(urb);
 				goto fail_lowmem;
 			}
+#ifdef CONFIG_OOM_RESCUER
+			if (rx_submit (dev, urb, GFP_KERNEL|__GFP_NORESCUE) == -ENOLINK)
+#else
 			if (rx_submit (dev, urb, GFP_KERNEL) == -ENOLINK)
+#endif
 				resched = 0;
 			usb_autopm_put_interface(dev->intf);
 fail_lowmem:
@@ -1207,6 +1282,14 @@ netdev_tx_t usbnet_start_xmit (struct sk_buff *skb,
 	}
 	spin_unlock_irqrestore (&dev->txq.lock, flags);
 
+#ifdef SAMSUNG_PATCH_WITH_USB_GADGET_ENHANCEMENT
+	if(dev->intf_id)
+	{
+		getnstimeofday(&dbg_set_scan_time);
+		ehci_periodic_switch = 1;
+	}
+#endif	// SAMSUNG_PATCH_WITH_USB_GADGET_ENHANCEMENT
+
 	if (retval) {
 		netif_dbg(dev, tx_err, dev->net, "drop, code %d\n", retval);
 drop:
@@ -1305,6 +1388,209 @@ static void usbnet_bh (unsigned long param)
 	}
 }
 
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_MODEMLOG
+#define MAX_MODEM_INFO_LEN	800
+static struct proc_dir_entry *proc_entry;
+static char *modem_port_data_info;
+static struct mutex shared_obj_lock;
+
+/**
+ * read_modem_info -> Function to read the /proc/usbmodemlog from user space
+ * Parameters
+ * char *page 	-> this is the buffer we write to
+ * char **start -> this is used for larger data access
+ * off_t offset -> same as above
+ * int count	-> this is the expected number of bytes
+ * int *eof		-> set this to 1 to indicate end if file
+ * void * data	-> optional user data
+ */
+static int read_modem_info( char *page, char **start, off_t off, int count, int *eof, void *data )
+{
+	int len;
+	size_t write_index;
+	if (off > 0)
+	{
+		*eof = 1;
+		return 0;
+	}
+	mutex_lock(&shared_obj_lock);
+	write_index = strlen(modem_port_data_info)+1;
+	len = snprintf(page, write_index, "%s", &modem_port_data_info[0]);
+	mutex_unlock(&shared_obj_lock);
+	return len;
+}
+
+/**
+ * create_modem_log_entry -> Function to write the attached modem information in /proc/usbmodemlog
+ * Parameters
+ * char *serial -> buffer having the serial number of the device
+ * u32 vendorId -> vendor Id of the device
+ * u32 productId-> product Id of the device
+ * const char *interface -> buffer which stores the name of the interface exposed by the device
+ */
+static void create_modem_log_entry( char *serial, u32 vendorId, u32 productId, const char *interface)
+{
+	char data[MAX_MODEM_INFO_LEN];
+	size_t len,write_index;
+	int data_written;
+
+	if(strncmp(interface,"usbx",3)!=0 && strncmp(interface,"ethx",3)!=0)
+		return;
+
+	data_written = snprintf ( data, MAX_MODEM_INFO_LEN, "V:%04x\nP:%04x\nI:%s\n", vendorId, productId, interface);
+	if(data_written<0)
+		return;
+
+	data[data_written]='\0';
+
+	if (proc_entry == NULL)
+	{
+		mutex_init(&shared_obj_lock);
+		mutex_lock(&shared_obj_lock);
+		modem_port_data_info = (char *)vmalloc( MAX_MODEM_INFO_LEN );
+		memset( modem_port_data_info, 0, MAX_MODEM_INFO_LEN );
+
+		proc_entry = create_proc_entry( "usbmodemlog", 0644, NULL );
+		if (proc_entry != NULL)
+		{
+			proc_entry->read_proc = read_modem_info;
+		}
+		else 
+		{
+			vfree(modem_port_data_info);
+			modem_port_data_info = NULL;
+		}
+		mutex_unlock(&shared_obj_lock);
+	}
+
+	if (proc_entry != NULL && modem_port_data_info != NULL)
+	{
+		mutex_lock(&shared_obj_lock);
+		len = strlen(data);
+		write_index = strlen(modem_port_data_info);
+		if(len < (MAX_MODEM_INFO_LEN - write_index - 2))
+		{
+			memcpy ( &modem_port_data_info[write_index], data, len );
+			write_index += len;
+			modem_port_data_info[write_index] = '\0';
+		}
+		mutex_unlock(&shared_obj_lock);
+	}
+}
+
+/**
+ * delete_modem_log_entry -> Function to delete the detached modem log entry from /proc/usbmodemlog
+ * Parameters
+ * char *serial -> buffer having the serial number of the device
+ * u32 vendorId -> vendor Id of the device
+ * u32 productId-> product Id of the device
+ * const char *interface -> buffer which stores the name of the interface exposed by the device
+ */
+static void delete_modem_log_entry( char *serial, u32 vId, u32 pId, const char *interface)
+{
+	char vendorId[5], productId[5], start_char;
+	size_t write_index, count, start=0, end=0, match=0;
+	char p_data[10];
+	size_t p_len, is_modem_detected=0;
+	char data[MAX_MODEM_INFO_LEN];
+
+	if(strncmp(interface,"usbx",3)!=0 && strncmp(interface,"ethx",3)!=0)
+		return;
+
+	if(!modem_port_data_info)
+		return;
+
+	mutex_lock(&shared_obj_lock);
+
+	snprintf ( vendorId, 5, "%04x", vId);
+	vendorId[4] = '\0';
+	snprintf ( productId, 5, "%04x", pId);
+	productId[4] = '\0';
+
+	write_index = strlen(modem_port_data_info);
+	for(count=0;count<write_index;count++)
+	{
+		// Get the first character of the line
+		start_char = modem_port_data_info[count];
+		switch(start_char) {
+		case 'V' : //Vendor ID
+			// New node starts, Initializing variables
+			match=1;
+			start=count;
+
+			// Reading after the 'V:' characters
+			count=count+2;
+			p_len = strlen(vendorId);
+
+			// Copy the vendor ID found in the line
+			memcpy ( p_data, &modem_port_data_info[count], p_len);
+			p_data[p_len]='\0';
+			if(strcmp(p_data,vendorId)!=0)
+				match=0;
+
+			// Increment count till the end of the line
+			count=count+p_len;
+			break;
+		case 'P' : // Product ID
+			// Reading after the 'P:' characters
+			count=count+2;
+			p_len = strlen(productId);
+
+			// Copy the product ID found in the line
+			memcpy ( p_data, &modem_port_data_info[count], p_len);
+			p_data[p_len]='\0';
+			if(strcmp(p_data,productId)!=0)
+				match=0;
+
+			// Increment count till the end of the line
+			count=count+p_len;
+			break;
+		case 'I' : // Interface
+			// Reading after the 'I:' characters
+			count=count+2;
+			p_len = strlen(interface);
+
+			// Copy the Interface found in the line
+			memcpy ( p_data, &modem_port_data_info[count], p_len);
+			p_data[p_len]='\0';
+
+			// Increment till the end of the line
+			count=count+p_len;
+			end=count;
+
+			if(strcmp(p_data,interface)==0 && match)
+			{
+				// Data Matched. Removing entry from index -> start to end
+				data[0] = '\0';
+				memcpy ( data, &modem_port_data_info[0], start );
+				memcpy ( &data[start], &modem_port_data_info[end+1],MAX_MODEM_INFO_LEN-end);
+				memset( modem_port_data_info, 0,MAX_MODEM_INFO_LEN);
+				memcpy ( modem_port_data_info,data,MAX_MODEM_INFO_LEN);
+				is_modem_detected = 1;
+			}
+			break;
+		default :
+			break;
+		}
+
+		// Checking whether the modem entry is detected yet ?
+		if(is_modem_detected)
+			break;
+	}
+
+	write_index = strlen(modem_port_data_info);
+	if(write_index==0)
+	{
+		// Remove the proc entry when no modem info is present
+		vfree(modem_port_data_info);
+		modem_port_data_info = NULL;
+		remove_proc_entry( "usbmodemlog", NULL );
+		proc_entry = NULL;
+	}
+	mutex_unlock(&shared_obj_lock);
+}
+
+#endif  //CONFIG_SAMSUNG_PATCH_WITH_USB_MODEMLOG
 
 /*-------------------------------------------------------------------------
  *
@@ -1332,6 +1618,10 @@ void usbnet_disconnect (struct usb_interface *intf)
 		   xdev->bus->bus_name, xdev->devpath,
 		   dev->driver_info->description);
 
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_MODEMLOG
+	//"delete_modem_log_entry" Added for Cellular support
+	delete_modem_log_entry(dev->udev->serial, le16_to_cpu(xdev->descriptor.idVendor), le16_to_cpu(xdev->descriptor.idProduct), dev->net->name);
+#endif    //CONFIG_SAMSUNG_PATCH_WITH_USB_MODEMLOG
 	net = dev->net;
 	unregister_netdev (net);
 
@@ -1433,7 +1723,12 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 
 	dev->net = net;
 	strcpy (net->name, "usb%d");
-	memcpy (net->dev_addr, node_id, sizeof node_id);
+
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+	random_ether_addr(net->dev_addr);
+#else	// CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+	memcpy(net->dev_addr, node_id, sizeof node_id);
+#endif	// CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
 
 	/* rx and tx sides can use different message sizes;
 	 * bind() should set rx_urb_size in that case.
@@ -1515,6 +1810,10 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 		   dev->driver_info->description,
 		   net->dev_addr);
 
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_MODEMLOG
+	//"create_modem_log_entry" Added for Cellular support
+	create_modem_log_entry(dev->udev->serial, le16_to_cpu(xdev->descriptor.idVendor), le16_to_cpu(xdev->descriptor.idProduct), dev->net->name);
+#endif    //CONFIG_SAMSUNG_PATCH_WITH_USB_MODEMLOG
 	// ok, it's ready to go.
 	usb_set_intfdata (udev, dev);
 
@@ -1854,6 +2153,9 @@ EXPORT_SYMBOL_GPL(usbnet_write_cmd_async);
 static int __init usbnet_init(void)
 {
 	/* Compiler should optimize this out. */
+#ifdef SAMSUNG_PATCH_WITH_USB_GADGET_ENHANCEMENT
+	ehci_periodic_switch = 0;
+#endif	// SAMSUNG_PATCH_WITH_USB_GADGET_ENHANCEMENT
 	BUILD_BUG_ON(
 		FIELD_SIZEOF(struct sk_buff, cb) < sizeof(struct skb_data));
 

@@ -77,6 +77,10 @@ struct uart_8250_port {
 	unsigned char		ier;
 	unsigned char		lcr;
 	unsigned char		mcr;
+#if defined(CONFIG_MSTAR_X14)
+	unsigned char		dll;
+	unsigned char		dlh;
+#endif
 	unsigned char		mcr_mask;	/* mask of user bits */
 	unsigned char		mcr_force;	/* mask of forced bits */
 	unsigned char		cur_iotype;	/* Running I/O type */

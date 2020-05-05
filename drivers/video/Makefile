@@ -31,6 +31,16 @@ obj-$(CONFIG_FB_DEFERRED_IO)   += fb_defio.o
 obj-$(CONFIG_FB_WMT_GE_ROPS)   += wmt_ge_rops.o
 
 # Hardware specific drivers go first
+ifeq ($(CONFIG_ARCH_SDP1202),y)
+obj-$(CONFIG_FB_SDP)              += sdp_ccepfb.o
+else
+ifeq ($(CONFIG_ARCH_SDP1207),y)
+obj-$(CONFIG_FB_SDP)              += sdp_ccepfb.o
+else
+obj-$(CONFIG_FB_SDP)              += sdp_fb.o
+endif
+endif
+
 obj-$(CONFIG_FB_AMIGA)            += amifb.o c2p_planar.o
 obj-$(CONFIG_FB_ARC)              += arcfb.o
 obj-$(CONFIG_FB_CLPS711X)         += clps711xfb.o

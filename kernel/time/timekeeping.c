@@ -23,6 +23,11 @@
 #include <linux/stop_machine.h>
 #include <linux/pvclock_gtod.h>
 
+#ifdef CONFIG_KDEBUGD_FTRACE
+#include "kdbg_util.h"
+#include <trace/kdbg_ftrace_helper.h>
+#include <trace/kdbg-ftrace.h>
+#endif /* CONFIG_KDEBUGD_FTRACE */
 
 static struct timekeeper timekeeper;
 
@@ -154,6 +159,34 @@ static inline s64 timekeeping_get_ns(struct timekeeper *tk)
 	/* If arch requires, add in gettimeoffset() */
 	return nsec + arch_gettimeoffset();
 }
+
+#ifdef CONFIG_KDEBUGD_FTRACE
+/* kdbg_ftrace_timekeeping_get_ns_raw
+ * function to get the raw nanoseconds value.
+ */
+s64 notrace kdbg_ftrace_timekeeping_get_ns_raw(void)
+{
+	cycle_t cycle_now, cycle_delta;
+	struct clocksource *clock;
+	s64 nsec;
+
+	if (fconf.trace_timestamp_nsec_status) {
+		/* read clocksource: */
+		clock = timekeeper.clock;
+		cycle_now = clock->read(clock);
+
+		/* calculate the delta since the last update_wall_time: */
+		cycle_delta = (cycle_now - clock->cycle_last) & clock->mask;
+
+		/* convert delta to nanoseconds. */
+		nsec = clocksource_cyc2ns(cycle_delta, clock->mult, clock->shift);
+
+		/* If arch requires, add in gettimeoffset() */
+		return nsec + arch_gettimeoffset();
+	} else
+		return 0;
+}
+#endif /* CONFIG_KDEBUGD_FTRACE */
 
 static inline s64 timekeeping_get_ns_raw(struct timekeeper *tk)
 {

@@ -32,6 +32,7 @@ struct nfsd3_readargs {
 	__u64			offset;
 	__u32			count;
 	int			vlen;
+	__u32                   f_mode;
 };
 
 struct nfsd3_writeargs {
@@ -104,6 +105,20 @@ struct nfsd3_commitargs {
 	struct svc_fh		fh;
 	__u64			offset;
 	__u32			count;
+};
+
+struct nfsd3_umountargs {
+	__u32                   dummy;
+};
+
+struct nfsd3_openargs {
+	struct svc_fh		fh;
+	__u32                   open_count;
+};
+
+struct nfsd3_closeargs {
+	struct svc_fh		fh;
+	__u32                   open_count;
 };
 
 struct nfsd3_getaclargs {
@@ -219,6 +234,23 @@ struct nfsd3_commitres {
 	struct svc_fh		fh;
 };
 
+struct nfsd3_umountres {
+	__be32                  status;
+	__u32                   dummy;
+};
+
+struct nfsd3_openres {
+	__be32                  status;
+	struct svc_fh		fh;
+	__u32                   open_count;
+};
+
+struct nfsd3_closeres {
+	__be32                  status;
+	struct svc_fh		fh;
+	__u32                   open_count;
+};
+
 struct nfsd3_getaclres {
 	__be32			status;
 	struct svc_fh		fh;
@@ -295,6 +327,12 @@ int nfs3svc_decode_readdirplusargs(struct svc_rqst *, __be32 *,
 				struct nfsd3_readdirargs *);
 int nfs3svc_decode_commitargs(struct svc_rqst *, __be32 *,
 				struct nfsd3_commitargs *);
+int nfs3svc_decode_umountargs(struct svc_rqst *, __be32 *,
+				struct nfsd3_umountargs *);
+int nfs3svc_decode_openargs(struct svc_rqst *, __be32 *,
+				struct nfsd3_openargs *);
+int nfs3svc_decode_closeargs(struct svc_rqst *, __be32 *,
+				struct nfsd3_closeargs *);
 int nfs3svc_encode_voidres(struct svc_rqst *, __be32 *, void *);
 int nfs3svc_encode_attrstat(struct svc_rqst *, __be32 *,
 				struct nfsd3_attrstat *);
@@ -324,6 +362,12 @@ int nfs3svc_encode_pathconfres(struct svc_rqst *, __be32 *,
 				struct nfsd3_pathconfres *);
 int nfs3svc_encode_commitres(struct svc_rqst *, __be32 *,
 				struct nfsd3_commitres *);
+int nfs3svc_encode_umountres(struct svc_rqst *, __be32 *,
+				struct nfsd3_umountres *);
+int nfs3svc_encode_openres(struct svc_rqst *, __be32 *,
+				struct nfsd3_openres *);
+int nfs3svc_encode_closeres(struct svc_rqst *, __be32 *,
+				struct nfsd3_closeres *);
 
 int nfs3svc_release_fhandle(struct svc_rqst *, __be32 *,
 				struct nfsd3_attrstat *);

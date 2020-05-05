@@ -45,6 +45,16 @@
 #include <asm/mach/irq.h>
 #include <asm/hardware/gic.h>
 
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+#include "chip_int.h"
+#endif
+
+#if defined(CONFIG_MSTAR_INT_1_to_1_SPI)
+#define SECOND_LEVEL_BOUNDARY 256
+#else
+#define SECOND_LEVEL_BOUNDARY 128
+#endif
+
 union gic_base {
 	void __iomem *common_base;
 	void __percpu __iomem **percpu_base;
@@ -90,8 +100,16 @@ struct irq_chip gic_arch_extn = {
 	.irq_set_wake	= NULL,
 };
 
+static int sdp1202_fix = 0;
+
 #ifndef MAX_GIC_NR
 #define MAX_GIC_NR	1
+#endif
+
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+extern void x14_irq_ack(unsigned int irq);
+extern void x14_irq_mask(unsigned int irq);
+extern void x14_irq_unmask(unsigned int irq);
 #endif
 
 static struct gic_chip_data gic_data[MAX_GIC_NR] __read_mostly;
@@ -150,6 +168,24 @@ static inline unsigned int gic_irq(struct irq_data *d)
  */
 static void gic_mask_irq(struct irq_data *d)
 {
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+	if(d->irq < SECOND_LEVEL_BOUNDARY )
+	{
+		u32 mask = (u32)(1 << (d->irq % 32));
+		raw_spin_lock(&irq_controller_lock);
+		writel_relaxed(mask, gic_dist_base(d) + GIC_DIST_ENABLE_CLEAR + (gic_irq(d) / 32) * 4);
+		if (gic_arch_extn.irq_mask)
+			gic_arch_extn.irq_mask(d);
+		raw_spin_unlock(&irq_controller_lock);
+	}
+	else
+	{
+		raw_spin_lock(&irq_controller_lock);
+		//handle MSTAR IRQ controler 
+		x14_irq_mask( d->irq - MSTAR_INT_BASE);
+		raw_spin_unlock(&irq_controller_lock);
+	}  
+#else
 	u32 mask = 1 << (gic_irq(d) % 32);
 
 	raw_spin_lock(&irq_controller_lock);
@@ -157,10 +193,57 @@ static void gic_mask_irq(struct irq_data *d)
 	if (gic_arch_extn.irq_mask)
 		gic_arch_extn.irq_mask(d);
 	raw_spin_unlock(&irq_controller_lock);
+#endif
 }
+
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+static void gic_disable_irq(struct irq_data *d)
+{
+	if(d->irq < SECOND_LEVEL_BOUNDARY )
+	{
+		u32 mask = (u32)(1 << (d->irq % 32));
+
+		raw_spin_lock(&irq_controller_lock);
+		writel_relaxed(mask, gic_dist_base(d) + GIC_DIST_ENABLE_CLEAR + (gic_irq(d) / 32) * 4);
+		raw_spin_unlock(&irq_controller_lock);
+	}
+	else
+	{		
+		raw_spin_lock(&irq_controller_lock);
+		//handle MSTAR IRQ controler 
+		x14_irq_mask( d->irq - MSTAR_INT_BASE);
+		raw_spin_unlock(&irq_controller_lock);
+	}  
+}
+#endif
 
 static void gic_unmask_irq(struct irq_data *d)
 {
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+	if(d->irq < SECOND_LEVEL_BOUNDARY )
+	{
+		u32 mask = (u32)(1 << (d->irq % 32));
+		raw_spin_lock(&irq_controller_lock);
+		if (gic_arch_extn.irq_unmask)
+			gic_arch_extn.irq_unmask(d);
+		writel_relaxed(mask, gic_dist_base(d) + GIC_DIST_ENABLE_SET + (gic_irq(d) / 32) * 4);
+		raw_spin_unlock(&irq_controller_lock);
+	}
+	else
+	{
+		u32 mask = (u32)(1 << (d->irq % 32));
+		raw_spin_lock(&irq_controller_lock);
+                writel_relaxed(mask, gic_dist_base(d) + GIC_DIST_ENABLE_SET + (INT_PPI_IRQ / 32) * 4);
+		raw_spin_unlock(&irq_controller_lock);
+
+		raw_spin_lock(&irq_controller_lock);
+
+		//handle MSTAR IRQ controler 
+		x14_irq_unmask( d->irq - MSTAR_INT_BASE);
+
+		raw_spin_unlock(&irq_controller_lock);
+	}
+#else
 	u32 mask = 1 << (gic_irq(d) % 32);
 
 	raw_spin_lock(&irq_controller_lock);
@@ -168,17 +251,61 @@ static void gic_unmask_irq(struct irq_data *d)
 		gic_arch_extn.irq_unmask(d);
 	writel_relaxed(mask, gic_dist_base(d) + GIC_DIST_ENABLE_SET + (gic_irq(d) / 32) * 4);
 	raw_spin_unlock(&irq_controller_lock);
+#endif
 }
+
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+static void gic_enable_irq(struct irq_data *d)
+{
+	if(d->irq < SECOND_LEVEL_BOUNDARY )
+	{
+		u32 mask = (u32)(1 << (d->irq % 32));
+		raw_spin_lock(&irq_controller_lock);
+		writel(mask, gic_dist_base(d) + GIC_DIST_ENABLE_SET + (gic_irq(d) / 32) * 4);
+		raw_spin_unlock(&irq_controller_lock);
+	}
+	else
+	{
+		raw_spin_lock(&irq_controller_lock);
+		//handle MSTAR IRQ controler 
+		x14_irq_unmask( d->irq - MSTAR_INT_BASE);
+		raw_spin_unlock(&irq_controller_lock);
+		//handle MSTAR IRQ controler 
+	}
+}
+#endif
 
 static void gic_eoi_irq(struct irq_data *d)
 {
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+	if(d->irq<SECOND_LEVEL_BOUNDARY)	
+	{
+		if (gic_arch_extn.irq_eoi) {
+			raw_spin_lock(&irq_controller_lock);
+			gic_arch_extn.irq_eoi(d);
+			raw_spin_unlock(&irq_controller_lock);
+		}
+
+		writel_relaxed(gic_irq(d), gic_cpu_base(d) + GIC_CPU_EOI);
+	}	
+	else
+	{
+		//handle MSTAR IRQ controler
+		x14_irq_ack( d->irq - MSTAR_INT_BASE);
+		writel_relaxed(INT_PPI_IRQ, gic_cpu_base(d) + GIC_CPU_EOI); //patch
+	}
+#else
 	if (gic_arch_extn.irq_eoi) {
 		raw_spin_lock(&irq_controller_lock);
 		gic_arch_extn.irq_eoi(d);
 		raw_spin_unlock(&irq_controller_lock);
 	}
 
-	writel_relaxed(gic_irq(d), gic_cpu_base(d) + GIC_CPU_EOI);
+	if(sdp1202_fix)
+		writel_relaxed(gic_irq(d), gic_cpu_base(d) + GIC_CPU_AEOI);
+	else
+		writel_relaxed(gic_irq(d), gic_cpu_base(d) + GIC_CPU_EOI);
+#endif
 }
 
 static int gic_set_type(struct irq_data *d, unsigned int type)
@@ -283,6 +410,9 @@ asmlinkage void __exception_irq_entry gic_handle_irq(struct pt_regs *regs)
 	void __iomem *cpu_base = gic_data_cpu_base(gic);
 
 	do {
+		if(sdp1202_fix)
+			irqstat = readl_relaxed(cpu_base + GIC_CPU_AINTACK);
+		else
 		irqstat = readl_relaxed(cpu_base + GIC_CPU_INTACK);
 		irqnr = irqstat & ~0x1c00;
 
@@ -292,6 +422,9 @@ asmlinkage void __exception_irq_entry gic_handle_irq(struct pt_regs *regs)
 			continue;
 		}
 		if (irqnr < 16) {
+			if(sdp1202_fix)
+				writel_relaxed(irqstat, cpu_base + GIC_CPU_AEOI);
+			else
 			writel_relaxed(irqstat, cpu_base + GIC_CPU_EOI);
 #ifdef CONFIG_SMP
 			handle_IPI(irqnr, regs);
@@ -312,6 +445,9 @@ static void gic_handle_cascade_irq(unsigned int irq, struct irq_desc *desc)
 	chained_irq_enter(chip, desc);
 
 	raw_spin_lock(&irq_controller_lock);
+	if(sdp1202_fix)
+		status = readl_relaxed(gic_data_cpu_base(chip_data) + GIC_CPU_AINTACK);
+	else
 	status = readl_relaxed(gic_data_cpu_base(chip_data) + GIC_CPU_INTACK);
 	raw_spin_unlock(&irq_controller_lock);
 
@@ -333,6 +469,10 @@ static struct irq_chip gic_chip = {
 	.name			= "GIC",
 	.irq_mask		= gic_mask_irq,
 	.irq_unmask		= gic_unmask_irq,
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+	.irq_enable             = gic_enable_irq,
+	.irq_disable            = gic_disable_irq,
+#endif
 	.irq_eoi		= gic_eoi_irq,
 	.irq_set_type		= gic_set_type,
 	.irq_retrigger		= gic_retrigger,
@@ -377,13 +517,28 @@ static void __init gic_dist_init(struct gic_chip_data *gic)
 	unsigned int gic_irqs = gic->gic_irqs;
 	void __iomem *base = gic_data_dist_base(gic);
 
-	writel_relaxed(0, base + GIC_DIST_CTRL);
+#if defined(CONFIG_ARM_TRUSTZONE) && defined(CONFIG_ARCH_SDP1202)
+	writel_relaxed(1, base + GIC_DIST_CTRL);
+#else
+	if(sdp1202_fix)
+		writel_relaxed(1, base + GIC_DIST_CTRL);
+	else
+		writel_relaxed(0, base + GIC_DIST_CTRL);
+#endif
 
+#ifndef CONFIG_ARCH_NVT72668
+#if defined(CONFIG_MSTAR_INT_1_to_1_SPI)
+	init_chip_spi_config();
+	for (i = MSTAR_IRQ_BASE; i < MSTAR_CHIP_INT_END; i += 16)
+		writel_relaxed(interrupt_configs[i/16], base + GIC_DIST_CONFIG + i * 4 / 16); // for level
+#else
 	/*
 	 * Set all global interrupts to be level triggered, active low.
 	 */
 	for (i = 32; i < gic_irqs; i += 16)
 		writel_relaxed(0, base + GIC_DIST_CONFIG + i * 4 / 16);
+#endif
+#endif
 
 	/*
 	 * Set all global interrupts to this CPU only.
@@ -397,8 +552,17 @@ static void __init gic_dist_init(struct gic_chip_data *gic)
 	/*
 	 * Set priority on all global interrupts.
 	 */
+#if defined(CONFIG_ARM_TRUSTZONE) && defined(CONFIG_ARCH_SDP1202)
 	for (i = 32; i < gic_irqs; i += 4)
-		writel_relaxed(0xa0a0a0a0, base + GIC_DIST_PRI + i * 4 / 4);
+		writel_relaxed(0xd0d0d0d0, base + GIC_DIST_PRI + i * 4 / 4);
+#else
+	if(sdp1202_fix)
+		for (i = 32; i < gic_irqs; i += 4)
+			writel_relaxed(0xd0d0d0d0, base + GIC_DIST_PRI + i * 4 / 4);
+	else
+		for (i = 32; i < gic_irqs; i += 4)
+			writel_relaxed(0xa0a0a0a0, base + GIC_DIST_PRI + i * 4 / 4);		
+#endif
 
 	/*
 	 * Disable all interrupts.  Leave the PPI and SGIs alone
@@ -407,7 +571,14 @@ static void __init gic_dist_init(struct gic_chip_data *gic)
 	for (i = 32; i < gic_irqs; i += 32)
 		writel_relaxed(0xffffffff, base + GIC_DIST_ENABLE_CLEAR + i * 4 / 32);
 
-	writel_relaxed(1, base + GIC_DIST_CTRL);
+#if defined(CONFIG_ARM_TRUSTZONE) && defined(CONFIG_ARCH_SDP1202)
+	writel_relaxed(3, base + GIC_DIST_CTRL);
+#else
+	if(sdp1202_fix)
+		writel_relaxed(3, base + GIC_DIST_CTRL);
+	else
+		writel_relaxed(1, base + GIC_DIST_CTRL);
+#endif
 }
 
 static void __cpuinit gic_cpu_init(struct gic_chip_data *gic)
@@ -438,15 +609,38 @@ static void __cpuinit gic_cpu_init(struct gic_chip_data *gic)
 	 */
 	writel_relaxed(0xffff0000, dist_base + GIC_DIST_ENABLE_CLEAR);
 	writel_relaxed(0x0000ffff, dist_base + GIC_DIST_ENABLE_SET);
-
+#if defined(CONFIG_MSTAR_INT_1_to_1_SPI)
+	{
+		unsigned int gic_irqs = 256;
+		for (i = 4; i < gic_irqs/8; i += 4)
+			writel_relaxed(0xFFFFFFFF, dist_base + GIC_DIST_ENABLE_SET + i);
+	}
+#endif
 	/*
 	 * Set priority on PPI and SGI interrupts
 	 */
+#if defined(CONFIG_ARM_TRUSTZONE) && defined(CONFIG_ARCH_SDP1202)
 	for (i = 0; i < 32; i += 4)
-		writel_relaxed(0xa0a0a0a0, dist_base + GIC_DIST_PRI + i * 4 / 4);
+		writel_relaxed(0xd0d0d0d0, dist_base + GIC_DIST_PRI + i * 4 / 4);
+	
+	writel_relaxed(0xff, base + GIC_CPU_PRIMASK);
+	writel_relaxed(0x1f, base + GIC_CPU_CTRL);
+#else
+	if(sdp1202_fix)	{
+		for (i = 0; i < 32; i += 4)
+			writel_relaxed(0xd0d0d0d0, dist_base + GIC_DIST_PRI + i * 4 / 4);
 
-	writel_relaxed(0xf0, base + GIC_CPU_PRIMASK);
-	writel_relaxed(1, base + GIC_CPU_CTRL);
+		writel_relaxed(0xff, base + GIC_CPU_PRIMASK);
+		writel_relaxed(0x1f, base + GIC_CPU_CTRL);
+	}	else	{
+		for (i = 0; i < 32; i += 4)
+			writel_relaxed(0xa0a0a0a0, dist_base + GIC_DIST_PRI + i * 4 / 4);
+
+		writel_relaxed(0xf0, base + GIC_CPU_PRIMASK);
+		writel_relaxed(1, base + GIC_CPU_CTRL);
+	}
+		
+#endif
 }
 
 #ifdef CONFIG_CPU_PM
@@ -746,10 +940,14 @@ void __init gic_init_bases(unsigned int gic_nr, int irq_start,
 	 * Find out how many interrupts are supported.
 	 * The GIC only supports up to 1020 interrupt sources.
 	 */
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+	gic_irqs=256;
+#else
 	gic_irqs = readl_relaxed(gic_data_dist_base(gic) + GIC_DIST_CTR) & 0x1f;
 	gic_irqs = (gic_irqs + 1) * 32;
 	if (gic_irqs > 1020)
 		gic_irqs = 1020;
+#endif
 	gic->gic_irqs = gic_irqs;
 
 	gic_irqs -= hwirq_base; /* calculate # of irqs to allocate */
@@ -794,7 +992,14 @@ void gic_raise_softirq(const struct cpumask *mask, unsigned int irq)
 	dsb();
 
 	/* this always happens on GIC0 */
-	writel_relaxed(map << 16 | irq, gic_data_dist_base(&gic_data[0]) + GIC_DIST_SOFTINT);
+#if defined(CONFIG_ARM_TRUSTZONE) && defined(CONFIG_ARCH_SDP1202)
+	writel_relaxed(map << 16 | irq | 0x8000, gic_data_dist_base(&gic_data[0]) + GIC_DIST_SOFTINT);
+#else
+	if(sdp1202_fix)
+		writel_relaxed(map << 16 | irq | 0x8000, gic_data_dist_base(&gic_data[0]) + GIC_DIST_SOFTINT);
+	else
+		writel_relaxed(map << 16 | irq, gic_data_dist_base(&gic_data[0]) + GIC_DIST_SOFTINT);
+#endif
 }
 #endif
 
@@ -819,6 +1024,9 @@ int __init gic_of_init(struct device_node *node, struct device_node *parent)
 
 	if (of_property_read_u32(node, "cpu-offset", &percpu_offset))
 		percpu_offset = 0;
+
+	if (of_property_read_u32(node, "sdp1202-fix", &sdp1202_fix))
+		sdp1202_fix = 0;	
 
 	gic_init_bases(gic_cnt, -1, dist_base, cpu_base, percpu_offset, node);
 

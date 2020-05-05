@@ -100,14 +100,14 @@ void inflate_fast(z_streamp strm, unsigned start)
     unsigned whave;             /* valid bytes in the window */
     unsigned write;             /* window write index */
     unsigned char *window;      /* allocated sliding window, if wsize != 0 */
-    unsigned long hold;         /* local strm->hold */
-    unsigned bits;              /* local strm->bits */
+    register unsigned long hold;         /* local strm->hold */
+    register unsigned bits;              /* local strm->bits */
     code const *lcode;          /* local strm->lencode */
     code const *dcode;          /* local strm->distcode */
     unsigned lmask;             /* mask for first level of length codes */
     unsigned dmask;             /* mask for first level of distance codes */
     code this;                  /* retrieved table entry */
-    unsigned op;                /* code bits, operation, extra bits, or */
+    register unsigned op;                /* code bits, operation, extra bits, or */
                                 /*  window position, window bytes to copy */
     unsigned len;               /* match length, unused bytes */
     unsigned dist;              /* match distance */
@@ -137,7 +137,7 @@ void inflate_fast(z_streamp strm, unsigned start)
     /* decode literals and length/distances until end-of-block or not enough
        input data or output space */
     do {
-        if (bits < 15) {
+        if (likely((bits < 15))) {
             hold += (unsigned long)(PUP(in)) << bits;
             bits += 8;
             hold += (unsigned long)(PUP(in)) << bits;
@@ -149,14 +149,14 @@ void inflate_fast(z_streamp strm, unsigned start)
         hold >>= op;
         bits -= op;
         op = (unsigned)(this.op);
-        if (op == 0) {                          /* literal */
+        if (likely((op == 0))) {                          /* literal */
             PUP(out) = (unsigned char)(this.val);
         }
-        else if (op & 16) {                     /* length base */
+        else if (likely((op & 16))) {                     /* length base */
             len = (unsigned)(this.val);
             op &= 15;                           /* number of extra bits */
-            if (op) {
-                if (bits < op) {
+            if (likely((op))) {
+                if (unlikely((bits < op))) {
                     hold += (unsigned long)(PUP(in)) << bits;
                     bits += 8;
                 }
@@ -164,32 +164,32 @@ void inflate_fast(z_streamp strm, unsigned start)
                 hold >>= op;
                 bits -= op;
             }
-            if (bits < 15) {
-                hold += (unsigned long)(PUP(in)) << bits;
-                bits += 8;
-                hold += (unsigned long)(PUP(in)) << bits;
-                bits += 8;
-            }
-            this = dcode[hold & dmask];
-          dodist:
+            if (likely((bits < 15))) {
+				hold += (unsigned long)(PUP(in)) << bits;
+				bits += 8;
+				hold += (unsigned long)(PUP(in)) << bits;
+				bits += 8;
+			}
+			this = dcode[hold & dmask];
+dodist:
             op = (unsigned)(this.bits);
             hold >>= op;
             bits -= op;
             op = (unsigned)(this.op);
-            if (op & 16) {                      /* distance base */
+            if (likely((op & 16))) {                      /* distance base */
                 dist = (unsigned)(this.val);
                 op &= 15;                       /* number of extra bits */
-                if (bits < op) {
+                if (likely((bits < op))) {
                     hold += (unsigned long)(PUP(in)) << bits;
                     bits += 8;
-                    if (bits < op) {
+                    if (likely((bits < op))) {
                         hold += (unsigned long)(PUP(in)) << bits;
                         bits += 8;
                     }
                 }
                 dist += (unsigned)hold & ((1U << op) - 1);
 #ifdef INFLATE_STRICT
-                if (dist > dmax) {
+                if (unlikely((dist > dmax))) {
                     strm->msg = (char *)"invalid distance too far back";
                     state->mode = BAD;
                     break;
@@ -198,17 +198,17 @@ void inflate_fast(z_streamp strm, unsigned start)
                 hold >>= op;
                 bits -= op;
                 op = (unsigned)(out - beg);     /* max distance in output */
-                if (dist > op) {                /* see if copy from window */
+                if (likely((dist > op))) {      /* see if copy from window */
                     op = dist - op;             /* distance back in window */
-                    if (op > whave) {
+                    if (unlikely((op > whave))) {
                         strm->msg = (char *)"invalid distance too far back";
                         state->mode = BAD;
                         break;
                     }
                     from = window - OFF;
-                    if (write == 0) {           /* very common case */
+                    if (unlikely((write == 0))) {           /* very common case */
                         from += wsize - op;
-                        if (op < len) {         /* some from window */
+                        if (unlikely((op < len))) {         /* some from window */
                             len -= op;
                             do {
                                 PUP(out) = PUP(from);
@@ -216,16 +216,16 @@ void inflate_fast(z_streamp strm, unsigned start)
                             from = out - dist;  /* rest from output */
                         }
                     }
-                    else if (write < op) {      /* wrap around window */
+                    else if (likely((write < op))) {      /* wrap around window */
                         from += wsize + write - op;
                         op -= write;
-                        if (op < len) {         /* some from end of window */
+                        if (unlikely((op < len))) {         /* some from end of window */
                             len -= op;
                             do {
                                 PUP(out) = PUP(from);
                             } while (--op);
                             from = window - OFF;
-                            if (write < len) {  /* some from start of window */
+                            if (unlikely((write < len))) {  /* some from start of window */
                                 op = write;
                                 len -= op;
                                 do {
@@ -237,7 +237,7 @@ void inflate_fast(z_streamp strm, unsigned start)
                     }
                     else {                      /* contiguous in window */
                         from += write - op;
-                        if (op < len) {         /* some from window */
+                        if (unlikely((op < len))) {         /* some from window */
                             len -= op;
                             do {
                                 PUP(out) = PUP(from);
@@ -245,16 +245,9 @@ void inflate_fast(z_streamp strm, unsigned start)
                             from = out - dist;  /* rest from output */
                         }
                     }
-                    while (len > 2) {
+					while (len > 0) {
                         PUP(out) = PUP(from);
-                        PUP(out) = PUP(from);
-                        PUP(out) = PUP(from);
-                        len -= 3;
-                    }
-                    if (len) {
-                        PUP(out) = PUP(from);
-                        if (len > 1)
-                            PUP(out) = PUP(from);
+						len -= 1;
                     }
                 }
                 else {
@@ -304,7 +297,7 @@ void inflate_fast(z_streamp strm, unsigned start)
 			PUP(out) = PUP(from);
                 }
             }
-            else if ((op & 64) == 0) {          /* 2nd level distance code */
+            else if (likely((op & 64) == 0)) {          /* 2nd level distance code */
                 this = dcode[this.val + (hold & ((1U << op) - 1))];
                 goto dodist;
             }
@@ -327,6 +320,7 @@ void inflate_fast(z_streamp strm, unsigned start)
             state->mode = BAD;
             break;
         }
+
     } while (in < last && out < end);
 
     /* return unused bytes (on entry, bits < 8, so in won't go too far back) */

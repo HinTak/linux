@@ -43,6 +43,10 @@
 #include "trace.h"
 #include "trace_output.h"
 
+#if defined(CONFIG_KDEBUGD_FTRACE) && defined(CONFIG_KDEBUGD_FTRACE_USER_BACKTRACE)
+#include <trace/kdbg_ftrace_helper.h>
+#endif
+
 /*
  * On boot up, the ring buffer is set to the minimum size, so that
  * we do not waste memory on systems that are not using tracing.
@@ -1479,7 +1483,11 @@ ftrace_trace_userstack(struct ring_buffer *buffer, unsigned long flags, int pc)
 	trace.skip		= 0;
 	trace.entries		= entry->caller;
 
+#if defined(CONFIG_KDEBUGD_FTRACE) && defined(CONFIG_KDEBUGD_FTRACE_USER_BACKTRACE)
+	kdbg_save_stack_trace_user(&trace);
+#else
 	save_stack_trace_user(&trace);
+#endif
 	if (!filter_check_discard(call, entry, buffer, event))
 		__buffer_unlock_commit(buffer, event);
 
@@ -5244,6 +5252,11 @@ __init static int clear_boot_tracer(void)
 
 	return 0;
 }
+
+#ifdef CONFIG_KDEBUGD_FTRACE
+/* Let kdebugd have access to static functions in this file */
+#include "../kdebugd/trace/kdbg_ftrace_core_helper.c"
+#endif /* CONFIG_KDEBUGD_FTRACE */
 
 early_initcall(tracer_alloc_buffers);
 fs_initcall(tracer_init_debugfs);

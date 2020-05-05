@@ -76,6 +76,13 @@ void dwc3_set_mode(struct dwc3 *dwc, u32 mode)
 	dwc3_writel(dwc->regs, DWC3_GCTL, reg);
 }
 
+static void dwc3_delay_for_phy_reset(struct dwc3 *dwc, int reset)
+{
+	/* ij.jang: this was 100ms delay in original code,
+	 * few micro-seconds are enough. */
+	mdelay(10);
+}
+
 /**
  * dwc3_core_soft_reset - Issues core soft reset and PHY reset
  * @dwc: pointer to our context structure
@@ -101,7 +108,7 @@ static void dwc3_core_soft_reset(struct dwc3 *dwc)
 
 	usb_phy_init(dwc->usb2_phy);
 	usb_phy_init(dwc->usb3_phy);
-	mdelay(100);
+	dwc3_delay_for_phy_reset(dwc, 1);
 
 	/* Clear USB3 PHY reset */
 	reg = dwc3_readl(dwc->regs, DWC3_GUSB3PIPECTL(0));
@@ -113,12 +120,14 @@ static void dwc3_core_soft_reset(struct dwc3 *dwc)
 	reg &= ~DWC3_GUSB2PHYCFG_PHYSOFTRST;
 	dwc3_writel(dwc->regs, DWC3_GUSB2PHYCFG(0), reg);
 
-	mdelay(100);
+	dwc3_delay_for_phy_reset(dwc, 0);
 
 	/* After PHYs are stable we can take Core out of reset state */
 	reg = dwc3_readl(dwc->regs, DWC3_GCTL);
 	reg &= ~DWC3_GCTL_CORESOFTRESET;
 	dwc3_writel(dwc->regs, DWC3_GCTL, reg);
+	
+	mdelay(2);
 }
 
 /**
@@ -472,7 +481,15 @@ static int dwc3_probe(struct platform_device *pdev)
 		goto err0;
 	}
 
-	mode = DWC3_MODE(dwc->hwparams.hwparams0);
+	mode = DWC3_MODE_UNKNOWN;
+
+	if (pdev->dev.platform_data) {
+		struct dwc3_platform_data *pdata = pdev->dev.platform_data;
+		mode = pdata->mode;
+	}
+
+	if (mode == DWC3_MODE_UNKNOWN)
+		mode = DWC3_MODE(dwc->hwparams.hwparams0);
 
 	switch (mode) {
 	case DWC3_MODE_DEVICE:
@@ -482,6 +499,7 @@ static int dwc3_probe(struct platform_device *pdev)
 			dev_err(dev, "failed to initialize gadget\n");
 			goto err1;
 		}
+		dev_info(dev, "role: DEVICE\n");
 		break;
 	case DWC3_MODE_HOST:
 		dwc3_set_mode(dwc, DWC3_GCTL_PRTCAP_HOST);
@@ -490,6 +508,7 @@ static int dwc3_probe(struct platform_device *pdev)
 			dev_err(dev, "failed to initialize host\n");
 			goto err1;
 		}
+		dev_info(dev, "role: HOST\n");
 		break;
 	case DWC3_MODE_DRD:
 		dwc3_set_mode(dwc, DWC3_GCTL_PRTCAP_OTG);
@@ -504,6 +523,7 @@ static int dwc3_probe(struct platform_device *pdev)
 			dev_err(dev, "failed to initialize gadget\n");
 			goto err1;
 		}
+		dev_info(dev, "role: OTG\n");
 		break;
 	default:
 		dev_err(dev, "Unsupported mode of operation %d\n", mode);
@@ -581,11 +601,105 @@ static int dwc3_remove(struct platform_device *pdev)
 	return 0;
 }
 
+#ifdef CONFIG_PM
+static int dwc3_suspend(struct device *dev)
+{
+	struct dwc3 *dwc = dev_get_drvdata(dev);
+	struct dwc3_platform_data *pdata = dev->platform_data;
+
+	if (pdata->flags & DWC3_PDATA_PM_NEED_REINIT) {
+		/* XXX */
+		dev_info(dev, "suspend, current mode = %d\n", dwc->mode);
+	}
+	return 0;
+}
+
+static int dwc3_resume(struct device *dev)
+{
+	struct dwc3 *dwc = dev_get_drvdata(dev);
+	struct dwc3_platform_data *pdata = dev->platform_data;
+	u32 reg;
+	int timeout;
+
+	/* XXX: duplicated from dwc3_core_init */
+	if (!(pdata->flags & DWC3_PDATA_PM_NEED_REINIT))
+		return 0;
+
+	/* issue device SoftReset too */
+	dev_warn(dev, "re-initialization for resuming, back to %d.\n",
+			dwc->mode);
+
+	dwc3_writel(dwc->regs, DWC3_DCTL, DWC3_DCTL_CSFTRST);
+	timeout = 500 * 1000;	/* usec */
+	while(timeout > 0) {
+		reg = dwc3_readl(dwc->regs, DWC3_DCTL);
+		if (!(reg & DWC3_DCTL_CSFTRST))
+			break;
+		timeout -= 10;
+		udelay(10);
+	}
+	if (timeout <= 0)
+		return -ETIMEDOUT;
+	
+	dwc3_core_soft_reset(dwc);
+
+	reg = dwc3_readl(dwc->regs, DWC3_GCTL);
+	reg &= ~DWC3_GCTL_SCALEDOWN_MASK;
+	reg &= ~DWC3_GCTL_DISSCRAMBLE;
+
+	switch (DWC3_GHWPARAMS1_EN_PWROPT(dwc->hwparams.hwparams1)) {
+	case DWC3_GHWPARAMS1_EN_PWROPT_CLK:
+		reg &= ~DWC3_GCTL_DSBLCLKGTNG;
+		break;
+	default:
+		dev_dbg(dwc->dev, "No power optimization available\n");
+	}
+
+	/*
+	 * WORKAROUND: DWC3 revisions <1.90a have a bug
+	 * where the device can fail to connect at SuperSpeed
+	 * and falls back to high-speed mode which causes
+	 * the device to enter a Connect/Disconnect loop
+	 */
+	if (dwc->revision < DWC3_REVISION_190A)
+		reg |= DWC3_GCTL_U2RSTECN;
+
+	dwc3_writel(dwc->regs, DWC3_GCTL, reg);
+	
+	switch (dwc->mode) {
+	case DWC3_MODE_DEVICE:
+		dwc3_set_mode(dwc, DWC3_GCTL_PRTCAP_DEVICE);
+		break;
+	case DWC3_MODE_HOST:
+		dwc3_set_mode(dwc, DWC3_GCTL_PRTCAP_HOST);
+		break;
+	case DWC3_MODE_DRD:
+		dwc3_set_mode(dwc, DWC3_GCTL_PRTCAP_OTG);
+		break;
+	default:
+		/* do nothing */
+		break;
+	}
+	return 0;
+}
+
+static const struct dev_pm_ops dwc3_pm_ops = {
+	.suspend	= dwc3_suspend,
+	.resume		= dwc3_resume,
+};
+
+#else	/* !CONFIG_PM */
+static const struct dev_pm_ops dwc3_pm_ops = {
+	.suspend	= NULL,
+	.resume		= NULL,
+#endif
+
 static struct platform_driver dwc3_driver = {
 	.probe		= dwc3_probe,
 	.remove		= dwc3_remove,
 	.driver		= {
 		.name	= "dwc3",
+		.pm	= &dwc3_pm_ops,
 	},
 };
 

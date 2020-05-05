@@ -464,6 +464,16 @@ out:
 	return err;
 }
 
+int	__init arch_timer_register_irq(int irq)
+{
+	arch_timer_use_virtual = 0;
+	arch_timer_ppi[PHYS_NONSECURE_PPI] = 0;
+	arch_timer_ppi[PHYS_SECURE_PPI] = irq;
+	return arch_timer_register();
+}
+
+
+#ifdef CONFIG_OF
 static const struct of_device_id arch_timer_of_match[] __initconst = {
 	{ .compatible	= "arm,armv7-timer",	},
 	{},
@@ -504,6 +514,7 @@ int __init arch_timer_of_register(void)
 
 	return arch_timer_register();
 }
+#endif
 
 int __init arch_timer_sched_clock_init(void)
 {

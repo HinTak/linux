@@ -77,8 +77,21 @@
 #include <asm/sections.h>
 #include <asm/cacheflush.h>
 
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+#endif
+
 #ifdef CONFIG_X86_LOCAL_APIC
 #include <asm/smp.h>
+#endif
+
+#ifdef CONFIG_EXECUTE_AUTHULD
+#include <linux/random.h>
+#include "secureboot/include/Secureboot.h"
+#include "secureboot/include/hmac_sha1.h"
+
+extern int MicomCtrl(unsigned char ctrl, unsigned char arg);
+extern int micom_reboot(void);
 #endif
 
 static int kernel_init(void *);
@@ -113,6 +126,25 @@ EXPORT_SYMBOL(system_state);
  */
 #define MAX_INIT_ARGS CONFIG_INIT_ENV_ARG_LIMIT
 #define MAX_INIT_ENVS CONFIG_INIT_ENV_ARG_LIMIT
+
+#ifdef CONFIG_EXECUTE_AUTHULD
+
+#define AUTH_ING	0x10
+#define AUTH_FAIL	0x11
+#define AUTH_SUCC	0x12
+#define AUTH_BEFORE	0x13
+
+#define RANDOM_LEN 256
+
+
+static char * auth_argv_init[MAX_INIT_ARGS+2] = {CONFIG_AUTHULD_PATH, NULL, };
+extern char rootfs_name[64];
+static pid_t authuld_pid=0;
+static pid_t authuld_parent_pid=0;
+static char auth_random[RANDOM_LEN];
+char auth_parent[TASK_COMM_LEN];
+static int authuld_result=AUTH_BEFORE;
+#endif
 
 extern void time_init(void);
 /* Default late time init is NULL. archs can override this later. */
@@ -802,6 +834,430 @@ static int run_init_process(const char *init_filename)
 		(const char __user *const __user *)envp_init);
 }
 
+#ifdef CONFIG_EXECUTE_AUTHULD
+
+void Exception_from_authuld(const unsigned char *msg);
+
+static int compare_chance=0;
+int authuld_compare(struct task_struct *me, struct task_struct *parent, char *random)
+{
+	// authention period?
+	if(authuld_result != AUTH_ING)
+	{
+		CIP_CRIT_PRINT("It's not authentication time!!!\n");
+#ifdef CONFIG_SHUTDOWN
+		panic("[Kernel] System down.\n");
+#endif
+		authuld_result = AUTH_FAIL;
+		return 0;
+	}
+
+	// only one time chance
+	compare_chance++;
+	if(compare_chance>1)
+	{
+		CIP_CRIT_PRINT("You have only one chance to check result!!!\n");
+		authuld_result = AUTH_FAIL;
+		return 0;
+	}
+
+#ifndef CONFIG_SHUTDOWN
+	CIP_CRIT_PRINT("===============================================================================\n");
+	CIP_CRIT_PRINT("authuld status : 0x%x, AUTH_IMG(0x%x)\n", authuld_result, AUTH_ING);
+	CIP_CRIT_PRINT("compare_chance:%d\n", compare_chance);
+	CIP_CRIT_PRINT("random : %s(%d), auth_random : %s(%d)\n", random, strlen(random), auth_random, strlen(auth_random) );
+	CIP_CRIT_PRINT("authuld_pid : %d, vs  pid : %d, comm :%s\n", authuld_pid, me->pid, me->comm);
+	CIP_CRIT_PRINT("authuld_parent_pid : %s(%d), vs  current parent : %s(%d)\n", auth_parent, authuld_parent_pid, parent->comm, parent->pid);
+	CIP_CRIT_PRINT("===============================================================================\n");
+#endif
+
+	// check reporter
+	if ( (me->pid != authuld_pid) || strncmp(me->comm, "authuld", 7) )
+	{
+		CIP_CRIT_PRINT("report check error!!\n");
+		authuld_result = AUTH_FAIL;
+		return 0;
+	}
+
+	// check reporter's parent
+	if ( (parent->pid != authuld_parent_pid) || strncmp(parent->comm, auth_parent, TASK_COMM_LEN) )
+	{
+		CIP_CRIT_PRINT("report's parent check error!!\n");
+		authuld_result = AUTH_FAIL;
+		return 0;
+	}
+
+	// random value check
+	if( strncmp (random, auth_random, strlen(auth_random)) )
+	{
+		CIP_CRIT_PRINT("random check error\n");
+		authuld_result = AUTH_FAIL;
+		return 0;
+	}
+
+	// random value same => authentication success
+	authuld_result = AUTH_SUCC;
+
+#ifndef CONFIG_SHUTDOWN
+	if( authuld_result == AUTH_SUCC)
+		CIP_CRIT_PRINT("result setting!! authuld_result:(AUTH_SUCC)\n");
+	else if( authuld_result == AUTH_FAIL)
+		CIP_CRIT_PRINT("result setting!! authuld_result:(AUTH_FAIL)\n");
+	else
+		CIP_CRIT_PRINT("result setting: invalid value : 0x%x\n", authuld_result);
+#endif
+
+	return 1;
+}
+
+static int wait_authuld(void)
+{
+    int i;
+	int max_time;
+	struct task_struct *p;
+
+	max_time = CONFIG_TIMEOUT_ACK_AUTHULD*60;
+	for(i=0; i<max_time*2; i++)
+    	{
+		msleep(500);
+		if( authuld_result == AUTH_SUCC )
+		{
+			authuld_result = AUTH_BEFORE;
+			CIP_DEBUG_PRINT("authentication success!!!\n");
+			return 1;
+		}
+		else if( authuld_result == AUTH_FAIL )
+			break;
+
+		// authuld live checking
+		p = find_task_by_pid_ns(authuld_pid, &init_pid_ns);
+		if( p == NULL || (p->state & TASK_DEAD) || (p->state & __TASK_STOPPED) )
+		{
+			CIP_CRIT_PRINT("authuld disappear\n");
+			break;
+		}
+		else 
+		{
+			if (strncmp( p->comm, "authuld", 7) || authuld_pid != p->pid )
+			{
+				CIP_CRIT_PRINT("it's not authuld\n");
+				break;
+			}
+
+			if (strncmp( p->real_parent->comm, auth_parent, strlen(auth_parent)) || authuld_parent_pid != p->real_parent->pid )
+			{
+				CIP_CRIT_PRINT("authuld's parent is different\n");
+				break;
+			}
+		}
+
+        	CIP_DEBUG_PRINT("(%d)th waiting. with 500ms\n", i);
+    	}
+	// roll back setting for next check
+	authuld_result = AUTH_BEFORE;
+
+    CIP_CRIT_PRINT("authentication fail!!\n");
+    return 0;
+}
+
+void Exception_from_authuld(const unsigned char *msg)
+{
+#ifdef CONFIG_SWU_SUPPORT
+	char *swuMode = NULL;
+#endif
+#ifdef CONFIG_VD_RELEASE
+	int i;
+    for(i=0;i<3;i++)
+    {
+        CIP_CRIT_PRINT("[%s::%s::%d]auth failed in kernel. System Down.\n", __FILE__, __FUNCTION__, __LINE__);
+    }
+#endif
+    CIP_CRIT_PRINT("%s", msg);
+
+#ifdef CONFIG_SWU_SUPPORT
+	swuMode = strstr(saved_command_line, "SWU");
+	if (swuMode != NULL)
+	{
+		CIP_CRIT_PRINT("Disable SWU & Rebooting ...\n");
+
+		MicomCtrl(141, 0);
+		msleep(100);
+		MicomCtrl(29, 0);
+	}
+#endif
+
+#ifdef CONFIG_SHUTDOWN
+    MicomCtrl(18, 0);
+    msleep(100);
+    panic("[Kernel] System down\n");
+#endif
+}
+
+static int check_ci_app_integrity_with_size(unsigned char *key, char *filename, int input_size, unsigned char *mac)
+{
+    int fd =-1;
+    mm_segment_t old_fs;
+#ifdef CONFIG_RSA1024
+    unsigned char cmac_result[HMAC_SIZE];
+#elif CONFIG_RSA2048
+    unsigned char cmac_result[HMAC_SHA256_SIZE];
+#endif
+    struct stat64 statbuf;
+    int retValue;
+
+	sys_stat64(filename, &statbuf);
+	if(input_size != statbuf.st_size)
+	{
+		CIP_CRIT_PRINT("%s size is different (mac_gen:%d, real:%d)\n", filename, input_size, (int)statbuf.st_size);
+		return 1;
+	}
+
+    /* key copy routine should be required here */
+    old_fs = get_fs();
+    set_fs(KERNEL_DS);
+    fd = sys_open(filename, O_RDONLY, 0);
+#ifdef CONFIG_RSA1024
+    if (fd >= 0)
+    {
+#if CONFIG_HW_SHA1
+        HMAC_Sha1_nokey(fd, input_size, cmac_result);
+#else
+        HMAC_Sha1(key, fd,input_size, cmac_result);
+#endif
+
+#ifdef SECURE_DEBUG
+        printk("\n[authuld hmac]\n");
+        print_20byte(cmac_result);
+#endif
+        sys_close(fd);
+    }
+    else
+    {
+        CIP_WARN_PRINT("Warning: unable to open %s.\n", filename);
+    }
+
+    set_fs(old_fs);
+    retValue = verify_rsa_signature(cmac_result, HMAC_SIZE, mac, RSA_1024_SIGN_SIZE);
+#elif CONFIG_RSA2048
+    if (fd >= 0)
+    {
+#if CONFIG_HW_SHA1
+        HMAC_Sha256_nokey(fd, input_size, cmac_result);
+#else
+        HMAC_Sha256(key, fd,input_size, cmac_result);
+#endif
+
+#ifdef SECURE_DEBUG
+        printk("\n[authuld hmac]\n");
+        print_32byte(cmac_result);
+#endif
+        sys_close(fd);
+    }
+    else
+    {
+        CIP_WARN_PRINT("Warning: unable to open %s.\n", filename);
+    }
+
+    set_fs(old_fs);
+    retValue = verify_rsa_signature_2048(cmac_result, HMAC_SHA256_SIZE, mac, RSA_2048_SIGN_SIZE);
+#endif
+
+    /* If no error occurs, return 0  */
+    if(retValue == 0)
+    {
+        return 0;
+    }
+
+    return 1;
+}
+
+static void execute_authuld(void)
+{
+	int i;
+	unsigned int rand=0;
+    current->flags |= PF_NOFREEZE;
+    auth_argv_init[0] = CONFIG_AUTHULD_PATH;
+#ifdef CONFIG_SHUTDOWN
+    auth_argv_init[1] = "0";
+#else
+    auth_argv_init[1] = "1";
+#endif
+
+	// making random string with RANDOM_LEN(256) length
+	for(i=0; i<RANDOM_LEN-1; i++)
+	{
+		rand = get_random_int()%16;
+		if(rand > 9)
+		{
+			auth_random[i] = (rand%10) + 'a';
+		}
+		else
+		{
+			auth_random[i] = rand + '0';
+		}
+	}
+	auth_random[RANDOM_LEN-1]=0;
+	auth_argv_init[2] = auth_random;
+
+#ifndef CONFIG_SHUTDOWN
+    CIP_CRIT_PRINT("rand : %s(len:%d)\n", auth_random, strlen(auth_random));
+#endif
+
+    do_execve(CONFIG_AUTHULD_PATH, 
+		(const char __user *const __user *)auth_argv_init, 
+		(const char __user *const __user *)envp_init);
+    CIP_DEBUG_PRINT("\n\n  execute authuld\n\n");
+    //do_exit(0); /* Bug fix(131018 - Becaus of this line, authuld is not running, even if do_execve() called. */
+}
+
+void print128(unsigned char *bytes)
+{
+    int j;
+
+    for (j=0; j<16;j++)
+    {
+        CIP_DEBUG_PRINT("%02x",bytes[j]);
+        if ( (j%4) == 3 )
+        {
+            CIP_DEBUG_PRINT(" ");
+        }
+    }
+    CIP_DEBUG_PRINT("\n\n");
+}
+
+void auth_script(void)
+{
+	int i;
+	MacInfo_ver_t sig;
+    unsigned char mkey[16]={0,};
+
+	// sequece must be same to mac_gen's one
+	char script[NUM_SCRIPT+1][100] = {"/bin/authuld", "/sbin/init", "/etc/inittab", "/etc/rc.local", "/etc/profile" };
+
+#ifndef CONFIG_SHUTDOWN
+		printk(KERN_CRIT "[auth_script()] start\n");
+#endif
+	for(i=0; i<(NUM_SCRIPT+1); i++)
+	{
+		memset( &sig, 0x0, sizeof(MacInfo_ver_t));
+		// get signature at the end of rootfs.img
+		getSig(&sig, rootfs_name, ((i)*sizeof(MacInfo_ver_t))+LSEEK_AUTHULD);
+
+		if(check_ci_app_integrity_with_size(mkey,
+					script[i],
+					sig.msgLen,
+					sig.mac) == 0)
+		{
+#ifndef CONFIG_SHUTDOWN
+			printk(KERN_CRIT "[auth_script()] %s(len:%d) success\n", script[i], sig.msgLen);
+#endif
+		}
+		else
+		{
+#ifndef CONFIG_SHUTDOWN
+			printk(KERN_CRIT "[auth_script()] %s(len:%d) fail\n", script[i], sig.msgLen);
+#endif
+			Exception_from_authuld("auth_script() failed\n");
+		}
+
+	}
+#ifndef CONFIG_SHUTDOWN
+		printk(KERN_CRIT "[auth_script()] end\n");
+#endif
+}
+
+static int check_ci_app(void)
+{
+    unsigned char mkey[16]={0,};
+    macAuthULd_t macAuthUld;
+	struct task_struct *p;
+
+    int fd;
+    int i = 0;
+    int fileOpenFlag = 0;
+    current->flags |= PF_NOFREEZE;
+
+#ifdef CONFIG_SWU_SUPPORT
+	char *swuMode = strstr(saved_command_line, "SWU");
+
+	// check the swu operation, if swu enable, wait to open authld
+	if (swuMode == NULL)
+	{
+		ssleep(SLEEP_WAITING);
+	}
+#else
+	ssleep(SLEEP_WAITING);
+#endif
+
+    getAuthUld(&macAuthUld);
+
+    /* open?? ¼ö ???» ¶§ ±î?ö polling??´? */
+    /******************** START ************************/
+    fileOpenFlag = 0;
+
+    for(i=0;i<10000;i++)
+    {
+        if((fd=sys_open(CONFIG_AUTHULD_PATH, O_RDONLY, 0 ) )>= 0)
+        {
+            CIP_DEBUG_PRINT("%s can read  (after=%d)\n",CONFIG_AUTHULD_PATH, i);
+            sys_close(fd);
+            fileOpenFlag = 1;
+            break;
+        }
+        msleep(10);
+    }
+    if( fileOpenFlag == 0 )
+    {
+        Exception_from_authuld("Unable to open authuld\n");
+    }
+    /******************** END ************************/
+    if(check_ci_app_integrity_with_size(mkey,
+                CONFIG_AUTHULD_PATH,
+                macAuthUld.macAuthULD.msgLen,
+                macAuthUld.macAuthULD.au8PreCmacResult) == 0)
+    {
+        /* ?¤»ó?û?? °æ¿ì?? */
+        CIP_CRIT_PRINT(">>> (%s) file is successfully authenticated <<< \n", CONFIG_AUTHULD_PATH);
+
+		// initial value setting for get result from authuld app
+		authuld_result = AUTH_ING;
+        authuld_pid = kernel_thread((void*)execute_authuld, NULL,0);
+		p = find_task_by_pid_ns(authuld_pid, &init_pid_ns);
+
+		if(p)
+		{
+#ifndef CONFIG_SHUTDOWN
+			printk("PARENT INFO : %s(%d)\n", p->real_parent->comm, p->real_parent->pid);
+			printk("CURRENT INFO : %s(%d)\n", current->comm, current->pid);
+#endif
+			memcpy(auth_parent, p->real_parent->comm, TASK_COMM_LEN);
+			authuld_parent_pid = p->real_parent->pid;
+		}
+
+
+        if(wait_authuld() < 1)
+        {
+            CIP_DEBUG_PRINT("There is an error in authuld or authuld did not respond in %d minutes!!\n", CONFIG_TIMEOUT_ACK_AUTHULD);
+            /* error ?³¸® */
+            Exception_from_authuld("timeout\n");
+        }
+        else
+        {
+            CIP_CRIT_PRINT("Success!! Authuld is successfully completed.\n");
+        }
+    }
+    else
+    {
+		// authuld ???õ ½???½?¿¡´? ??»ó fastboot µ?µµ·? ¼º°ø ¸?¼¼?ö¸¦ write ??.
+		/* ¹®?¦°¡ µ?´? °æ¿ì?? */
+		CIP_DEBUG_PRINT(">>> (%s) file is illegally modified!! <<< \n", CONFIG_AUTHULD_PATH);
+		Exception_from_authuld("authuld authentication failed\n");
+	}
+
+	do_exit(0);
+}
+#endif
+
 static noinline void __init kernel_init_freeable(void);
 
 static int __ref kernel_init(void *unused)
@@ -835,18 +1291,35 @@ static int __ref kernel_init(void *unused)
 		printk(KERN_WARNING "Failed to execute %s.  Attempting "
 					"defaults...\n", execute_command);
 	}
+#ifdef CONFIG_EXECUTE_AUTHULD
+	auth_script();
+	kernel_thread((void*)check_ci_app, NULL, 0);
+
+	// only /sbin/init is permitted in our case 
+	if (!run_init_process("/sbin/init"))
+		return 0;
+#else
 	if (!run_init_process("/sbin/init") ||
 	    !run_init_process("/etc/init") ||
 	    !run_init_process("/bin/init") ||
 	    !run_init_process("/bin/sh"))
 		return 0;
+#endif
 
 	panic("No init found.  Try passing init= option to kernel. "
 	      "See Linux Documentation/init.txt for guidance.");
 }
 
+#ifdef CONFIG_MMC_BOOTING_SYNC
+extern struct completion mmc_rescan_work;
+#endif
+
 static noinline void __init kernel_init_freeable(void)
 {
+#ifdef CONFIG_ARCH_NVT_V7
+        extern void kernel_protect_range_get(void);
+#endif
+
 	/*
 	 * Wait until kthreadd is all set-up.
 	 */
@@ -876,6 +1349,21 @@ static noinline void __init kernel_init_freeable(void)
 
 	do_basic_setup();
 
+#ifdef CONFIG_ARCH_NVT_V7
+        kernel_protect_range_get();
+#endif
+
+#ifdef CONFIG_VDLP_VERSION_INFO
+	printk(KERN_ALERT"================================================================================\n");
+	printk(KERN_ALERT" SAMSUNG VDLP Kernel\n");
+	printk(KERN_ALERT" Version : %s\n", DTV_KERNEL_VERSION);
+	printk(KERN_ALERT" Applied Last Patch Number : %s\n", DTV_LAST_PATCH);
+#ifdef CONFIG_PULLOUT_INITRAMFS
+       printk(KERN_ALERT"RAMDISK BSP!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+#endif
+	printk(KERN_ALERT"================================================================================\n");
+#endif
+
 	/* Open the /dev/console on the rootfs, this should never fail */
 	if (sys_open((const char __user *) "/dev/console", O_RDWR, 0) < 0)
 		printk(KERN_WARNING "Warning: unable to open an initial console.\n");
@@ -890,6 +1378,11 @@ static noinline void __init kernel_init_freeable(void)
 	if (!ramdisk_execute_command)
 		ramdisk_execute_command = "/init";
 
+#ifdef CONFIG_MMC_BOOTING_SYNC
+	/* BSP : wait till completion of mmc rescan */
+	wait_for_completion(&mmc_rescan_work);
+#endif
+
 	if (sys_access((const char __user *) ramdisk_execute_command, 0) != 0) {
 		ramdisk_execute_command = NULL;
 		prepare_namespace();
@@ -901,3 +1394,116 @@ static noinline void __init kernel_init_freeable(void)
 	 * initmem segments and start the user-mode stuff..
 	 */
 }
+
+#ifdef CONFIG_PM_CRC_CHECK
+
+#ifdef CONFIG_RSA1024
+#define CRC_LEN	HMAC_SIZE
+#elif CONFIG_RSA2048
+#define CRC_LEN	HMAC_SHA256_SIZE
+#endif
+
+unsigned char suspend_crc[CRC_LEN];
+unsigned char resume_crc[CRC_LEN];
+
+void make_sha( unsigned char *mac, unsigned long start, unsigned long end)
+{
+	unsigned char mkey[16]={0,};
+	unsigned long len = end - start;
+	unsigned char *input_buf = NULL;
+
+	input_buf = (unsigned char*)start;
+	printk("[SABSP] start : 0x%lx, end : 0x%lx, len : 0x%lx\n", start, end, len);
+	printk("[SABSP] input_buf:0x%p(first four byte contents: 0x%x, 0x%x, 0x%x, 0x%x)\n", 
+				input_buf, 
+				(unsigned int)input_buf[0], (unsigned int)input_buf[1], 
+				(unsigned int)input_buf[2], (unsigned int)input_buf[3]);
+#ifdef CONFIG_RSA1024
+#if CONFIG_HW_SHA1
+	HMAC_Sha1_buf_nokey(input_buf,CRC_LEN, mac);
+#else
+	HMAC_Sha1_buf(mkey,input_buf, CRC_LEN, mac);
+#endif
+#elif CONFIG_RSA2048
+#if CONFIG_HW_SHA1
+	HMAC_Sha256_buf_nokey(input_buf,CRC_LEN, mac);
+#else
+	HMAC_Sha256_buf(mkey,input_buf, CRC_LEN, mac);
+#endif
+#endif
+}
+
+#ifdef CONFIG_PM_CRC_CHECK_AREA_SELECT
+unsigned int* crc_check_base = 0;
+#endif
+void save_suspend_crc(void)
+{
+	printk("[SABSP:%s:%d:save_suspend_crc()]\n", __FILE__, __LINE__);
+	
+	memset(suspend_crc, 0x0, CRC_LEN);
+
+#ifdef CONFIG_PM_CRC_CHECK_AREA_SELECT
+	crc_check_base = ioremap(CONFIG_PM_CRC_CHECK_AREA_START, 
+							CONFIG_PM_CRC_CHECK_AREA_SIZE);
+	if(unlikely(!crc_check_base))
+	{
+		printk("[SABSP] PM CRC Check error : Can't map PM_CRC_CHECK_AREA area\n");
+		printk("[SABSP] PM CRC Check error : Check the 'CONFIG_PM_CRC_CHECK_AREA_START' value\n");
+		return;
+	}
+	else
+	{
+		printk("[SABSP] Physical Address - start : 0x%x, end : 0x%x, len : 0x%x\n", 
+				CONFIG_PM_CRC_CHECK_AREA_START,
+				CONFIG_PM_CRC_CHECK_AREA_START + CONFIG_PM_CRC_CHECK_AREA_SIZE,
+				CONFIG_PM_CRC_CHECK_AREA_SIZE);
+	}
+	make_sha( suspend_crc, 
+			(unsigned long) crc_check_base, 
+			(unsigned long) crc_check_base + CONFIG_PM_CRC_CHECK_AREA_SIZE);
+#else
+	// read-only part
+	make_sha( suspend_crc, (unsigned long) _text, (unsigned long) (__end_rodata-4) );
+#endif
+}
+
+void compare_resume_crc(void)
+{
+	printk("[SABSP:%s:%d:compare_resume_crc()]\n", __FILE__, __LINE__);
+
+	memset(resume_crc, 0x0, CRC_LEN);
+	// read-only part
+
+#ifdef CONFIG_PM_CRC_CHECK_AREA_SELECT
+	if(unlikely(!crc_check_base))
+	{
+		printk("[SABSP] PM CRC Check error : Not mapped 'PM_CRC_CHECK_AREA'\n");
+		return;
+	}
+	make_sha( resume_crc, 
+			(unsigned long) crc_check_base, 
+			(unsigned long) crc_check_base + CONFIG_PM_CRC_CHECK_AREA_SIZE);
+
+	iounmap(crc_check_base);
+#else
+	make_sha( resume_crc, (unsigned long) _text, (unsigned long) (__end_rodata-4) );
+#endif
+
+	if(memcmp( suspend_crc, resume_crc, CRC_LEN ) != 0 )
+	{
+		int i;
+
+		printk("[SABSP] SUSPEND CRC & RESUME CRC is different!!!!\n");
+		printk("[SABSP] DUMP CMAC(SUSPEND VS RESUME)\n");
+		printk("-----------------------------------------------------------\n");
+		for(i=0; i<CRC_LEN ; i++)
+		{
+			printk(	"0x%2x, 0x%2x\n", suspend_crc[i], resume_crc[i]);
+		}
+		printk("-----------------------------------------------------------\n");
+		while(1);
+	}
+	else
+		printk("[SABSP] CRC check success!!!\n");
+}
+#endif /* end of CONFIG_PM_CRC_CHECK */

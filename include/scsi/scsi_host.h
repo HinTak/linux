@@ -725,6 +725,10 @@ struct Scsi_Host {
 	 * separately
 	 */
 	void *shost_data;
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+        // patch for wrong inquiry response length case of SUNSTAR memory stick        //JUN-18-2007
+        unsigned long           flags;
+#endif
 
 	/*
 	 * Points to the physical bus device we'd use to do DMA

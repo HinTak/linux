@@ -628,6 +628,13 @@ config I2C_S6000
 	  To compile this driver as a module, choose M here. The module
 	  will be called i2c-s6000.
 
+config SDP_I2C_DEV
+	tristate "Samsung SDP SoCs I2C Driver"
+	depends on ARCH_SDP
+	help
+	  Say Y here to include support for I2C controller in the
+	  Samsung SDP SoCs.
+
 config I2C_SH7760
 	tristate "Renesas SH7760 I2C Controller"
 	depends on CPU_SUBTYPE_SH7760

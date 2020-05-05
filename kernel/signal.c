@@ -42,6 +42,11 @@
 #include <asm/cacheflush.h>
 #include "audit.h"	/* audit_signal_info() */
 
+#ifdef CONFIG_SUPPORT_REBOOT
+extern int micom_reboot( void );
+extern int reboot_permit(void);
+#endif
+
 /*
  * SLAB caches for signal bits.
  */
@@ -1050,6 +1055,16 @@ static int __send_signal(int sig, struct siginfo *info, struct task_struct *t,
 
 	assert_spin_locked(&t->sighand->siglock);
 
+#ifdef USE_PROHIBIT_SIG 
+	if(sig == CONFIG_PROHIBIT_SIG)
+	{
+		printk(KERN_ERR"[SABSP]: SIGNAL[%d] %s(%d) ->%s(%d)  %s\n",
+                        sig, current->comm, current->pid, t->comm, t->pid, __func__);
+		printk(KERN_ERR"[SABSP]: make coredump ->%s(%d)\n",current->comm, current->pid); 
+		t = current;
+		sig = SIGSEGV;
+	}
+#endif
 	result = TRACE_SIGNAL_IGNORED;
 	if (!prepare_signal(sig, t,
 			from_ancestor_ns || (info == SEND_SIG_FORCED)))
@@ -1136,6 +1151,12 @@ static int __send_signal(int sig, struct siginfo *info, struct task_struct *t,
 	}
 
 out_set:
+#if CONFIG_PRINT_KILL_SIGNAL
+	if((t != NULL) && !(sig_kernel_ignore(sig))){
+		printk(KERN_ALERT "##### send signal SIG : %d, %s(%d)->%s(%d) %s\n",
+			sig, current->comm, current->pid, t->comm, t->pid, __func__);
+        }
+#endif
 	signalfd_notify(t, sig);
 	sigaddset(&pending->signal, sig);
 	complete_signal(sig, t, group);
@@ -1235,6 +1256,11 @@ force_sig_info(int sig, struct siginfo *info, struct task_struct *t)
 	int ret, blocked, ignored;
 	struct k_sigaction *action;
 
+#ifdef CONFIG_PRINT_KILL_SIGNAL
+	printk(KERN_ALERT "##### send signal from KERNEL, SIG : %d, %s, PID:%d, %s \n",
+		sig, t->comm, t->pid, __func__);
+	dump_stack();
+#endif
 	spin_lock_irqsave(&t->sighand->siglock, flags);
 	action = &t->sighand->action[sig-1];
 	ignored = action->sa.sa_handler == SIG_IGN;
@@ -1375,6 +1401,7 @@ int kill_proc_info(int sig, struct siginfo *info, pid_t pid)
 	rcu_read_unlock();
 	return error;
 }
+EXPORT_SYMBOL(kill_proc_info);
 
 static int kill_as_cred_perm(const struct cred *cred,
 			     struct task_struct *target)
@@ -2183,6 +2210,11 @@ static int ptrace_signal(int signr, siginfo_t *info)
 	return signr;
 }
 
+
+#ifdef CONFIG_KPI_SYSTEM_SUPPORT
+extern void set_kpi_fault(unsigned long pc, unsigned long lr, char* thread_name, char* process_name);
+#endif
+
 int get_signal_to_deliver(siginfo_t *info, struct k_sigaction *return_ka,
 			  struct pt_regs *regs, void *cookie)
 {
@@ -2279,7 +2311,15 @@ relock:
 			if (ka->sa.sa_flags & SA_ONESHOT)
 				ka->sa.sa_handler = SIG_DFL;
 
-			break; /* will return non-zero "signr" value */
+			/* ignored user defined signal handler, call default
+			 * handler, Linux Part 2011-06-19 */
+			if ((signr == SIGBUS) ||  (signr == SIGABRT) ||
+			    (signr == SIGSEGV) || (signr == SIGILL)) {
+				printk(KERN_ALERT " ##### ignored user defined signal (%d) handler, call kernel default handler\n", signr);
+			} else {
+				//printk(KERN_ALERT " ##### call kernel default signal (%d) handler\n", signr);
+				break; /* will return non-zero "signr" value */
+			}
 		}
 
 		/*
@@ -2288,6 +2328,10 @@ relock:
 		if (sig_kernel_ignore(signr)) /* Default is nothing. */
 			continue;
 
+#if CONFIG_PRINT_KILL_SIGNAL /* print deliver signal SP_DEBUG */
+		printk(KERN_ALERT "##### deliver signal SIG : %d, %s(%d) %s\n",
+			signr, current->comm, current->pid, __func__);
+#endif
 		/*
 		 * Global init gets no signals it doesn't want.
 		 * Container-init gets no signals it doesn't want from same
@@ -2344,6 +2388,25 @@ relock:
 		current->flags |= PF_SIGNALED;
 
 		if (sig_kernel_coredump(signr)) {
+#ifdef CONFIG_KPI_SYSTEM_SUPPORT
+		int i;
+		for (i=0 ; i < ALLOWED_TASK_NUM ; i++) {
+			if (!strncmp(current->group_leader->comm, allowTask[i], TASK_COMM_LEN)){
+				if(signr != SIGBUS && signr != SIGILL && signr != SIGSEGV)
+				        set_kpi_fault(signr, 0, current->comm, current->group_leader->comm);
+
+				break;
+			}
+		}
+#endif
+#ifdef CONFIG_SUPPORT_REBOOT
+			if( reboot_permit() )
+			{
+				micom_reboot();
+				while(1);
+			}
+#endif
+
 			if (print_fatal_signals)
 				print_fatal_signal(info->si_signo);
 			/*
@@ -2354,6 +2417,9 @@ relock:
 			 * first and our do_group_exit call below will use
 			 * that value and ignore the one we pass it.
 			 */
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+			printk(KERN_ALERT "[VDLP COREDUMP] SIGNR:%d\n\n", signr);
+#endif
 			do_coredump(info);
 		}
 
@@ -2845,6 +2911,18 @@ SYSCALL_DEFINE2(kill, pid_t, pid, int, sig)
 	info.si_pid = task_tgid_vnr(current);
 	info.si_uid = from_kuid_munged(current_user_ns(), current_uid());
 
+#ifdef CONFIG_PROHIBIT_SIGNAL_HOOKING
+	if ((sig == SIGABRT ) || (sig == SIGILL ) || (sig == SIGBUS ) || (sig == SIGSEGV ))
+	{
+		if (strcmp(current->comm, "gatord"))
+		{
+			printk(KERN_ALERT "##### Prohibit %s(%d) USER sending SIGABRT, SIGILL, SIGBUS, SIGSEGV, SIG : %d, kill USER......\n", current->comm, current->pid, sig);
+			force_sig(SIGBUS, current);
+		}
+
+	}
+#endif
+
 	return kill_something_info(sig, &info, pid);
 }
 
@@ -2903,6 +2981,18 @@ static int do_tkill(pid_t tgid, pid_t pid, int sig)
  */
 SYSCALL_DEFINE3(tgkill, pid_t, tgid, pid_t, pid, int, sig)
 {
+
+#ifdef CONFIG_PROHIBIT_SIGNAL_HOOKING
+	if ((sig == SIGABRT ) || (sig == SIGILL ) || (sig == SIGBUS ) || (sig == SIGSEGV ))
+	{
+		if (strcmp(current->comm, "gatord"))
+		{
+			printk(KERN_ALERT "##### Prohibit %s(%d) USER sending SIGABRT, SIGILL, SIGBUS, SIGSEGV, SIG : %d, kill USER......\n", current->comm, current->pid, sig);
+			force_sig(SIGBUS, current);
+		}
+	}
+#endif
+
 	/* This is only valid for single tasks */
 	if (pid <= 0 || tgid <= 0)
 		return -EINVAL;
@@ -2919,6 +3009,18 @@ SYSCALL_DEFINE3(tgkill, pid_t, tgid, pid_t, pid, int, sig)
  */
 SYSCALL_DEFINE2(tkill, pid_t, pid, int, sig)
 {
+
+#ifdef CONFIG_PROHIBIT_SIGNAL_HOOKING
+	if ((sig == SIGABRT ) || (sig == SIGILL ) || (sig == SIGBUS ) || (sig == SIGSEGV ))
+	{
+		if (strcmp(current->comm, "gatord"))
+		{
+			printk(KERN_ALERT "##### Prohibit %s(%d) USER sending SIGABRT, SIGILL, SIGBUS, SIGSEGV, SIG : %d, kill USER......\n", current->comm, current->pid, sig);
+			force_sig(SIGBUS, current);
+		}
+	}
+#endif
+
 	/* This is only valid for single tasks */
 	if (pid <= 0)
 		return -EINVAL;
@@ -2992,6 +3094,17 @@ int do_sigaction(int sig, struct k_sigaction *act, struct k_sigaction *oact)
 
 	if (!valid_signal(sig) || sig < 1 || (act && sig_kernel_only(sig)))
 		return -EINVAL;
+
+#ifdef CONFIG_PROHIBIT_SIGNAL_HOOKING
+	if ((sig == SIGABRT ) || (sig == SIGILL ) || (sig == SIGBUS ) || (sig == SIGSEGV ))
+	{
+		if (strcmp(current->comm, "gatord"))
+		{
+			printk(KERN_ALERT "##### Prohibit %s(%d) USER hooking SIGABRT, SIGILL, SIGBUS, SIGSEGV, Current SIG : %d, kill USER......\n", current->comm, current->pid, sig);
+			force_sig(SIGBUS, current);
+		}
+	}
+#endif
 
 	k = &t->sighand->action[sig-1];
 

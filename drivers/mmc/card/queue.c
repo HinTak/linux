@@ -34,7 +34,11 @@ static int mmc_prep_request(struct request_queue *q, struct request *req)
 	/*
 	 * We only like normal block requests and discards.
 	 */
-	if (req->cmd_type != REQ_TYPE_FS && !(req->cmd_flags & REQ_DISCARD)) {
+	if (req->cmd_type != REQ_TYPE_FS && !(req->cmd_flags & REQ_DISCARD)
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+	    && req->cmd_type != REQ_TYPE_SPECIAL
+#endif
+		) {
 		blk_dump_rq_flags(req, "MMC bad request");
 		return BLKPREP_KILL;
 	}
@@ -167,6 +171,9 @@ int mmc_init_queue(struct mmc_queue *mq, struct mmc_card *card,
 	struct mmc_host *host = card->host;
 	u64 limit = BLK_BOUNCE_HIGH;
 	int ret;
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+	int i;
+#endif
 	struct mmc_queue_req *mqrq_cur = &mq->mqrq[0];
 	struct mmc_queue_req *mqrq_prev = &mq->mqrq[1];
 
@@ -178,6 +185,19 @@ int mmc_init_queue(struct mmc_queue *mq, struct mmc_card *card,
 	if (!mq->queue)
 		return -ENOMEM;
 
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+	for (i = 0; i < 2; ++i) {
+		void *buff;
+
+		buff = kmalloc(MMC_HW_MAX_IBUFF_SZ, GFP_KERNEL);
+		if (!buff)
+			goto cleanup_queue;
+
+		mq->mqrq[i].hw_desc.hw_ibuff = buff;
+		BUILD_BUG_ON(ARRAY_SIZE(mq->mqrq[i].hw_desc.io_vec) !=
+			     MMC_HW_MAX_IBUFF_PAGES);
+	}
+#endif
 	mq->mqrq_cur = mqrq_cur;
 	mq->mqrq_prev = mqrq_prev;
 	mq->queue->queuedata = mq;
@@ -289,6 +309,13 @@ int mmc_init_queue(struct mmc_queue *mq, struct mmc_card *card,
 	kfree(mqrq_prev->bounce_buf);
 	mqrq_prev->bounce_buf = NULL;
 
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+	for (i = 0; i < 2; ++i) {
+		kfree(mq->mqrq[i].hw_desc.hw_ibuff);
+		mq->mqrq[i].hw_desc.hw_ibuff = NULL;
+	}
+#endif
+
 	blk_cleanup_queue(mq->queue);
 	return ret;
 }
@@ -299,6 +326,9 @@ void mmc_cleanup_queue(struct mmc_queue *mq)
 	unsigned long flags;
 	struct mmc_queue_req *mqrq_cur = mq->mqrq_cur;
 	struct mmc_queue_req *mqrq_prev = mq->mqrq_prev;
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+	int i;
+#endif
 
 	/* Make sure the queue isn't suspended, as that will deadlock */
 	mmc_queue_resume(mq);
@@ -329,6 +359,13 @@ void mmc_cleanup_queue(struct mmc_queue *mq)
 
 	kfree(mqrq_prev->bounce_buf);
 	mqrq_prev->bounce_buf = NULL;
+
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+	for (i = 0; i < 2; ++i) {
+		kfree(mq->mqrq[i].hw_desc.hw_ibuff);
+		mq->mqrq[i].hw_desc.hw_ibuff = NULL;
+	}
+#endif
 
 	mq->card = NULL;
 }
@@ -378,6 +415,56 @@ void mmc_queue_resume(struct mmc_queue *mq)
 	}
 }
 
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+
+static unsigned int mmc_hw_decompress_map_sg(struct mmc_queue *mq,
+					     struct mmc_queue_req *mqrq)
+{
+	struct mmc_hw_desc *hw_desc = &mqrq->hw_desc;
+	struct request *req = mqrq->req;
+	struct bio *bio = req->bio;
+	struct mmc_hw_req *hw_req = req->special;
+	struct bio_vec *bio_vec, *prev_bio_vec;
+	unsigned int to_read_b, prev_vcnt;
+	int i, err;
+	void *buff;
+
+	BUG_ON(!hw_req);
+	BUG_ON(!bio);
+
+	/* Set input buffer for request and tmp buffer */
+	hw_req->ibuff = buff = hw_desc->hw_ibuff;
+
+	to_read_b = hw_req->to_read_b;
+	prev_bio_vec = bio->bi_io_vec;
+	prev_vcnt = bio->bi_vcnt;
+
+	bio->bi_vcnt = hw_req->to_read_b >> PAGE_SHIFT;
+	bio->bi_io_vec = hw_desc->io_vec;
+	BUG_ON(bio->bi_vcnt > MMC_HW_MAX_IBUFF_PAGES);
+
+	/* Setup bio vec */
+	bio_for_each_segment(bio_vec, bio, i) {
+		BUG_ON(!to_read_b);
+		BUG_ON(!virt_addr_valid(buff));
+		bio_vec->bv_offset = 0;
+		bio_vec->bv_len = min_t(unsigned int, PAGE_SIZE, to_read_b);
+		bio_vec->bv_page = virt_to_page(buff);
+		buff += PAGE_SIZE;
+		to_read_b -= bio_vec->bv_len;
+	}
+
+	err = blk_rq_map_sg(mq->queue, mqrq->req, mqrq->sg);
+
+	/* Restore original vecs */
+	bio->bi_io_vec = prev_bio_vec;
+	bio->bi_vcnt = prev_vcnt;
+
+	return err;
+}
+
+#endif /* CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM */
+
 /*
  * Prepare the sg list(s) to be handed of to the host driver
  */
@@ -387,6 +474,17 @@ unsigned int mmc_queue_map_sg(struct mmc_queue *mq, struct mmc_queue_req *mqrq)
 	size_t buflen;
 	struct scatterlist *sg;
 	int i;
+
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+	if (mqrq->req->cmd_type == REQ_TYPE_SPECIAL) {
+		BUG_ON(!mqrq->req->special);
+		/* Set hw decompression request for bottom layer */
+		mqrq->brq.data.hw_req = mqrq->req->special;
+		return mmc_hw_decompress_map_sg(mq, mqrq);
+	} else
+		/* Cleanup hw decompression request */
+		mqrq->brq.data.hw_req = NULL;
+#endif
 
 	if (!mqrq->bounce_buf)
 		return blk_rq_map_sg(mq->queue, mqrq->req, mqrq->sg);

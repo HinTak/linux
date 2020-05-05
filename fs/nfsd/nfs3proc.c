@@ -8,6 +8,7 @@
 #include <linux/ext2_fs.h>
 #include <linux/magic.h>
 
+#include "nfsd.h"
 #include "cache.h"
 #include "xdr3.h"
 #include "vfs.h"
@@ -635,6 +636,58 @@ nfsd3_proc_commit(struct svc_rqst * rqstp, struct nfsd3_commitargs *argp,
 	RETURN_STATUS(nfserr);
 }
 
+/*
+ * UMOUNT call.
+ */
+static __be32
+nfsd3_proc_umount(struct svc_rqst *rqstp, struct nfsd3_umountargs *argp,
+					struct nfsd3_umountres *resp)
+{
+	dprintk("nfsd: UMOUNT(3)\n");
+
+	if (nfs_umountd_workqueue)
+		queue_work(nfs_umountd_workqueue, &nfs_umount_work);
+
+	return nfs_ok;
+}
+
+/*
+ * OPEN call
+ */
+static __be32
+nfsd3_proc_open(struct svc_rqst *rqstp, struct nfsd3_openargs *argp,
+					  struct nfsd3_openres *resp)
+{
+	__be32	nfserr;
+
+	dprintk("nfsd: OPEN(3)   %s 0x%x\n",
+				SVCFH_fmt(&argp->fh),
+				argp->open_count);
+
+	fh_copy(&resp->fh, &argp->fh);
+	resp->open_count = argp->open_count;
+	nfserr = nfsd_fat_set_open_cnt(rqstp, &resp->fh, &resp->open_count);
+	RETURN_STATUS(nfserr);
+}
+
+/*
+ * CLOSE call
+ */
+static __be32
+nfsd3_proc_close(struct svc_rqst *rqstp, struct nfsd3_closeargs *argp,
+					  struct nfsd3_closeres *resp)
+{
+	__be32	nfserr;
+
+	dprintk("nfsd: CLOSE(3)   %s 0x%x\n",
+				SVCFH_fmt(&argp->fh),
+				argp->open_count);
+
+	fh_copy(&resp->fh, &argp->fh);
+	resp->open_count = argp->open_count;
+	nfserr = nfsd_fat_set_open_cnt(rqstp, &resp->fh, &resp->open_count);
+	RETURN_STATUS(nfserr);
+}
 
 /*
  * NFSv3 Server procedures.
@@ -671,7 +724,7 @@ struct nfsd3_voidargs { int dummy; };
 #define pAT (1+AT)	/* post attributes - conditional */
 #define WC (7+pAT)	/* WCC attributes */
 
-static struct svc_procedure		nfsd_procedures3[22] = {
+static struct svc_procedure		nfsd_procedures3[25] = {
 	[NFS3PROC_NULL] = {
 		.pc_func = (svc_procfunc) nfsd3_proc_null,
 		.pc_encode = (kxdrproc_t) nfs3svc_encode_voidres,
@@ -885,11 +938,40 @@ static struct svc_procedure		nfsd_procedures3[22] = {
 		.pc_cachetype = RC_NOCACHE,
 		.pc_xdrressize = ST+WC+2,
 	},
+	[NFS3PROC_UMOUNT] = {
+		.pc_func = (svc_procfunc) nfsd3_proc_umount,
+		.pc_decode = (kxdrproc_t) nfs3svc_decode_umountargs,
+		.pc_encode = (kxdrproc_t) nfs3svc_encode_umountres,
+		.pc_argsize = sizeof(struct nfsd3_umountargs),
+		.pc_ressize = sizeof(struct nfsd3_umountres),
+		.pc_cachetype = RC_NOCACHE,
+		.pc_xdrressize = ST+1,
+	},
+	[NFS3PROC_OPEN] = {
+		.pc_func = (svc_procfunc) nfsd3_proc_open,
+		.pc_decode = (kxdrproc_t) nfs3svc_decode_openargs,
+		.pc_encode = (kxdrproc_t) nfs3svc_encode_openres,
+		.pc_release = (kxdrproc_t) nfs3svc_release_fhandle,
+		.pc_argsize = sizeof(struct nfsd3_openargs),
+		.pc_ressize = sizeof(struct nfsd3_openres),
+		.pc_cachetype = RC_NOCACHE,
+		.pc_xdrressize = ST+FH+1,
+	},
+	[NFS3PROC_CLOSE] = {
+		.pc_func = (svc_procfunc) nfsd3_proc_close,
+		.pc_decode = (kxdrproc_t) nfs3svc_decode_closeargs,
+		.pc_encode = (kxdrproc_t) nfs3svc_encode_closeres,
+		.pc_release = (kxdrproc_t) nfs3svc_release_fhandle,
+		.pc_argsize = sizeof(struct nfsd3_closeargs),
+		.pc_ressize = sizeof(struct nfsd3_closeres),
+		.pc_cachetype = RC_NOCACHE,
+		.pc_xdrressize = ST+FH+1,
+	},
 };
 
 struct svc_version	nfsd_version3 = {
 		.vs_vers	= 3,
-		.vs_nproc	= 22,
+		.vs_nproc	= 25,
 		.vs_proc	= nfsd_procedures3,
 		.vs_dispatch	= nfsd_dispatch,
 		.vs_xdrsize	= NFS3_SVC_XDRSIZE,

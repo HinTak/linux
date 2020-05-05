@@ -23,6 +23,10 @@
 
 #include <linux/rwsem.h>
 
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+#define HOTPLUG    //tony add for hotplug when read/write device
+#endif
+
 #define MAX_TOPO_LEVEL		6
 
 /* This file contains declarations of usbcore internals that are mostly
@@ -49,6 +53,17 @@
 #define USB_PID_SETUP			0x2d
 #define USB_PID_STALL			0x1e
 #define USB_PID_MDATA			0x0f	/* USB 2.0 */
+
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+//usb port power control
+struct usb_ppc {
+	u32  port_addr;
+	u8   bit_addr;
+	u8   out_en_bit_addr; 
+	u8   out_en_hi_active;
+	u8   reserved[1];
+};
+#endif
 
 /*-------------------------------------------------------------------------*/
 
@@ -92,7 +107,12 @@ struct usb_hcd {
 	 * hardware info/state
 	 */
 	const struct hc_driver	*driver;	/* hw-specific hooks */
-
+#if defined(CONFIG_ARCH_NVT72668)
+	unsigned long porcd;
+	unsigned long porcd2;
+	unsigned long modem_dongle;
+	unsigned long nvt_flag;
+#endif
 	/*
 	 * OTG and some Host controllers need software interaction with phys;
 	 * other external phys should be software-transparent
@@ -110,6 +130,10 @@ struct usb_hcd {
 #define HCD_FLAG_WAKEUP_PENDING		4	/* root hub is resuming? */
 #define HCD_FLAG_RH_RUNNING		5	/* root hub is running? */
 #define HCD_FLAG_DEAD			6	/* controller has died? */
+
+#if defined(CONFIG_ARCH_NVT72668)
+#define HCD_FLAG_NRY		7
+#endif
 
 	/* The flags can be tested using these macros; they are likely to
 	 * be slightly faster than test_bit().
@@ -135,8 +159,13 @@ struct usb_hcd {
 
 	unsigned int		irq;		/* irq allocated */
 	void __iomem		*regs;		/* device memory/io */
+#if defined(CONFIG_ARCH_NVT72668)
 	resource_size_t		rsrc_start;	/* memory/io resource start */
 	resource_size_t		rsrc_len;	/* memory/io resource length */
+#else
+	u64			rsrc_start;	/* memory/io resource start */
+	u64			rsrc_len;	/* memory/io resource length */
+#endif
 	unsigned		power_budget;	/* in mA, 0 = no limit */
 
 	/* bandwidth_mutex should be taken before adding or removing
@@ -171,6 +200,40 @@ struct usb_hcd {
 
 #define	HC_IS_RUNNING(state) ((state) & __ACTIVE)
 #define	HC_IS_SUSPENDED(state) ((state) & __SUSPEND)
+
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+	// Refactoring --- 2011.10.27 ---
+	u32     port_index;
+	u32     utmi_base;
+	u32     ehc_base;
+	u32     usbc_base;
+	u32     bc_base;
+
+	u32     xhci_base;
+	u32     u3phy_d_base;
+	u32     u3phy_a_base;
+	u32     u3top_base;
+	u32     u3indctl_base;    
+#if defined(CONFIG_MSTAR_X14)
+	u32     u3phy_d_m0_base;
+	u32     u3phy_d_m1_base;
+	u32     u3phy_a_m0_base;
+	u32     u3phy_a_m1_base;
+#endif
+
+	u32     root_port_devnum;
+	u8      enum_port_flag;
+	u8      enum_dbreset_flag;
+	u8      rootflag;
+	
+	u8      startup_conn_flag;  //120210, for port reset when connected at startup
+
+	/* lock for usb reset */
+	spinlock_t usb_reset_lock;
+	spinlock_t lock_usbreset;
+	
+	struct usb_ppc  ppc;   
+#endif
 
 	/* more shared queuing code would be good; it should support
 	 * smarter scheduling, handle transaction translators, etc;
@@ -347,6 +410,10 @@ struct hc_driver {
 		 * address is set
 		 */
 	int	(*update_device)(struct usb_hcd *, struct usb_device *);
+#if defined(CONFIG_ARCH_NVT72668)
+	void	(*port_nc) (struct usb_hcd *);
+#endif
+
 	int	(*set_usb2_hw_lpm)(struct usb_hcd *, struct usb_device *, int);
 	/* USB 3.0 Link Power Management */
 		/* Returns the USB3 hub-encoded value for the U1/U2 timeout. */
@@ -357,6 +424,11 @@ struct hc_driver {
 		 */
 	int	(*disable_usb3_lpm_timeout)(struct usb_hcd *,
 			struct usb_device *, enum usb3_link_state state);
+
+#ifdef SAMSUNG_PATCH_WITH_NEW_xHCI_API_FOR_BUGGY_DEVICE
+	int	(*enable_control_endpoint)(struct usb_hcd *, struct usb_device *);
+#endif
+
 };
 
 extern int usb_hcd_link_urb_to_ep(struct usb_hcd *hcd, struct urb *urb);
@@ -599,6 +671,29 @@ static inline void usb_hcd_resume_root_hub(struct usb_hcd *hcd)
 	return;
 }
 #endif /* CONFIG_USB_SUSPEND */
+
+
+/*
+ * USB device fs stuff
+ */
+
+#ifdef CONFIG_USB_DEVICEFS
+
+/*
+ * these are expected to be called from the USB core/hub thread
+ * with the kernel lock held
+ */
+extern void usbfs_update_special(void);
+extern int usbfs_init(void);
+extern void usbfs_cleanup(void);
+
+#else /* CONFIG_USB_DEVICEFS */
+
+static inline void usbfs_update_special(void) {}
+static inline int usbfs_init(void) { return 0; }
+static inline void usbfs_cleanup(void) { }
+
+#endif /* CONFIG_USB_DEVICEFS */
 
 /*-------------------------------------------------------------------------*/
 

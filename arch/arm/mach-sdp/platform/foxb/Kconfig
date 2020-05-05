@@ -1,0 +1,8 @@
+config SATA_FOXB
+	tristate "Support SDP1207 Fox-B SATA Hosts"
+	select	ATA_SFF
+	select	SATA_PMP
+	help
+	  For historical reason, fox-b is using custom ahci driver,
+	  forked from older version of linux kernel.
+

@@ -524,7 +524,7 @@ int __init arm_add_memory(phys_addr_t start, phys_addr_t size)
 	size -= start & ~PAGE_MASK;
 	bank->start = PAGE_ALIGN(start);
 
-#ifndef CONFIG_LPAE
+#ifndef CONFIG_ARM_LPAE
 	if (bank->start + size < bank->start) {
 		printk(KERN_CRIT "Truncating memory at 0x%08llx to fit in "
 			"32-bit physical address space\n", (long long)start);
@@ -726,9 +726,23 @@ void __init hyp_mode_check(void)
 #endif
 }
 
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+extern void __init prom_meminit(void);
+#endif
+
+#ifdef CONFIG_SERIAL_INPUT_MANIPULATION
+extern void set_enable_string(char *val, int len);
+#endif
 void __init setup_arch(char **cmdline_p)
 {
 	struct machine_desc *mdesc;
+
+	char *tmp;
+	int size;
+#ifdef CONFIG_SERIAL_INPUT_MANIPULATION
+	int count;
+#endif
+
 
 	setup_processor();
 	mdesc = setup_machine_fdt(__atags_pointer);
@@ -748,11 +762,29 @@ void __init setup_arch(char **cmdline_p)
 	init_mm.brk	   = (unsigned long) _end;
 
 	/* populate cmd_line too for later use, preserving boot_command_line */
+	tmp =  strstr( boot_command_line, "SELP_ENABLE=" );
+	if( tmp )
+	{
+		size = tmp -  boot_command_line;
+		tmp = boot_command_line + size + strlen("SELP_ENABLE=");
+#ifdef CONFIG_SERIAL_INPUT_MANIPULATION
+		count = 0;
+		while( tmp[count] != ' ' )
+			count++;
+		set_enable_string(tmp, count );
+#endif
+		tmp = boot_command_line + size;
+		memset( tmp, 0xff, count+strlen("SELP_ENABLE="));
+	}
+
 	strlcpy(cmd_line, boot_command_line, COMMAND_LINE_SIZE);
 	*cmdline_p = cmd_line;
 
 	parse_early_param();
 
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+	prom_meminit();
+#endif
 	sort(&meminfo.bank, meminfo.nr_banks, sizeof(meminfo.bank[0]), meminfo_cmp, NULL);
 	sanity_check_meminfo();
 	arm_memblock_init(&meminfo, mdesc);
@@ -931,3 +963,11 @@ const struct seq_operations cpuinfo_op = {
 	.stop	= c_stop,
 	.show	= c_show
 };
+
+#ifdef CONFIG_BOOTPROFILE
+/* pass to boot chart solution */
+const char *bc_get_cpu_name(void)
+{
+	return cpu_name;
+}
+#endif /* CONFIG_BOOTPROFILE */

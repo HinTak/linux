@@ -78,17 +78,41 @@
 	__HEAD
 ENTRY(stext)
 
+#if defined(CONFIG_ARCH_NVT_V7) && defined (CONFIG_SUSPEND)
+    b stext_start          
+.extern nt72668_cpu_resume
+	b nt72668_cpu_resume 
+stext_start:
+#endif
+
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+	mov r1, #0x2
+#endif
+
  THUMB(	adr	r9, BSYM(1f)	)	@ Kernel is always entered in ARM.
  THUMB(	bx	r9		)	@ If this is a Thumb-2 kernel,
  THUMB(	.thumb			)	@ switch to Thumb now.
  THUMB(1:			)
+#ifdef CONFIG_ARCH_SDP
+#if CONFIG_ARCH_SDP_SOC_CA9
+	mov	r12, r1			@ back machine nr and atags pointer
+	mov	r13, r2	
+	bl	v7_inv_dcache_all
+	mov	r1, r12
+	mov	r2, r13
+#endif
+#include <asm/mach-types.h>     /* by tukho.kim */
+        ldr     r1, =machine_arch_type          @by tukho.kim, not need r1 machine number
+#endif
 
 #ifdef CONFIG_ARM_VIRT_EXT
 	bl	__hyp_stub_install
 #endif
 	@ ensure svc mode and all interrupts masked
 	safe_svcmode_maskall r9
-
+#ifdef CONFIG_NVT_USE_UIMAGE_DTB	
+  	bl __nvt_clean_onboot
+#endif
 	mrc	p15, 0, r9, c0, c0		@ get processor id
 	bl	__lookup_processor_type		@ r5=procinfo r9=cpuid
 	movs	r10, r5				@ invalid processor (r5=0)?
@@ -117,6 +141,9 @@ ENTRY(stext)
 	 * r8 = phys_offset, r9 = cpuid, r10 = procinfo
 	 */
 	bl	__vet_atags
+#ifdef CONFIG_NVT_USE_UIMAGE_DTB	
+	bl  __nvt_moving_dtb
+#endif
 #ifdef CONFIG_SMP_ON_UP
 	bl	__fixup_smp
 #endif
@@ -267,7 +294,7 @@ __create_page_tables:
 	addne	r6, r6, #1 << SECTION_SHIFT
 	strne	r6, [r3]
 
-#if defined(CONFIG_LPAE) && defined(CONFIG_CPU_ENDIAN_BE8)
+#if defined(CONFIG_ARM_LPAE) && defined(CONFIG_CPU_ENDIAN_BE8)
 	sub	r4, r4, #4			@ Fixup page table pointer
 						@ for 64-bit descriptors
 #endif
@@ -351,6 +378,9 @@ ENTRY(secondary_startup)
 	 * the processor type - there is no need to check the machine type
 	 * as it has already been validated by the primary processor.
 	 */
+#if CONFIG_ARCH_SDP_SOC_CA9
+	bl	v7_inv_dcache_all
+#endif
 #ifdef CONFIG_ARM_VIRT_EXT
 	bl	__hyp_stub_install_secondary
 #endif
@@ -386,6 +416,12 @@ ENDPROC(secondary_startup)
 ENTRY(__secondary_switched)
 	ldr	sp, [r7, #4]			@ get secondary_data.stack
 	mov	fp, #0
+#if defined(CONFIG_MP_MSTAR_STR_BASE)
+	mrc   p15,0,r0,c1,c0,2
+	orr   r0, r0, #0x00F00000
+	bic   r0, r0, #0xC0000000
+	mcr   p15,0,r0,c1,c0,2
+#endif
 	b	secondary_start_kernel
 ENDPROC(__secondary_switched)
 
@@ -489,7 +525,26 @@ __fixup_smp:
 	mrc	p15, 0, r0, c0, c0, 5	@ read MPIDR
 	and	r0, r0, #0xc0000000	@ multiprocessing extensions and
 	teq	r0, #0x80000000		@ not part of a uniprocessor system?
-	moveq	pc, lr			@ yes, assume SMP
+	bne    __fixup_smp_on_up	@ no, assume UP
+
+	@ Core indicates it is SMP. Check for Aegis SOC where a single
+	@ Cortex-A9 CPU is present but SMP operations fault.
+	mov	r4, #0x41000000
+	orr	r4, r4, #0x0000c000
+	orr	r4, r4, #0x00000090
+	teq	r3, r4			@ Check for ARM Cortex-A9
+	movne	pc, lr			@ Not ARM Cortex-A9,
+
+	@ If a future SoC *does* use 0x0 as the PERIPH_BASE, then the
+	@ below address check will need to be #ifdef'd or equivalent
+	@ for the Aegis platform.
+	mrc	p15, 4, r0, c15, c0	@ get SCU base address
+	teq	r0, #0x0		@ '0' on actual UP A9 hardware
+	beq	__fixup_smp_on_up	@ So its an A9 UP
+	ldr	r0, [r0, #4]		@ read SCU Config
+	and	r0, r0, #0x3		@ number of CPUs
+	teq	r0, #0x0		@ is 1?
+	movne	pc, lr
 
 __fixup_smp_on_up:
 	adr	r0, 1f
@@ -626,6 +681,91 @@ __pv_phys_offset:
 	.size	__pv_phys_offset, . - __pv_phys_offset
 __pv_offset:
 	.long	0
+#endif	
+
+#ifdef CONFIG_NVT_USE_UIMAGE_DTB
+	__HEAD
+ENTRY(__nvt_clean_onboot)
+#ifdef CONFIG_MACH_NT14M
+#define BOOT1_LOADADDR (0x2ff00000)
+#else
+#define BOOT1_LOADADDR (0x1ff00000)
+#endif 
+		/*
+		 * Clean onboot content in DRAM
+		 *  Use AXI DMA to fill '0' into address of onboot (fixed length: 128K)
+		 */
+		ldr	r3, =0xfc090000
+		ldr	r4, =BOOT1_LOADADDR
+		ldr	r5, =0x20000	@ 128K
+		ldr	r6, =0x1		@ 
+		str	r4, [r3, #0x04]	@ Set DMA Destination
+		str	r5, [r3, #0x08]	@ Set DMA byte count
+		str	r6, [r3, #0x18]	@ Set specified data into Destination (default value is '0')
+		str	r6, [r3, #0x20]	@ DMA trigger
+
+1:
+		ldr	r4, [r3, #0x24]	@ Check DMA finish
+		teq	r4, #1
+		bne	1b
+		mov pc,lr
+ENDPROC(__nvt_clean_onboot)
+
+		/*
+		 * Moving the dtb table from the _edata to the atags addr+0x1000
+		 */
+__nvt_dtb_loc:
+    .word .               @ phys virt offset
+    .word _edata          @ dtb original virt addr  
+  	
+__nvt_moving_dtb:
+  stmfd	sp!, {r8-r10, lr}
+  @ r1: mach ID
+  @ r2: atags
+  @ r4: dtb size
+  @ r5: dtb original address
+  
+  ldr r1, =0x104d		      @ arch = cortex-A9
+  ldr r2, =(PHYS_OFFSET + 0x8000 + 0x02000000)  @ atags locate at 0x2600_8000
+  adr r3, __nvt_dtb_loc
+  ldmia	r3, {r4-r5}
+  sub	r3, r3, r4			    @ get offset between virt&phys
+	add	r5, r5, r3			    @ convert dtb virt addr to phys
+   
+#ifdef __CHECK_DTB_HEADER  
+  ldr	r4, [r5, #0]        @ dtb first word
+#ifndef __ARMEB__
+	ldr	r5, =0xedfe0dd0		  @ sig is 0xd00dfeed big endian
+#else
+	ldr	r5, =0xd00dfeed
+#endif
+	cmp	r4, r5
+	bne	__nvt_dtb_check_done	  @ not found dtb
+#endif	
+
+  ldr r4,[r5, #4]         @ dtb size  
+#ifndef __ARMEB__
+	/* convert dtb size to little endian */
+	eor	r6, r4, r4, ror #16
+	bic	r6, r6, #0x00ff0000
+	mov	r4, r4, ror #8
+	eor	r4, r4, r6, lsr #8
+#endif
+	/* preserve 64-bit alignment */
+	add	r4, r4, #7
+	bic	r4, r4, #7
+	
+	/* moving the dtb to new space */
+  add r0, r2, #0x1000      @ new dtb address
+  stmfd	sp!, {r0}      
+	mov r1, r5               @ dtb original address
+  mov r2, r4               @ dtb size
+  bl memcpy 	
+  ldmfd	sp!, {r2}
+__nvt_dtb_check_done:
+  ldmfd	sp!, {r8-r10, lr}
+  mov pc,lr	
+ENDPROC(__nvt_moving_dtb)	
 #endif
 
 #include "head-common.S"

@@ -379,6 +379,11 @@ static inline void dio_bio_submit(struct dio *dio, struct dio_submit *sdio)
 	if (dio->is_async && dio->rw == READ)
 		bio_set_pages_dirty(bio);
 
+#ifdef CONFIG_BD_CACHE_ENABLED
+	if(bio->bi_bdev->bd_disk->major == SCSI_CDROM_MAJOR)
+		set_bit(BIO_DIRECT, &bio->bi_flags);
+#endif
+
 	if (sdio->submit_io)
 		sdio->submit_io(dio->rw, bio, dio->inode,
 			       sdio->logical_offset_in_bio);

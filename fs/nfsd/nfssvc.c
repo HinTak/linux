@@ -293,6 +293,10 @@ static void nfsd_last_thread(struct svc_serv *serv, struct net *net)
 	 */
 	if (!nn->nfsd_net_up)
 		return;
+
+	if (nfs_umountd_workqueue)
+		flush_workqueue(nfs_umountd_workqueue);
+
 	nfsd_shutdown_net(net);
 
 	svc_rpcb_cleanup(serv, net);

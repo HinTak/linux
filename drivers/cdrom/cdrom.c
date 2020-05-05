@@ -1012,6 +1012,10 @@ int cdrom_open(struct cdrom_device_info *cdi, struct block_device *bdev, fmode_t
 
 	cdinfo(CD_OPEN, "Use count for \"/dev/%s\" now %d\n",
 			cdi->name, cdi->use_count);
+
+	/* Always invalidate the buffer cache */
+	invalidate_bdev(bdev);
+	
 	return 0;
 err_release:
 	if (CDROM_CAN(CDC_LOCK) && cdi->options & CDO_LOCK) {

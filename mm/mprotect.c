@@ -27,6 +27,12 @@
 #include <asm/pgtable.h>
 #include <asm/cacheflush.h>
 #include <asm/tlbflush.h>
+#if defined(CONFIG_PAX_MPROTECT) || defined(CONFIG_PAX_PAGEEXEC)
+/*Added by Pax*/
+#include <linux/elf.h>
+#include <linux/mmu_context.h>
+#include <linux/binfmts.h>
+#endif
 
 #ifndef pgprot_modify
 static inline pgprot_t pgprot_modify(pgprot_t oldprot, pgprot_t newprot)
@@ -245,6 +251,10 @@ mprotect_fixup(struct vm_area_struct *vma, struct vm_area_struct **pprev,
 	int error;
 	int dirty_accountable = 0;
 
+#ifdef CONFIG_RSS_INFO  /* VD_SP */
+	int rss_cnt = 0;
+#endif
+
 	if (newflags == oldflags) {
 		*pprev = vma;
 		return 0;
@@ -292,10 +302,12 @@ mprotect_fixup(struct vm_area_struct *vma, struct vm_area_struct **pprev,
 	}
 
 success:
-	/*
-	 * vm_flags and vm_page_prot are protected by the mmap_sem
-	 * held in write mode.
-	 */
+#ifdef CONFIG_RSS_INFO  /* VD_SP */
+	rss_cnt = get_vma_rss(vma);
+	dec_rss_counter(vma, rss_cnt);
+	/* Decrement rss_cnt for the current task. */
+	inc_mupt_counter(vma, NULL, 0, -(rss_cnt));
+#endif
 	vma->vm_flags = newflags;
 	vma->vm_page_prot = pgprot_modify(vma->vm_page_prot,
 					  vm_get_page_prot(newflags));
@@ -307,7 +319,11 @@ success:
 
 	change_protection(vma, start, end, vma->vm_page_prot,
 			  dirty_accountable, 0);
-
+#ifdef CONFIG_RSS_INFO  /* VD_SP */
+	inc_rss_counter(vma, rss_cnt);
+	/* Increment rss_cnt for the current task. */
+	inc_mupt_counter(vma, NULL, 0, rss_cnt);
+#endif
 	vm_stat_account(mm, oldflags, vma->vm_file, -nrpages);
 	vm_stat_account(mm, newflags, vma->vm_file, nrpages);
 	perf_event_mmap(vma);
@@ -325,6 +341,12 @@ SYSCALL_DEFINE3(mprotect, unsigned long, start, size_t, len,
 	struct vm_area_struct *vma, *prev;
 	int error = -EINVAL;
 	const int grows = prot & (PROT_GROWSDOWN|PROT_GROWSUP);
+#if defined(CONFIG_PAX_MPROTECT) || defined(CONFIG_PAX_PAGEEXEC)
+	int check_permision = PROT_READ;
+	if ((current->mm->pax_flags & MF_PAX_MPROTECT) ||
+			(current->mm->pax_flags & MF_PAX_PAGEEXEC))
+		check_permision |= PROT_WRITE; /*PROT_WRITE is added from PAX*/
+#endif
 	prot &= ~(PROT_GROWSDOWN|PROT_GROWSUP);
 	if (grows == (PROT_GROWSDOWN|PROT_GROWSUP)) /* can't be both */
 		return -EINVAL;
@@ -337,6 +359,12 @@ SYSCALL_DEFINE3(mprotect, unsigned long, start, size_t, len,
 	end = start + len;
 	if (end <= start)
 		return -ENOMEM;
+#if defined(CONFIG_PAX_MPROTECT) || defined(CONFIG_PAX_PAGEEXEC)
+	if ((current->mm->pax_flags & MF_PAX_MPROTECT) ||
+			(current->mm->pax_flags & MF_PAX_PAGEEXEC))
+		if (end > TASK_SIZE)
+			return -EINVAL;
+#endif
 	if (!arch_validate_prot(prot))
 		return -EINVAL;
 
@@ -344,9 +372,14 @@ SYSCALL_DEFINE3(mprotect, unsigned long, start, size_t, len,
 	/*
 	 * Does the application expect PROT_READ to imply PROT_EXEC:
 	 */
+#if defined(CONFIG_PAX_MPROTECT) || defined(CONFIG_PAX_PAGEEXEC)
+	if ((prot & check_permision) &&
+			(current->personality & READ_IMPLIES_EXEC))
+		prot |= PROT_EXEC;
+#else
 	if ((prot & PROT_READ) && (current->personality & READ_IMPLIES_EXEC))
 		prot |= PROT_EXEC;
-
+#endif
 	vm_flags = calc_vm_prot_bits(prot);
 
 	down_write(&current->mm->mmap_sem);

@@ -612,6 +612,7 @@ struct device_node *of_find_matching_node_and_match(struct device_node *from,
 					const struct of_device_id **match)
 {
 	struct device_node *np;
+	const struct of_device_id *matched;
 
 	if (match)
 		*match = NULL;
@@ -619,9 +620,10 @@ struct device_node *of_find_matching_node_and_match(struct device_node *from,
 	read_lock(&devtree_lock);
 	np = from ? from->allnext : of_allnodes;
 	for (; np; np = np->allnext) {
-		if (of_match_node(matches, np) && of_node_get(np)) {
+		matched = of_match_node(matches, np);
+		if (matched && of_node_get(np)) {
 			if (match)
-				*match = matches;
+				*match = matched;
 			break;
 		}
 	}

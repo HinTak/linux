@@ -21,6 +21,10 @@
 #include <linux/memcontrol.h>
 
 #include "slab.h"
+#ifdef CONFIG_KDML
+#include "kdml/kdml_packet.h"
+#include "kdml/kdml.h"
+#endif
 
 enum slab_state slab_state;
 LIST_HEAD(slab_caches);
@@ -463,4 +467,45 @@ static int __init slab_proc_init(void)
 	return 0;
 }
 module_init(slab_proc_init);
+
+#ifdef CONFIG_KDML
+int kdml_get_cache_list(struct kdml_slab_info_line *slabinfo_arr,
+		const int count, int *result)
+{
+	struct kmem_cache *s = NULL;
+	int i = 0;
+
+	mutex_lock(&slab_mutex);
+
+	list_for_each_entry(s, &slab_caches, list) {
+		struct slabinfo sinfo;
+
+		if (i == count)
+			break;
+
+		/* parse the list and print */
+		if (!is_root_cache(s))
+			continue;
+
+		memset(&sinfo, 0, sizeof(sinfo));
+		get_slabinfo(s, &sinfo);
+
+		memcg_accumulate_slabinfo(s, &sinfo);
+		/* fill the kdml_slab_info_line struct */
+		slabinfo_arr[i].active_objs = sinfo.active_objs;
+		slabinfo_arr[i].num_objs = sinfo.num_objs;
+		slabinfo_arr[i].obj_size = s->size;
+		slabinfo_arr[i].objs_per_slab = sinfo.objects_per_slab;
+		slabinfo_arr[i].cache_order = sinfo.cache_order;
+		slabinfo_arr[i].num_slabs = sinfo.num_slabs;
+		strncpy(slabinfo_arr[i].name, cache_name(s), MAX_CACHE_NAME_LEN - 1);
+		slabinfo_arr[i].name[MAX_CACHE_NAME_LEN - 1] = '\0';
+		i++;
+	}
+	mutex_unlock(&slab_mutex);
+	*result = i;
+	return 0;
+}
+#endif
+
 #endif /* CONFIG_SLABINFO */

@@ -160,6 +160,18 @@ static inline const char *get_task_state(struct task_struct *tsk)
 	return *p;
 }
 
+
+#ifdef CONFIG_BOOTPROFILE
+/* Function for bootchart */
+const char *sec_bp_get_task_state(struct task_struct *tsk)
+{
+	if (tsk)
+		return get_task_state(tsk);
+
+	return NULL;
+}
+#endif
+
 static inline void task_state(struct seq_file *m, struct pid_namespace *ns,
 				struct pid *pid, struct task_struct *p)
 {
@@ -363,6 +375,18 @@ static void task_cpus_allowed(struct seq_file *m, struct task_struct *task)
 	seq_putc(m, '\n');
 }
 
+#if defined(CONFIG_PAX_NOEXEC)
+static inline void task_pax(struct seq_file *m, struct task_struct *p)
+{
+	if (p->mm)
+		seq_printf(m, "PaX:\t%c%c\n",
+				p->mm->pax_flags & MF_PAX_PAGEEXEC ? 'P' : 'p',
+				p->mm->pax_flags & MF_PAX_MPROTECT ? 'M' : 'm');
+	else
+		seq_printf(m, "PaX:\t-----\n");
+}
+#endif
+
 int proc_pid_status(struct seq_file *m, struct pid_namespace *ns,
 			struct pid *pid, struct task_struct *task)
 {
@@ -381,6 +405,9 @@ int proc_pid_status(struct seq_file *m, struct pid_namespace *ns,
 	task_cpus_allowed(m, task);
 	cpuset_task_status_allowed(m, task);
 	task_context_switch_counts(m, task);
+#if defined(CONFIG_PAX_NOEXEC)
+	task_pax(m, task);
+#endif
 	return 0;
 }
 

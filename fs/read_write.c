@@ -17,6 +17,10 @@
 #include <linux/splice.h>
 #include "read_write.h"
 
+#ifdef CONFIG_TRACE_SYS_WRITE
+#include <linux/major.h>
+#endif
+
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
 
@@ -397,8 +401,13 @@ ssize_t do_sync_write(struct file *filp, const char __user *buf, size_t len, lof
 
 	for (;;) {
 		ret = filp->f_op->aio_write(&kiocb, &iov, 1, kiocb.ki_pos);
-		if (ret != -EIOCBRETRY)
+		if (ret != -EIOCBRETRY) {
+			/* Check for the Bad sector Error flag */
+			if (test_and_clear_bit(AS_EBAD, &filp->f_mapping->flags)
+								&& ret == -EIO)
+				ret = -EBADSEC;
 			break;
+		}
 		wait_on_retry_sync_kiocb(&kiocb);
 	}
 
@@ -413,6 +422,7 @@ EXPORT_SYMBOL(do_sync_write);
 ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_t *pos)
 {
 	ssize_t ret;
+	loff_t orig_pos = *pos;
 
 	if (!(file->f_mode & FMODE_WRITE))
 		return -EBADF;
@@ -433,6 +443,19 @@ ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_
 			add_wchar(current, ret);
 		}
 		inc_syscw(current);
+	}
+
+	if (ret < 0) {
+		char *path, buf[128];
+		path = d_path(&file->f_path, buf, sizeof(buf));
+		if (!IS_ERR(path) && strnstr(path, "/mtd_", sizeof(buf))) {
+			printk(KERN_ERR "\n================================\n");
+			printk(KERN_ERR "ERROR: vfs_write: ret %d, path %s, "
+			       "pos %llu, count %u, app %s, pid %u\n",
+			       ret, path, orig_pos, count, current->comm,
+			       (unsigned)current->pid);
+			printk(KERN_ERR "================================\n");
+		}
 	}
 
 	return ret;
@@ -471,6 +494,33 @@ SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
 	ssize_t ret = -EBADF;
 
 	if (f.file) {
+#ifdef CONFIG_TRACE_SYS_WRITE
+		char path_buf[256];
+		static struct file *prev_file = 0;
+		static int prev_pid = 0;
+		dev_t dev;
+		char* p = d_path(&(f.file->f_path),path_buf, 256);
+
+		/* device node check */
+		dev = f.file->f_path.dentry->d_inode->i_sb->s_dev;
+
+		/* 1. only mmc device and partition num > 10 (don't include rootfs and kernel) */
+		if(MAJOR(dev) == MMC_BLOCK_MAJOR && MINOR(dev) > 10 )   /* FIXME */
+		{
+			/* 2. duplicate msg handling */
+			if(f.file != prev_file || current->pid != prev_pid)
+			{
+				printk("\n[SA_BSP] sys_write : %-20s - %20s(%4d)  ", p, 
+						current->comm, current->pid);
+				prev_file = f.file;
+				prev_pid  = current->pid;
+			}
+			else
+			{
+				printk(".");
+			}
+		}
+#endif
 		loff_t pos = file_pos_read(f.file);
 		ret = vfs_write(f.file, buf, count, &pos);
 		file_pos_write(f.file, pos);
@@ -760,12 +810,29 @@ EXPORT_SYMBOL(vfs_readv);
 ssize_t vfs_writev(struct file *file, const struct iovec __user *vec,
 		   unsigned long vlen, loff_t *pos)
 {
+	ssize_t ret;
+	loff_t orig_pos = *pos;
+
 	if (!(file->f_mode & FMODE_WRITE))
 		return -EBADF;
 	if (!file->f_op || (!file->f_op->aio_write && !file->f_op->write))
 		return -EINVAL;
 
-	return do_readv_writev(WRITE, file, vec, vlen, pos);
+	ret = do_readv_writev(WRITE, file, vec, vlen, pos);
+	if (ret < 0) {
+		char *path, buf[128];
+		path = d_path(&file->f_path, buf, sizeof(buf));
+		if (!IS_ERR(path) && strnstr(path, "/mtd_", sizeof(buf))) {
+			printk(KERN_ERR "\n================================\n");
+			printk(KERN_ERR "ERROR: vfs_writev: ret %d, path %s, "
+			       "pos %llu, vlen %lu, app %s, pid %u\n",
+			       ret, path, orig_pos, vlen, current->comm,
+			       (unsigned)current->pid);
+			printk(KERN_ERR "================================\n");
+		}
+	}
+
+	return ret;
 }
 
 EXPORT_SYMBOL(vfs_writev);

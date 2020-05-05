@@ -866,6 +866,43 @@ static const struct file_operations proc_environ_operations = {
 	.release	= mem_release,
 };
 
+int oom_score_to_adj(short oom_score_adj)
+{
+	int oom_adj;
+
+	if (oom_score_adj >= 0)
+		oom_adj = (oom_score_adj * OOM_ADJUST_MAX) / OOM_SCORE_ADJ_MAX;
+	else
+		oom_adj = (oom_score_adj * -OOM_DISABLE) / OOM_SCORE_ADJ_MAX;
+
+	return oom_adj;
+}
+EXPORT_SYMBOL(oom_score_to_adj);
+
+short oom_adj_to_score(int oom_adj)
+{
+	short oom_score_adj;
+
+	if (oom_adj == 0) {
+		oom_score_adj = 0;
+	} else if (oom_adj == OOM_ADJUST_MAX) {
+		oom_score_adj = OOM_SCORE_ADJ_MAX;
+	} else if (oom_adj == OOM_DISABLE) {
+		oom_score_adj = OOM_SCORE_ADJ_MIN;
+	} else if (oom_adj > 0) {
+		oom_score_adj = (oom_adj * OOM_SCORE_ADJ_MAX) / OOM_ADJUST_MAX;
+		/* Increment to avoid fraction errors */
+		oom_score_adj++;
+	} else {
+		oom_score_adj = (oom_adj * OOM_SCORE_ADJ_MAX) / -OOM_DISABLE;
+		/* Decrement to avoid fraction errors */
+		oom_score_adj--;
+	}
+
+	return oom_score_adj;
+}
+EXPORT_SYMBOL(oom_adj_to_score);
+
 static ssize_t oom_adj_read(struct file *file, char __user *buf, size_t count,
 			    loff_t *ppos)
 {
@@ -878,11 +915,7 @@ static ssize_t oom_adj_read(struct file *file, char __user *buf, size_t count,
 	if (!task)
 		return -ESRCH;
 	if (lock_task_sighand(task, &flags)) {
-		if (task->signal->oom_score_adj == OOM_SCORE_ADJ_MAX)
-			oom_adj = OOM_ADJUST_MAX;
-		else
-			oom_adj = (task->signal->oom_score_adj * -OOM_DISABLE) /
-				  OOM_SCORE_ADJ_MAX;
+		oom_adj = oom_score_to_adj(task->signal->oom_score_adj);
 		unlock_task_sighand(task, &flags);
 	}
 	put_task_struct(task);
@@ -937,10 +970,7 @@ static ssize_t oom_adj_write(struct file *file, const char __user *buf,
 	 * Scale /proc/pid/oom_score_adj appropriately ensuring that a maximum
 	 * value is always attainable.
 	 */
-	if (oom_adj == OOM_ADJUST_MAX)
-		oom_adj = OOM_SCORE_ADJ_MAX;
-	else
-		oom_adj = (oom_adj * OOM_SCORE_ADJ_MAX) / -OOM_DISABLE;
+	oom_adj = oom_adj_to_score(oom_adj);
 
 	if (oom_adj < task->signal->oom_score_adj &&
 	    !capable(CAP_SYS_RESOURCE)) {
@@ -2142,6 +2172,124 @@ out_no_task:
 	return ret;
 }
 
+#ifdef CONFIG_RSS_INFO
+
+#define K(x) ((x) << (PAGE_SHIFT-10))
+#define STRING_LENGTH 48
+
+struct kernel_usage{
+	unsigned long slab;
+	unsigned long slab_unreclaimable;
+	unsigned long page_table;
+	unsigned long vmalloc_used;
+	unsigned long kernel_stack;
+	unsigned long kernel_total;
+};
+
+void get_kernel_usage(struct kernel_usage* ku)
+{
+	struct vmalloc_info vmi;
+	struct task_struct *p;
+	unsigned int number_of_task = 0;
+	unsigned long kernel_stack = 0;
+
+	for_each_process(p)
+		number_of_task++;
+
+	kernel_stack = (THREAD_SIZE * number_of_task)/PAGE_SIZE;
+
+	get_vmalloc_info(&vmi);
+
+	ku->slab = K(global_page_state(NR_SLAB_RECLAIMABLE)
+		     + global_page_state(NR_SLAB_UNRECLAIMABLE));
+	ku->slab_unreclaimable = K(global_page_state(NR_SLAB_UNRECLAIMABLE));
+	ku->page_table = K(global_page_state(NR_PAGETABLE));
+	ku->vmalloc_used = (vmi.used >> 10);
+	ku->kernel_stack = K(kernel_stack);
+	ku->kernel_total = ku->slab + ku->page_table + ku->vmalloc_used + ku->kernel_stack;
+}
+
+static ssize_t show_rss(struct seq_file *m, void *v)
+{
+        struct inode *inode = m->private;
+        struct task_struct *task = get_proc_task(inode);
+        struct mm_struct *mm;
+        int i; 
+        unsigned long cur_cnt[VMAG_CNT], max_cnt[VMAG_CNT];
+        unsigned long tot_max_cnt = 0;
+        unsigned long tot_cur_cnt = 0;
+        
+        struct kernel_usage kernel_mem = {0,};
+        
+        if (!task) return 0;
+        
+        mm = get_task_mm(task);
+        if (!mm) return 0;
+        
+        down_read(&mm->mmap_sem);
+        for (i=0; i < VMAG_CNT; i++) {
+                get_rss_cnt(mm, i, &cur_cnt[i], &max_cnt[i]);
+                tot_max_cnt += max_cnt[i];
+        }       
+        up_read(&mm->mmap_sem);
+        
+        for (i=0; i < VMAG_CNT; i++) {
+                tot_cur_cnt += cur_cnt[i];
+        }
+
+        get_kernel_usage(&kernel_mem);
+
+        /* print usage count : human readable */
+        seq_printf(m,   " =======================\n"
+                        "  Process Max : %7luK\n"
+                        "     Code Max : %7luK\n"
+                        "     Data Max : %7luK\n"
+                        "  LibCode Max : %7luK\n"
+                        "  LibData Max : %7luK\n"
+                        " Heap-BRK Max : %7luK\n"
+                        "    Stack Max : %7luK\n"
+                        "    Other Max : %7luK\n"
+                        " =======================\n"
+                        "  Process Cur : %7luK\n"
+                        "     Code Cur : %7luK\n"
+                        "     Data Cur : %7luK\n"
+                        "  LibCode Cur : %7luK\n"
+                        "  LibData Cur : %7luK\n"
+                        " Heap-BRK Cur : %7luK\n"
+                        "    Stack Cur : %7luK\n"
+                        "    Other Cur : %7luK\n"
+                        " =======================\n"
+                        "         Slab : %7luK (%luK)\n"
+                        "     PageTabe : %7luK\n"
+                        "  VmallocUsed : %7luK\n"
+                        "  KernelStack : %7luK\n"
+                        " kernel Total : %7luK\n",
+                        K(tot_max_cnt), K(max_cnt[0]), K(max_cnt[1]), K(max_cnt[2]), K(max_cnt[3]), K(max_cnt[4]), K(max_cnt[5]), K(max_cnt[6]),
+                        K(tot_cur_cnt), K(cur_cnt[0]), K(cur_cnt[1]), K(cur_cnt[2]), K(cur_cnt[3]), K(cur_cnt[4]), K(cur_cnt[5]), K(cur_cnt[6]),
+                        kernel_mem.slab ,kernel_mem.slab_unreclaimable, kernel_mem.page_table, kernel_mem.vmalloc_used, kernel_mem.kernel_stack, kernel_mem.kernel_total);
+
+        mmput(mm);
+
+        return 0;
+}
+
+static int rss_open(struct inode *inode, struct file *file)
+{
+        return single_open(file, show_rss, inode);
+}
+
+const struct file_operations proc_pid_rss_operations = {
+        .open           = rss_open,
+        .read           = seq_read,
+        .llseek         = seq_lseek,
+        .release        = single_release,
+};
+#endif  // CONFIG_RSS_INFO
+
+#ifdef CONFIG_MEMSTAT_INFO
+extern struct file_operations proc_pid_memstat_operations;
+#endif
+
 #ifdef CONFIG_SECURITY
 static ssize_t proc_pid_attr_read(struct file * file, char __user * buf,
 				  size_t count, loff_t *ppos)
@@ -2537,6 +2685,18 @@ static const struct pid_entry tgid_base_stuff[] = {
 	REG("smaps",      S_IRUGO, proc_pid_smaps_operations),
 	REG("pagemap",    S_IRUGO, proc_pagemap_operations),
 #endif
+#ifdef CONFIG_RSS_INFO
+	REG("rss",	S_IRUGO, proc_pid_rss_operations),
+#endif
+
+#ifdef CONFIG_MEMFREE_INFO
+	REG("memfree",  S_IRUGO, proc_pid_rss_operations),
+#endif
+
+#ifdef CONFIG_MEMSTAT_INFO
+	REG("vd_memstat",	S_IRUGO, proc_pid_memstat_operations),
+#endif
+
 #ifdef CONFIG_SECURITY
 	DIR("attr",       S_IRUGO|S_IXUGO, proc_attr_dir_inode_operations, proc_attr_dir_operations),
 #endif
@@ -2880,6 +3040,12 @@ static const struct pid_entry tid_base_stuff[] = {
 	REG("clear_refs", S_IWUSR, proc_clear_refs_operations),
 	REG("smaps",     S_IRUGO, proc_tid_smaps_operations),
 	REG("pagemap",    S_IRUGO, proc_pagemap_operations),
+#endif
+#ifdef CONFIG_RSS_INFO
+	REG("rss",	S_IRUGO, proc_pid_rss_operations),
+#endif
+#ifdef CONFIG_MEMSTAT_INFO
+	REG("vd_memstat",	S_IRUGO, proc_pid_memstat_operations),
 #endif
 #ifdef CONFIG_SECURITY
 	DIR("attr",      S_IRUGO|S_IXUGO, proc_attr_dir_inode_operations, proc_attr_dir_operations),

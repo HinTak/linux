@@ -89,6 +89,12 @@ static int do_blktrans_request(struct mtd_blktrans_ops *tr,
 	if (req->cmd_type != REQ_TYPE_FS)
 		return -EIO;
 
+	if (req->cmd_flags & REQ_FLUSH) {
+		if (tr->flush)
+			return tr->flush(dev);
+		return 0;
+	}
+
 	if (blk_rq_pos(req) + blk_rq_cur_sectors(req) >
 	    get_capacity(req->rq_disk))
 		return -EIO;
@@ -111,6 +117,16 @@ static int do_blktrans_request(struct mtd_blktrans_ops *tr,
 		for (; nsect > 0; nsect--, block++, buf += tr->blksize)
 			if (tr->writesect(dev, block, buf))
 				return -EIO;
+
+		/* Always flush the cache.  The most important thing
+		   for us is data integrity, but using old school block
+		   filesystems (e.g. fat, ext2) we can not guarantee
+		   flush of this volatile cache.  So, always flush it on
+		   every write.  And yes, we do not care about perfomance
+		   now. */
+		if (tr->flush)
+			return tr->flush(dev);
+
 		return 0;
 	default:
 		printk(KERN_NOTICE "Unknown request %u\n", rq_data_dir(req));
@@ -409,6 +425,8 @@ int add_mtd_blktrans_dev(struct mtd_blktrans_dev *new)
 
 	if (!new->rq)
 		goto error3;
+
+	blk_queue_flush(new->rq, REQ_FLUSH);
 
 	new->rq->queuedata = new;
 	blk_queue_logical_block_size(new->rq, tr->blksize);

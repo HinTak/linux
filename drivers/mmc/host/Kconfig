@@ -4,6 +4,19 @@
 
 comment "MMC/SD/SDIO Host Controller Drivers"
 
+config MMC_MSTAR_MMC_EMMC_SEC
+	bool "Mstar Multimedia Card Interface support for SEC"
+	help
+	  Mstar FCIE eMMC Host Controller Driver for SEC
+	  /driver/mmc/host/Makefile
+
+config MMC_MSTAR_PREDEFINED
+	bool "Mstar Multimedia Card Interface support CMD23 set block count"
+	depends on MMC_MSTAR_MMC_EMMC_SEC
+	help
+	  Mstar FCIE eMMC Host Controller Driver CMD23 SBC capability
+	  If N, Open-ended multiple block read/write will be used
+
 config MMC_ARMMMCI
 	tristate "ARM AMBA Multimedia Card Interface support"
 	depends on ARM_AMBA
@@ -43,6 +56,12 @@ config MMC_SDHCI_IO_ACCESSORS
 	help
 	  This is silent Kconfig symbol that is selected by the drivers that
 	  need to overwrite SDHCI IO memory accessors.
+
+config MMC_ALWAYS_DUMP_SDHCI_REGS
+	bool
+	depends on MMC_SDHCI_NVT
+	help
+	  This enables sd host registers dumping when errors happen.
 
 config MMC_SDHCI_BIG_ENDIAN_32BIT_BYTE_SWAPPER
 	bool
@@ -153,6 +172,45 @@ config MMC_SDHCI_ESDHC_IMX
 	  If you have a controller with this interface, say Y or M here.
 
 	  If unsure, say N.
+
+config MMC_SDHCI_NVT
+	tristate "NVT Multimedia Card Interface support"
+	depends on ARCH_NVT_V7
+	depends on MMC_SDHCI_PLTFM
+	select MMC_SDHCI_IO_ACCESSORS
+	select MMC_ALWAYS_DUMP_SDHCI_REGS
+	help
+	  This selects the ARM(R) NVT(R) Multimedia Card Interface support.
+
+config MMC_SDHCI_NVT_HS200
+	bool "NVT MMC controller HS200 mode"
+	depends on MMC_SDHCI_NVT
+	help
+	  This asks Novatek's mmc controller to enable HS200 speed mode for eMMC
+
+config MMC_SDHCI_NVT_PIO_MODE
+	bool "NVT data R/W by CPU, not ADMA"
+	depends on MMC_SDHCI_NVT
+	help
+	  This asks Novatek's mmc controller use CPU to read/write data.
+
+config MMC_SDHCI_NVT_OPEN_ENDED_RW
+	bool "use open-ended RW in NVT mmc controller"
+	depends on MMC_SDHCI_NVT
+	help
+	  This enables AUTO CMD12 to stop multiple read/write, default is using predefined command.
+
+config MMC_SDHCI_NVT_ENABLE_DEV_CACHE
+	bool "enable emmc device's cache mode with Novatek's controller"
+	depends on MMC_SDHCI_NVT
+	help
+	  This enables emmc's device cache mode.
+
+config MMC_SDHCI_NVT_TOSHIBA_BUSY_HANDLING
+	bool "enable busy handing if busy interrupt happen before cmd interrupt. (for TOSHIBA EMMC)"
+	depends on MMC_SDHCI_NVT
+	help
+	  TOSHIBA EMMC may need this patch. But Samsung/Micron may not.
 
 config MMC_SDHCI_DOVE
 	tristate "SDHCI support on Marvell's Dove SoC"

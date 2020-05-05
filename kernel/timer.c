@@ -41,6 +41,12 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 
+#ifdef CONFIG_KDEBUGD_COUNTER_MONITOR
+#include <kdebugd/sec_topthread.h> /*This header file is for topthread info*/
+#include <kdebugd/sec_cpuusage.h> /*This header file is for cpuusage info*/
+#endif
+
+
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
 #include <asm/div64.h>
@@ -655,6 +661,14 @@ static inline void detach_timer(struct timer_list *timer, bool clear_pending)
 
 	debug_deactivate(timer);
 
+#if defined(CONFIG_MACH_NT14U) && !defined(CONFIG_VD_RELEASE)
+	if(entry == NULL) {
+		printk("[BUG] timer entry is 0x%x (timer:0x%x, timer->fn:0x%x).\n",
+				entry, timer, timer->function);
+		BUG();
+	}
+#endif
+
 	__list_del(entry->prev, entry->next);
 	if (clear_pending)
 		entry->next = NULL;
@@ -1085,6 +1099,61 @@ static int cascade(struct tvec_base *base, struct tvec *tv, int index)
 	return index;
 }
 
+#ifdef CONFIG_RUN_TIMER_DEBUG
+unsigned long time_current;
+void (*time_fn)(unsigned long);
+struct list_head *selp_head;
+struct task_struct *selp_task;
+void show_timer_list(void)
+{
+	struct timer_list *timer;
+	unsigned long data=0;
+	void (*fn)(unsigned long);
+	int i = 0;
+
+	printk( KERN_ALERT "====================================================\n");
+	if( selp_task )
+		printk( KERN_ALERT "selp_task : %s[%d]\n", selp_task->comm, selp_task->pid);
+	else
+		printk( KERN_ALERT "selp_task is NULL\n");
+	printk( KERN_ALERT "data:0x%lx, time_fn : %p\n", data, time_fn);
+	if( time_fn != NULL )
+		print_symbol("time_fn name : %p", (long unsigned int)time_fn);
+	else
+		printk("time_fn is NULL\n");
+
+	printk("\n");
+
+	printk( KERN_ALERT "====================================================\n");
+	printk( KERN_ALERT "remaing timer list...\n");
+	printk( KERN_ALERT "----------------------------------------------------\n");
+	if( selp_head != NULL )
+	{
+		list_for_each_entry(timer, selp_head,entry)
+		{
+			fn = timer->function;
+			data = timer->data;
+			printk( KERN_ALERT "[%2d] data: 0x%lx, fn:%p\n", i, data, fn);
+			print_symbol("fn name : %p", (long unsigned int)fn);
+			printk( "\n");
+			i++;
+
+			if(i==10)
+			{
+				printk("stop print timer list... (too many...)\n");
+				break;
+			}
+		}
+	}
+	else
+		printk( KERN_ALERT "selp_head is NULL! (oops doesn't occur in time_fn()?)\n");
+	printk( KERN_ALERT "====================================================\n");
+}
+EXPORT_SYMBOL(show_timer_list);
+
+extern int valid_module_addr(unsigned long addr);
+#endif
+
 static void call_timer_fn(struct timer_list *timer, void (*fn)(unsigned long),
 			  unsigned long data)
 {
@@ -1110,7 +1179,31 @@ static void call_timer_fn(struct timer_list *timer, void (*fn)(unsigned long),
 	lock_map_acquire(&lockdep_map);
 
 	trace_timer_expire_entry(timer);
+#ifdef CONFIG_RUN_TIMER_DEBUG
+	// FOR SELP DEBUGGING
+	time_current = data;
+	time_fn = fn;
+	selp_task = current;
+
+	if( !virt_addr_valid( fn ) && !valid_module_addr( (unsigned long)fn ) )
+	{
+		printk("=================================================================================");
+		printk("fn() is not invalid... %p, %s[%d]\n", fn, current->comm, current->pid);
+		printk("=================================================================================");
+
+		BUG_ON(1);
+		printk("while(1)... Please attach T32 if you need...\n");
+		while(1);
+	}
+	else
+		fn(data);
+
+	time_current = 0;
+	time_fn = NULL;
+	selp_task = NULL;
+#else
 	fn(data);
+#endif
 	trace_timer_expire_exit(timer);
 
 	lock_map_release(&lockdep_map);
@@ -1163,6 +1256,15 @@ static inline void __run_timers(struct tvec_base *base)
 			bool irqsafe;
 
 			timer = list_first_entry(head, struct timer_list,entry);
+#if defined(CONFIG_ARCH_NVT_V7) && !defined(CONFIG_VD_RELEASE)
+			if ( timer == NULL ) {
+				printk("[BUG] timer list base is 0x%x, running timer is 0x%x, jiffies is %lu, current tv1 index is %d, size is %d. \n", 
+					base, base->running_timer, base->timer_jiffies, index, (TVR_SIZE));
+				printk("tv1 item is 0x%x\n", &work_list);
+				BUG();
+			}
+#endif
+
 			fn = timer->function;
 			data = timer->data;
 			irqsafe = tbase_get_irqsafe(timer->base);
@@ -1174,11 +1276,23 @@ static inline void __run_timers(struct tvec_base *base)
 
 			if (irqsafe) {
 				spin_unlock(&base->lock);
+#ifdef CONFIG_RUN_TIMER_DEBUG
+				selp_head = head;
+#endif
 				call_timer_fn(timer, fn, data);
+#ifdef CONFIG_RUN_TIMER_DEBUG
+				selp_head = NULL;
+#endif
 				spin_lock(&base->lock);
 			} else {
 				spin_unlock_irq(&base->lock);
+#ifdef CONFIG_RUN_TIMER_DEBUG
+				selp_head = head;
+#endif
 				call_timer_fn(timer, fn, data);
+#ifdef CONFIG_RUN_TIMER_DEBUG
+				selp_head = NULL;
+#endif
 				spin_lock_irq(&base->lock);
 			}
 		}
@@ -1358,6 +1472,10 @@ void update_process_times(int user_tick)
 #endif
 	scheduler_tick();
 	run_posix_cpu_timers(p);
+
+#ifdef CONFIG_KDEBUGD_COUNTER_MONITOR
+	sec_topthread_timer_interrupt_handler (cpu);
+#endif
 }
 
 /*

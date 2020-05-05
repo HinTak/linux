@@ -1,0 +1,172 @@
+/*
+ * Novatek Ltd. 72668
+ *
+ * Cortex-A9 MPCore 
+ *
+ */
+
+/dts-v1/;
+
+/ {
+	model = "nvt-72668";
+	nvt,cortex_a9,site = <0xf>;
+	compatible = "novatek,ca9,72668", "novatek,ca9";
+	interrupt-parent = <&gic>;
+	#address-cells = <1>;
+	#size-cells = <1>;
+
+	chosen { };
+
+	pmu {
+    compatible = "arm,cortex-a9-pmu";
+    interrupts = <0 105 4>,
+                 <0 106 4>,
+                 <0 107 4>,
+                 <0 108 4>;
+  };
+
+	uart@fd091000 {
+		compatible = "nvt,serial8250";
+		reg = <0xfd091000 0x1000>;
+		interrupts = <0 29 4>;
+		clock-frequency = <96000000>;
+	};
+
+	uart@fd090000 {
+		compatible = "nvt,serial8250";
+		reg = <0xfd090000 0x1000>;
+		interrupts = <0 51 4>;
+		clock-frequency = <96000000>;
+	};
+
+	uart@fd092000 {
+		compatible = "nvt,serial8250";
+		reg = <0xfd092000 0x1000>;
+		interrupts = <0 45 4>;
+		clock-frequency = <96000000>;
+	};
+ 
+	nfc@0xfc048000 {
+		compatible = "nvt,nfc";
+		//    NFC               
+		reg = <0xfc048000 0x200>;
+		interrupts = <0 63 4>;
+	};
+ 
+	mmc@0xfc048300 {
+		compatible = "nvt,hsmmc";
+		//    SDC                 NFC                 FCR
+		reg = <0xfc048300 0x100>, <0xfc048000 0x200>, <0xfc048200 0x100>;
+		interrupts = <0 63 4>;
+		max-bus-frequency = <180000000>;
+	};
+	
+	ahb_status@0xfc0f0088 {
+		compatible = "nvt,ahb-status";
+		reg = <0xfc0f0088 0x4>;
+		interrupts = <0 68 4>;
+	};
+ 
+	timer@fd0a0000 {
+		compatible = "nvt,ext-timer";
+		reg = <0xfd0a0000 0x10>;
+		interrupts = <0 43 1>;
+		clocks = <&oscclk1>;
+		clock-names = "timer_clk";
+	};
+  
+	clk_gen {
+		compatible = "nvt,clkgen";
+		reg = <0xfd020000 0x400>, <0xfd670000 0x1000>, <0xfd720000 0x400>, <0xfd0f0c18 0x4>;
+	};
+	
+	ethernet@fd050000 {
+		compatible = "nvt,synopsys-mac";
+		//    MAC                  DMA                  GPIO mux          Clock pad-in mux  Clock control
+		reg = <0xfd050000 0x0ffc>, <0xfd051000 0x0054>, <0xfd0d0014 0x4>, <0xfd0200F4 0x4>, <0xfd020044 0x4>;
+		interrupts = <0 42 4>;
+	};
+	
+	ehci@fc1f0000 {
+		compatible = "nvt,NT72668-ehci0";
+	};
+	
+	ehci@fc000000 {
+		compatible = "nvt,NT72668-ehci1";
+	};
+
+	ehci@fc140000 {
+		compatible = "nvt,NT72668-ehci2";
+	};
+	
+	ehci@fc1a0000 {
+		compatible = "nvt,NT72668-ehci3";
+	};
+
+	xhci@fc200000 {
+		compatible = "nvt,NT72668-xhci";
+	};
+	
+	gic: interrupt-controller {
+		compatible = "arm,cortex-a9-gic";
+		#interrupt-cells = <3>;
+		#address-cells = <0>;
+		interrupt-controller;
+	};
+
+	L2: cache-controller@ffe00000 {
+		compatible = "arm,pl310-cache";
+		reg = <0xffe00000 0x1000>;
+		interrupts = <0 96 4>;
+		cache-level = <2>;
+		arm,data-latency = <6 6 6>;
+		arm,tag-latency = <6 6 6>;
+	};
+
+	cpu_clk: gb_timer_clk: twd_clk {
+			compatible = "fixed-clock1";
+			#clock-cells = <0>;
+			clock-frequency = <55000000>;
+			clock-output-names = "cpu_clk";
+		};
+	
+	axi_clk {
+			compatible = "fixed-clock2";
+			#clock-cells = <0>;
+			clock-frequency = <40000000>;
+			clock-output-names = "axi_clk";
+		};
+		
+	ahb_clk: ext_timer_clk {
+			compatible = "fixed-clock3";
+			#clock-cells = <0>;
+			clock-frequency = <12000000>;
+			clock-output-names = "ahb_clk";
+		};
+		
+	smbclk: oscclk1: osc@1 {
+			compatible = "nvt,ca9-72668-osc";
+			freq-range = <20000000 12000000>;
+			#clock-cells = <0>;
+			clock-output-names = "refclk1";
+		};
+
+	nvtmb {
+		compatible = "nvt-amba-bus";
+
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		/include/ "nvtca9-72668.dtsi"
+	};
+
+	spi {
+		compatible = "nvt,spi-gpio";
+		status = "okay";
+		num-chipselects = <1>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		/include/ "w25q128.dtsi"
+    };
+};

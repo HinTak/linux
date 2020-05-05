@@ -144,6 +144,14 @@ void float_raise(signed char flags)
 {
 	register unsigned int fpsr, cumulativeTraps;
 
+	/* Read fpsr and initialize the cumulativeTraps.  */
+	fpsr = readFPSR();
+
+#ifdef CONFIG_ACCURATE_COREDUMP
+	if (fpsr & (flags << 16))
+		early_coredump_wait(SIGFPE);
+#endif
+
 #ifdef CONFIG_DEBUG_USER
 	if (flags & debug)
  		printk(KERN_DEBUG
@@ -152,8 +160,6 @@ void float_raise(signed char flags)
 		       __builtin_return_address(0), GET_USERREG()->ARM_pc);
 #endif
 
-	/* Read fpsr and initialize the cumulativeTraps.  */
-	fpsr = readFPSR();
 	cumulativeTraps = 0;
 
 	/* For each type of exception, the cumulative trap exception bit is only

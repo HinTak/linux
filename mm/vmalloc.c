@@ -2515,6 +2515,37 @@ void pcpu_free_vm_areas(struct vm_struct **vms, int nr_vms)
 #endif	/* CONFIG_SMP */
 
 #ifdef CONFIG_PROC_FS
+#ifdef CONFIG_VMALLOCUSED_PLUS
+/**
+ * Function to retrieve values for VmallocUsed fields
+ * @pvmallocused: poiner to hold all parameter values in VmallocUsed
+ *
+ */
+void get_vmallocused(struct vmalloc_usedinfo *pvmallocused)
+{
+	struct vm_struct *v;
+
+	read_lock(&vmlist_lock);
+	v = vmlist;
+	while (v) {
+		if (v->flags & VM_IOREMAP)
+			pvmallocused->ioremapsize += v->size;
+		if (v->flags & VM_ALLOC)
+			pvmallocused->vmallocsize += v->size;
+		if (v->flags & VM_MAP)
+			pvmallocused->vmapsize += v->size;
+		if (v->flags & VM_USERMAP)
+			pvmallocused->usermapsize += v->size;
+		if (v->flags & VM_VPAGES)
+			pvmallocused->vpagessize += v->size;
+
+		v = v->next;
+	}
+	read_unlock(&vmlist_lock);
+}
+EXPORT_SYMBOL(get_vmallocused);
+#endif
+
 static void *s_start(struct seq_file *m, loff_t *pos)
 	__acquires(&vmlist_lock)
 {

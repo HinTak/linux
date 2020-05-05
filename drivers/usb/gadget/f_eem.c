@@ -21,6 +21,10 @@
 
 #define EEM_HLEN 2
 
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+static struct multi_eem_gadget multi_eem;
+#endif // CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+
 /*
  * This function is a "CDC Ethernet Emulation Model" (CDC EEM)
  * Ethernet link.
@@ -29,6 +33,10 @@
 struct f_eem {
 	struct gether			port;
 	u8				ctrl_id;
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+       void*           dev_info;
+       u8              devnum;
+#endif // CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
 };
 
 static inline struct f_eem *func_to_eem(struct usb_function *f)
@@ -196,6 +204,7 @@ static int eem_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 		if (eem->port.in_ep->driver_data) {
 			DBG(cdev, "reset eem\n");
 			gether_disconnect(&eem->port);
+            		eem->port.is_enable = 1;
 		}
 
 		if (!eem->port.in_ep->desc || !eem->port.out_ep->desc) {
@@ -222,6 +231,7 @@ static int eem_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 	} else
 		goto fail;
 
+       netif_wake_queue(net);
 	return 0;
 fail:
 	return -EINVAL;
@@ -233,6 +243,7 @@ static void eem_disable(struct usb_function *f)
 	struct usb_composite_dev *cdev = f->config->cdev;
 
 	DBG(cdev, "eem deactivated\n");
+        eem->port.is_enable = 0;
 
 	if (eem->port.in_ep->driver_data)
 		gether_disconnect(&eem->port);
@@ -385,8 +396,8 @@ static int eem_unwrap(struct gether *port,
 			struct sk_buff *skb,
 			struct sk_buff_head *list)
 {
-	struct usb_composite_dev	*cdev = port->func.config->cdev;
 	int				status = 0;
+   struct usb_composite_dev    *cdev = port->func.config->cdev;
 
 	do {
 		struct sk_buff	*skb2;
@@ -562,6 +573,14 @@ int __init eem_bind_config(struct usb_configuration *c)
 	eem->port.wrap = eem_wrap;
 	eem->port.unwrap = eem_unwrap;
 	eem->port.header_len = EEM_HLEN;
+
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+   	eem->dev_info = &multi_eem;
+   	eem->devnum = multi_eem.eem_num;
+   	eem->port.dev_info = &multi_eem;
+   	eem->port.devnum = multi_eem.eem_num;
+#endif // CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+	eem->port.is_enable = 0;
 
 	status = usb_add_function(c, &eem->port.func);
 	if (status)

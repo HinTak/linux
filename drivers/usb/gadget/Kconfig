@@ -278,6 +278,13 @@ config USB_S3C_HSOTG
 	  The Samsung S3C64XX USB2.0 high-speed gadget controller
 	  integrated into the S3C64XX series SoC.
 
+config USB_SDP_OTGD
+	tristate "SDP High Speed USB OTG device (DMA)"
+	depends on ARCH_SDP
+	help
+	  The Samsung USB2.0 high-speed gadget controller
+	  integrated into the SDP series SoC.
+
 config USB_IMX
 	tristate "Freescale i.MX1 USB Peripheral Controller"
 	depends on ARCH_MXC
@@ -835,6 +842,59 @@ config USB_G_ACM_MS
 
 	  Say "y" to link the driver statically, or "m" to build a
 	  dynamically linked module called "g_acm_ms".
+
+config USB_G_SAM_MULTI
+   tristate "Samsung Multifunction Composite Gadget (EXPERIMENTAL)"
+   depends on BLOCK && NET
+   select SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+   help
+     The Multifunction Composite Gadget provides Ethernet EEM 
+     and mass storage. 
+
+     You will be asked to choose which of the two configurations is
+     to be available in the gadget.  At least one configuration must
+     be chosen to make the gadget usable.  Selecting more than one
+     configuration will prevent Windows from automatically detecting
+     the gadget as a composite gadget, so an INF file will be needed to
+     use the gadget.
+
+     Say "y" to link the driver statically, or "m" to build a
+     dynamically linked module called "g_sam_multi".
+
+config SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+   bool
+   depends on USB_G_SAM_MULTI
+   default y
+
+config  SAMSUNG_BUTTOM_HALF
+   bool "Samsung patch for Bottom Half in Receive path"
+   depends on USB_G_SAM_MULTI
+   default y
+
+config SAMSUNG_PATCH_WITH_USB_GADGET_INFO
+   bool "Samsung patch for gadget information"
+   depends on USB_G_SAM_MULTI
+   default y
+
+config SAMSUNG_PATCH_WITH_USB_GADGET_STORAGE_REMOVABLE
+   bool "Samsung patch for removable storage driver"
+   depends on USB_G_SAM_MULTI
+   default y
+
+config SAMSUNG_PATCH_WITH_USB_GADGET_STORAGE_INTERFACE_MODIFY
+        bool "Samsung patch for storage gadget interface modify"
+        depends on USB_G_SAM_MULTI
+        default y
+
+config SAMSUNG_PATCH_WITH_USB_GADGET_STORAGE_MULTI_DEVICE_SUPPORT
+        bool "Samsung patch for storage gadget multi device support"
+        depends on USB_G_SAM_MULTI
+        default y
+
+config SAMSUNG_PATCH_WITH_USB_GADGET_STORAGE_PARTITION_DEVICE_SUPPORT
+        bool "Samsung patch for storage gadget partition device support"
+        depends on USB_G_SAM_MULTI
+        default y
 
 config USB_G_MULTI
 	tristate "Multifunction Composite Gadget"

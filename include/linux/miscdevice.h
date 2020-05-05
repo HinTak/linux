@@ -45,6 +45,10 @@
 #define MAPPER_CTRL_MINOR	236
 #define LOOP_CTRL_MINOR		237
 #define VHOST_NET_MINOR		238
+#ifdef CONFIG_ORSAY_VDBINDER_IPC
+#define VDBINDER_MINOR		240
+#define VDASHMEM_MINOR		241
+#endif
 #define MISC_DYNAMIC_MINOR	255
 
 struct device;

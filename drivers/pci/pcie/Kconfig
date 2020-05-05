@@ -1,6 +1,10 @@
 #
 # PCI Express Port Bus Configuration
 #
+config SDP_PCIE
+	bool "Samsung PCI Express Driver support"
+	depends on PCI
+	
 config PCIEPORTBUS
 	bool "PCI Express support"
 	depends on PCI

@@ -27,6 +27,9 @@
 #include <linux/task_work.h>
 #include <linux/ima.h>
 
+#include <linux/path.h>
+#include <linux/fs_struct.h>
+
 #include <linux/atomic.h>
 
 #include "internal.h"
@@ -53,6 +56,9 @@ static void file_free_rcu(struct rcu_head *head)
 
 static inline void file_free(struct file *f)
 {
+#ifdef CONFIG_FD_PID
+	put_pid(f->f_pid);
+#endif
 	percpu_counter_dec(&nr_files);
 	file_check_state(f);
 	call_rcu(&f->f_u.fu_rcuhead, file_free_rcu);
@@ -136,6 +142,10 @@ struct file *get_empty_filp(void)
 	spin_lock_init(&f->f_lock);
 	eventpoll_init_file(f);
 	/* f->f_version: 0 */
+#ifdef CONFIG_FD_PID
+	if (current)
+		f->f_pid = get_task_pid(current, PIDTYPE_PID);
+#endif
 	return f;
 
 over:
@@ -433,6 +443,23 @@ void file_sb_list_del(struct file *file)
 }
 
 #endif
+
+int iterate_sb_files(struct super_block *sb,
+		     int (*func)(struct file *, void *),
+		     void *arg)
+{
+	struct file *f;
+
+	lg_global_lock(&files_lglock);
+	do_file_list_for_each_entry(sb, f) {
+		int res = func(f, arg);
+		if (res)
+			return res;
+	} while_file_list_for_each_entry;
+	lg_global_unlock(&files_lglock);
+
+	return 0;
+}
 
 /**
  *	mark_files_ro - mark all files read-only

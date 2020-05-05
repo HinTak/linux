@@ -14,3 +14,4 @@ obj-$(CONFIG_PCIEPORTBUS)	+= pcieportdrv.o
 obj-$(CONFIG_PCIEAER)		+= aer/
 
 obj-$(CONFIG_PCIE_PME) += pme.o
+obj-$(CONFIG_SDP_PCIE)	+= pcie.o pcie_sdp.o

@@ -1278,6 +1278,8 @@ int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 			}
 			dec_mm_counter(mm, MM_ANONPAGES);
 			inc_mm_counter(mm, MM_SWAPENTS);
+			dec_rss_counter(vma, 1);        /* VD_SP */
+			dec_mupt_counter(vma, page, address, 1);
 		} else if (IS_ENABLED(CONFIG_MIGRATION)) {
 			/*
 			 * Store the pfn of the page in a special migration
@@ -1295,9 +1297,13 @@ int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 		swp_entry_t entry;
 		entry = make_migration_entry(page, pte_write(pteval));
 		set_pte_at(mm, address, pte, swp_entry_to_pte(entry));
-	} else
+	} else {
 		dec_mm_counter(mm, MM_FILEPAGES);
+		dec_rss_counter(vma, 1);        /* VD_SP */
+		dec_mupt_counter(vma, page, address, 1);
+	}
 
+	dec_ptmu_counter(mm, vma, page, address, 1);
 	page_remove_rmap(page);
 	page_cache_release(page);
 
@@ -1431,9 +1437,12 @@ static int try_to_unmap_cluster(unsigned long cursor, unsigned int *mapcount,
 		if (pte_dirty(pteval))
 			set_page_dirty(page);
 
+		dec_ptmu_counter(mm, vma, page, address, 1);
 		page_remove_rmap(page);
 		page_cache_release(page);
 		dec_mm_counter(mm, MM_FILEPAGES);
+		dec_rss_counter(vma, 1);        /* VD_SP */
+		dec_mupt_counter(vma, page, address, 1);
 		(*mapcount)--;
 	}
 	pte_unmap_unlock(pte - 1, ptl);

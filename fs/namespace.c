@@ -1249,6 +1249,104 @@ static inline bool may_mount(void)
 	return ns_capable(current->nsproxy->mnt_ns->user_ns, CAP_SYS_ADMIN);
 }
 
+static int __print_mount(struct vfsmount *mnt, void *arg)
+{
+	char buff[256];
+	struct path mnt_path = { .dentry = mnt->mnt_root, .mnt = mnt };
+	struct mount *r = real_mount(mnt);
+	const char *name, *devname;
+
+	name = d_path(&mnt_path, buff, sizeof(buff));
+	if (IS_ERR(name))
+		name = "(error)";
+
+	devname = r->mnt_devname;
+	if (!devname)
+		devname = "(no device)";
+
+	pr_err("devname: %s, path: %s\n", devname, name);
+
+	return 0;
+}
+
+void print_mounts(void)
+{
+	int err;
+	struct path path;
+	struct vfsmount *root_mnt;
+
+	err = kern_path("/", LOOKUP_FOLLOW, &path);
+	if (err)
+		return;
+
+	root_mnt = collect_mounts(&path);
+	path_put(&path);
+	if (IS_ERR(root_mnt))
+		return;
+
+	iterate_mounts(__print_mount, NULL, root_mnt);
+	drop_collected_mounts(root_mnt);
+}
+
+#ifdef CONFIG_FCOUNT_DEBUG
+static int __print_file_path(struct file *f, void *arg)
+{
+	char buf[256];
+	struct task_struct *p;
+	const char *path, *tsk_name;
+	long refs;
+
+	if (!file_count(f))
+		return 0;
+
+	path = d_path(&f->f_path, buf, sizeof(buf));
+	if (IS_ERR(path))
+		path = "(error)";
+	refs = atomic_long_read(&f->f_count);
+
+#ifdef CONFIG_FD_PID
+	rcu_read_lock();
+	p = pid_task(f->f_pid, PIDTYPE_PID);
+	tsk_name = (p ? p->comm : "Task struct is not available");
+	pr_alert("* %s(%ld) - %s\n", path, refs, tsk_name);
+	rcu_read_unlock();
+#else
+	(void)tsk_name;
+	(void)p;
+	pr_alert("* %s(%ld)\n", path, refs);
+#endif
+
+	return 0;
+}
+
+static void check_files_count(struct path *path)
+{
+	char buf[256];
+	struct super_block *sb = path->mnt->mnt_sb;
+	const char *mountp = d_path(path, buf, sizeof(buf));
+
+	if (IS_ERR(mountp))
+		mountp = "(error)";
+
+	pr_alert("=========================================================\n");
+	pr_alert("Mount Point : %s(length:%d)\n",
+		 mountp, strlen(mountp));
+
+	pr_alert("File Name(File Count) - Task(optional - CONFIG_FD_PID)\n");
+	pr_alert("---------------------------------------------------------\n");
+
+	iterate_sb_files(sb, __print_file_path, NULL);
+
+	pr_alert("=========================================================\n");
+
+	pr_alert("Current Mount Info\n");
+	pr_alert("---------------------------------------------------------\n");
+
+	print_mounts();
+}
+#endif
+
+
 /*
  * Now umount can handle mount points as well as block devices.
  * This is important for filesystems which use unnamed block devices.
@@ -1256,7 +1354,6 @@ static inline bool may_mount(void)
  * We now support a flag for forced unmount like the other 'big iron'
  * unixes. Our API is identical to OSF/1 to avoid making a mess of AMD
  */
-
 SYSCALL_DEFINE2(umount, char __user *, name, int, flags)
 {
 	struct path path;
@@ -1285,6 +1382,15 @@ SYSCALL_DEFINE2(umount, char __user *, name, int, flags)
 
 	retval = do_umount(mnt, flags);
 dput_and_out:
+#ifdef CONFIG_FCOUNT_DEBUG
+	if (retval) {
+		printk("\n------------------------------------------\n");
+		printk("retval : %d\n", retval);
+		printk("------------------------------------------\n");
+		check_files_count(&path);
+	}
+#endif
+
 	/* we mustn't call path_put() as that would clear mnt_expiry_mark */
 	dput(path.dentry);
 	mntput_no_expire(mnt);
@@ -2228,8 +2334,7 @@ int copy_mount_string(const void __user *data, char **where)
 }
 
 /*
- * Flags is a 32-bit value that allows up to 31 non-fs dependent flags to
- * be given to the mount() call (ie: read-only, no-dev, no-suid etc).
+ * Flags is a 32-bit value that allows up to 31 non-fs dependent flags  * be given to the mount() call (ie: read-only, no-dev, no-suid etc).
  *
  * data is a (void *) that can point to any structure up to
  * PAGE_SIZE-1 bytes, which can contain arbitrary fs-dependent
@@ -2241,12 +2346,40 @@ int copy_mount_string(const void __user *data, char **where)
  * Therefore, if this magic number is present, it carries no information
  * and must be discarded.
  */
+
+#ifdef CONFIG_MOUNT_SECURITY
+/*
+ *  * Devices in this list will not be applied "noexec" option.
+ *   * All device will be applied "noexec" option to protect system security
+ *    * except some devices for system
+ *     * */
+char *allowedDEV[] = {"bml", "stl", "mmcblk", "dev/root",
+	"proc", "rootfs", "sysfs", "tmpfs", "none",
+#ifndef CONFIG_VD_RELEASE 
+	"dev/sd", 	// usb device (ex: /dev/sda1, /dev/sdb1/ ...)
+#endif
+	"loop", // loopback mount in flash and usb memory
+	"END" };
+#endif
+
 long do_mount(const char *dev_name, const char *dir_name,
 		const char *type_page, unsigned long flags, void *data_page)
 {
 	struct path path;
 	int retval = 0;
 	int mnt_flags = 0;
+
+#ifdef CONFIG_MOUNT_SECURITY
+	int i = 0, numOfDev = 0;
+#endif
+
+#if defined(CONFIG_MOUNT_SECURITY)
+	if (!dev_name || !*dev_name)
+	{
+		printk("[SABSP] mount device name is not invalid!!!!!\n");
+		return -EINVAL;
+	}
+#endif
 
 	/* Discard magic */
 	if ((flags & MS_MGC_MSK) == MS_MGC_VAL)
@@ -2274,6 +2407,22 @@ long do_mount(const char *dev_name, const char *dir_name,
 	if (!(flags & MS_NOATIME))
 		mnt_flags |= MNT_RELATIME;
 
+#ifdef CONFIG_MOUNT_SECURITY
+	/* Apply MNT_NOEXEC option except some devices for system */
+	numOfDev = sizeof(allowedDEV)/sizeof(allowedDEV[0]);
+
+	for( i = 0 ; i < numOfDev  ; i++) {
+		if(strstr(dev_name, allowedDEV[i]) != NULL)
+			break;
+	}
+
+	if( i == numOfDev ) {
+		mnt_flags |= MNT_NOEXEC;
+		mnt_flags |= MNT_NOSUID;
+		mnt_flags |= MNT_NODEV;
+	}
+#endif
+
 	/* Separate the per-mountpoint flags */
 	if (flags & MS_NOSUID)
 		mnt_flags |= MNT_NOSUID;
@@ -2293,6 +2442,19 @@ long do_mount(const char *dev_name, const char *dir_name,
 	flags &= ~(MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_ACTIVE | MS_BORN |
 		   MS_NOATIME | MS_NODIRATIME | MS_RELATIME| MS_KERNMOUNT |
 		   MS_STRICTATIME);
+
+#ifdef CONFIG_MOUNT_SECURITY
+    if (flags & MS_BIND) {
+	if((strstr(dev_name, "mtd_uniro/exe") == NULL) || (strstr(dir_name, "mtd_exe") == NULL))
+	    if((strstr(dev_name, "mtd_uniro/rocommon") == NULL) || (strstr(dir_name, "mtd_rocommon") == NULL))
+	    {
+		flags &= ~MS_BIND;
+		printk("\033[31mERROR : BIND option was called with - %s -\033[0m\n", current->comm);
+		printk("\033[31m  BIND option can make potential problem of system security.\033[0m\n");
+		printk("\033[31m  You can't use this dangerous function on embedded system.\033[0m\n");
+	    }
+    }
+#endif
 
 	if (flags & MS_REMOUNT)
 		retval = do_remount(&path, flags & ~MS_REMOUNT, mnt_flags,

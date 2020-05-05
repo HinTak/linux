@@ -74,6 +74,11 @@ void panic(const char *fmt, ...)
 	long i, i_next = 0;
 	int state = 0;
 
+#ifdef CONFIG_DTVLOGD
+	/* Synchronously flush the messages remaining in dlog buffer */
+	do_dtvlog(5, NULL, 0);
+#endif
+
 	/*
 	 * Disable local interrupts. This will prevent panic_smp_self_stop
 	 * from deadlocking the first cpu that invokes the panic, since

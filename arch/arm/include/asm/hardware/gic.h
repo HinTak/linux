@@ -15,10 +15,17 @@
 #define GIC_CPU_CTRL			0x00
 #define GIC_CPU_PRIMASK			0x04
 #define GIC_CPU_BINPOINT		0x08
+#if defined(CONFIG_ARM_TRUSTZONE) && defined(CONFIG_ARCH_SDP1202)
+#define GIC_CPU_INTACK			0x20
+#define GIC_CPU_EOI			0x24
+#else
 #define GIC_CPU_INTACK			0x0c
 #define GIC_CPU_EOI			0x10
+#endif
 #define GIC_CPU_RUNNINGPRI		0x14
 #define GIC_CPU_HIGHPRI			0x18
+#define GIC_CPU_AINTACK			0x20
+#define GIC_CPU_AEOI			0x24
 
 #define GIC_DIST_CTRL			0x000
 #define GIC_DIST_CTR			0x004

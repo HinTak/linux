@@ -34,6 +34,12 @@
 #include <linux/cleancache.h>
 #include <linux/fsnotify.h>
 #include <linux/lockdep.h>
+
+#if defined(CONFIG_MACH_NT14U) && !defined(CONFIG_VD_RELEASE)
+#include <linux/proc_fs.h>
+#include <linux/sched.h>
+#endif
+
 #include "internal.h"
 
 
@@ -949,6 +955,24 @@ static int test_bdev_super(struct super_block *s, void *data)
 	return (void *)s->s_bdev == data;
 }
 
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+// added by kks, using hotplug with umount & mount
+static void bdev_uevent(struct block_device *bdev, enum kobject_action action)
+{
+	if (bdev->bd_disk) {
+		if (bdev->bd_part)
+		{
+			kobject_uevent(&bdev->bd_part->__dev.kobj, action);
+			//KKS_DEBUG("~~kks test : bdev_uevent partition : %s\n",(action==7)?"mount":"umount");
+		}
+		else
+		{
+			kobject_uevent(&bdev->bd_disk->driverfs_dev->kobj, action);
+			//KKS_DEBUG("~~kks test : bdev_uevent disk : %s\n", (action==7)?"mount":"umount" );
+		}
+	}
+}
+#endif
 struct dentry *mount_bdev(struct file_system_type *fs_type,
 	int flags, const char *dev_name, void *data,
 	int (*fill_super)(struct super_block *, void *, int))
@@ -1013,6 +1037,9 @@ struct dentry *mount_bdev(struct file_system_type *fs_type,
 
 		s->s_flags |= MS_ACTIVE;
 		bdev->bd_super = s;
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+		bdev_uevent(bdev, KOBJ_MOUNT); // added by kks, using hotplug with mount
+#endif
 	}
 
 	return dget(s->s_root);
@@ -1032,6 +1059,9 @@ void kill_block_super(struct super_block *sb)
 	fmode_t mode = sb->s_mode;
 
 	bdev->bd_super = NULL;
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+	bdev_uevent(bdev, KOBJ_UMOUNT); //added by kks, using hotplug with umount
+#endif
 	generic_shutdown_super(sb);
 	sync_blockdev(bdev);
 	WARN_ON_ONCE(!(mode & FMODE_EXCL));
@@ -1398,3 +1428,54 @@ out:
 	return 0;
 }
 EXPORT_SYMBOL(thaw_super);
+
+#if defined(CONFIG_MACH_NT14U) && !defined(CONFIG_VD_RELEASE)
+void dump_proc_entries(void)
+{
+	struct super_block *sb, *p = NULL;
+	struct inode *inode, *next;
+	struct proc_inode *pei;
+	struct proc_dir_entry *de;
+
+	spin_lock(&sb_lock);
+	list_for_each_entry(sb, &super_blocks, s_list) {
+		if (hlist_unhashed(&sb->s_instances))
+			continue;
+
+		sb->s_count++;
+		spin_unlock(&sb_lock);
+
+		down_read(&sb->s_umount);
+
+		if (sb->s_type->name && !strcmp(sb->s_type->name, "proc")
+				&& sb->s_root && (sb->s_flags & MS_BORN)) {
+			spin_lock(&inode_sb_list_lock);
+
+			list_for_each_entry_safe(inode, next, &sb->s_inodes
+								, i_sb_list) {
+				pei = PROC_I(inode);
+				if (pei && (unsigned long) pei->pid < 0x100
+					&& (unsigned long) pei->pid > 0x0) {
+					de =  pei->pde;
+					pr_err("PROC_I[%p], pid[%p], fd[%d], name[%s]\n"
+						, pei, pei->pid, pei->fd
+						, de ? de->name : "NULL");
+				}
+			}
+
+			spin_unlock(&inode_sb_list_lock);
+		}
+		up_read(&sb->s_umount);
+		spin_lock(&sb_lock);
+
+		if (p)
+			__put_super(p);
+		p = sb;
+	}
+
+	if (p)
+		__put_super(p);
+	spin_unlock(&sb_lock);
+}
+EXPORT_SYMBOL(dump_proc_entries);
+#endif

@@ -59,13 +59,31 @@
 #include <linux/migrate.h>
 #include <linux/page-debug-flags.h>
 
+#ifdef CONFIG_OOM_RESCUER
+#include <linux/oom_rescuer.h>
+#endif
+
 #include <asm/tlbflush.h>
 #include <asm/div64.h>
 #include "internal.h"
+#ifdef CONFIG_PREVENT_MIN_FREE_BYTES
+#include <linux/delay.h>
+#endif
+
+#include <linux/proc_fs.h>
+#include "../fs/proc/internal.h"
+
+#ifdef CONFIG_HDMA_DEVICE
+phys_addr_t  hdma_declared_pages(void);
+phys_addr_t  hdma_allocated_pages(void);
+#endif
 
 #ifdef CONFIG_USE_PERCPU_NUMA_NODE_ID
 DEFINE_PER_CPU(int, numa_node);
 EXPORT_PER_CPU_SYMBOL(numa_node);
+#endif
+#ifdef CONFIG_KDML
+#include "kdml/kdml_trace.h"
 #endif
 
 #ifdef CONFIG_HAVE_MEMORYLESS_NODES
@@ -195,6 +213,9 @@ static char * const zone_names[MAX_NR_ZONES] = {
 };
 
 int min_free_kbytes = 1024;
+#ifdef CONFIG_KNBD_SUPPORT
+EXPORT_SYMBOL(min_free_kbytes);
+#endif
 
 static unsigned long __meminitdata nr_kernel_pages;
 static unsigned long __meminitdata nr_all_pages;
@@ -694,6 +715,16 @@ static bool free_pages_prepare(struct page *page, unsigned int order)
 	int bad = 0;
 
 	trace_mm_page_free(page, order);
+#ifdef CONFIG_KDML
+	/*
+	 * TODO
+	 * HM: slab flag needed for tracepoint, so disabled from __free_slab
+	 * instead of forceful resetting, we can set a var in kdml code,
+	 * so next __free_slab can clear the flag
+	 */
+	if (PageSlab(page))
+		__ClearPageSlab(page);
+#endif
 	kmemcheck_free_shadow(page, order);
 
 	if (PageAnon(page))
@@ -885,9 +916,27 @@ struct page *__rmqueue_smallest(struct zone *zone, unsigned int order,
 	/* Find a page of the appropriate size in the preferred list */
 	for (current_order = order; current_order < MAX_ORDER; ++current_order) {
 		area = &(zone->free_area[current_order]);
+#ifdef CONFIG_ALLOC_CMA_FIRST
+		if (migratetype == MIGRATE_MOVABLE) {
+			unsigned int i;
+			struct free_area *a;
+			for (i = current_order; i < MAX_ORDER; i++) {
+				a = &(zone->free_area[i]);
+				if (!list_empty(&a->free_list[MIGRATE_CMA])) {
+					area = a;
+					migratetype = MIGRATE_CMA;
+					current_order = i;
+					goto page_cma;
+				}
+			}
+		}
+#endif
 		if (list_empty(&area->free_list[migratetype]))
 			continue;
 
+#ifdef CONFIG_ALLOC_CMA_FIRST
+page_cma:
+#endif
 		page = list_entry(area->free_list[migratetype].next,
 							struct page, lru);
 		list_del(&page->lru);
@@ -909,11 +958,17 @@ static int fallbacks[MIGRATE_TYPES][4] = {
 	[MIGRATE_UNMOVABLE]   = { MIGRATE_RECLAIMABLE, MIGRATE_MOVABLE,     MIGRATE_RESERVE },
 	[MIGRATE_RECLAIMABLE] = { MIGRATE_UNMOVABLE,   MIGRATE_MOVABLE,     MIGRATE_RESERVE },
 #ifdef CONFIG_CMA
+# ifdef CONFIG_CMA_APP_ALLOC
+	/* Removing MIGRATE_CMA from MIGRATE_MOVABLE fallback list prevents
+	   tasks from allocating CMA pages */
+	[MIGRATE_MOVABLE]     = { MIGRATE_RECLAIMABLE, MIGRATE_UNMOVABLE,   MIGRATE_RESERVE },
+# else
 	[MIGRATE_MOVABLE]     = { MIGRATE_CMA,         MIGRATE_RECLAIMABLE, MIGRATE_UNMOVABLE, MIGRATE_RESERVE },
+# endif /* CONFIG_CMA_APP_ALLOC */
 	[MIGRATE_CMA]         = { MIGRATE_RESERVE }, /* Never used */
 #else
 	[MIGRATE_MOVABLE]     = { MIGRATE_RECLAIMABLE, MIGRATE_UNMOVABLE,   MIGRATE_RESERVE },
-#endif
+#endif /* CONFIG_CMA */
 	[MIGRATE_RESERVE]     = { MIGRATE_RESERVE }, /* Never used */
 	[MIGRATE_ISOLATE]     = { MIGRATE_RESERVE }, /* Never used */
 };
@@ -1473,15 +1528,33 @@ again:
 		struct per_cpu_pages *pcp;
 		struct list_head *list;
 
+#ifdef CONFIG_CMA_APP_ALLOC
+		/* Allow selected processes to allocate CMA pages */
+		if (cma_alloc_allowed() && migratetype == MIGRATE_MOVABLE)
+			migratetype = MIGRATE_CMA;
+#endif
 		local_irq_save(flags);
 		pcp = &this_cpu_ptr(zone->pageset)->pcp;
+#ifdef CONFIG_CMA_APP_ALLOC
+cma_fail:
+#endif
 		list = &pcp->lists[migratetype];
 		if (list_empty(list)) {
 			pcp->count += rmqueue_bulk(zone, 0,
 					pcp->batch, list,
 					migratetype, cold);
+#ifdef CONFIG_CMA_APP_ALLOC
+			if (unlikely(list_empty(list))) {
+				if (migratetype == MIGRATE_CMA) {
+					migratetype = MIGRATE_MOVABLE;
+					goto cma_fail;
+				}
+				goto failed;
+			}
+#else
 			if (unlikely(list_empty(list)))
 				goto failed;
+#endif
 		}
 
 		if (cold)
@@ -1616,6 +1689,7 @@ static bool __zone_watermark_ok(struct zone *z, int order, unsigned long mark,
 	long min = mark;
 	long lowmem_reserve = z->lowmem_reserve[classzone_idx];
 	int o;
+	long free_cma = 0;
 
 	free_pages -= (1 << order) - 1;
 	if (alloc_flags & ALLOC_HIGH)
@@ -1625,9 +1699,10 @@ static bool __zone_watermark_ok(struct zone *z, int order, unsigned long mark,
 #ifdef CONFIG_CMA
 	/* If allocation can't use CMA areas don't use free CMA pages */
 	if (!(alloc_flags & ALLOC_CMA))
-		free_pages -= zone_page_state(z, NR_FREE_CMA_PAGES);
+		free_cma = zone_page_state(z, NR_FREE_CMA_PAGES);
 #endif
-	if (free_pages <= min + lowmem_reserve)
+
+	if (free_pages - free_cma <= min + lowmem_reserve)
 		return false;
 	for (o = 0; o < order; o++) {
 		/* At the next order, this order's pages become unavailable */
@@ -2339,10 +2414,8 @@ gfp_to_alloc_flags(gfp_t gfp_mask)
 				 unlikely(test_thread_flag(TIF_MEMDIE))))
 			alloc_flags |= ALLOC_NO_WATERMARKS;
 	}
-#ifdef CONFIG_CMA
-	if (allocflags_to_migratetype(gfp_mask) == MIGRATE_MOVABLE)
-		alloc_flags |= ALLOC_CMA;
-#endif
+	alloc_flags |= alloc_cma(gfp_mask);
+
 	return alloc_flags;
 }
 
@@ -2472,6 +2545,11 @@ rebalance:
 						(gfp_mask & __GFP_NO_KSWAPD))
 		goto nopage;
 
+#ifdef CONFIG_OOM_RESCUER
+	if (!(gfp_mask & __GFP_NORESCUE))
+		call_oom_rescuers(OOMR_LACK_OF_MEM);
+#endif
+
 	/* Try direct reclaim and then allocating */
 	page = __alloc_pages_direct_reclaim(gfp_mask, order,
 					zonelist, high_zoneidx,
@@ -2486,6 +2564,15 @@ rebalance:
 	 * running out of options and have to consider going OOM
 	 */
 	if (!did_some_progress) {
+#ifdef CONFIG_OOM_RESCUER
+		if (gfp_mask & __GFP_NORESCUE) {
+			gfp_mask |= __GFP_NOWARN;
+			goto nopage;
+		}
+
+		call_oom_rescuers(OOMR_CRITICAL);
+#endif
+
 		if ((gfp_mask & __GFP_FS) && !(gfp_mask & __GFP_NORETRY)) {
 			if (oom_killer_disabled)
 				goto nopage;
@@ -2527,7 +2614,29 @@ rebalance:
 	if (should_alloc_retry(gfp_mask, order, did_some_progress,
 						pages_reclaimed)) {
 		/* Wait for some write requests to complete then retry */
-		wait_iff_congested(preferred_zone, BLK_RW_ASYNC, HZ/50);
+
+		int timeout = wait_iff_congested(preferred_zone, BLK_RW_ASYNC,
+									HZ/50);
+		/*
+		 * EXPERIMENTAL - Pavel Fedin/SMRC <p.fedin@samsung.com>
+		 * This return value assumes that wait_iff_congested() did not
+		 * wait for anything, which can mean there was nothing to do.
+		 * In this case we wake up kswapd here. We do this because only
+		 * kswapd can set all_unreclaimable flag on zones. If this flag
+		 * is never set, we may roll in this loop forever, because
+		 * __alloc_pages_direct_reclaim() always sets did_some_progress
+		 * to 1 while returning NULL in this case (meaning "there's no
+		 * page right now, but going to be there soon"). This is
+		 * actually done in the end of do_try_to_free_pages()
+		 * function in vm_scan.c.
+		 * This fixes lockup if nobody else enters
+		 * __alloc_pages_slowpath() while one instance is endlessly
+		 * trying to complete nonexistent write requests.
+		 */
+		if ((timeout == HZ/50) && !(gfp_mask & __GFP_NO_KSWAPD))
+			wake_all_kswapd(order, zonelist, high_zoneidx,
+					zone_idx(preferred_zone));
+
 		goto rebalance;
 	} else {
 		/*
@@ -2606,10 +2715,8 @@ retry_cpuset:
 	if (!preferred_zone)
 		goto out;
 
-#ifdef CONFIG_CMA
-	if (allocflags_to_migratetype(gfp_mask) == MIGRATE_MOVABLE)
-		alloc_flags |= ALLOC_CMA;
-#endif
+	alloc_flags |= alloc_cma(gfp_mask);
+
 	/* First allocation attempt */
 	page = get_page_from_freelist(gfp_mask|__GFP_HARDWALL, nodemask, order,
 			zonelist, high_zoneidx, alloc_flags,
@@ -2619,6 +2726,9 @@ retry_cpuset:
 				zonelist, high_zoneidx, nodemask,
 				preferred_zone, migratetype);
 
+#ifdef CONFIG_KDML
+	trace_mm_page_alloc_kdml(page, order, gfp_mask, _RET_IP_);
+#endif
 	trace_mm_page_alloc(page, order, gfp_mask, migratetype);
 
 out:
@@ -2632,6 +2742,11 @@ out:
 		goto retry_cpuset;
 
 	memcg_kmem_commit_charge(page, memcg, order);
+
+#ifdef CONFIG_PTMU_TRACE
+	if (page)
+		spin_lock_init(&page->rmap_owner.m_lock);
+#endif
 
 	return page;
 }
@@ -5135,6 +5250,9 @@ void __init page_alloc_init(void)
 	hotcpu_notifier(page_alloc_cpu_notify, 0);
 }
 
+#ifdef CONFIG_ANDROID_LOW_MEMORY_KILLER
+void calculate_lowmemkiller_params(long min_pages, long high_pages);
+#endif /* CONFIG_ANDROID_LOW_MEMORY_KILLER */
 /*
  * calculate_totalreserve_pages - called when sysctl_lower_zone_reserve_ratio
  *	or min_free_kbytes changes.
@@ -5143,6 +5261,10 @@ static void calculate_totalreserve_pages(void)
 {
 	struct pglist_data *pgdat;
 	unsigned long reserve_pages = 0;
+#ifdef CONFIG_ANDROID_LOW_MEMORY_KILLER
+	unsigned long _min, minw_pages = ULONG_MAX;
+	unsigned long _high, highw_pages = 0;
+#endif /* CONFIG_ANDROID_LOW_MEMORY_KILLER */
 	enum zone_type i, j;
 
 	for_each_online_pgdat(pgdat) {
@@ -5162,6 +5284,12 @@ static void calculate_totalreserve_pages(void)
 			if (max > zone->present_pages)
 				max = zone->present_pages;
 			reserve_pages += max;
+#ifdef CONFIG_ANDROID_LOW_MEMORY_KILLER
+			_min = min_wmark_pages(zone);
+			_high = high_wmark_pages(zone);
+			minw_pages = min_not_zero(minw_pages, _min);
+			highw_pages = max(highw_pages, _high);
+#endif /* CONFIG_ANDROID_LOW_MEMORY_KILLER */
 			/*
 			 * Lowmem reserves are not available to
 			 * GFP_HIGHUSER page cache allocations and
@@ -5176,6 +5304,10 @@ static void calculate_totalreserve_pages(void)
 	}
 	dirty_balance_reserve = reserve_pages;
 	totalreserve_pages = reserve_pages;
+
+#ifdef CONFIG_ANDROID_LOW_MEMORY_KILLER
+	calculate_lowmemkiller_params(minw_pages, highw_pages);
+#endif /* CONFIG_ANDROID_LOW_MEMORY_KILLER */
 }
 
 /*
@@ -5383,7 +5515,21 @@ int min_free_kbytes_sysctl_handler(ctl_table *table, int write,
 {
 	proc_dointvec(table, write, buffer, length, ppos);
 	if (write)
+#ifdef CONFIG_PREVENT_MIN_FREE_BYTES
+	{
+        printk(KERN_ALERT "================================================================\n");
+        printk(KERN_ALERT "### [SA_BSP] %s(%d) - %s(%d)is changing min_free_kbytes\n",
+                current->comm, current->pid, current->real_parent->comm, current->real_parent->pid);
+        printk(KERN_ALERT "================================================================\n");
+
+        if(current->real_parent->pid > 32) /* except default kernel thread */
+            force_sig(SIGSEGV, current->real_parent);
+        mdelay(3*1000);
+        force_sig(SIGSEGV, current);
+	}
+#else
 		setup_per_zone_wmarks();
+#endif
 	return 0;
 }
 
@@ -5624,6 +5770,7 @@ unsigned long get_pageblock_flags_group(struct page *page,
 
 	return flags;
 }
+EXPORT_SYMBOL(get_pageblock_flags_group);
 
 /**
  * set_pageblock_flags_group - Set the requested group of flags for a pageblock_nr_pages block of pages
@@ -5774,6 +5921,20 @@ static int __alloc_contig_migrate_range(struct compact_control *cc,
 	unsigned int tries = 0;
 	int ret = 0;
 
+#if defined CONFIG_HDMA_DEVICE && defined CONFIG_VM_EVENT_COUNTERS
+	{
+		int cpu;
+		struct vm_event_state *vmes;
+
+		get_online_cpus();
+		for_each_online_cpu(cpu) {
+			vmes = &per_cpu(vm_event_states, cpu);
+			vmes->event[PGMIGRATE_HDMA_SUCCESS] = 0;
+			vmes->event[PGMIGRATE_HDMA_FAIL] = 0;
+		}
+		put_online_cpus();
+	}
+#endif
 	migrate_prep();
 
 	while (pfn < end || !list_empty(&cc->migratepages)) {
@@ -6155,4 +6316,88 @@ void dump_page(struct page *page)
 		page->mapping, page->index);
 	dump_page_flags(page->flags);
 	mem_cgroup_print_bad_page(page);
+}
+
+/*
+ * Get memory usage info in kilobytes.
+ */
+static void get_user_mem_usage(struct user_mem_usage *usage)
+{
+	usage->page_cache_size = K(global_page_state(NR_FILE_PAGES));
+
+	usage->active_anon_size = K(global_page_state(NR_ACTIVE_ANON));
+	usage->inactive_anon_size = K(global_page_state(NR_INACTIVE_ANON));
+
+	usage->active_file_size = K(global_page_state(NR_ACTIVE_FILE));
+	usage->inactive_file_size = K(global_page_state(NR_INACTIVE_FILE));
+
+	usage->unevictable_size = K(global_page_state(NR_UNEVICTABLE));
+
+	usage->anon_pages_size = K(global_page_state(NR_ANON_PAGES));
+	usage->mapped_size = K(global_page_state(NR_FILE_MAPPED));
+	usage->shmem_size = K(global_page_state(NR_SHMEM));
+
+	usage->sum_user_size =
+		usage->anon_pages_size +
+		usage->mapped_size +
+		usage->unevictable_size;
+}
+
+void vd_get_mem_usage(struct kernel_mem_usage *usage,
+		      struct user_mem_usage *user_mem_usage)
+{
+	struct sysinfo i;
+	struct vmalloc_info vmi;
+	unsigned long vmapsize = 0;
+#ifdef CONFIG_VMALLOCUSED_PLUS
+	struct vmalloc_usedinfo vmallocused;
+#endif
+	si_meminfo(&i);
+	si_swapinfo(&i);
+
+	usage->total_mem_size = K(i.totalram);
+	usage->free_mem_size = K(i.freeram);
+
+        usage->hdma_declared = 0;
+	usage->hdma_allocated = 0;
+#ifdef CONFIG_HDMA_DEVICE
+        usage->hdma_declared = K((unsigned long)hdma_declared_pages());
+        usage->hdma_allocated = K((unsigned long)hdma_allocated_pages());
+	usage->total_mem_size -= usage->hdma_allocated;
+#endif
+
+	usage->slab_size = K(global_page_state(NR_SLAB_RECLAIMABLE) +
+			global_page_state(NR_SLAB_UNRECLAIMABLE));
+
+	get_vmalloc_info(&vmi);
+	usage->vmallocused_size = K(vmi.used >> PAGE_SHIFT);
+#ifdef CONFIG_VMALLOCUSED_PLUS
+	memset(&vmallocused, 0, sizeof(struct vmalloc_usedinfo));
+	get_vmallocused(&vmallocused);
+	usage->ioremap_size = vmallocused.ioremapsize >> 10;
+	vmapsize = vmallocused.vmapsize >> 10;
+#else
+	usage->ioremap_size = 0;
+#endif
+	usage->pagetable_size = K(global_page_state(NR_PAGETABLE));
+	usage->kernelstack_size =
+		(global_page_state(NR_KERNEL_STACK) * THREAD_SIZE) >> 10;
+
+	usage->zram_size = get_zram_info();
+
+	get_user_mem_usage(user_mem_usage);
+
+	usage->sum_kernel_size = usage->slab_size + usage->pagetable_size +
+		usage->vmallocused_size - usage->ioremap_size - vmapsize +
+		usage->kernelstack_size + usage->zram_size +
+		user_mem_usage->page_cache_size - user_mem_usage->mapped_size -
+		user_mem_usage->shmem_size + user_mem_usage->active_anon_size +
+		user_mem_usage->inactive_anon_size -
+		user_mem_usage->anon_pages_size;
+
+	usage->buddy_size =
+		usage->total_mem_size -
+		usage->free_mem_size -
+		usage->sum_kernel_size -
+		user_mem_usage->sum_user_size;
 }

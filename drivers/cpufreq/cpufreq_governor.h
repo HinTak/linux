@@ -33,7 +33,11 @@
  * this governor will not work. All times here are in uS.
  */
 #define MIN_SAMPLING_RATE_RATIO			(2)
-#define LATENCY_MULTIPLIER			(1000)
+#if defined(CONFIG_ARCH_SDP)
+#define LATENCY_MULTIPLIER				(100)
+#else
+#define LATENCY_MULTIPLIER				(1000)
+#endif
 #define MIN_LATENCY_MULTIPLIER			(100)
 #define TRANSITION_LATENCY_LIMIT		(10 * 1000 * 1000)
 
@@ -108,6 +112,12 @@ struct od_dbs_tuners {
 	unsigned int sampling_rate;
 	unsigned int sampling_down_factor;
 	unsigned int up_threshold;
+#if defined(CONFIG_ARCH_SDP)
+	unsigned int down_threshold;
+	unsigned int up_threshold_l;
+	unsigned int up_step_level_l;
+	unsigned int down_threshold_l;
+#endif
 	unsigned int down_differential;
 	unsigned int powersave_bias;
 	unsigned int io_is_busy;

@@ -27,6 +27,10 @@
 #include <asm/hardware/cache-l2x0.h>
 #include "cache-aurora-l2.h"
 
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+#include <chip_setup.h>
+#endif
+
 #define CACHE_LINE_SIZE		32
 
 static void __iomem *l2x0_base;
@@ -135,6 +139,9 @@ static void l2x0_cache_sync(void)
 	raw_spin_lock_irqsave(&l2x0_lock, flags);
 	cache_sync();
 	raw_spin_unlock_irqrestore(&l2x0_lock, flags);
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+	_chip_flush_miu_pipe();
+#endif
 }
 
 static void __l2x0_flush_all(void)
@@ -154,6 +161,9 @@ static void l2x0_flush_all(void)
 	raw_spin_lock_irqsave(&l2x0_lock, flags);
 	__l2x0_flush_all();
 	raw_spin_unlock_irqrestore(&l2x0_lock, flags);
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+	_chip_flush_miu_pipe();
+#endif
 }
 
 static void l2x0_clean_all(void)
@@ -166,6 +176,9 @@ static void l2x0_clean_all(void)
 	cache_wait_way(l2x0_base + L2X0_CLEAN_WAY, l2x0_way_mask);
 	cache_sync();
 	raw_spin_unlock_irqrestore(&l2x0_lock, flags);
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+	_chip_flush_miu_pipe();
+#endif
 }
 
 static void l2x0_inv_all(void)
@@ -249,6 +262,9 @@ static void l2x0_clean_range(unsigned long start, unsigned long end)
 	cache_wait(base + L2X0_CLEAN_LINE_PA, 1);
 	cache_sync();
 	raw_spin_unlock_irqrestore(&l2x0_lock, flags);
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+	_chip_flush_miu_pipe();
+#endif
 }
 
 static void l2x0_flush_range(unsigned long start, unsigned long end)
@@ -281,7 +297,17 @@ static void l2x0_flush_range(unsigned long start, unsigned long end)
 	cache_wait(base + L2X0_CLEAN_INV_LINE_PA, 1);
 	cache_sync();
 	raw_spin_unlock_irqrestore(&l2x0_lock, flags);
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+	_chip_flush_miu_pipe();
+#endif
 }
+
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+static inline int l2x0_is_enable(void)
+{
+	return (readl_relaxed(l2x0_base + L2X0_CTRL) & 1);
+}
+#endif
 
 static void l2x0_disable(void)
 {
@@ -289,6 +315,10 @@ static void l2x0_disable(void)
 
 	raw_spin_lock_irqsave(&l2x0_lock, flags);
 	__l2x0_flush_all();
+#if defined(CONFIG_ARM_TRUSTZONE)
+	/* SDP1302: non-secure cpu cannot disable l2c thus lock down all ways to prevent further linefills */
+	writel_relaxed(0xffff, l2x0_base + L2X0_LOCKDOWN_WAY_D_BASE);
+#endif
 	writel_relaxed(0, l2x0_base + L2X0_CTRL);
 	dsb();
 	raw_spin_unlock_irqrestore(&l2x0_lock, flags);
@@ -409,8 +439,14 @@ void __init l2x0_init(void __iomem *base, u32 aux_val, u32 aux_mask)
 	l2x0_saved_regs.aux_ctrl = aux;
 
 	if (!of_init) {
+#if defined(CONFIG_MSTAR_CHIP)
+		outer_cache.is_enable = l2x0_is_enable;
+#endif
 		outer_cache.inv_range = l2x0_inv_range;
 		outer_cache.clean_range = l2x0_clean_range;
+#if defined(CONFIG_MSTAR_CHIP)
+		outer_cache.clean_all = l2x0_clean_all;
+#endif
 		outer_cache.flush_range = l2x0_flush_range;
 		outer_cache.sync = l2x0_cache_sync;
 		outer_cache.flush_all = l2x0_flush_all;

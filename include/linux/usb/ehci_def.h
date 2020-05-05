@@ -110,7 +110,12 @@ struct ehci_regs {
 	u32		frame_list;	/* points to periodic list */
 	/* ASYNCLISTADDR: offset 0x18 */
 	u32		async_next;	/* address of next async queue head */
-
+#ifndef CONFIG_ARCH_NVT72668
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+	//u32		reserved [1];
+	u32		txfill_tuning;	/* for compile */
+#define TXFIFO_DEFAULT	(8<<16)		/* FIFO burst threshold 8 */
+#else
 	u32		reserved1[2];
 
 	/* TXFILLTUNING: offset 0x24 */
@@ -118,13 +123,35 @@ struct ehci_regs {
 #define TXFIFO_DEFAULT	(8<<16)		/* FIFO burst threshold 8 */
 
 	u32		reserved2[6];
+#endif
 
+#else
+		/* CONFIGFLAG: offset 0x40 */
+		u32 	reserved1[1];
+		/* PORTSC: offset 0x44 */
+		u32 	port_status[0]; /* up to N_PORTS */
+		u32 	txfill_tuning;	/* TX FIFO Tuning register */
+#define TXFIFO_DEFAULT	(8<<16)		/* FIFO burst threshold 8 */
+
+
+#endif
+
+#ifndef CONFIG_ARCH_NVT72668
+#if !(defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14))
 	/* CONFIGFLAG: offset 0x40 */
 	u32		configured_flag;
 #define FLAG_CF		(1<<0)		/* true: we'll support "high speed" */
+#endif
 
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+	/* PORTSC: offset of MSTAR 0x30 */
+	u32		port_status[1];	/* up to N_PORTS */
+#else
 	/* PORTSC: offset 0x44 */
 	u32		port_status[0];	/* up to N_PORTS */
+#endif
+#endif
+
 /* EHCI 1.1 addendum */
 #define PORTSC_SUSPEND_STS_ACK 0
 #define PORTSC_SUSPEND_STS_NYET 1
@@ -161,6 +188,36 @@ struct ehci_regs {
 #define PORT_CSC	(1<<1)		/* connect status change */
 #define PORT_CONNECT	(1<<0)		/* device connected */
 #define PORT_RWC_BITS   (PORT_CSC | PORT_PEC | PORT_OCC)
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+	/* offset of MSTAR 0x34 */
+	u32		hcmisc ;
+	u32		reserved1 [2];
+	/* offset of MSTAR 0x40 */
+	u32		bmcs;
+	u32		busmonintsts;
+	u32		busmoninten;
+
+	u32		configured_flag; /* for compile */
+#define FLAG_CF        (1<<0)      /* true: we'll support "high speed" */
+
+	/* reserved: offset of MSTAR 0x50 */
+	u32		reserved3 [1];
+
+	u32		usbmode;	/* for compile */
+#define USBMODE_SDIS	(1<<3)		/* Stream disable */
+#define USBMODE_BE	(1<<2)		/* BE/LE endianness select */
+#define USBMODE_CM_HC	(3<<0)		/* host controller mode */
+#define USBMODE_CM_IDLE	(0<<0)		/* idle state */
+
+	u32		hostpc[1];	/* for compile */
+#define HOSTPC_PHCD	(1<<22)		/* Phy clock disable */
+#define HOSTPC_PSPD	(3<<25)		/* Port speed detection */
+
+	u32		usbmode_ex;	/* for compile */
+#define USBMODE_EX_VBPS	(1<<5)		/* VBus Power Select On */
+#define USBMODE_EX_HC	(3<<0)		/* host controller mode */
+};
+#else
 
 	u32		reserved3[9];
 
@@ -189,6 +246,7 @@ struct ehci_regs {
 #define USBMODE_EX_VBPS	(1<<5)		/* VBus Power Select On */
 #define USBMODE_EX_HC	(3<<0)		/* host controller mode */
 };
+#endif
 
 /* Appendix C, Debug port ... intended for use with special "debug devices"
  * that can help if there's no serial console.  (nonstandard enumeration.)

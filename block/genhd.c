@@ -16,10 +16,25 @@
 #include <linux/kmod.h>
 #include <linux/kobj_map.h>
 #include <linux/mutex.h>
+#include <linux/freezer.h>
+#include <uapi/linux/major.h>
+
+#ifdef CONFIG_KDEBUGD_COUNTER_MONITOR
+#include <kdebugd/kdebugd.h>
+#include <linux/time.h>
+#include <kdebugd/sec_diskusage.h>
+#endif
+
 #include <linux/idr.h>
 #include <linux/log2.h>
 
 #include "blk.h"
+
+#ifdef CONFIG_FS_SEL_READAHEAD
+extern atomic_t *create_readahead_proc(const char *name);
+extern void remove_readahead_proc(const char *name);
+extern atomic_t *get_readahead_entry(const char *name);
+#endif
 
 static DEFINE_MUTEX(block_class_lock);
 struct kobject *block_depr;
@@ -244,6 +259,11 @@ static struct blk_major_name {
 	int major;
 	char name[16];
 } *major_names[BLKDEV_MAJOR_HASH_SIZE];
+
+
+#ifdef CONFIG_BOOTPROFILE
+static inline void sec_bp_start(void);
+#endif /* CONFIG_BOOTPROFILE */
 
 /* index in the above - for now: assume no multimajor ranges */
 static inline int major_to_index(unsigned major)
@@ -535,6 +555,11 @@ static void register_disk(struct gendisk *disk)
 			return;
 		}
 	}
+
+#ifdef CONFIG_FS_SEL_READAHEAD
+	create_readahead_proc(dev_name(ddev));
+#endif
+
 	disk->part0.holder_dir = kobject_create_and_add("holders", &ddev->kobj);
 	disk->slave_dir = kobject_create_and_add("slaves", &ddev->kobj);
 
@@ -646,6 +671,10 @@ void del_gendisk(struct gendisk *disk)
 	}
 	disk_part_iter_exit(&piter);
 
+#ifdef CONFIG_FS_SEL_READAHEAD
+	remove_readahead_proc(dev_name(disk_to_dev(disk)));
+#endif
+
 	invalidate_partition(disk, 0);
 	set_capacity(disk, 0);
 	disk->flags &= ~GENHD_FL_UP;
@@ -667,6 +696,25 @@ void del_gendisk(struct gendisk *disk)
 	blk_free_devt(disk_to_dev(disk)->devt);
 }
 EXPORT_SYMBOL(del_gendisk);
+
+#ifdef CONFIG_FS_SEL_READAHEAD
+atomic_t *
+disk_name_from_dev(dev_t dev)
+{
+	struct block_device *bdev = bdget(dev);
+	char buff[BDEVNAME_SIZE] = {0};
+	atomic_t *pstate = NULL;
+	if (bdev) {
+		if (MAJOR(dev)) {
+			bdevname(bdev, buff);
+			pstate = get_readahead_entry(buff);
+		}
+		bdput(bdev);
+	}
+	return pstate;
+}
+EXPORT_SYMBOL(disk_name_from_dev);
+#endif
 
 /**
  * get_gendisk - get partitioning information for a given device
@@ -911,6 +959,11 @@ static int __init genhd_device_init(void)
 	/* create top-level block dir */
 	if (!sysfs_deprecated)
 		block_depr = kobject_create_and_add("block", NULL);
+
+#ifdef CONFIG_BOOTPROFILE
+	sec_bp_start();
+#endif /* CONFIG_BOOTPROFILE */
+
 	return 0;
 }
 
@@ -1360,12 +1413,18 @@ int bdev_read_only(struct block_device *bdev)
 
 EXPORT_SYMBOL(bdev_read_only);
 
+
 int invalidate_partition(struct gendisk *disk, int partno)
 {
 	int res = 0;
 	struct block_device *bdev = bdget_disk(disk, partno);
 	if (bdev) {
+#ifdef CONFIG_FREEZER
+		if(!(check_freezing() == 1 && MAJOR(bdev->bd_dev) == SCSI_DISK0_MAJOR ))
+			fsync_bdev(bdev);
+#else
 		fsync_bdev(bdev);
+#endif
 		res = __invalidate_device(bdev, true);
 		bdput(bdev);
 	}
@@ -1830,3 +1889,2229 @@ static void disk_release_events(struct gendisk *disk)
 	WARN_ON_ONCE(disk->ev && disk->ev->block != 1);
 	kfree(disk->ev);
 }
+
+#ifdef CONFIG_KDEBUGD_COUNTER_MONITOR
+
+void sec_diskusage_update(struct sec_diskdata *pdisk_data)
+{
+       struct class_dev_iter iter;
+       struct device *dev;
+
+       mutex_lock(&block_class_lock);
+       class_dev_iter_init(&iter, &block_class, NULL, &disk_type);
+       while ((dev = class_dev_iter_next(&iter))) {
+		struct gendisk *disk = dev_to_disk(dev);
+
+		BUG_ON(!disk);
+		sec_diskstats_dump_entry(disk, pdisk_data);
+       }
+       class_dev_iter_exit(&iter);
+       mutex_unlock(&block_class_lock);
+}
+#endif
+
+#ifdef CONFIG_BOOTPROFILE
+/* Boot Chart  */
+
+/**********************************************************************/
+/*                                                                    */
+/*     sec boot profile collection defines and declarations           */
+/*                                                                    */
+/**********************************************************************/
+
+#include <linux/delay.h>
+#include <linux/vmalloc.h>
+#include <linux/proc_fs.h>
+#include <linux/kernel_stat.h>
+#include <linux/kthread.h>
+#include <linux/version.h>
+#include <linux/utsname.h>
+#include <linux/init.h>
+#include <linux/cpumask.h>
+
+
+/* Boot Profile states */
+
+#define SEC_BP_STATE_UNINITED     0  /* not running, no memory
+				      * allocated */
+#define SEC_BP_STATE_STARTING     1  /* starting, preparing for
+				      * sampling */
+#define SEC_BP_STATE_RUNNING      2  /* running, sample collection
+				      * started */
+#define SEC_BP_STATE_COMPLETING   3  /* closing and preparing for
+				      * further actions */
+#define SEC_BP_STATE_COMPLETED    4  /* sampling done, profile data is
+				      * available in previously
+				      * allocated memory*/
+
+
+/* Change it to enable / disable the debug trace prints for boot
+ * profile solution.  It is only alocal setting for debugging. */
+#define SEC_BP_TRACE_ON    0
+
+/* Optimize the memory usage, calculations are done in the kernel code
+ * and summarized results are prepared for report, e.g. all diskstats
+ * can be summed up and just one entry per sample can be put in output
+ * report */
+#define SEC_DS_USE_SUMMARY  0
+
+#if (SEC_BP_TRACE_ON == 0)
+#define SEC_BP_TRACE(fmt...) do { } while (0)
+#else
+#define SEC_BP_TRACE(fmt, args...) do {	\
+	printk(KERN_INFO "[BP] %s: " fmt , __FUNCTION__ , ##args); \
+} while (0)
+#endif /* #if (SEC_BP_TRACE_ON == 0) */
+
+
+#define SEC_BP_COMM_NAME  "boot_profile"
+
+#define SEC_BP_START_DELAY_MS  200 /* initial start delay ms */
+#define SEC_BP_SAMPLE_INTERVAL_MS     200  /* sampling interval ms */
+
+#define SEC_BP_NR_SAMPLES    240  /* at 0.2 sec sampling interval it
+				     would cover 48 seconds */
+
+#if (SEC_DS_USE_SUMMARY == 0)
+/* assume 40 diskstats lines of entries per sample */
+#define SEC_DS_NR_ENTRIES    (SEC_BP_NR_SAMPLES * 40)
+#else
+/* only 1 summarized entry is used */
+#define SEC_DS_NR_ENTRIES    (SEC_BP_NR_SAMPLES)
+#endif /* #if (SEC_DS_USE_SUMMARY == 0) */
+
+/* assume on average 64 threads per sample */
+#define SEC_PS_NR_ENTRIES (SEC_BP_NR_SAMPLES * 128)
+
+#define PROC_STAT_LOG       "proc_stat.log"
+#define PROC_PS_LOG         "proc_ps.log"
+#define PROC_DISKSTATS_LOG  "proc_diskstats.log"
+
+#define SEC_BP_DIRECT_DUMP           0
+
+#if (SEC_BP_DIRECT_DUMP != 0)
+#define SEC_BP_DIRECT_DUMP_START_DELAY_MS  6000
+#endif
+/* for slowing down the serial output of printk when directly dumping
+ * the report on console */
+#define DIRECT_DUMP_SLOW_MS  10
+
+#define SEC_BP_LOG_DONE_COUNT   3 /* 3 types of logs are collected
+				   * during sampling */
+#define SEC_BP_WAIT_UPTIME_SEC  0 /* start profiling at the specified
+				   * uptime */
+
+#define SEC_BP_PROC_MIN_READ_LEN  (128 + 64) /* minimum supported proc
+					      * read len */
+#define SEC_BP_WARN_SMALL_BUF_LEN  0
+
+/* For 'who' entries while filling the report for proc read */
+#define SEC_BP_FILL_HEADER      0
+#define SEC_BP_FILL_CPUSTAT     1
+#define SEC_BP_FILL_PROC_PS     2
+#define SEC_BP_FILL_DISKSTATS   3
+#define SEC_BP_FILL_DONE        4
+
+/* used for creating the proc buffer (line wise) */
+#define SEC_BP_LINE_CACHE_SIZE  1024
+/* useful for matching uptime with normal application logs / trace prints */
+#define SEC_BP_TRACE_UPTIME     1
+
+#define SEC_BP_COMM_WITH_PID    0
+#if (SEC_BP_COMM_WITH_PID != 0)
+#define SEC_BP_PROC_PS_FMT_STR  "%d (%s-%u) %c %d 0 0 0 0 0 0 " \
+	"0 0 0 %lu %lu 0 0 0 0 "        \
+"0 0 %llu 0 0 0 0 0 0 0 "       \
+"0 0 0 0 0 0 0 %u 0 0 0 0 0\n"
+#else
+#define SEC_BP_PROC_PS_FMT_STR  "%d (%s) %c %d 0 0 0 0 0 0 "    \
+	"0 0 0 %lu %lu 0 0 0 0 "        \
+"0 0 %llu 0 0 0 0 0 0 0 "       \
+"0 0 0 0 0 0 0 %u 0 0 0 0 0\n"
+#endif
+
+#define BOOTCHART_VER_STR   "4.0.0"
+#define BOOTSTATS_HEADER_SIZE  512
+
+
+struct sec_uptime_table {
+	unsigned long uptime;
+	int start_idx;
+};
+
+struct sec_cpustats {
+	unsigned long uptime; /* uptime in units of 1/100sec*/
+	u32 user; /* cputime64_t: only 32 bit value is stored, enough for
+		   * 462 days = (4000000000/(100 * 60 * 60 * 24))*/
+	u32 nice;
+	u32 system;
+	u32 idle;
+	u32 iowait;
+	u32 irq;
+	u32 softirq;
+	u32 steal;
+	u32 user_rt;
+	u32 system_rt;
+};
+
+struct sec_process_stat {
+	pid_t pid;
+	char tcomm[FIELD_SIZEOF(struct task_struct, comm)];
+	char state;
+	pid_t ppid;
+	cputime_t utime;
+	cputime_t stime;
+	unsigned long cpuid;      /* for multicore cpuid */
+	unsigned long start_time; /* 32-bit value would not wrap till 462
+				   * days */
+};
+
+/* BDEVNAME_SIZE is currently 32, we have only small device names, so
+ * we can save some space */
+#define SEC_DS_BDEVNAME  12
+
+/* stores the disk-stats required for disk utilization and throughput
+ * along with the actual jiffy at that moment. */
+struct sec_ds_struct {
+	/* As we just store the summarized result, we can pretend it to be
+	 * a dummy device (just for reporting), so generate the dummy name
+	 * during report generation, no need to store here in:
+	 * sec_ds_table[sec_ds_idx].name */
+#if (SEC_DS_USE_SUMMARY == 0)
+	char name[SEC_DS_BDEVNAME];
+#endif
+	long nsect_read;
+	long nsect_write;
+	unsigned io_ticks;
+};
+
+static int sec_bp_state = SEC_BP_STATE_UNINITED;
+
+static struct sec_cpustats *sec_cs_table[CONFIG_NR_CPUS];
+/* for second cpu Multi core */
+/* static struct sec_cpustats* sec_cs_table2= NULL; */
+static int sec_cs_idx;
+
+static struct sec_process_stat *sec_ps_table;
+static int sec_ps_idx;
+static struct sec_uptime_table *sec_ps_ut_table ;
+static int sec_ps_ut_idx;
+
+static struct sec_ds_struct *sec_ds_table;
+static int sec_ds_idx;
+static struct sec_uptime_table *sec_ds_ut_table;
+static int sec_ds_ut_idx;
+
+#if (SEC_DS_USE_SUMMARY != 0)
+static long ds_sum_nsect_read;
+static long ds_sum_nsect_write;
+static unsigned ds_sum_io_ticks;
+#endif /* #if (SEC_DS_USE_SUMMARY != 0) */
+
+static char *bs_header;
+
+/* added in arch/arm/kernel/setup.c */
+extern const char *bc_get_cpu_name(void);
+
+static void sec_bp_start__(void);
+static inline void sec_bp_reset(void);
+static int sec_bp_alloc(void);
+static void sec_bp_dealloc(void);
+static int sec_bp_thread(void *arg);
+#if (SEC_BP_WAIT_UPTIME_SEC != 0)
+static inline void sec_uptime_wait(int nsec);
+#endif
+
+static inline int sec_bp_ds_filter(const char *str);
+static void sec_bp_log_header(void);
+static int sec_bp_log_cpu_stat(void);
+static int sec_bp_log_process_stat(void);
+static int sec_bp_log_diskstats(void);
+static inline int sec_bp_log_ds_entry(struct gendisk *gd, struct disk_part_iter *piter);
+static void sec_bp_meminfo_dump(void);
+
+static void sec_bp_direct_dump(void);
+static void sec_bp_dump_header(void);
+static void sec_bp_dump_cpu_stat(void);
+static void sec_bp_dump_process_stat(void);
+static void sec_bp_dump_diskstats(void);
+
+static int save_to_usb(void);
+
+static inline void sec_bp_state_change(int new_state)
+{
+	SEC_BP_TRACE("state_change: %d -> %d\n", sec_bp_state, new_state);
+	sec_bp_state = new_state;
+}
+
+/**********************************************************************
+ *
+ *  sec_bootstats:  proc related implementation.
+ *
+ **********************************************************************/
+
+struct bp_stats_proc_filled_info {
+	int who; /* 0= header, 1= cpu_stat, 2= process_stat, 3= diskstats,
+		    other_value= done */
+	int fname_is_done; /* #@fname printed before the stats */
+	int next_idx; /* Any value out of range, i.e. < 0 or > available
+		       * means end of data. starts with 0. */
+	int next_sub_idx; /* index of sub table, if any. */
+	int next_idx_is_done;
+	off_t next_expected_seq_offset;
+	int is_no_more_data;
+	char *line_cache;
+};
+
+static struct bp_stats_proc_filled_info bp_stats_proc_read_ctx;
+
+static int sec_bp_proc_fill_report(char *buffer, off_t offset,
+		int buffer_length);
+static int sec_bp_proc_fill_header(char *buffer, int buffer_length);
+static int sec_bp_proc_fill_cpu_stat(char *buffer, int buffer_length);
+static int sec_bp_proc_fill_process_stat(char *buffer, int buffer_length);
+static int sec_bp_proc_fill_diskstats(char *buffer, int buffer_length);
+
+static inline int sec_bp_proc_check_length(int buffer_length);
+
+/*Fucntion definition written in fs/proc.c */
+extern const char *sec_bp_get_task_state(struct task_struct *tsk);
+
+
+/**********************************************************************
+ *                                                                    *
+ *              proc related functions                                *
+ *                                                                    *
+ **********************************************************************/
+static void sec_bp_proc_activate(void);
+
+/* for /proc/bootstats writing */
+static int sec_bp_proc_write(struct file *file, const char *buffer,
+		unsigned long count, void *data);
+
+/* for /proc/bootstats reading */
+static int sec_bp_proc_read(char *buffer, char **buffer_location,
+		off_t offset, int buffer_length, int *eof,
+		void *data);
+
+/* Filter the device names that should be accounted for disk-stats
+ * For Chelsea:
+ *
+ *   skip:     ram0 ... ram 15
+ *   consider: tbmlc, tbml1 ... tbml13
+ *   consider: bml0/c, bml1 ... bml13
+ *   consider: stl1 ... stl13
+ *   consider: sda, sdb, sdc, ...
+ *   skip:     sda1, sdb1, ...
+ *   consider: hda, hdb (hard-disk?)
+ */
+static inline int sec_bp_ds_filter(const char *str)
+{
+	/* It is the support for all kind of device */
+	return 1;
+	/* To provide the support for very precise devices to save memory
+	 *  for bootchart*/
+	/* just do a quick check */
+}
+
+
+/**********************************************************************
+ * some user interace functions (called writing of /proc/bootstats)
+ **********************************************************************/
+
+static void sec_bp_print_help(void);
+static void sec_bp_print_status(void);
+static inline void sec_bp_start(void);
+
+
+/**********************************************************************/
+/*                                                                    */
+/*     sec boot profile functions definitions                         */
+/*                                                                    */
+/**********************************************************************/
+
+void sec_bp_start__(void)
+{
+	pid_t pid = 0;
+	struct task_struct *sec_bp_tsk = NULL;
+
+	SEC_BP_TRACE("enter\n");
+	BUG_ON(sec_bp_state == SEC_BP_STATE_STARTING);
+	BUG_ON(sec_bp_state == SEC_BP_STATE_RUNNING);
+	sec_bp_state_change(SEC_BP_STATE_STARTING);
+
+	/* changing state to running is done by thread function, if
+	 * success in creating thread */
+	sec_bp_tsk = kthread_create(sec_bp_thread, NULL, "bp_thread");
+	if (IS_ERR(sec_bp_tsk)) {
+		sec_bp_tsk = NULL;
+		printk("Failed: bp_thread Thread Creation\n");
+		return;
+	}
+
+	/* update task flag and wakeup process */
+	sec_bp_tsk->flags |= PF_NOFREEZE;
+	wake_up_process(sec_bp_tsk);
+
+	pid = sec_bp_tsk->pid;
+
+	if (likely(pid >= 0)) {
+		read_lock(&tasklist_lock);
+		sec_bp_tsk = find_task_by_pid_ns(pid, &init_pid_ns);
+		if (likely(sec_bp_tsk)) {
+			set_task_comm(sec_bp_tsk, SEC_BP_COMM_NAME);
+			printk("--- [BP] --- pid= %u: " SEC_BP_COMM_NAME
+					" task= (%.20s)\n", pid, sec_bp_tsk->comm);
+		}
+		read_unlock(&tasklist_lock);
+	} else {
+		BUG_ON(sec_bp_state != SEC_BP_STATE_STARTING);
+		sec_bp_state_change(SEC_BP_STATE_UNINITED);
+	}
+
+	SEC_BP_TRACE("pid= %u\n", pid);
+}
+
+/* Note: There is a potential race condition of proc being read
+ * when profiling is re-started.  It is not supported to
+ * simultaneous read the proc and start the profiling in parallel
+ * when proc read is in happening. */
+void sec_bp_reset(void)
+{
+	BUG_ON(sec_bp_state != SEC_BP_STATE_STARTING);
+
+	sec_cs_idx = 0;
+	sec_ps_idx = 0;
+	sec_ps_ut_idx = 0;
+	sec_ds_idx = 0;
+	sec_ds_ut_idx = 0;
+
+#if (SEC_DS_USE_SUMMARY != 0)
+	ds_sum_nsect_read = 0;
+	ds_sum_nsect_write = 0;
+	ds_sum_io_ticks = 0;
+#endif /* #if (SEC_DS_USE_SUMMARY != 0) */
+
+	memset(&bp_stats_proc_read_ctx, 0, sizeof(bp_stats_proc_read_ctx));
+}
+
+int sec_bp_alloc(void)
+{
+	int ret = 1;
+	int len = 0;
+	unsigned int i;
+
+	SEC_BP_TRACE("enter\n");
+	BUG_ON(sec_bp_state != SEC_BP_STATE_STARTING);
+
+	/* cpu stat */
+	/* Second CPU for multicore */
+	for (i = 0; i < CONFIG_NR_CPUS; i++) {
+		if (!sec_cs_table[i]) {
+			len = (SEC_BP_NR_SAMPLES
+					* sizeof(struct sec_cpustats));
+			sec_cs_table[i] = vzalloc(len);
+			if (!sec_cs_table[i]) {
+				printk(KERN_WARNING "%s: cpustat: memory alloc error\n",
+						__FUNCTION__);
+				goto alloc_out;
+			}
+		}
+	}
+	/* process stat */
+	if (!sec_ps_ut_table) {
+		len = (SEC_BP_NR_SAMPLES
+				* sizeof(*sec_ps_ut_table));
+		sec_ps_ut_table = vzalloc(len);
+		if (!sec_ps_ut_table) {
+			printk(KERN_WARNING "%s: process_stat_ut: memory alloc error\n",
+					__FUNCTION__);
+			goto alloc_out;
+		}
+	}
+
+	if (!sec_ps_table) {
+		len = (SEC_PS_NR_ENTRIES
+				* sizeof(*sec_ps_table));
+		sec_ps_table = vzalloc(len);
+		if (!sec_ps_table) {
+			printk(KERN_WARNING "%s: process_stat: memory alloc error\n",
+					__FUNCTION__);
+			goto alloc_out;
+		}
+	}
+
+	/* disk stat */
+	if (!sec_ds_ut_table) {
+		len = (SEC_BP_NR_SAMPLES
+				* sizeof(*sec_ds_ut_table));
+		sec_ds_ut_table = vzalloc(len);
+		if (!sec_ds_ut_table) {
+			printk(KERN_WARNING "%s: diskstats_ut: memory alloc error\n",
+					__FUNCTION__);
+			goto alloc_out;
+		}
+	}
+
+	if (!sec_ds_table) {
+		len = (SEC_DS_NR_ENTRIES
+				* sizeof(*sec_ds_table));
+		sec_ds_table = vzalloc(len);
+		if (!sec_ds_table) {
+			printk(KERN_WARNING "%s: diskstats: memory alloc error\n",
+					__FUNCTION__);
+			goto alloc_out;
+		}
+	}
+
+	ret = 0; /* alloc success */
+alloc_out:
+
+	SEC_BP_TRACE("exit: ret= %d\n", ret);
+	return ret;
+}
+
+void sec_bp_dealloc(void)
+{
+	unsigned int i;
+	SEC_BP_TRACE("vfree table\n");
+	printk("[BP] %s: releasing memory\n", __FUNCTION__);
+
+	BUG_ON(sec_bp_state != SEC_BP_STATE_COMPLETED);
+
+	/* Note: vfree(addr) performs no-operation when 'addr' is NULL. */
+
+	for (i = 0; i < CONFIG_NR_CPUS; i++) {
+		if (sec_cs_table[i]) {
+			vfree(sec_cs_table[i]);
+			sec_cs_table[i] = NULL;
+		}
+	}
+
+	if (sec_ps_table) {
+		vfree(sec_ps_table);
+		sec_ps_table = NULL;
+	}
+
+	if (sec_ps_ut_table) {
+		vfree(sec_ps_ut_table);
+		sec_ps_ut_table = NULL;
+	}
+
+	if (sec_ds_table) {
+		vfree(sec_ds_table);
+		sec_ds_table = NULL;
+	}
+
+	if (sec_ds_ut_table) {
+		vfree(sec_ds_ut_table);
+		sec_ds_ut_table = NULL;
+	}
+
+	if (bs_header) {
+		vfree(bs_header);
+		bs_header = NULL;
+	}
+	sec_bp_state_change(SEC_BP_STATE_UNINITED);
+}
+
+static int sec_bp_thread(void *arg)
+{
+	int ret = 0;
+	int is_done = 0;
+
+	SEC_BP_TRACE("enter\n");
+	BUG_ON(sec_bp_state != SEC_BP_STATE_STARTING);
+
+	/* delay before start collecting the stats */
+#if (SEC_BP_START_DELAY_MS != 0)
+	msleep(SEC_BP_START_DELAY_MS);
+#endif
+
+	sec_bp_reset();
+	SEC_BP_TRACE("alloc memory\n");
+	ret = sec_bp_alloc();
+
+	if (ret) {
+		printk(KERN_WARNING "%s: memory alloc failure\n", __FUNCTION__);
+		sec_bp_state_change(SEC_BP_STATE_COMPLETED); /* transition state */
+		SEC_BP_TRACE("deallocing memory\n");
+		sec_bp_dealloc();
+		return 1;
+	}
+
+#if (SEC_BP_WAIT_UPTIME_SEC != 0)
+	sec_uptime_wait(SEC_BP_WAIT_UPTIME_SEC);
+#endif
+
+	for (; !is_done; ) {
+
+		msleep(SEC_BP_SAMPLE_INTERVAL_MS);
+		is_done = sec_bp_log_cpu_stat();
+		is_done += sec_bp_log_process_stat();
+		is_done += sec_bp_log_diskstats();
+
+		/* continue till all are done */
+		is_done = (is_done == SEC_BP_LOG_DONE_COUNT) ? 1 : 0;
+	}
+
+	sec_bp_log_header();
+	sec_bp_state_change(SEC_BP_STATE_COMPLETING); /* transition state */
+
+#if (SEC_BP_DIRECT_DUMP != 0)
+	SEC_BP_TRACE("delay for direct dump: sleeping %dms\n",
+			SEC_BP_DIRECT_DUMP_START_DELAY_MS);
+
+	/* Dump the collected log directly to console.  Useful for
+	 * testing.  The reason for delay is that we can choose suitable
+	 * moment, to avoid mixing with normal application power up
+	 * logs. */
+	msleep(SEC_BP_DIRECT_DUMP_START_DELAY_MS);
+
+	SEC_BP_TRACE("direct dump\n");
+	sec_bp_direct_dump();
+#endif /* #if (SEC_BP_DIRECT_DUMP != 0) */
+
+	/* create proc (first time) / reset proc for new data */
+	sec_bp_proc_activate();
+	sec_bp_meminfo_dump();
+
+	sec_bp_state_change(SEC_BP_STATE_COMPLETED);
+
+	printk("%s: ------------------------------------\n", __FUNCTION__);
+	printk("%s: exiting the sec bootprof thread func\n", __FUNCTION__);
+	printk("%s: ------------------------------------\n", __FUNCTION__);
+	SEC_BP_TRACE("exit\n");
+	printk("Saving to usb.....................\n");
+
+	msleep(5000);
+	printk("Saving to usb....\n");
+	if (!save_to_usb())
+		printk("USB write bootstats file fail\n");
+	else
+		printk("Saving to usb complete!\n");
+
+	return 0;
+}
+
+
+/**********************************************************************
+ *
+ *  Boot profile information collection related functions.
+ *
+ **********************************************************************/
+
+void sec_bp_log_header(void)
+{
+	if (!bs_header) {
+		bs_header = vmalloc(BOOTSTATS_HEADER_SIZE);
+		if (!bs_header) {
+			printk (KERN_ERR "%s: vmalloc failed\n", __FUNCTION__);
+			return;
+		}
+	}
+
+	snprintf(bs_header, BOOTSTATS_HEADER_SIZE,
+			"#@header\n"
+			"version = " BOOTCHART_VER_STR "\n"
+			"title = Boot chart for %s (Sun May 31 21:01:58 IST 2009)\n"
+			"system.uname = %s %s %s %s\n"
+			"system.release = %s\n"
+			"system.cpu = model name	: %s (%u)\n"
+			"system.kernel.options = %s\n",
+			init_uts_ns.name.nodename, init_uts_ns.name.sysname,
+			init_uts_ns.name.release, init_uts_ns.name.version,
+			init_uts_ns.name.machine, init_uts_ns.name.release,
+			bc_get_cpu_name(), num_possible_cpus(),
+			saved_command_line);
+}
+
+int sec_bp_log_cpu_stat(void)
+{
+	int i;
+	cputime64_t user_rt, user, nice, system_rt, system, idle,
+		    iowait, irq, softirq, steal;
+	/* second cpu */
+	struct timespec uptime;
+
+	SEC_BP_TRACE("enter sec_bp_log_cpu_stat\n");
+	if (sec_cs_idx >= SEC_BP_NR_SAMPLES)
+		return 1;
+
+	user_rt = user = nice = system_rt = system = idle = iowait =
+		irq = softirq = steal = 0ULL;
+
+	do_posix_clock_monotonic_gettime(&uptime);
+
+	for_each_online_cpu(i) {
+		/* Getting CPU state for first core */
+		user += kcpustat_cpu(i).cpustat[CPUTIME_USER];
+		nice += kcpustat_cpu(i).cpustat[CPUTIME_NICE];
+		system += kcpustat_cpu(i).cpustat[CPUTIME_SYSTEM];
+		idle += kcpustat_cpu(i).cpustat[CPUTIME_IDLE];
+		iowait += kcpustat_cpu(i).cpustat[CPUTIME_IOWAIT];
+		irq += kcpustat_cpu(i).cpustat[CPUTIME_IRQ];
+		softirq += kcpustat_cpu(i).cpustat[CPUTIME_SOFTIRQ];
+		steal += kcpustat_cpu(i).cpustat[CPUTIME_STEAL];
+
+
+		sec_cs_table[i][sec_cs_idx].uptime
+			= ((unsigned long) uptime.tv_sec * 100
+					+ uptime.tv_nsec / (NSEC_PER_SEC / 100));
+		sec_cs_table[i][sec_cs_idx].user = (u32) user;
+		sec_cs_table[i][sec_cs_idx].nice = (u32) nice;
+		sec_cs_table[i][sec_cs_idx].system = (u32) system;
+		sec_cs_table[i][sec_cs_idx].idle = (u32) idle;
+		sec_cs_table[i][sec_cs_idx].iowait = (u32) iowait;
+		sec_cs_table[i][sec_cs_idx].irq = (u32) irq;
+		sec_cs_table[i][sec_cs_idx].softirq = (u32) softirq;
+		sec_cs_table[i][sec_cs_idx].steal = (u32) steal;
+		sec_cs_table[i][sec_cs_idx].user_rt = 0;
+		sec_cs_table[i][sec_cs_idx].system_rt = 0;
+
+		user_rt = user = nice = system_rt = system = idle = iowait =
+			irq = softirq = steal = 0ULL;
+
+	}
+#if (SEC_BP_TRACE_UPTIME != 0)
+	printk("--- [BP %lu] ---\n", sec_cs_table[0][sec_cs_idx].uptime);
+#endif
+	++sec_cs_idx;
+
+	SEC_BP_TRACE("normal exit\n");
+	return 0;
+}
+
+/* Note:
+ * ====
+ * We should find out why we require tty_mutex lock.
+ * Also for task->group_leader is tty_mutex lock used?
+ * Find if group_leader is protected by task_lock or tty_mutex.
+ */
+static int sec_bp_log_process_stat(void)
+{
+	struct task_struct *g = NULL;
+	struct task_struct *p = NULL;
+	unsigned long long start_time = 0;
+	struct timespec uptime;
+
+	SEC_BP_TRACE("enter\n");
+
+	if (sec_ps_ut_idx >= SEC_BP_NR_SAMPLES
+			|| sec_ps_idx >= SEC_PS_NR_ENTRIES)
+		return 1;
+
+	read_lock(&tasklist_lock);
+
+	do_posix_clock_monotonic_gettime(&uptime);
+	sec_ps_ut_table[sec_ps_ut_idx].start_idx
+		= sec_ps_idx;
+
+	do_each_thread(g, p) {
+		sec_ps_table[sec_ps_idx].pid = p->pid;
+		/* multicore: storing core id in sec_ps_table */
+		sec_ps_table[sec_ps_idx].cpuid = task_cpu(p);
+		/* multicore end */
+
+		get_task_comm(sec_ps_table[sec_ps_idx].tcomm, p);
+		sec_ps_table[sec_ps_idx].state =
+			*sec_bp_get_task_state(p);
+		sec_ps_table[sec_ps_idx].ppid =
+			(pid_alive(p) ? p->group_leader->real_parent->tgid : 0);
+		sec_ps_table[sec_ps_idx].utime = p->utime;
+		sec_ps_table[sec_ps_idx].stime = p->stime;
+
+		/* Temporary variable needed for gcc-2.96 */
+		/* convert timespec -> nsec*/
+		start_time = (unsigned long long)p->start_time.tv_sec * NSEC_PER_SEC
+			+ p->start_time.tv_nsec;
+		/* convert nsec -> ticks */
+		start_time = nsec_to_clock_t(start_time);
+		sec_ps_table[sec_ps_idx].start_time = start_time;
+		++sec_ps_idx;
+		if (sec_ps_idx >= SEC_PS_NR_ENTRIES) {
+			SEC_BP_TRACE("limit reached sec_ps_idx= %d\n", sec_ps_idx);
+			goto thread_out; /* break out of nested loop */
+		}
+	} while_each_thread(g, p);
+
+thread_out:
+
+	sec_ps_ut_table[sec_ps_ut_idx].uptime
+		= ((unsigned long) uptime.tv_sec * 100
+				+ uptime.tv_nsec / (NSEC_PER_SEC / 100));
+	++sec_ps_ut_idx;
+
+	read_unlock(&tasklist_lock);
+	/* mutex_unlock(&tty_mutex); */
+
+	SEC_BP_TRACE("normal exit\n");
+	return 0;
+}
+
+/* Note:
+ * we can try to check if we can use jiffies as uptime (then need to
+ * start with 0 or some near to 0 value, otherwise BootChart will show
+ * misleading timeline). */
+static int sec_bp_log_diskstats(void)
+{
+	struct class_dev_iter iter;
+	struct device *dev;
+	struct gendisk *disk = NULL;
+	struct timespec uptime;
+	struct disk_part_iter piter;
+
+	SEC_BP_TRACE("enter\n");
+
+	if (sec_ds_ut_idx >= SEC_BP_NR_SAMPLES
+			|| sec_ds_idx >= SEC_DS_NR_ENTRIES)
+		return 1;
+
+#if (SEC_DS_USE_SUMMARY != 0)
+	ds_sum_nsect_read = 0;
+	ds_sum_nsect_write = 0;
+	ds_sum_io_ticks = 0;
+#endif
+
+	sec_ds_ut_table[sec_ds_ut_idx].start_idx = sec_ds_idx;
+	/* mutex_lock(&block_class_lock); */
+	do_posix_clock_monotonic_gettime(&uptime);
+
+	class_dev_iter_init(&iter, &block_class, NULL, &disk_type);
+	while ((dev = class_dev_iter_next(&iter)))	{
+		disk = dev_to_disk(dev);
+		BUG_ON(!disk);
+		/* disk_part_iter_init(&piter, disk, DISK_PITER_INCL_EMPTY_PART0); */
+		disk_part_iter_init(&piter, disk, DISK_PITER_INCL_PART0);
+		while (sec_bp_log_ds_entry(disk, &piter)) {
+			if (sec_ds_idx >= SEC_DS_NR_ENTRIES) {
+				SEC_BP_TRACE("limit reached sec_ds_ut_idx= %d\n", sec_ds_idx);
+				break;
+			}
+		}
+		disk_part_iter_exit(&piter);
+
+	}
+	class_dev_iter_exit(&iter);
+
+	/* mutex_unlock(&block_class_lock); */
+
+#if (SEC_DS_USE_SUMMARY != 0)
+	sec_ds_table[sec_ds_idx].nsect_read
+		= ds_sum_nsect_read;
+	sec_ds_table[sec_ds_idx].nsect_write
+		= ds_sum_nsect_write;
+	sec_ds_table[sec_ds_idx].io_ticks
+		= ds_sum_io_ticks;
+	++sec_ds_idx;
+#endif
+
+	sec_ds_ut_table[sec_ds_ut_idx].uptime
+		= ((unsigned long) uptime.tv_sec * 100
+				+ uptime.tv_nsec / (NSEC_PER_SEC / 100));
+	++sec_ds_ut_idx;
+
+	SEC_BP_TRACE("normal exit\n");
+	return 0;
+}
+
+static inline int sec_bp_log_ds_entry(struct gendisk *gd, struct disk_part_iter *piter)
+{
+	char buf[BDEVNAME_SIZE];
+	struct hd_struct *hd;
+	int cpu;
+
+	SEC_BP_TRACE("enter\n");
+
+	SEC_BP_TRACE("preempt_disable()\n");
+	/* preempt_disable(); */
+	hd = disk_part_iter_next(piter);
+	if (hd) {
+		cpu = part_stat_lock();
+		part_round_stats(cpu, hd);
+		part_stat_unlock();
+	} else {
+		return 0;
+	}
+	/* preempt_enable(); */
+	SEC_BP_TRACE("preempt_enable()\n");
+
+	/* limit of input char array is properly handled in disk_name(),
+	 * so no need to check overlow case */
+	disk_name(gd, hd->partno, buf);
+
+	/* check if does not need to be considered for disk-stats */
+	if (sec_bp_ds_filter(buf) && hd) {
+#if (SEC_DS_USE_SUMMARY != 0)
+		ds_sum_nsect_read += part_stat_read(hd, sectors[0]);
+		ds_sum_nsect_write += part_stat_read(hd, sectors[1]);
+		ds_sum_io_ticks += part_stat_read(hd, io_ticks);
+#else
+		strncpy(sec_ds_table[sec_ds_idx].name,
+				buf, SEC_DS_BDEVNAME);
+		sec_ds_table[sec_ds_idx].name[SEC_DS_BDEVNAME - 1] = '\0';
+
+		sec_ds_table[sec_ds_idx].nsect_read
+			= part_stat_read(hd, sectors[0]);
+
+		sec_ds_table[sec_ds_idx].nsect_write
+			= part_stat_read(hd, sectors[1]);
+
+		sec_ds_table[sec_ds_idx].io_ticks
+			= part_stat_read(hd, io_ticks);
+		++sec_ds_idx;
+#endif /* #if (SEC_DS_USE_SUMMARY == 0) */
+	}
+	return 1;
+}
+
+
+/**********************************************************************
+ *
+ *  Dump boot profile information to console related functions.
+ *
+ **********************************************************************/
+
+
+/* Dump the memory used and actually allocated memory by the internal
+ * tables of boot profile soluton.  It is only for debugging and
+ * information. */
+static void sec_bp_meminfo_dump(void)
+{
+	const int cpu_used_mem = (sec_cs_idx
+			* sizeof(struct sec_cpustats)*CONFIG_NR_CPUS);
+
+	const int cpu_alloc_mem = (SEC_BP_NR_SAMPLES
+			* sizeof(struct sec_cpustats)*CONFIG_NR_CPUS);
+
+	const int ps_ut_used_mem = (sec_ps_ut_idx
+			* sizeof(*sec_ps_ut_table));
+	const int ps_ut_alloc_mem = (SEC_BP_NR_SAMPLES
+			* sizeof(*sec_ps_ut_table));
+	const int ps_used_mem = (sec_ps_idx
+			* sizeof(*sec_ps_table));
+	const int ps_alloc_mem = (SEC_PS_NR_ENTRIES
+			* sizeof(*sec_ps_table));
+
+	const int ds_ut_used_mem = (sec_ds_ut_idx
+			* sizeof(*sec_ds_ut_table));
+	const int ds_ut_alloc_mem = (SEC_BP_NR_SAMPLES
+			* sizeof(*sec_ds_ut_table));
+	const int ds_used_mem = (sec_ds_idx
+			* sizeof(*sec_ds_table));
+	const int ds_alloc_mem = (SEC_DS_NR_ENTRIES
+			* sizeof(*sec_ds_table));
+
+	BUG_ON(sec_bp_state != SEC_BP_STATE_COMPLETING
+			&& sec_bp_state != SEC_BP_STATE_COMPLETED);
+
+	printk("\n");
+	printk("#   boot prof meminfo\n");
+	printk("#\n");
+	printk("# used memory   /  allocated memory\n");
+	printk("# cpustat memory:  %d x %d = %d / %d\n",
+			sec_cs_idx, sizeof(struct sec_cpustats),
+			cpu_used_mem, cpu_alloc_mem);
+
+	printk("# process stat ut memory:  %d x %d = %d / %d\n",
+			sec_ps_ut_idx, sizeof(*sec_ps_ut_table),
+			ps_ut_used_mem, ps_ut_alloc_mem);
+
+	printk("# process stat memory: %d x %d = %d / %d\n",
+			sec_ps_idx, sizeof(*sec_ps_table),
+			ps_used_mem, ps_alloc_mem);
+
+	printk("# diskstats ut memory: %d x %d = %d / %d\n",
+			sec_ds_ut_idx, sizeof(*sec_ds_ut_table),
+			ds_ut_used_mem, ds_ut_alloc_mem);
+
+	printk("# diskstats memory: %d x %d = %d / %d\n",
+			sec_ds_idx, sizeof(*sec_ds_table),
+			ds_used_mem, ds_alloc_mem);
+
+	printk("# Total memory: %d / %d\n",
+			(cpu_used_mem + ps_ut_used_mem + ps_used_mem
+			 + ds_ut_used_mem + ds_used_mem),
+			(cpu_alloc_mem + ps_ut_alloc_mem + ps_alloc_mem
+			 + ds_ut_alloc_mem + ds_alloc_mem));
+
+	printk("#\n");
+	printk("\n");
+}
+
+static void sec_bp_direct_dump(void)
+{
+	SEC_BP_TRACE("enter\n");
+
+	BUG_ON(sec_bp_state != SEC_BP_STATE_COMPLETING
+			&& sec_bp_state != SEC_BP_STATE_COMPLETED);
+
+	sec_bp_dump_header();
+
+	printk("\n");
+	printk("# cpu stat start\n");
+	printk("\n");
+	sec_bp_dump_cpu_stat();
+
+	printk("\n");
+	printk("# process stat start\n");
+	printk("\n");
+	sec_bp_dump_process_stat();
+
+	printk("\n");
+	printk("# diskstats start\n");
+	printk("\n");
+	sec_bp_dump_diskstats();
+
+	printk("\n");
+	printk("# boot prof report end\n");
+	printk("\n");
+
+}
+
+static void sec_bp_dump_header(void)
+{
+	printk("#   boot prof header\n");
+	printk("#\n");
+	printk("\n");
+	if (bs_header)
+		printk("%s", bs_header);
+}
+
+/* for /proc/stat */
+static void sec_bp_dump_cpu_stat(void)
+{
+	int ii = 0;
+	unsigned int i;
+
+	BUG_ON(!sec_cs_table[0]);
+	printk("\n#@%s\n", PROC_STAT_LOG);
+	for (ii = 0; ii < sec_cs_idx; ++ii) {
+
+		for_each_online_cpu(i)
+		{
+			printk("%lu\n", sec_cs_table[i][ii].uptime);
+
+			printk("cpu%u  %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu\n", i,
+					(unsigned long long)
+					cputime64_to_clock_t(sec_cs_table[i][ii].user),
+					(unsigned long long)
+					cputime64_to_clock_t(sec_cs_table[i][ii].nice),
+					(unsigned long long)
+					cputime64_to_clock_t(sec_cs_table[i][ii].system),
+					(unsigned long long)
+					cputime64_to_clock_t(sec_cs_table[i][ii].idle),
+					(unsigned long long)
+					cputime64_to_clock_t(sec_cs_table[i][ii].iowait),
+					(unsigned long long)
+					cputime64_to_clock_t(sec_cs_table[i][ii].irq),
+					(unsigned long long)
+					cputime64_to_clock_t(sec_cs_table[i][ii].softirq),
+					(unsigned long long)
+					cputime64_to_clock_t(sec_cs_table[i][ii].steal),
+					(unsigned long long)
+					cputime64_to_clock_t(sec_cs_table[i][ii].user_rt),
+					(unsigned long long)
+					cputime64_to_clock_t(sec_cs_table[i][ii].system_rt));
+			printk("\n");
+		}
+	}
+}
+
+
+/* Note:
+ * =====
+ *
+ *  Do we need to add the time of all the threads also for the
+ *  main thread?  refer to array.c, I think it is not required.
+ *  We should keep eye on 'whole' argument, when received as one
+ *  in array.c function? */
+static void sec_bp_dump_process_stat(void)
+{
+	int ii = 0;
+	int jj = 0;
+	int end_idx = 0;
+
+	BUG_ON(!sec_ps_ut_table);
+	BUG_ON(!sec_ps_table);
+
+	printk("#@%s\n", PROC_PS_LOG);
+	for (ii = 0; ii < sec_ps_ut_idx; ++ii) {
+
+		printk("%lu\n", sec_ps_ut_table[ii].uptime);
+
+		if (ii == sec_ps_ut_idx - 1)
+			end_idx = sec_ps_idx; /* last record limit */
+		else
+			end_idx = sec_ps_ut_table[ii+1].start_idx;
+
+		for (jj = sec_ps_ut_table[ii].start_idx; jj < end_idx; ++jj)
+			printk(SEC_BP_PROC_PS_FMT_STR,
+					sec_ps_table[jj].pid,
+					sec_ps_table[jj].tcomm,
+#if (SEC_BP_COMM_WITH_PID != 0)
+					sec_ps_table[jj].pid, /* append to tcomm */
+#endif
+					/* sec_ps_table[jj].cpuid,*/ /* cpuid */
+					sec_ps_table[jj].state,
+					sec_ps_table[jj].ppid,
+					cputime_to_clock_t(sec_ps_table[jj].utime),
+					cputime_to_clock_t(sec_ps_table[jj].stime),
+					(unsigned long long)sec_ps_table[jj].start_time,
+					(unsigned int) sec_ps_table[jj].cpuid);
+
+		printk("\n");
+		msleep(DIRECT_DUMP_SLOW_MS);
+	}
+}
+
+static void sec_bp_dump_diskstats(void)
+{
+	int ii = 0;
+	int jj = 0;
+	int end_idx = 0;
+
+	BUG_ON(!sec_ds_ut_table);
+	BUG_ON(!sec_ds_table);
+
+	printk("#@%s\n", PROC_DISKSTATS_LOG);
+	for (ii = 0; ii < sec_ds_ut_idx; ++ii) {
+
+		printk("%lu\n", sec_ds_ut_table[ii].uptime);
+
+		if (ii == sec_ds_ut_idx - 1)
+			end_idx = sec_ds_idx; /* last record limit */
+		else
+			end_idx = sec_ds_ut_table[ii+1].start_idx;
+
+		for (jj = sec_ds_ut_table[ii].start_idx; jj < end_idx; ++jj)
+			/* major first_minor name ios[0] merges[0] nsect_read
+			   ticks[0] ios[1] merges[1] nsect_read sect_write
+			   ticks[1] in_flight io_ticks time_in_queue */
+			/* "%4d %4d %s %lu %lu %llu %u %lu %lu %llu %u %u %u %u\n" */
+			printk("0 0 %s 0 0 %llu 0 0 0 %llu 0 0 %u 0\n",
+#if (SEC_DS_USE_SUMMARY == 0)
+					sec_ds_table[jj].name,
+#else
+					"sum_bdev",
+#endif
+					(unsigned long long)sec_ds_table[jj].nsect_read,
+					(unsigned long long)sec_ds_table[jj].nsect_write,
+					jiffies_to_msecs(sec_ds_table[jj].io_ticks));
+		printk("\n");
+		msleep(DIRECT_DUMP_SLOW_MS);
+	}
+}
+
+/**********************************************************************/
+/*                                                                    */
+/*     sec boot profile utility functions                             */
+/*                                                                    */
+/**********************************************************************/
+
+/**********************************************************************
+ *
+ *  sec_bootstats:  proc related implementation.
+ *
+ **********************************************************************/
+
+static void sec_bp_proc_activate(void)
+{
+	static struct proc_dir_entry *sec_bootstats_proc_dentry;
+	SEC_BP_TRACE("enter\n");
+	BUG_ON(sec_bp_state != SEC_BP_STATE_COMPLETING);
+
+	if (!sec_bootstats_proc_dentry) {
+		SEC_BP_TRACE("creating /proc/bootstats\n");
+		sec_bootstats_proc_dentry = create_proc_entry("bootstats", 0, NULL);
+
+		if (sec_bootstats_proc_dentry) {
+			sec_bootstats_proc_dentry->read_proc  = sec_bp_proc_read;
+			sec_bootstats_proc_dentry->write_proc = sec_bp_proc_write;
+		} else
+			printk(KERN_WARNING "/proc/bootstats creation failed\n");
+	}
+}
+
+/* This function is called with the /proc file is written */
+int sec_bp_proc_write(struct file *file, const char *buffer,
+		unsigned long count, void *data)
+{
+	long ilength = -EFAULT;
+
+	SEC_BP_TRACE("(file= %p, buffer= %p, count= %lu, data= %p)\n",
+			file, buffer, count, data);
+
+	(void) file; /* not used, well except for trace printks */
+	(void) data; /* not used */
+
+	/* we never expect it to be null, but put a condition to handle it
+	   is release builds */
+	BUG_ON(!buffer);
+
+	if (!buffer) {
+		printk (KERN_ERR "buffer is null\n");
+
+	} else if (count > 0) {
+		char cinput[4];
+
+		ilength = (count >= sizeof(cinput) ? sizeof(cinput) - 1 : count);
+		/* write data to the buffer */
+		if (copy_from_user(cinput, buffer, ilength)) {
+			printk(KERN_WARNING "%s: Error in copy_from_user: Returning\n",
+					__FUNCTION__);
+			return -EPERM;
+		}
+
+		cinput[ilength] = '\0';
+		SEC_BP_TRACE("buf@3= (%s)\n", cinput);
+		switch (cinput[0]) {
+		case 'h':
+			sec_bp_print_help();
+			break;
+		case '1':
+			/* (re)start the profiling. */
+			if (sec_bp_state == SEC_BP_STATE_UNINITED
+					|| sec_bp_state == SEC_BP_STATE_COMPLETED) {
+				printk(KERN_INFO "%s: Profiling OFF -> active\n", __FUNCTION__);
+				sec_bp_start();
+			} else {
+				BUG_ON(sec_bp_state != SEC_BP_STATE_RUNNING
+						&& sec_bp_state != SEC_BP_STATE_STARTING
+						&& sec_bp_state != SEC_BP_STATE_COMPLETING);
+				printk(KERN_INFO "%s: Profiling already active\n", __FUNCTION__);
+			}
+			break;
+		case 'd':
+			if (sec_bp_state == SEC_BP_STATE_COMPLETED)
+				sec_bp_direct_dump();
+			else
+				printk(KERN_INFO "%s: not in finished state (%d)\n",
+						__FUNCTION__, sec_bp_state);
+			break;
+		case 's':
+			sec_bp_print_status();
+			break;
+		case 'c':
+			if (sec_bp_state == SEC_BP_STATE_COMPLETED) {
+				printk(KERN_INFO "%s: dealloc memory\n", __FUNCTION__);
+				sec_bp_dealloc();
+				BUG_ON(sec_bp_state != SEC_BP_STATE_UNINITED);
+			} else if (sec_bp_state == SEC_BP_STATE_UNINITED) {
+				printk(KERN_INFO "%s: memory is already released\n",
+						__FUNCTION__);
+			} else {
+				BUG_ON(sec_bp_state != SEC_BP_STATE_STARTING
+						&& sec_bp_state != SEC_BP_STATE_RUNNING
+						&& sec_bp_state != SEC_BP_STATE_COMPLETING);
+				printk(KERN_INFO "%s: ERR: currently running\n",
+						__FUNCTION__);
+			}
+
+			break;
+		default:
+			printk(KERN_WARNING "%s: invalid choice [0x%x, %c]\n",
+					__FUNCTION__, cinput[0], cinput[0]);
+		}
+
+		/* we need to pretend that we consumed all the buffer, so that
+		 * the system feels ok and does not attempt to re-write
+		 * again */
+		ilength = count;
+
+	} else {
+		printk(KERN_WARNING "%s: insufficient data, count= %ld\n",
+				__FUNCTION__, count);
+	}
+
+	return ilength;
+}
+
+/* Called when /proc/bootstats is read.
+ * Note:
+ * It is not re-entrant function. Right now it does not require to be
+ * re-entrant, unless some user tries to access it from two shells, or
+ * more than one program / thread.  Do not access this module for
+ * output report simultaneous from more than one place, e.g. kdebugd
+ * and user or from more than one threads.
+ *
+ * We do not support a small buffer read, also we never support
+ * seeking.  Users should read a big buffer say 512 or 1024 bytes and
+ * typically a line size may be around 80 characters. We may actually
+ * fill less data, in that case we return that as return value, but we
+ * always expect a good size buffer. */
+int sec_bp_proc_read(char *buffer, char **buffer_location,
+		off_t offset, int buffer_length, int *eof,
+		void *data)
+{
+	int len_copied = 0;
+	int ret = -EFAULT;
+
+	SEC_BP_TRACE("(buffer= %p, buffer_location= %p, "
+			"offset= %ld, buffer_length= %d, eof= %p, data= %p)\n",
+			buffer, buffer_location, offset, buffer_length, eof, data);
+
+	/* It is required, otherwise for large proc data next read does
+	   not happen with proper offset. */
+	*buffer_location = buffer;
+	(void) data; /* not used */
+
+	if (sec_bp_state != SEC_BP_STATE_COMPLETED) {
+
+		printk(KERN_WARNING "ERR: boot-profiling is "
+				"not completed, state= %d\n", sec_bp_state);
+		ret = -ENOENT;
+		goto proc_read_out;
+
+	} else if (!sec_bp_proc_check_length(buffer_length)) {
+#if (SEC_BP_WARN_SMALL_BUF_LEN != 0)
+		/* It clashes with normal prints. */
+		printk(KERN_WARNING "++++++++++++++++++++++++++++++++++++++\n");
+		printk(KERN_WARNING "======================================\n");
+		printk(KERN_WARNING "buffer_length= %d:  "
+				"small length not supported\n", buffer_length);
+		printk(KERN_WARNING "======================================\n");
+		printk(KERN_WARNING "++++++++++++++++++++++++++++++++++++++\n");
+#endif
+		ret = -ENOBUFS;
+		goto proc_read_out;
+
+	} else if (!buffer) {
+		printk(KERN_WARNING "input buffer is null\n");
+		ret = -EFAULT;
+		goto proc_read_out;
+
+	} else if (offset == 0) {
+		SEC_BP_TRACE("offset == 0: ~~~~~~~~\n");
+
+		/* we need to reset here, e.g. if there is any previous
+		 * incomplete read */
+		bp_stats_proc_read_ctx.next_expected_seq_offset = 0;
+		bp_stats_proc_read_ctx.is_no_more_data = 0;
+		bp_stats_proc_read_ctx.who = SEC_BP_FILL_HEADER; /* start */
+		bp_stats_proc_read_ctx.next_idx = 0;
+		bp_stats_proc_read_ctx.next_sub_idx = 0;
+		bp_stats_proc_read_ctx.next_idx_is_done = 0;
+		bp_stats_proc_read_ctx.fname_is_done = 0;
+
+	} else if (bp_stats_proc_read_ctx.is_no_more_data) {
+		SEC_BP_TRACE("is_eof: ~~~~~~~~~~~~~~\n");
+		*eof = 1;
+		ret = 0;
+		goto proc_read_out;
+
+	} else if (offset != bp_stats_proc_read_ctx.next_expected_seq_offset) {
+		printk(KERN_WARNING "read in random order, not supported, "
+				"offset = %ld vs %ld\n",
+				bp_stats_proc_read_ctx.next_expected_seq_offset, offset);
+		*eof = 1;
+		ret = -ESPIPE;
+		goto proc_read_out;
+	}
+
+	len_copied = sec_bp_proc_fill_report(buffer, offset, buffer_length);
+	ret = len_copied;
+	SEC_BP_TRACE("len_copied= %d\n", len_copied);
+
+proc_read_out:
+
+	return ret;
+}
+
+static int sec_bp_proc_fill_report(char *buffer, off_t offset,
+		int buffer_length)
+{
+	int filled_len = 0;
+
+	SEC_BP_TRACE("offset= %ld, buffer_length= %d\n",
+			(long)offset, buffer_length);
+
+	if (!bp_stats_proc_read_ctx.line_cache) {
+
+		SEC_BP_TRACE("alloca line cache\n");
+		bp_stats_proc_read_ctx.line_cache =
+			(char *) vmalloc(SEC_BP_LINE_CACHE_SIZE);
+		if (!bp_stats_proc_read_ctx.line_cache) {
+			printk(KERN_WARNING "out of memory\n");
+			return -ENOMEM;
+		}
+	}
+
+	BUG_ON(bp_stats_proc_read_ctx.is_no_more_data);
+
+	/* header */
+	if (bp_stats_proc_read_ctx.who == SEC_BP_FILL_HEADER) {
+		SEC_BP_TRACE("who == %d\n", bp_stats_proc_read_ctx.who);
+		filled_len += sec_bp_proc_fill_header(buffer, buffer_length);
+	}
+
+	/* proc_stat */
+	if (bp_stats_proc_read_ctx.who == SEC_BP_FILL_CPUSTAT
+			&& filled_len < buffer_length) {
+		SEC_BP_TRACE("who == %d\n", bp_stats_proc_read_ctx.who);
+		filled_len += sec_bp_proc_fill_cpu_stat(buffer + filled_len,
+				buffer_length - filled_len);
+	}
+
+	/* proc_ps_stat */
+	if (bp_stats_proc_read_ctx.who == SEC_BP_FILL_PROC_PS
+			&& filled_len < buffer_length) {
+		SEC_BP_TRACE("who == %d\n", bp_stats_proc_read_ctx.who);
+		filled_len += sec_bp_proc_fill_process_stat(buffer + filled_len,
+				buffer_length - filled_len);
+	}
+
+	/* proc_diskstats */
+	if (bp_stats_proc_read_ctx.who == SEC_BP_FILL_DISKSTATS
+			&& filled_len < buffer_length) {
+		SEC_BP_TRACE("who == %d\n", bp_stats_proc_read_ctx.who);
+		filled_len += sec_bp_proc_fill_diskstats(buffer + filled_len,
+				buffer_length - filled_len);
+	}
+
+	/* last step */
+	if (bp_stats_proc_read_ctx.who == SEC_BP_FILL_DONE) {
+		SEC_BP_TRACE("who == %d\n", bp_stats_proc_read_ctx.who);
+		bp_stats_proc_read_ctx.is_no_more_data = 1;
+		vfree(bp_stats_proc_read_ctx.line_cache);
+		bp_stats_proc_read_ctx.line_cache = NULL;
+	} else {
+		BUG_ON(bp_stats_proc_read_ctx.who < SEC_BP_FILL_HEADER
+				|| bp_stats_proc_read_ctx.who >= SEC_BP_FILL_DONE);
+	}
+
+	SEC_BP_TRACE("filled_len= %d\n", filled_len);
+	BUG_ON(filled_len > buffer_length);
+	return filled_len;
+}
+
+static int sec_bp_proc_fill_header(char *buffer, int buffer_length)
+{
+	int filled_len = 0;
+	int bs_header_len = 0;
+	BUG_ON(bp_stats_proc_read_ctx.who != SEC_BP_FILL_HEADER);
+	BUG_ON(!bs_header);
+
+	if (!bs_header) {  /* silently skip header */
+		bp_stats_proc_read_ctx.next_idx = 0;
+		++bp_stats_proc_read_ctx.who;
+		return 0;
+	}
+
+	bs_header_len = strlen(bs_header);
+	if (bp_stats_proc_read_ctx.next_idx < bs_header_len) {
+		filled_len = (bs_header_len
+				- bp_stats_proc_read_ctx.next_idx); /* remaining len */
+		filled_len = min(buffer_length, filled_len); /* adjusted len */
+		memcpy(buffer, bs_header + bp_stats_proc_read_ctx.next_idx,
+				filled_len);
+		bp_stats_proc_read_ctx.next_idx += filled_len;
+	} else {
+		bp_stats_proc_read_ctx.next_idx = 0;
+		++bp_stats_proc_read_ctx.who;
+	}
+
+	bp_stats_proc_read_ctx.next_expected_seq_offset += filled_len;
+	bp_stats_proc_read_ctx.is_no_more_data = 0;
+
+	return filled_len;
+}
+
+static int sec_bp_proc_fill_cpu_stat(char *buffer, int buffer_length)
+{
+	int ii = 0;
+	int line_len = 0, length = 0;
+	int len_copied = 0;
+	int next_idx_done_cnt = 2;
+	unsigned int i;
+
+	SEC_BP_TRACE("buffer_length= %d\n", buffer_length);
+
+	SEC_BP_TRACE("next_idx= %d, next_sub_idx= %d, next_idx_done_cnt= %d\n",
+			bp_stats_proc_read_ctx.next_idx,
+			bp_stats_proc_read_ctx.next_sub_idx,
+			bp_stats_proc_read_ctx.next_idx_is_done);
+
+	if (!bp_stats_proc_read_ctx.fname_is_done) {
+
+		BUG_ON(bp_stats_proc_read_ctx.next_idx
+				|| bp_stats_proc_read_ctx.next_idx_is_done);
+
+		line_len = sizeof("#@" PROC_STAT_LOG "\n") - 1;
+		if (line_len > buffer_length) {
+			SEC_BP_TRACE("#@%s: line_len= %d > %d: -- 00 --\n",
+					PROC_STAT_LOG, line_len, buffer_length);
+			return 0;
+		}
+
+		memcpy(buffer, "#@" PROC_STAT_LOG "\n", line_len);
+		SEC_BP_TRACE("ii= %d: [0  => %d]: %d\n",
+				ii, line_len, buffer_length);
+		len_copied = line_len;
+		next_idx_done_cnt = 0;
+		bp_stats_proc_read_ctx.fname_is_done = 1;
+	}
+
+	for (ii = bp_stats_proc_read_ctx.next_idx; ii < sec_cs_idx; ++ii) {
+
+		next_idx_done_cnt = 0;
+
+		if (ii != bp_stats_proc_read_ctx.next_idx
+				|| !bp_stats_proc_read_ctx.next_idx_is_done) {
+
+			SEC_BP_TRACE("first idx not not complete: idx= %d\n",
+					bp_stats_proc_read_ctx.next_idx);
+
+			line_len = snprintf(bp_stats_proc_read_ctx.line_cache, SEC_BP_LINE_CACHE_SIZE, "%lu\n",
+					sec_cs_table[0][ii].uptime);
+
+			if (len_copied + line_len > buffer_length) {
+				SEC_BP_TRACE("len_copied + line_len = %d + %d > %d: -- 0 --\n",
+						len_copied, line_len, buffer_length);
+				break;
+			}
+
+			memcpy(buffer + len_copied, bp_stats_proc_read_ctx.line_cache,
+					line_len);
+			SEC_BP_TRACE("ii= %d: [%d + %d => %d]: %d\n",
+					ii, len_copied, line_len,
+					len_copied + line_len, buffer_length);
+			len_copied += line_len;
+		}
+
+		next_idx_done_cnt = 1;
+
+		SEC_BP_TRACE("ii= %d: fill_stats\n", ii);
+		length = 0;
+		for_each_online_cpu(i)
+		{
+			length += snprintf(bp_stats_proc_read_ctx.line_cache+length,
+					SEC_BP_LINE_CACHE_SIZE-length,
+					"cpu%u  %llu %llu %llu %llu %llu"
+					" %llu %llu %llu %llu %llu\n", i,
+					(unsigned long long)
+					cputime64_to_clock_t(sec_cs_table[i][ii].user),
+					(unsigned long long)
+					cputime64_to_clock_t(sec_cs_table[i][ii].nice),
+					(unsigned long long)
+					cputime64_to_clock_t(sec_cs_table[i][ii].system),
+					(unsigned long long)
+					cputime64_to_clock_t(sec_cs_table[i][ii].idle),
+					(unsigned long long)
+					cputime64_to_clock_t(sec_cs_table[i][ii].iowait),
+					(unsigned long long)
+					cputime64_to_clock_t(sec_cs_table[i][ii].irq),
+					(unsigned long long)
+					cputime64_to_clock_t(sec_cs_table[i][ii].softirq),
+					(unsigned long long)
+					cputime64_to_clock_t(sec_cs_table[i][ii].steal),
+					(unsigned long long)
+						cputime64_to_clock_t(sec_cs_table[i][ii].user_rt),
+					(unsigned long long)
+						cputime64_to_clock_t(sec_cs_table[i][ii].system_rt));
+		}
+		length += snprintf(bp_stats_proc_read_ctx.line_cache + length, SEC_BP_LINE_CACHE_SIZE-length, "\n");
+
+		line_len = length;
+		if (len_copied + line_len > buffer_length) {
+			break;
+		}
+
+		memcpy(buffer + len_copied, bp_stats_proc_read_ctx.line_cache,
+				line_len);
+		SEC_BP_TRACE("ii= %d:  [%d + %d => %d]: %d\n",
+				ii, len_copied, line_len,
+				len_copied + line_len, buffer_length);
+		len_copied += line_len;
+
+		next_idx_done_cnt = 2;
+	}
+
+	bp_stats_proc_read_ctx.next_expected_seq_offset += len_copied;
+	bp_stats_proc_read_ctx.is_no_more_data = 0;
+
+
+	SEC_BP_TRACE("ii= %d: next_idx= %d, "
+			"next_sub_idx= %d, next_idx_done_cnt= %d: -- Pre ---\n",
+			ii, bp_stats_proc_read_ctx.next_idx,
+			bp_stats_proc_read_ctx.next_sub_idx, next_idx_done_cnt);
+
+	BUG_ON(!bp_stats_proc_read_ctx.fname_is_done);
+	if (ii == sec_cs_idx) {
+		SEC_BP_TRACE("ii= %d: Data finished\n", ii);
+		++bp_stats_proc_read_ctx.who;
+		bp_stats_proc_read_ctx.next_idx = 0;
+		bp_stats_proc_read_ctx.next_sub_idx = 0;
+		BUG_ON(next_idx_done_cnt != 2);
+		bp_stats_proc_read_ctx.next_idx_is_done = 0;
+		/* bp_stats_proc_read_ctx.is_no_more_data = 1; */
+		bp_stats_proc_read_ctx.fname_is_done = 0;
+	} else {
+		SEC_BP_TRACE("ii= %d: more_data\n", ii);
+		BUG_ON(!(next_idx_done_cnt == 0 || next_idx_done_cnt == 1));
+		BUG_ON(bp_stats_proc_read_ctx.who != SEC_BP_FILL_CPUSTAT);
+		bp_stats_proc_read_ctx.next_idx = ii;
+		bp_stats_proc_read_ctx.next_sub_idx = 0; /* not used */
+		bp_stats_proc_read_ctx.next_idx_is_done = (next_idx_done_cnt != 0);
+	}
+
+	SEC_BP_TRACE("ii= %d: next_idx= %d, "
+			"next_sub_idx= %d, next_idx_done_cnt= %d: -- Post ---\n",
+			ii, bp_stats_proc_read_ctx.next_idx,
+			bp_stats_proc_read_ctx.next_sub_idx,
+			bp_stats_proc_read_ctx.next_idx_done_cnt);
+
+	BUG_ON(len_copied > buffer_length);
+	return len_copied;
+}
+
+static int sec_bp_proc_fill_process_stat(char *buffer, int buffer_length)
+{
+	int ii = 0;
+	int jj = 0;
+	int end_idx = 0;
+	int line_len = 0;
+	int len_copied = 0;
+	int next_idx_is_done = 0;
+	int is_loop_break = 0;
+
+	SEC_BP_TRACE("buffer_length= %d\n", buffer_length);
+
+	SEC_BP_TRACE("next_idx= %d, next_sub_idx= %d, next_idx_is_done= %d\n",
+			bp_stats_proc_read_ctx.next_idx,
+			bp_stats_proc_read_ctx.next_sub_idx,
+			bp_stats_proc_read_ctx.next_idx_is_done);
+
+	if (!bp_stats_proc_read_ctx.fname_is_done) {
+
+		BUG_ON(bp_stats_proc_read_ctx.next_idx
+				|| bp_stats_proc_read_ctx.next_idx_is_done);
+
+		line_len = sizeof("#@" PROC_PS_LOG "\n") - 1;
+		if (line_len > buffer_length) {
+			SEC_BP_TRACE("#@%s: line_len= %d > %d: -- 00 --\n",
+					PROC_PS_LOG, line_len, buffer_length);
+			return 0;
+		}
+
+		memcpy(buffer, "#@" PROC_PS_LOG "\n", line_len);
+		SEC_BP_TRACE("ii= %d: [0  => %d]: %d\n",
+				ii, line_len, buffer_length);
+		len_copied = line_len;
+		bp_stats_proc_read_ctx.fname_is_done = 1;
+	}
+
+	for (ii = bp_stats_proc_read_ctx.next_idx;
+			!is_loop_break && ii < sec_ps_ut_idx; ++ii) {
+
+		if (ii != bp_stats_proc_read_ctx.next_idx
+				|| !bp_stats_proc_read_ctx.next_idx_is_done) {
+
+			SEC_BP_TRACE("first idx not not complete: idx= %d\n",
+					bp_stats_proc_read_ctx.next_idx);
+
+			line_len = snprintf(bp_stats_proc_read_ctx.line_cache, SEC_BP_LINE_CACHE_SIZE, "%lu\n",
+					sec_ps_ut_table[ii].uptime);
+
+			if (len_copied + line_len > buffer_length) {
+				SEC_BP_TRACE("len_copied + line_len = %d + %d > %d: -- 0 --\n",
+						len_copied, line_len, buffer_length);
+				next_idx_is_done = 0;
+				break;
+			}
+
+			memcpy(buffer + len_copied, bp_stats_proc_read_ctx.line_cache,
+					line_len);
+			SEC_BP_TRACE("ii= %d: [%d + %d => %d]: %d\n",
+					ii, len_copied, line_len,
+					len_copied + line_len, buffer_length);
+			len_copied += line_len;
+
+			jj = sec_ps_ut_table[ii].start_idx;
+		} else {
+			jj = bp_stats_proc_read_ctx.next_sub_idx;
+		}
+		SEC_BP_TRACE("ii= %d: first jj= %d\n", ii, jj);
+
+		next_idx_is_done = 1;
+		if (ii == sec_ps_ut_idx - 1)
+			end_idx = sec_ps_idx;
+		else
+			end_idx = sec_ps_ut_table[ii+1].start_idx;
+
+		for (; jj < end_idx; ++jj) {
+			line_len = snprintf(bp_stats_proc_read_ctx.line_cache,
+					SEC_BP_LINE_CACHE_SIZE,
+					SEC_BP_PROC_PS_FMT_STR,
+					sec_ps_table[jj].pid,
+					sec_ps_table[jj].tcomm,
+#if (SEC_BP_COMM_WITH_PID != 0)
+					sec_ps_table[jj].pid, /* append to tcomm */
+#endif
+					sec_ps_table[jj].state,
+					sec_ps_table[jj].ppid,
+					cputime_to_clock_t(sec_ps_table[jj].utime),
+					cputime_to_clock_t(sec_ps_table[jj].stime),
+					(unsigned long long)sec_ps_table[jj].start_time,
+					(unsigned int)sec_ps_table[jj].cpuid /* cpuid */
+					);
+
+			/* lalit: added +1 because we have a terminating new line
+			   at end of the block (see below). */
+			if (len_copied + line_len + 1 > buffer_length) {
+				is_loop_break = 1;
+				break;
+			}
+
+			memcpy(buffer + len_copied, bp_stats_proc_read_ctx.line_cache, line_len);
+			SEC_BP_TRACE("ii= %d, jj= %d: [%d + %d => %d]: %d\n",
+					ii, jj, len_copied, line_len,
+					len_copied + line_len, buffer_length);
+			len_copied += line_len;
+		}
+
+		/* Do not add new line if upper loop finished pre-maturely (we
+		 * had to break because of buffer full, net read call will
+		 * resume again */
+		if (!is_loop_break) {
+			SEC_BP_TRACE("ii= %d: [%d + NL => %d]: %d\n",
+					ii, len_copied,
+					len_copied + 1, buffer_length);
+			BUG_ON(len_copied >= buffer_length);
+			buffer[len_copied++] = '\n';
+		}
+	}
+
+	bp_stats_proc_read_ctx.next_expected_seq_offset += len_copied;
+	bp_stats_proc_read_ctx.is_no_more_data = 0;
+
+
+	SEC_BP_TRACE("ii= %d, jj= %d: next_idx= %d, "
+			"next_sub_idx= %d, next_idx_is_done= %d: -- Pre ---\n",
+			ii, jj, bp_stats_proc_read_ctx.next_idx,
+			bp_stats_proc_read_ctx.next_sub_idx, next_idx_is_done);
+
+	BUG_ON(!bp_stats_proc_read_ctx.fname_is_done);
+	if (ii == sec_ps_ut_idx && jj == end_idx) {
+		SEC_BP_TRACE("ii= %d, jj= %d: Data finished\n", ii, jj);
+		++bp_stats_proc_read_ctx.who;
+		bp_stats_proc_read_ctx.next_idx = 0;
+		bp_stats_proc_read_ctx.next_sub_idx = 0;
+		BUG_ON(is_loop_break);
+		bp_stats_proc_read_ctx.next_idx_is_done = 0;
+		/* bp_stats_proc_read_ctx.is_no_more_data = 1; */
+		bp_stats_proc_read_ctx.fname_is_done = 0;
+	} else {
+		SEC_BP_TRACE("ii= %d, jj= %d: more_data\n", ii, jj);
+		BUG_ON(bp_stats_proc_read_ctx.who != SEC_BP_FILL_PROC_PS);
+		bp_stats_proc_read_ctx.next_idx = is_loop_break ? ii - 1 : ii;
+		bp_stats_proc_read_ctx.next_sub_idx = jj;
+		bp_stats_proc_read_ctx.next_idx_is_done = next_idx_is_done;
+	}
+
+	SEC_BP_TRACE("ii= %d, jj= %d: next_idx= %d, "
+			"next_sub_idx= %d, next_idx_is_done= %d: -- Post ---\n",
+			ii, jj, bp_stats_proc_read_ctx.next_idx,
+			bp_stats_proc_read_ctx.next_sub_idx,
+			bp_stats_proc_read_ctx.next_idx_is_done);
+
+	BUG_ON(len_copied > buffer_length);
+	return len_copied;
+}
+
+static int sec_bp_proc_fill_diskstats(char *buffer, int buffer_length)
+{
+	int ii = 0;
+	int jj = 0;
+	int end_idx = 0;
+	int line_len = 0;
+	int len_copied = 0;
+	int next_idx_is_done = 0;
+	int is_loop_break = 0;
+
+	SEC_BP_TRACE("buffer_length= %d\n", buffer_length);
+
+	SEC_BP_TRACE("next_idx= %d, next_sub_idx= %d, next_idx_is_done= %d\n",
+			bp_stats_proc_read_ctx.next_idx,
+			bp_stats_proc_read_ctx.next_sub_idx,
+			bp_stats_proc_read_ctx.next_idx_is_done);
+
+	if (!bp_stats_proc_read_ctx.fname_is_done) {
+
+		BUG_ON(bp_stats_proc_read_ctx.next_idx
+				|| bp_stats_proc_read_ctx.next_idx_is_done);
+
+		line_len = sizeof("#@" PROC_DISKSTATS_LOG "\n") - 1;
+		if (line_len > buffer_length) {
+			SEC_BP_TRACE("#@%s: line_len = %d  > %d: -- 00 --\n",
+					PROC_DISKSTATS_LOG, line_len, buffer_length);
+			return 0;
+		}
+
+		memcpy(buffer, "#@" PROC_DISKSTATS_LOG "\n", line_len);
+		SEC_BP_TRACE("ii= %d: [0  => %d]: %d\n",
+				ii, line_len, buffer_length);
+		len_copied = line_len;
+		bp_stats_proc_read_ctx.fname_is_done = 1;
+	}
+
+	for (ii = bp_stats_proc_read_ctx.next_idx;
+			!is_loop_break && ii < sec_ds_ut_idx; ++ii) {
+
+		if (ii != bp_stats_proc_read_ctx.next_idx
+				|| !bp_stats_proc_read_ctx.next_idx_is_done) {
+
+			SEC_BP_TRACE("first idx not not complete: idx= %d\n",
+					bp_stats_proc_read_ctx.next_idx);
+
+			line_len = snprintf(bp_stats_proc_read_ctx.line_cache, SEC_BP_LINE_CACHE_SIZE, "%lu\n",
+					sec_ds_ut_table[ii].uptime);
+
+			if (len_copied + line_len > buffer_length) {
+				SEC_BP_TRACE("len_copied + line_len = %d + %d > %d: -- 0 --\n",
+						len_copied, line_len, buffer_length);
+				next_idx_is_done = 0;
+				break;
+			}
+
+			memcpy(buffer + len_copied, bp_stats_proc_read_ctx.line_cache,
+					line_len);
+			SEC_BP_TRACE("ii= %d: [%d + %d => %d]: %d\n",
+					ii, len_copied, line_len,
+					len_copied + line_len, buffer_length);
+			len_copied += line_len;
+
+			jj = sec_ds_ut_table[ii].start_idx;
+		} else {
+			jj = bp_stats_proc_read_ctx.next_sub_idx;
+		}
+		SEC_BP_TRACE("ii= %d: first jj= %d\n", ii, jj);
+
+		next_idx_is_done = 1;
+		if (ii == sec_ds_ut_idx - 1)
+			end_idx = sec_ds_idx;
+		else
+			end_idx = sec_ds_ut_table[ii+1].start_idx;
+
+		for (; jj < end_idx; ++jj) {
+			/* major first_minor name ios[0] merges[0] nsect_read
+			   ticks[0] ios[1] merges[1] nsect_read sect_write
+			   ticks[1] in_flight io_ticks time_in_queue */
+			/* "%4d %4d %s %lu %lu %llu %u %lu %lu %llu %u %u %u %u\n" */
+			line_len = snprintf(bp_stats_proc_read_ctx.line_cache,
+					SEC_BP_LINE_CACHE_SIZE,
+					"0 0 %s 0 0 %llu 0 0 0 %llu 0 0 %u 0\n",
+#if (SEC_DS_USE_SUMMARY == 0)
+					sec_ds_table[jj].name,
+#else
+					"sum_bdev",
+#endif
+					(unsigned long long)
+					sec_ds_table[jj].nsect_read,
+					(unsigned long long)
+					sec_ds_table[jj].nsect_write,
+					jiffies_to_msecs(sec_ds_table[jj].io_ticks));
+
+			/* lalit: added +1 because we have a terminating new line
+			   at end of the block (see below). */
+			if (len_copied + line_len + 1 > buffer_length) {
+				is_loop_break = 1;
+				break;
+			}
+
+			memcpy(buffer + len_copied, bp_stats_proc_read_ctx.line_cache, line_len);
+			SEC_BP_TRACE("ii= %d, jj= %d: [%d + %d => %d]: %d\n",
+					ii, jj, len_copied, line_len,
+					len_copied + line_len, buffer_length);
+			len_copied += line_len;
+		}
+
+		/* Do not add new line if upper loop finished pre-maturely (we
+		 * had to break because of buffer full, net read call will
+		 * resume again */
+		if (!is_loop_break) {
+			SEC_BP_TRACE("ii= %d: [%d + NL => %d]: %d\n",
+					ii, len_copied,
+					len_copied + 1, buffer_length);
+			BUG_ON(len_copied >= buffer_length);
+			buffer[len_copied++] = '\n';
+		}
+	}
+
+	bp_stats_proc_read_ctx.next_expected_seq_offset += len_copied;
+	bp_stats_proc_read_ctx.is_no_more_data = 0;
+
+	SEC_BP_TRACE("ii= %d, jj= %d: next_idx= %d, "
+			"next_sub_idx= %d, next_idx_is_done= %d: -- Pre ---\n",
+			ii, jj, bp_stats_proc_read_ctx.next_idx,
+			bp_stats_proc_read_ctx.next_sub_idx, next_idx_is_done);
+
+	BUG_ON(!bp_stats_proc_read_ctx.fname_is_done);
+	if (ii == sec_ds_ut_idx && jj == end_idx) {
+		SEC_BP_TRACE("ii= %d, jj= %d: Data finished\n", ii, jj);
+		++bp_stats_proc_read_ctx.who;
+		bp_stats_proc_read_ctx.next_idx = 0;
+		bp_stats_proc_read_ctx.next_sub_idx = 0;
+		BUG_ON(is_loop_break);
+		bp_stats_proc_read_ctx.next_idx_is_done = 0;
+		/* bp_stats_proc_read_ctx.is_no_more_data = 1; */
+		bp_stats_proc_read_ctx.fname_is_done = 0;
+	} else {
+		SEC_BP_TRACE("ii= %d, jj= %d: more_data\n", ii, jj);
+		BUG_ON(bp_stats_proc_read_ctx.who != SEC_BP_FILL_DISKSTATS);
+		bp_stats_proc_read_ctx.next_idx = is_loop_break ? ii - 1 : ii;
+		bp_stats_proc_read_ctx.next_sub_idx = jj;
+		bp_stats_proc_read_ctx.next_idx_is_done = next_idx_is_done;
+	}
+
+	SEC_BP_TRACE("ii= %d, jj= %d: next_idx= %d, "
+			"next_sub_idx= %d, next_idx_is_done= %d: -- Post ---\n",
+			ii, jj, bp_stats_proc_read_ctx.next_idx,
+			bp_stats_proc_read_ctx.next_sub_idx,
+			bp_stats_proc_read_ctx.next_idx_is_done);
+
+	BUG_ON(len_copied > buffer_length);
+	return len_copied;
+}
+
+static inline int sec_bp_proc_check_length(int buffer_length)
+{
+	return buffer_length > SEC_BP_PROC_MIN_READ_LEN;
+}
+
+
+/**********************************************************************/
+
+static void sec_bp_print_help(void)
+{
+	printk("Boot Profile Help:\n"
+			"==========================================\n\n"
+			"proc_read:    cat /proc/bootstats\n\n"
+			"help:         echo h > /proc/bootstats\n"
+			"start:        echo 1 > /proc/bootstats\n"
+			"direct-dump:  echo d > /proc/bootstats\n"
+			"clear memory: echo c > /proc/bootstats\n"
+			"status print: echo s > /proc/bootstats\n\n");
+}
+
+static void sec_bp_print_status(void)
+{
+
+	if (sec_bp_state == SEC_BP_STATE_COMPLETING) {
+		BUG_ON(!sec_cs_table[0]);
+		printk("Boot Profile Status: COMPLETING\n");
+	} else if (sec_bp_state == SEC_BP_STATE_COMPLETED) {
+		BUG_ON(!sec_cs_table[0]);
+		printk("Boot Profile Status: COMPLETED\n");
+		sec_bp_meminfo_dump();
+	} else if (sec_bp_state == SEC_BP_STATE_UNINITED) {
+		printk("Boot Profile Status: NOT STARTED - MEMORY CLEARED\n");
+	} else {
+		BUG_ON(sec_bp_state != SEC_BP_STATE_RUNNING
+				&& sec_bp_state != SEC_BP_STATE_STARTING);
+		printk("Boot Profile Status: RUNNING\n");
+	}
+}
+
+static inline void sec_bp_start(void)
+{
+	SEC_BP_TRACE("enter\n");
+	if (sec_bp_state == SEC_BP_STATE_UNINITED
+			|| sec_bp_state == SEC_BP_STATE_COMPLETED) {
+		SEC_BP_TRACE("starting\n");
+		sec_bp_start__();
+	} else {
+		BUG_ON(sec_bp_state != SEC_BP_STATE_RUNNING
+				&& sec_bp_state != SEC_BP_STATE_STARTING);
+		printk(KERN_INFO "already running\n");
+	}
+}
+
+/**********************************************************************/
+#if (SEC_BP_WAIT_UPTIME_SEC != 0)
+void sec_uptime_wait(int nsec)
+{
+	int sleep_delay = 0;
+	struct timespec uptime;
+	do_posix_clock_monotonic_gettime(&uptime);
+	sleep_delay = nsec - uptime.tv_sec;
+
+	if (sleep_delay > 0) {
+		printk("%s: sleeping for %d ms\n", __FUNCTION__, sleep_delay);
+		msleep(sleep_delay * 1000);
+	}
+
+	do_posix_clock_monotonic_gettime(&uptime);
+	printk("%s: Uptime: %u.%u\n", __FUNCTION__,
+			(unsigned)uptime.tv_sec, (unsigned)uptime.tv_nsec);
+}
+#endif
+
+/*
+ * find the usb connect from "/dev/usb/usblog" file. first its open the file
+ * and find the MountDit. This code work only the case when exeDSP running.
+ */
+static int find_usb_device(char *dev, int max_path_len)
+{
+	struct file *fp;
+	char buf[256];
+	char *p;
+	int ret = -ENOENT;
+	char *dup_str = NULL,  *alt_dup_str = NULL;
+	mm_segment_t oldfs = get_fs();
+	char *tok = NULL;
+
+	set_fs(KERNEL_DS);
+	fp = filp_open("/dtv/usb/usblog", O_RDONLY , 0600);
+
+	if (IS_ERR(fp)) {
+		printk("open error \n");
+		return 1;
+	}
+
+	fp->f_pos = 0;
+	ret = fp->f_op->read(fp, buf, sizeof(buf)-1, &fp->f_pos);
+
+	if (ret <= 0) {
+		printk("read error\n");
+		filp_close(fp, NULL);
+		set_fs(oldfs);
+		return 1;
+	}
+
+	filp_close(fp, NULL);
+	set_fs(oldfs);
+	BUG_ON(ret > sizeof(buf)-1);
+	buf[ret] = '\0';
+
+	p = strstr(buf, "MountDir");
+
+	if (p) {
+		/* sscanf(p, "MountDir : %s", dev);*/  /* Prevent error */
+		/*
+		 * duplicating the string to be parsed also kstrdup
+		 * allocate memory iteslf
+		 */
+		dup_str = kstrdup(p, GFP_KERNEL);
+		if (!dup_str)
+			return 1;
+
+		alt_dup_str = dup_str;
+
+		/*
+		 * tokenising the duplicated string to find out the Mount dir
+		 * value for this string "mount_dir : /dev/sda1")
+		 */
+		tok = strsep(&alt_dup_str, ":");
+		if (!tok)
+			return 1;
+
+		/*
+		 * truncating the string to end of line "\n" delimiter and get
+		 * the mount dir i.e /dev/sda1 "
+		 */
+		tok = strsep(&alt_dup_str, "\n");
+		if (!tok)
+			return 1;
+
+		tok = strim(tok); /*  trimming the white space characters in token */
+		if (!tok)
+			return 1;
+
+		strncpy(dev, tok, max_path_len);
+		dev[max_path_len - 1] = '\0'; /* for boundary cond. */
+
+		kfree(dup_str);
+
+		return 0;
+	}
+	return 1; /* no usb device */
+}
+
+/*
+ * Its a general solution to get the mounted usb device path if exeDSP
+ * is not running.
+ */
+int usb_detect(char *usb_path, int max_path_len)
+{
+	unsigned char *read_buf = NULL;
+	struct file *filp = NULL;
+	int ret = 0;
+	int bytesread = 0;
+	char *ptr = NULL, *ptr2 = NULL; /* for parsing string */
+	int len = 0;
+	const int READ_BUF_SIZE = 4096;
+	mm_segment_t oldfs = get_fs();
+
+	if (!usb_path || max_path_len < 1) {
+		printk("BootChart: Error Invalid arguments\n");
+		ret = -1;
+		goto out;
+	}
+	usb_path[0] = '\0'; /* in case path is not found */
+
+	/* allocate sufficient size to read mount entries */
+	read_buf = (char *)vmalloc(READ_BUF_SIZE);
+	if (!read_buf) {
+		printk("BootChart: read_buf: no memory\n");
+		ret = -1;
+		goto out; /* no memory!! */
+	}
+
+	set_fs(KERNEL_DS);
+	/* opening file to know where usb has mounted */
+	filp = filp_open("/proc/mounts", O_RDONLY , 0);
+	if (IS_ERR(filp) || (filp == NULL)) {
+		printk("BootChart: error opening /proc/mounts\n");
+		ret = -1;
+		goto out;
+	}
+
+	if (filp->f_op->read == NULL) {
+		printk("BootChart: read not allowed\n");
+		ret = -1;
+		goto out_close;
+	}
+
+	filp->f_pos = 0;
+
+	printk("BootChart: USB MOUNT PATH(s):\n");
+
+	/* reading a /proc/mount file here (to know where usb has mounted)
+	 * read max 4 KB buffer of file, that should be sufficient.
+	 */
+
+	bytesread = filp->f_op->read(filp, read_buf, READ_BUF_SIZE, &filp->f_pos);
+	if (bytesread <= 0) {
+		printk("BootChart: error reading file\n");
+		ret = -1;
+		goto out_close;
+	}
+	read_buf[bytesread-1] = '\0';
+
+
+	/*
+	 * The idea for this loop is to take all the string
+	 * started  with  "/dev/sd"  (usb  make dev node in
+	 * /dev/sd** )
+	 * the format of that file is
+	 * "devnode"  "moount dir" "option" ...............
+	 * by this way we can find the directory where usb
+	 * has mounted
+	 */
+	ptr = strstr(read_buf, "/dev/sd");
+	if (!ptr) {
+		printk("BootChart: USB not connected\n");
+		ret = -1;
+		goto out_close;
+	}
+
+	ptr = strstr(ptr + 1, " ");
+	if (!ptr) {
+		printk("BootChart: Error USB path detection [1]\n");
+		ret = -1;
+		goto out_close;
+	}
+
+	ptr = strchr(ptr + 1, '/');
+	if (!ptr) {
+		printk("BootChart: Error USB path detection [2]\n");
+		ret = -1;
+		goto out_close;
+	}
+
+	ptr2 = strchr(ptr + 1, ' ');
+	if (!ptr2) {
+		printk("BootChart: Error USB path detection [3]\n");
+		ret = -1;
+		goto out_close;
+	}
+
+	BUG_ON(ptr2 - ptr <= 0);
+	len = min(ptr2 - ptr + 1, max_path_len);
+	memcpy(usb_path, ptr, len);
+	usb_path[len - 1] = '\0';
+	printk("\t %s \n", usb_path);
+
+out_close:
+	filp_close(filp, NULL);
+
+out:
+	set_fs(oldfs);
+	if (read_buf)
+		vfree(read_buf);
+
+	return ret;
+}
+
+/*
+ * This function called to save the bootchart log into the
+ * usb device connected with target. First its try to find
+ * usb device in case
+ */
+static int save_to_usb()
+{
+	struct file *fp = NULL;
+	char *line = NULL;
+	const int USB_BUFF_LEN = 4096;
+	off_t offset = 0;
+	char path[120];
+	int ret = 0;
+	int line_copied = 0;
+	char dev[512];
+	mm_segment_t oldfs = get_fs();
+
+	if (find_usb_device(dev, sizeof(dev)) != 0)	{
+		if (usb_detect(dev, sizeof(dev)) != 0) {
+			printk(KERN_DEBUG "Usb open fail\n");
+			return 0;
+		}
+	}
+
+	snprintf(path, sizeof(path), "%s/%s", dev, "bootstats");
+	line = (char *) vmalloc(USB_BUFF_LEN);
+	if (!line) {
+		printk("[%s: %d]line: mem alloc failure\n", __FUNCTION__, __LINE__);
+		return 0;
+	}
+
+	printk("open file %s ---- \n", path);
+
+	set_fs(KERNEL_DS);
+	fp = filp_open(path, O_CREAT | O_TRUNC | O_WRONLY , 0600);
+	if (IS_ERR(fp)) {
+		printk("Failed to open file %s ---- exiting\n", path);
+		if (line) {
+			vfree(line);
+			line = NULL;
+		}
+		set_fs(oldfs);
+		return 0;
+	}
+
+	while (!bp_stats_proc_read_ctx.is_no_more_data) {
+		line_copied = sec_bp_proc_fill_report(line, offset, USB_BUFF_LEN);
+
+		ret = fp->f_op->write(fp, line, line_copied, &fp->f_pos);
+
+		if (ret < 0) {
+			printk(KERN_DEBUG "Write proc_stat.log is fail\n");
+			if (line) {
+				vfree(line);
+				line = NULL;
+			}
+			filp_close(fp, NULL);
+			set_fs(oldfs);
+			return 0;
+		}
+	}
+
+	if (line) {
+		vfree(line);
+		line = NULL;
+	}
+	filp_close(fp, NULL);
+	set_fs(oldfs);
+	return 1;
+}
+#endif/* Boot Chart */

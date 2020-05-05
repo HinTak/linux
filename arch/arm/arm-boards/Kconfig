@@ -1,0 +1,15 @@
+menu "Mstar platform type"
+	depends on ARCH_MSTAR
+
+config ARCH_MSTAR_CA9X4
+	bool "Mstar Cortex-A9x4 tile"
+	select CPU_V7
+	select ARM_GIC
+	select MIGHT_HAVE_CACHE_L2X0
+endmenu
+
+
+config MP_MSTAR_STR_BASE
+	depends on ARCH_MSTAR && PM
+	bool "Mstar Suspend To RAM Base"
+

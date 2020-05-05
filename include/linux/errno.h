@@ -3,6 +3,7 @@
 
 #include <uapi/linux/errno.h>
 
+#ifdef __KERNEL__
 
 /*
  * These should never be seen by user programs.  To return one of ERESTART*
@@ -30,4 +31,33 @@
 #define EIOCBQUEUED	529	/* iocb queued, will get completion event */
 #define EIOCBRETRY	530	/* iocb queued, will trigger a retry */
 
+/* 
+ * SAMSUNG USB PATCH, by ksfree.kim
+ */
+#define SAMSUNG_PATCH_WITH_USB_HOTPLUG   	// patch for usb hotplug 
+#define SAMSUNG_PATCH_WITH_USB_HOTPLUG_MREADER  // patch for usb multicard reader
+#define SAMSUNG_PATCH_WITH_USB_ENHANCEMENT   	// stable patch for enhanced speed  and compatibility
+#define SAMSUNG_PATCH_WITH_STORAGE_GADGET_PARTITION_SUPPORT		// patch for partition media plug in/out support
+#define SAMSUNG_PATCH_WITH_NEW_xHCI_API_FOR_BUGGY_DEVICE		// patch adds new xHCI API for supporting address device command with BSR=1 flag set.
+#define SAMSUNG_PATCH_WITH_USB_HID_DISCONNECT_BUGFIX			// patch fixes hid disconnect issues at suspend and manual disconnect time
+
+#ifdef CONFIG_MACH_NT14U
+	#define SAMSUNG_PATCH_WITH_SUSPEND_TRY_END_TIME_INCREASED //21_mar_2014 by kanak.priey@samsung.com
+#endif
+
+//#define SAMSUNG_PATCH_WITH_USB_XHCI_BUGFIX   	// BugFIX patch for xHCI
+//#define SAMSUNG_PATCH_WITH_USB_XHCI_ADD_DYNAMIC_RING_BUFFER   	// Add Dynamic RingBuffer patch for xHCI, This patch has dependance for "SAMSUNG_PATCH_WITH_USB_XHCI_BUGFIX"
+//#define SAMSUNG_PATCH_WITH_USB_XHCI_CODE_CLEANUP   	// Add code cleanup and debug patch for xHCI, This patch has dependance for "SAMSUNG_PATCH_WITH_USB_XHCI_ADD_DYNAMIC_RING_BUFFER"
+
+
+//#define SAMSUNG_PATCH_WITH_USB_GADGET_ENHANCEMENT	// patch about 'scan_periodic'
+//#define SAMSUNG_PATCH_WITH_USB_TEMP     // patch for usb compatibility, but this patch need to verify for the each linux version.
+//#define SAMSUNG_PATCH_WITH_USB_NOTCHECK_SPEED		//Don't check high-speed for invalid speed info(bcdUSB). 
+//#define SAMSUNG_PATCH_WITH_MOIP_HOTPLUG
+//#define SAMSUNG_PATCH_WITH_HUB_BUGFIX			// patch for some hubs malfunction
+//#define SAMSUNG_PATCH_WITH_NOT_SUPPORTED_DEVICE	//Alarm of supported usb device (USB 2.0 certification)
+//#define KKS_DEBUG	printk
+//#define PACKET_PORT_SUPPORT
+#define	KKS_DEBUG(f,a...)
+#endif
 #endif

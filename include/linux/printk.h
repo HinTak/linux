@@ -45,8 +45,18 @@ static inline void console_silent(void)
 
 static inline void console_verbose(void)
 {
+/* VDLinux, if console_loglevel is 0, this func do not work, so skip the check routine, 2010-10-21
 	if (console_loglevel)
 		console_loglevel = 15;
+*/
+	console_loglevel = 15;
+}
+
+static inline void console_default(void)
+{
+/* VDLinux, add new function revert to default loglevel, 2014-02-07
+*/
+	console_loglevel = 7;
 }
 
 struct va_format {

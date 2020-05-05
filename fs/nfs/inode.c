@@ -759,12 +759,22 @@ static void nfs_file_clear_open_context(struct file *filp)
 	}
 }
 
+static inline bool vfat_over_nfs(struct inode *inode)
+{
+	if (NFS_SERVER(inode)->native_fs_magic == MSDOS_SUPER_MAGIC)
+		return true;
+
+	return false;
+}
+
 /*
  * These allocate and release file read/write context information.
  */
 int nfs_open(struct inode *inode, struct file *filp)
 {
 	struct nfs_open_context *ctx;
+	struct nfs_inode *nfsi = NFS_I(inode);
+	int err;
 
 	ctx = alloc_nfs_open_context(filp->f_path.dentry, filp->f_mode);
 	if (IS_ERR(ctx))
@@ -772,12 +782,39 @@ int nfs_open(struct inode *inode, struct file *filp)
 	nfs_file_set_open_context(filp, ctx);
 	put_nfs_open_context(ctx);
 	nfs_fscache_set_inode_cookie(inode, filp);
+
+	if (vfat_over_nfs(inode) &&
+		NFS_SERVER(inode)->nfs_client->rpc_ops->version == 3) {
+			atomic_inc(&nfsi->open_count);
+
+		err = NFS_PROTO(inode)->open(inode);
+		if (err < 0) {
+			pr_err("%s: nfs_proc3_open() failed err = %d\n",
+					__func__, err);
+		}
+	}
+
 	return 0;
 }
 
 int nfs_release(struct inode *inode, struct file *filp)
 {
+	struct nfs_inode *nfsi = NFS_I(inode);
+	int err;
+
 	nfs_file_clear_open_context(filp);
+
+	if (vfat_over_nfs(inode) &&
+		NFS_SERVER(inode)->nfs_client->rpc_ops->version == 3) {
+		atomic_dec(&nfsi->open_count);
+
+		err = NFS_PROTO(inode)->close(inode);
+		if (err < 0) {
+			pr_err("%s: nfs_proc3_close() failed err = %d\n",
+					__func__, err);
+		}
+	}
+
 	return 0;
 }
 
@@ -1532,6 +1569,7 @@ struct inode *nfs_alloc_inode(struct super_block *sb)
 #if IS_ENABLED(CONFIG_NFS_V4)
 	nfsi->nfs4_acl = NULL;
 #endif /* CONFIG_NFS_V4 */
+	atomic_set(&nfsi->open_count, 0);
 	return &nfsi->vfs_inode;
 }
 EXPORT_SYMBOL_GPL(nfs_alloc_inode);

@@ -77,6 +77,9 @@
 #include <linux/miscdevice.h>
 #include <linux/falloc.h>
 
+#include <linux/fdtable.h>
+#include <linux/path.h> 
+
 #include <asm/uaccess.h>
 
 static DEFINE_IDR(loop_index_idr);
@@ -619,6 +622,31 @@ out:
 	complete(&p->wait);
 }
 
+#ifdef CONFIG_LOOP_MOUNT_CHECK
+static int loop_is_file_busy(struct file *file)
+{
+	int busy = 0;
+	struct dentry *dentry;
+	struct hlist_node *p;
+	struct inode *inode = file->f_path.dentry->d_inode;
+
+	spin_lock(&inode->i_lock);
+	hlist_for_each_entry(dentry, p, &inode->i_dentry, d_alias) {
+		spin_lock(&dentry->d_lock);
+		/* In case of "this" dentry loop device has the reference */
+		busy = dentry->d_count >
+			(dentry == file->f_path.dentry ? 2 : 1);
+
+		spin_unlock(&dentry->d_lock);
+
+		if (busy)
+			break;
+	}
+	spin_unlock(&inode->i_lock);
+
+	return busy;
+}
+#endif
 
 /*
  * loop_change_fd switched the backing store of a loopback device to
@@ -660,6 +688,11 @@ static int loop_change_fd(struct loop_device *lo, struct block_device *bdev,
 	/* size of the new backing store needs to be the same */
 	if (get_loop_size(lo, file) != get_loop_size(lo, old_file))
 		goto out_putf;
+
+#ifdef CONFIG_LOOP_MOUNT_CHECK
+	if (loop_is_file_busy(file))
+		goto out_putf;
+#endif
 
 	/* and ... switch */
 	error = loop_switch(lo, file);
@@ -857,6 +890,11 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
 	error = -EINVAL;
 	if (!S_ISREG(inode->i_mode) && !S_ISBLK(inode->i_mode))
 		goto out_putf;
+
+#ifdef CONFIG_LOOP_MOUNT_CHECK
+	if (loop_is_file_busy(file))
+		goto out_putf;
+#endif
 
 	if (!(file->f_mode & FMODE_WRITE) || !(mode & FMODE_WRITE) ||
 	    !file->f_op->write)
@@ -1146,6 +1184,7 @@ loop_get_status(struct loop_device *lo, struct loop_info64 *info)
 
 	if (lo->lo_state != Lo_bound)
 		return -ENXIO;
+
 	error = vfs_getattr(file->f_path.mnt, file->f_path.dentry, &stat);
 	if (error)
 		return error;
@@ -1568,6 +1607,7 @@ static const struct block_device_operations lo_fops = {
 	.compat_ioctl =	lo_compat_ioctl,
 #endif
 };
+
 
 /*
  * And now the modules code and kernel interface.

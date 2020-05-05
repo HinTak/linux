@@ -109,6 +109,10 @@ static void fake_signal_wake_up(struct task_struct *p)
 bool freeze_task(struct task_struct *p)
 {
 	unsigned long flags;
+#ifdef CONFIG_PM_DEBUG
+	struct timeval start, end;
+	u64 elapsed_us;
+#endif
 
 	spin_lock_irqsave(&freezer_lock, flags);
 	if (!freezing(p) || frozen(p)) {
@@ -116,12 +120,25 @@ bool freeze_task(struct task_struct *p)
 		return false;
 	}
 
+#ifdef CONFIG_PM_DEBUG
+	do_gettimeofday(&start);
+#endif
 	if (!(p->flags & PF_KTHREAD))
 		fake_signal_wake_up(p);
 	else
 		wake_up_state(p, TASK_INTERRUPTIBLE);
 
+#ifdef CONFIG_PM_DEBUG
+	do_gettimeofday(&end);
+#endif
 	spin_unlock_irqrestore(&freezer_lock, flags);
+#ifdef CONFIG_PM_DEBUG
+	elapsed_us = timeval_to_ns(&end) - timeval_to_ns(&start);
+	do_div(elapsed_us, NSEC_PER_SEC / 1000000);
+
+	printk(KERN_ERR "  Freezing task %s (pid %d) took %llu us\n",
+			p->comm, p->pid, elapsed_us);
+#endif
 	return true;
 }
 

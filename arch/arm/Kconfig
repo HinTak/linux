@@ -1,3 +1,6 @@
+config MSTAR_CHIP
+	bool
+
 config ARM
 	bool
 	default y
@@ -79,10 +82,19 @@ config HAVE_PWM
 	bool
 
 config MIGHT_HAVE_PCI
-	bool
+	bool 
+	default y if ARCH_SDP 
 
 config SYS_SUPPORTS_APM_EMULATION
 	bool
+
+config ARCH_SCHED_CLOCK
+        bool
+        help
+          Allow the default sched_clock() to be overloaded at runtime.
+          Use this option if you build a kernel for a platform with
+          multiplee sched_clock sources, one of which will be selected
+          at runtime.
 
 config GENERIC_GPIO
 	bool
@@ -261,7 +273,27 @@ config MMU
 #
 choice
 	prompt "ARM system type"
-	default ARCH_MULTIPLATFORM
+	default ARCH_MSTAR
+
+config ARCH_SDP
+	bool "Samsung DTV Platform"
+	select ARCH_HAS_HOLES_MEMORYMODEL
+	select ARCH_SPARSEMEM_ENABLE
+	select ARCH_FLATMEM_ENABLE
+	select ARM_AMBA
+	select ARM_GIC
+	select CPU_V7
+	select CLKDEV_LOOKUP
+	select COMMON_CLK
+	select GENERIC_CLOCKEVENTS
+	select HAVE_CLK
+	select HAVE_SMP
+	select MULTI_IRQ_HANDLER
+	select NEED_MACH_MEMORY_H
+	select ARCH_HAS_CPUFREQ
+	select MIGHT_HAVE_CACHE_L2X0
+	help
+	  Support for Samsung DTV platforms based on SDPxxxx.
 
 config ARCH_MULTIPLATFORM
 	bool "Allow multiple platforms to be selected"
@@ -272,6 +304,31 @@ config ARCH_MULTIPLATFORM
 	select MULTI_IRQ_HANDLER
 	select SPARSE_IRQ
 	select USE_OF
+
+config ARCH_NVT_V7
+           bool "Novatek DTV Platform"
+           depends on MMU
+           select USE_OF
+           select CPU_V7
+           select ARCH_HAS_HOLES_MEMORYMODEL
+           select ARCH_SPARSEMEM_ENABLE
+           select ARCH_FLATMEM_ENABLE
+           select NEED_MACH_MEMORY_H
+           select ARCH_WANT_OPTIONAL_GPIOLIB
+
+config NVT_UART_16550A
+	bool "Novatek UART device"
+	default y
+	depends on ARCH_NVT_V7
+	help
+	  Novatek UART device
+
+config NVT_USE_UIMAGE_DTB
+	bool "use uImage+dtb, atags"
+	default y
+	depends on ARCH_NVT_V7	
+	help
+	  This enables support for kernel booting use uImage+dtb directly. The atags was passed by boot loader.	
 
 config ARCH_INTEGRATOR
 	bool "ARM Ltd. Integrator family"
@@ -322,6 +379,21 @@ config ARCH_VERSATILE
 	select VERSATILE_FPGA_IRQ
 	help
 	  This enables support for ARM Ltd Versatile board.
+
+config ARCH_MSTAR
+	bool "Mstar ARM-based"
+	select ARM_AMBA
+	select CLKDEV_LOOKUP
+	select GENERIC_CLOCKEVENTS
+	select ARCH_SCHED_CLOCK
+	select HAVE_CLK
+	select PLAT_MSTAR
+	select MSTAR_CHIP
+	select ARCH_HAS_HOLES_MEMORYMODEL
+	select COMMON_CLK
+	select ARCH_SUSPEND_POSSIBLE
+	help
+	  Support SEC X10P and SEC X12
 
 config ARCH_AT91
 	bool "Atmel AT91"
@@ -1022,6 +1094,10 @@ source "arch/arm/mach-at91/Kconfig"
 
 source "arch/arm/mach-bcm/Kconfig"
 
+source "arch/arm/mach-sdp/Kconfig"
+
+source "arch/arm/plat-sdp/Kconfig"
+
 source "arch/arm/mach-clps711x/Kconfig"
 
 source "arch/arm/mach-cns3xxx/Kconfig"
@@ -1125,7 +1201,11 @@ source "arch/arm/mach-ux500/Kconfig"
 source "arch/arm/mach-versatile/Kconfig"
 
 source "arch/arm/mach-vexpress/Kconfig"
+source "arch/arm/mach-nvt72668/Kconfig"
 source "arch/arm/plat-versatile/Kconfig"
+
+source "arch/arm/arm-boards/Kconfig"
+source "arch/arm/arm-boards/plat-mstar/Kconfig"
 
 source "arch/arm/mach-vt8500/Kconfig"
 
@@ -1156,6 +1236,12 @@ config PLAT_PXA
 	bool
 
 config PLAT_VERSATILE
+	bool
+	
+config PLAT_NOVATEK
+	bool	
+
+config PLAT_MSTAR
 	bool
 
 config ARM_TIMER_SP804
@@ -1424,8 +1510,18 @@ config ARM_ERRATA_775420
 	 This option enables the workaround for the 775420 Cortex-A9 (r2p2,
 	 r2p6,r2p8,r2p10,r3p0) erratum. In case a date cache maintenance
 	 operation aborts with MMU exception, it might cause the processor
-	 to deadlock. This workaround puts DSB before executing ISB if
-	 an abort may occur on cache maintenance.
+	 to deadlock. This workaround puts DSB before executing ISB at the 
+	 beginning of the abort exception handler.
+
+config ARM_ERRATA_798181
+	bool "ARM errata: TLBI/DSB failure on Cortex-A15"
+	depends on CPU_V7 && SMP
+	help
+	  On Cortex-A15 (r0p0..r3p2) the TLBI*IS/DSB operations are not
+	  adequately shooting down all use of the old entries. This
+	  option enables the Linux kernel workaround for this erratum
+	  which sends an IPI to the CPUs that are running the same ASID
+	  as the one being invalidated.
 
 endmenu
 
@@ -1504,13 +1600,30 @@ config HAVE_SMP
 	  The only effect of this option is to make the SMP-related
 	  options available to the user for configuration.
 
+config BD_CACHE_ENABLED
+	bool "BD Cache Enable"
+	default y
+	help    
+	   Blu-ray cache enable/disable.If BD_CACHE is enable it :-
+	   Implements readpages address space operation for UDF,
+	   Increased VM_MAX_READAHEAD to 512K from 128K
+	   Increased ATA_MAX_SECTORS to 1024 from 256
+
+config SSIF_EXT_CACHE
+       bool "BD UDF Extents Cache (for 3D BD)"
+       default y
+       help
+         The 3D Blu-ray has many extents. So it make slow read problem when play it.
+         This problem also occur even we play 3D Blu-ray with 2D mode.
+         So remember last accessed inode to enhance read performance of 3D Blu-ray.
+
 config SMP
 	bool "Symmetric Multi-Processing"
 	depends on CPU_V6K || CPU_V7
 	depends on GENERIC_CLOCKEVENTS
-	depends on HAVE_SMP
+	depends on HAVE_SMP || ARCH_MSTAR_CA9X4
 	depends on MMU
-	select HAVE_ARM_SCU if !ARCH_MSM_SCORPIONMP
+	select HAVE_ARM_SCU if (!ARCH_MSM_SCORPIONMP)
 	select USE_GENERIC_SMP_HELPERS
 	help
 	  This enables support for systems with more than one CPU. If you have
@@ -1624,7 +1737,7 @@ config LOCAL_TIMERS
 	bool "Use local timer interrupts"
 	depends on SMP
 	default y
-	select HAVE_ARM_TWD if (!ARCH_MSM_SCORPIONMP && !EXYNOS4_MCT)
+	select HAVE_ARM_TWD if (!ARCH_MSM_SCORPIONMP && !EXYNOS4_MCT && !ARCH_SDP_SOC_CA15)
 	help
 	  Enable support for local timers on SMP platforms, rather then the
 	  legacy IPI broadcast method.  Local timers allows the system
@@ -1636,7 +1749,8 @@ config ARCH_NR_GPIO
 	default 1024 if ARCH_SHMOBILE || ARCH_TEGRA
 	default 355 if ARCH_U8500
 	default 264 if MACH_H4700
-	default 512 if SOC_OMAP5
+	default 512 if SOC_OMAP5 
+	default 512 if ARCH_SDP
 	default 288 if ARCH_VT8500
 	default 0
 	help
@@ -1647,12 +1761,13 @@ config ARCH_NR_GPIO
 source kernel/Kconfig.preempt
 
 config HZ
-	int
+	int "Timer Frequency(HZ)"
 	default 200 if ARCH_EBSA110 || ARCH_S3C24XX || ARCH_S5P64X0 || \
 		ARCH_S5PV210 || ARCH_EXYNOS4
 	default OMAP_32K_TIMER_HZ if ARCH_OMAP && OMAP_32K_TIMER
 	default AT91_TIMER_HZ if ARCH_AT91
 	default SHMOBILE_TIMER_HZ if ARCH_SHMOBILE
+	default 250 if ARCH_SDP
 	default 100
 
 config THUMB2_KERNEL
@@ -1734,10 +1849,20 @@ config OABI_COMPAT
 	  UNPREDICTABLE (in fact it can be predicted that it won't work
 	  at all). If in doubt say Y.
 
+config MSTAR_INT_1_to_1_SPI
+	bool "Enable MSTAR SPI"
+	depends on ARCH_MSTAR
+	default y
+	help
+		Enable MSTAR SPI
+
 config ARCH_HAS_HOLES_MEMORYMODEL
 	bool
 
 config ARCH_SPARSEMEM_ENABLE
+	bool
+
+config ARCH_FLATMEM_ENABLE
 	bool
 
 config ARCH_SPARSEMEM_DEFAULT
@@ -1781,7 +1906,7 @@ config HW_PERF_EVENTS
 source "mm/Kconfig"
 
 config FORCE_MAX_ZONEORDER
-	int "Maximum zone order" if ARCH_SHMOBILE
+	int "Maximum zone order" if (ARCH_SHMOBILE || ARCH_SDP)
 	range 11 64 if ARCH_SHMOBILE
 	default "12" if SOC_AM33XX
 	default "9" if SA1111
@@ -2076,7 +2201,7 @@ config XIP_PHYS_ADDR
 
 config KEXEC
 	bool "Kexec system call (EXPERIMENTAL)"
-	depends on EXPERIMENTAL && (!SMP || HOTPLUG_CPU)
+	depends on EXPERIMENTAL && (!SMP || PM_SLEEP_SMP)
 	help
 	  kexec is a system call that implements the ability to shutdown your
 	  current kernel, and to start another kernel.  It is like a reboot
@@ -2204,6 +2329,36 @@ config CPU_FREQ_S3C24XX_DEBUGFS
 	help
 	  Export status information via debugfs.
 
+config CPU_FREQ_SDP1202
+	bool "CPUfreq support for SDP1202"
+	depends on CPU_FREQ && ARCH_SDP1202
+	default y
+
+config CPU_FREQ_SDP1202_DEBUG
+	bool "CPUfreq debug print"
+	depends on CPU_FREQ_SDP1202
+	default n
+
+config CPU_FREQ_SDP1207
+	bool "CPUfreq support for SDP1207"
+	depends on CPU_FREQ && ARCH_SDP1207
+	default y
+
+config CPU_FREQ_SDP1207_DEBUG
+	bool "CPUfreq debug print"
+	depends on CPU_FREQ_SDP1207
+	default n
+
+config CPU_FREQ_SDP1302
+	bool "CPUfreq support for SDP1302"
+	depends on CPU_FREQ && ARCH_SDP1302
+	default y
+
+config CPU_FREQ_SDP1302_DEBUG
+	bool "CPUfreq debug print"
+	depends on CPU_FREQ_SDP1302
+	default n
+
 endif
 
 source "drivers/cpuidle/Kconfig"
@@ -2309,6 +2464,8 @@ config ARM_CPU_SUSPEND
 
 endmenu
 
+source "arch/arm/Kconfig.Secure"
+
 source "net/Kconfig"
 
 source "drivers/Kconfig"
@@ -2316,6 +2473,8 @@ source "drivers/Kconfig"
 source "fs/Kconfig"
 
 source "arch/arm/Kconfig.debug"
+
+source "arch/Kconfig.VDLP"
 
 source "security/Kconfig"
 

@@ -587,7 +587,21 @@ config CPU_USE_DOMAINS
 config IO_36
 	bool
 
+config ARCH_HIBERNATION_POSSIBLE
+	bool
+	depends on MMU
+	default y if CPU_ARM920T || CPU_ARM926T || CPU_SA1100 || CPU_XSCALE || CPU_XSC3 || CPU_V6 || CPU_V6K || CPU_V7
+
 comment "Processor Features"
+
+config ARM_TRUSTZONE
+	bool "Support TrustZone-enabled Trusted Execution Environment"
+	default n
+	help
+	  Select if you want a kernel to be executed at non-secure world.
+	  This option should be used with related secure bootloader and
+	  TrustZone software.
+	  If you don't know about TrustZone, say 'N'.
 
 config ARM_LPAE
 	bool "Support for the Large Physical Address Extension"
@@ -860,6 +874,7 @@ config CACHE_XSC3L2
 
 config ARM_L1_CACHE_SHIFT_6
 	bool
+	default n if ARCH_NVT72668 || ARCH_MSTAR
 	default y if CPU_V7
 	help
 	  Setting ARM L1 cache line size to 64 Bytes.
@@ -872,7 +887,7 @@ config ARM_L1_CACHE_SHIFT
 config ARM_DMA_MEM_BUFFERABLE
 	bool "Use non-cacheable memory for DMA" if (CPU_V6 || CPU_V6K) && !CPU_V7
 	depends on !(MACH_REALVIEW_PB1176 || REALVIEW_EB_ARM11MP || \
-		     MACH_REALVIEW_PB11MP)
+		     MACH_REALVIEW_PB11MP || ARCH_SDP)
 	default y if CPU_V6 || CPU_V6K || CPU_V7
 	help
 	  Historically, the kernel has used strongly ordered mappings to

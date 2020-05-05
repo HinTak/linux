@@ -53,6 +53,9 @@
  */
 
 #include <linux/types.h>
+#ifdef CONFIG_PACKET_PORT_SUPPORT
+#include <linux/bootmem.h>
+#endif
 #include <linux/mm.h>
 #include <linux/capability.h>
 #include <linux/fcntl.h>
@@ -88,7 +91,9 @@
 #include <linux/virtio_net.h>
 #include <linux/errqueue.h>
 #include <linux/net_tstamp.h>
-
+#ifdef CONFIG_PACKET_PORT_SUPPORT
+#include <linux/jhash.h>
+#endif
 #ifdef CONFIG_INET
 #include <net/inet_common.h>
 #endif
@@ -179,6 +184,11 @@ static int packet_set_ring(struct sock *sk, union tpacket_req_u *req_u,
 #define BLOCK_O2PRIV(x)	((x)->offset_to_priv)
 #define BLOCK_PRIV(x)		((void *)((char *)(x) + BLOCK_O2PRIV(x)))
 
+#ifdef CONFIG_PACKET_PORT_SUPPORT
+#define MAX_PKT_PORTS		65535
+#define PORTS_PER_CHAIN 	(MAX_PKT_PORTS / PKT_HTABLE_SIZE_MIN)
+struct packet_table pkttable __read_mostly;
+#endif
 struct packet_sock;
 static int tpacket_snd(struct packet_sock *po, struct msghdr *msg);
 
@@ -1549,8 +1559,7 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev,
 		skb = nskb;
 	}
 
-	BUILD_BUG_ON(sizeof(*PACKET_SKB_CB(skb)) + MAX_ADDR_LEN - 8 >
-		     sizeof(skb->cb));
+	BUILD_BUG_ON(sizeof(*PACKET_SKB_CB(skb)) + MAX_ADDR_LEN - 8 > sizeof(skb->cb));
 
 	sll = &PACKET_SKB_CB(skb)->sa.ll;
 	sll->sll_family = AF_PACKET;
@@ -1600,6 +1609,566 @@ drop:
 	return 0;
 }
 
+#ifdef CONFIG_PACKET_PORT_SUPPORT
+
+static int packet_lib_lport_inuse(struct net *net, __u16 num,
+                               const struct packet_hslot *hslot,
+                               unsigned long *bitmap,
+                               struct sock *sk,
+                               int (*saddr_comp)(const struct sock *sk1,
+                                                 const struct sock *sk2),
+                               unsigned int log)
+{
+        struct sock *sk2;
+        struct hlist_nulls_node *node;
+
+        sk_nulls_for_each(sk2, node, &hslot->head)
+                if (net_eq(sock_net(sk2), net) &&
+                    sk2 != sk &&
+                    (bitmap || pkt_sk(sk2)->pkt_port_hash == num) &&
+                    (!sk2->sk_reuse || !sk->sk_reuse) &&
+                    (!sk2->sk_bound_dev_if || !sk->sk_bound_dev_if ||
+                     sk2->sk_bound_dev_if == sk->sk_bound_dev_if) &&
+                    (*saddr_comp)(sk, sk2)) {
+                        if (bitmap)
+                                __set_bit(pkt_sk(sk2)->pkt_port_hash >> log,
+                                          bitmap);
+                        else
+                                return 1;
+                }
+        return 0;
+}
+
+
+/*
+ * Note: we still hold spinlock of primary hash chain, so no other writer
+ * can insert/delete a socket with local_port == num
+ */
+static int packet_lib_lport_inuse2(struct net *net, __u16 num,
+                               struct packet_hslot *hslot2,
+                               struct sock *sk,
+                               int (*saddr_comp)(const struct sock *sk1,
+                                                 const struct sock *sk2))
+{
+        struct sock *sk2;
+        struct hlist_nulls_node *node;
+        int res = 0;
+
+        spin_lock(&hslot2->lock);
+        pkt_portaddr_for_each_entry(sk2, node, &hslot2->head)
+                if (net_eq(sock_net(sk2), net) &&
+                    sk2 != sk &&
+                    (pkt_sk(sk2)->pkt_port_hash == num) &&
+                    (!sk2->sk_reuse || !sk->sk_reuse) &&
+                    (!sk2->sk_bound_dev_if || !sk->sk_bound_dev_if ||
+                     sk2->sk_bound_dev_if == sk->sk_bound_dev_if) &&
+                    (*saddr_comp)(sk, sk2)) {
+                        res = 1;
+                        break;
+                }
+        spin_unlock(&hslot2->lock);
+        return res;
+}
+
+/*
+ * This struct holds the first and last local port number.
+ */
+extern struct local_ports sysctl_local_ports;
+
+void packet_get_local_port_range(int *low, int *high)
+{
+        unsigned int seq;
+
+        do {
+                seq = read_seqbegin(&sysctl_local_ports.lock);
+
+                *low = sysctl_local_ports.range[0];
+                *high = sysctl_local_ports.range[1];
+        } while (read_seqretry(&sysctl_local_ports.lock, seq));
+}
+EXPORT_SYMBOL(packet_get_local_port_range);
+
+/**
+ *  packet_lib_get_port  -  Packet port lookup
+ *
+ *  @sk:          socket struct in question
+ *  @snum:        port number to look up
+ *  @saddr_comp:  AF-dependent comparison of bound local IP addresses
+ *  @hash2_nulladdr: AF-dependent hash value in secondary hash chains,
+ *                   with NULL address
+ */
+int packet_lib_get_port(struct sock *sk, unsigned short snum,
+                       int (*saddr_comp)(const struct sock *sk1,
+                                         const struct sock *sk2),
+                     unsigned int hash2_nulladdr)
+{
+        struct packet_hslot *hslot, *hslot2;
+        struct packet_table *pkttable = sk->sk_prot->h.pkt_table;
+        int    error = 1;
+        struct net *net = sock_net(sk);
+	if(!pkttable)
+	{
+		goto fail;
+	}
+        if (!snum) {
+                int low, high, remaining;
+                unsigned int rand;
+                unsigned short first, last;
+                DECLARE_BITMAP(bitmap, PORTS_PER_CHAIN);
+
+                packet_get_local_port_range(&low, &high);
+                remaining = (high - low) + 1;
+
+                rand = net_random();
+                first = (((u64)rand * remaining) >> 32) + low;
+                /*
+                 * force rand to be an odd multiple of UDP_HTABLE_SIZE
+                 */
+                rand = (rand | 1) * (pkttable->mask + 1);
+                last = first + pkttable->mask + 1;
+                do {
+                        hslot = packet_hashslot(pkttable, net, first);
+                        bitmap_zero(bitmap, PORTS_PER_CHAIN);
+                        spin_lock_bh(&hslot->lock);
+                        packet_lib_lport_inuse(net, snum, hslot, bitmap, sk,
+                                            saddr_comp, pkttable->log);
+
+                        snum = first;
+                        /*
+                         * Iterate on all possible values of snum for this hash.
+                         * Using steps of an odd multiple of UDP_HTABLE_SIZE
+                         * give us randomization and full range coverage.
+                         */
+                        do {
+                                if (low <= snum && snum <= high &&
+                                !test_bit(snum >> pkttable->log, bitmap) &&
+  			        !packet_is_reserved_local_port(snum))
+                                        goto found;
+                                snum += rand;
+                        } while (snum != first);
+                        spin_unlock_bh(&hslot->lock);
+                } while (++first != last);
+                goto fail;
+        } else {
+                hslot = packet_hashslot(pkttable, net, snum);
+                spin_lock_bh(&hslot->lock);
+                if (hslot->count > 10) 
+		{	
+                        int exist;
+                        unsigned int slot2 = pkt_sk(sk)->pkt_portaddr_hash ^ snum;
+
+                        slot2          &= pkttable->mask;
+                        hash2_nulladdr &= pkttable->mask;
+
+                        hslot2 = packet_hashslot2(pkttable, slot2);
+                        if (hslot->count < hslot2->count)
+                                goto scan_primary_hash;
+
+                        exist = packet_lib_lport_inuse2(net, snum, hslot2,
+                                                     sk, saddr_comp);
+                        if (!exist && (hash2_nulladdr != slot2)) {
+                                hslot2 = packet_hashslot2(pkttable, hash2_nulladdr);
+                                exist = packet_lib_lport_inuse2(net, snum, hslot2,
+                                                             sk, saddr_comp);
+                        }
+                        if (exist)
+                                goto fail_unlock;
+                        else
+                                goto found;
+                }
+scan_primary_hash:
+	        if (packet_lib_lport_inuse(net, snum, hslot, NULL, sk,
+                                        saddr_comp, 0))
+                        goto fail_unlock;
+        }
+found:
+        pkt_sk(sk)->pkt_num = snum;
+        pkt_sk(sk)->pkt_port_hash = snum;
+        pkt_sk(sk)->pkt_portaddr_hash ^= snum;
+        if (sk_unhashed(sk)) {
+                sk_nulls_add_node_rcu(sk, &hslot->head);
+                hslot->count++;
+                sock_prot_inuse_add(sock_net(sk), sk->sk_prot, 1);
+
+                hslot2 = packet_hashslot2(pkttable, pkt_sk(sk)->pkt_portaddr_hash);
+                spin_lock(&hslot2->lock);
+                hlist_nulls_add_head_rcu(&pkt_sk(sk)->pkt_portaddr_node,
+                                                        &hslot2->head);
+		 hslot2->count++;
+                spin_unlock(&hslot2->lock);
+        }
+        error = 0;
+fail_unlock:
+        spin_unlock_bh(&hslot->lock);
+fail:
+        return error;
+
+}
+
+EXPORT_SYMBOL(packet_lib_get_port);	                                                                            
+
+
+static int packet_ifindex_equal(const struct sock *sk1, const struct sock *sk2)
+{
+        struct packet_sock *po1 = pkt_sk(sk1), *po2 = pkt_sk(sk2);
+
+        return((!po1->pkt_ifindex || !po2->pkt_ifindex || po1->pkt_ifindex || po2->pkt_ifindex));
+}
+
+static unsigned int packet_portaddr_hash(struct net *net, __be32 saddr,
+                                       unsigned int port)
+{
+        return jhash_1word((__force u32)saddr, net_hash_mix(net)) ^ port;
+}
+
+static int packet_get_port(struct sock *sk, unsigned short snum)
+{
+        unsigned int hash2_nulladdr = packet_portaddr_hash(sock_net(sk), htonl(INADDR_ANY), snum);
+        unsigned int hash2_partial = packet_portaddr_hash(sock_net(sk), pkt_sk(sk)->pkt_ifindex, 0);
+
+        /* precompute partial secondary hash */
+        pkt_sk(sk)->pkt_portaddr_hash = hash2_partial;
+        return packet_lib_get_port(sk, snum, packet_ifindex_equal, hash2_nulladdr);
+}
+
+
+static inline int compute_score(struct sock *sk, struct net *net, __be32 saddr,
+                         unsigned short hnum,
+                         __be16 sport, __be32 daddr, __be16 dport)
+{
+        int score = -1;
+
+        if (net_eq(sock_net(sk), net) && pkt_sk(sk)->pkt_port_hash == hnum) {
+                struct packet_sock *po = pkt_sk(sk);
+
+                score = (sk->sk_family == AF_PACKET ? 1 : 0);
+		if (po->ifindex) {
+                        if (po->ifindex != daddr)
+                                return -1;
+                        score += 2;
+                }
+                if(po->s_port)
+                {
+                        if(po->s_port != dport)
+                                return -1;
+                        score += 2;
+                }
+
+                if (po->pkt_difindex) {
+                        if (po->pkt_difindex != saddr)
+                                return -1;
+                        score += 2;
+                }
+                if (po->pkt_dport) {
+                        if (po->pkt_dport != sport)
+                                return -1;
+                        score += 2;
+                }
+        }
+        return score;
+}
+
+/*
+ * In this second variant, we check (daddr, dport) matches (inet_rcv_sadd, inet_num)
+ */
+#define SCORE2_MAX (1 + 2 + 2)
+static inline int compute_score2(struct sock *sk, struct net *net,
+                                 __be32 saddr, __be16 sport,
+                                 __be32 daddr, unsigned int hnum)
+{
+        int score = -1;
+
+        if (net_eq(sock_net(sk), net)) {
+                struct packet_sock *po = pkt_sk(sk);
+
+                if (po->pkt_ifindex != daddr)
+                        return -1;
+                if (po->pkt_num != hnum)
+                        return -1;
+
+                score = (sk->sk_family == AF_PACKET ? 1 : 0);
+                if (po->pkt_difindex) {
+                        if (po->pkt_difindex != saddr)
+                                return -1;
+                        score += 2;
+                }
+                if (po->pkt_dport) {
+                        if (po->pkt_dport != sport)
+                                return -1;
+                        score += 2;
+                }
+        }
+        return score;
+}
+
+/* called with read_rcu_lock() */
+static struct sock *packet_lib_lookup2(struct net *net,
+                __be32 saddr, __be16 sport,
+                __be32 daddr, unsigned int hnum,
+                struct packet_hslot *hslot2, unsigned int slot2)
+{
+        struct sock *sk, *result;
+        struct hlist_nulls_node *node;
+        int score, badness;
+
+begin:
+        result = NULL;
+        badness = -1;
+        pkt_portaddr_for_each_entry_rcu(sk, node, &hslot2->head) {
+                score = compute_score2(sk, net, saddr, sport,
+                                      daddr, hnum);
+                if (score > badness) {
+                        result = sk;
+                        badness = score;
+                        if (score == SCORE2_MAX)
+                                goto exact_match;
+                }
+        }
+        /*
+         * if the nulls value we got at the end of this lookup is
+         * not the expected one, we must restart lookup.
+         * We probably met an item that was moved to another chain.
+         */
+        if (get_nulls_value(node) != slot2)
+                goto begin;
+
+        if (result) {
+exact_match:
+                if (unlikely(!atomic_inc_not_zero_hint(&result->sk_refcnt, 2)))
+                        result = NULL;
+                else if (unlikely(compute_score2(result, net, saddr, sport,
+                                  daddr, hnum) < badness)) {
+                        sock_put(result);
+                        goto begin;
+                }
+        }
+        return result;
+}
+
+
+struct sock *packet_lookup(struct net *net, __be32 saddr,
+                __be16 sport, __be32 daddr, __be16 dport,
+                struct packet_table *pkttable)
+{
+        struct sock *sk, *result;
+        struct hlist_nulls_node *node;
+        unsigned short hnum = ntohs(dport);
+        unsigned int hash2, slot2, slot = packet_hashfn(net, hnum, pkttable->mask);
+        struct packet_hslot *hslot2, *hslot = &pkttable->hash[slot];
+        int score, badness;
+
+        rcu_read_lock();
+        if (hslot->count > 10) {
+                hash2 = packet_portaddr_hash(net, daddr, hnum);
+                slot2 = hash2 & pkttable->mask;
+                hslot2 = &pkttable->hash2[slot2];
+                if (hslot->count < hslot2->count)
+                        goto begin;
+
+                result = packet_lib_lookup2(net, saddr, sport,
+                                          daddr, hnum,
+                                          hslot2, slot2);
+                if (!result) {
+                        hash2 = packet_portaddr_hash(net, htonl(INADDR_ANY), hnum);
+                        slot2 = hash2 & pkttable->mask;
+                        hslot2 = &pkttable->hash2[slot2];
+                        if (hslot->count < hslot2->count)
+                                goto begin;
+
+                        result = packet_lib_lookup2(net, saddr, sport,
+                                                  htonl(INADDR_ANY), hnum,
+                                                  hslot2, slot2);
+                }
+                rcu_read_unlock();
+                return result;
+        }
+begin:
+        result = NULL;
+        badness = -1;
+        sk_nulls_for_each_rcu(sk, node, &hslot->head) {
+                score = compute_score(sk, net, saddr, hnum, sport,
+                                      daddr, dport);
+                if (score > badness) {
+                        result = sk;
+                        badness = score;
+                }
+        }
+        /*
+         * if the nulls value we got at the end of this lookup is
+         * not the expected one, we must restart lookup.
+	* We probably met an item that was moved to another chain.
+         */
+        if (get_nulls_value(node) != slot)
+                goto begin;
+
+        if (result) {
+                if (unlikely(!atomic_inc_not_zero_hint(&result->sk_refcnt, 2)))
+                        result = NULL;
+                else if (unlikely(compute_score(result, net, saddr, hnum, sport,
+                                  daddr, dport) < badness)) {
+                        sock_put(result);
+                        goto begin;
+
+        	}
+	}
+        rcu_read_unlock();
+        return result;	
+	
+}
+
+EXPORT_SYMBOL(packet_lookup);
+
+/*
+ * This function makes lazy skb cloning in hope that most of packets
+ * are discarded by 
+ *
+ * Note tricky part: we DO mangle shared skb! skb->data, skb->len
+ * and skb->cb are mangled. It works because (and until) packets
+ * falling here are owned by current CPU. Output packets are cloned
+ * by dev_queue_xmit_nit(), input packets are processed by net_bh
+ * sequencially, so that if we return skb to original state on exit,
+ * we will not harm anyone.
+ */
+
+static int packet_rcv_port_support(struct sk_buff *skb, struct net_device *dev,
+                      struct packet_type *pt, struct net_device *orig_dev)
+{
+        struct sock *sk;
+        struct sockaddr_ll *sll;
+        struct packet_sock *po;
+        u8 *skb_head = skb->data;
+        int skb_len = skb->len;
+        unsigned int snaplen, res;
+#ifdef CONFIG_PACKET_PORT_SUPPORT
+        struct pkthdr *ph;
+	struct net *net = dev_net(skb_dst(skb)->dev);
+#endif
+
+        if (skb->pkt_type == PACKET_LOOPBACK)
+                goto drop;
+#ifdef CONFIG_PACKET_PORT_SUPPORT 
+        if (skb->pkt_type == PACKET_OTHERHOST || skb->pkt_type == PACKET_OUTGOING)
+                goto drop;
+#endif
+#ifdef CONFIG_PACKET_PORT_SUPPORT
+        skb_reset_network_header(skb);
+        skb_pull_inline(skb, sizeof(struct pkthdr));
+        ph = pkt_hdr(skb);
+        if(!ph)
+		goto drop;
+#endif
+
+#ifndef CONFIG_PACKET_PORT_SUPPORT
+        sk = pt->af_packet_priv;
+#else
+	sk = packet_lookup(net, ph->s_addr, ph->s_port, ph->d_addr, ph->d_port, &pkttable);
+#endif
+	if(!sk)
+		goto drop;
+
+	ph = pkt_hdr(skb);
+ 
+        po = pkt_sk(sk);
+
+        if (!net_eq(dev_net(dev), sock_net(sk)))
+                goto drop;
+
+        skb->dev = dev;
+
+        if (dev->header_ops) {
+                /* The device has an explicit notion of ll header,
+                 * exported to higher levels.
+                 *
+                 * Otherwise, the device hides details of its frame
+                 * structure, so that corresponding packet head is
+                 * never delivered to user.
+                 */
+                if (sk->sk_type != SOCK_DGRAM)
+                        skb_push(skb, skb->data - skb_mac_header(skb));
+#ifndef CONFIG_PACKET_PORT_SUPPORT 
+                else if (skb->pkt_type == PACKET_OUTGOING) {
+                        /* Special case: outgoing packets have ll header at head */
+                        skb_pull(skb, skb_network_offset(skb));
+                }
+#endif
+        }
+
+        snaplen = skb->len;
+
+	res = run_filter(skb, sk, snaplen);
+        if (!res)
+                goto drop_n_restore;
+        if (snaplen > res)
+                snaplen = res;
+
+        if (atomic_read(&sk->sk_rmem_alloc) >= sk->sk_rcvbuf)
+                goto drop_n_acct;
+
+        if (skb_shared(skb)) {
+                struct sk_buff *nskb = skb_clone(skb, GFP_ATOMIC);
+                if (nskb == NULL)
+                        goto drop_n_acct;
+
+                if (skb_head != skb->data) {
+                        skb->data = skb_head;
+                        skb->len = skb_len;
+                }
+                consume_skb(skb);
+                skb = nskb;
+        }
+
+        BUILD_BUG_ON(sizeof(*PACKET_SKB_CB(skb)) + MAX_ADDR_LEN - 8 > sizeof(skb->cb));
+
+        sll = &PACKET_SKB_CB(skb)->sa.ll;
+        sll->sll_family = AF_PACKET;
+        sll->sll_hatype = dev->type;
+        sll->sll_protocol = skb->protocol;
+        sll->sll_pkttype = skb->pkt_type;
+        if (unlikely(po->origdev))
+                sll->sll_ifindex = orig_dev->ifindex;
+        else
+                sll->sll_ifindex = dev->ifindex;
+
+        sll->sll_halen = dev_parse_header(skb, sll->sll_addr);
+
+        PACKET_SKB_CB(skb)->origlen = skb->len;
+
+        if (pskb_trim(skb, snaplen))
+                goto drop_n_acct;
+
+        skb_set_owner_r(skb, sk);
+        skb->dev = NULL;
+        skb_dst_drop(skb);
+
+        /* drop conntrack reference */
+        nf_reset(skb);
+
+        spin_lock(&sk->sk_receive_queue.lock);
+	po->stats.tp_packets++;
+        skb->dropcount = atomic_read(&sk->sk_drops);
+        __skb_queue_tail(&sk->sk_receive_queue, skb);
+        spin_unlock(&sk->sk_receive_queue.lock);
+        sk->sk_data_ready(sk, skb->len);
+        return 0;
+
+drop_n_acct:
+        spin_lock(&sk->sk_receive_queue.lock);
+        po->stats.tp_drops++;
+        atomic_inc(&sk->sk_drops);
+        spin_unlock(&sk->sk_receive_queue.lock);
+
+drop_n_restore:
+        if (skb_head != skb->data && skb_shared(skb)) {
+                skb->data = skb_head;
+                skb->len = skb_len;
+        }
+drop:
+        consume_skb(skb);
+        return 0;
+}
+                                                    	
+                                                                                   
+#endif
 static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,
 		       struct packet_type *pt, struct net_device *orig_dev)
 {
@@ -2118,7 +2687,7 @@ static struct sk_buff *packet_alloc_skb(struct sock *sk, size_t prepad,
 
 	return skb;
 }
-
+#ifndef CONFIG_PACKET_PORT_SUPPORT
 static int packet_snd(struct socket *sock,
 			  struct msghdr *msg, size_t len)
 {
@@ -2126,7 +2695,8 @@ static int packet_snd(struct socket *sock,
 	struct sockaddr_ll *saddr = (struct sockaddr_ll *)msg->msg_name;
 	struct sk_buff *skb;
 	struct net_device *dev;
-	__be16 proto;
+	__be16 proto = 0;
+//	__be16 dport = 0;
 	bool need_rls_dev = false;
 	unsigned char *addr;
 	int err, reserve = 0;
@@ -2313,6 +2883,236 @@ out_unlock:
 out:
 	return err;
 }
+#endif
+
+#ifdef CONFIG_PACKET_PORT_SUPPORT
+static int packet_snd_port_support(struct socket *sock,
+                          struct msghdr *msg, size_t len)
+{
+        struct sock *sk = sock->sk;
+        struct sockaddr_ll *saddr = (struct sockaddr_ll *)msg->msg_name;
+        struct sk_buff *skb;
+        struct net_device *dev;
+        __be16 proto;
+        bool need_rls_dev = false;
+        unsigned char *addr;
+        int err, reserve = 0;
+        struct virtio_net_hdr vnet_hdr = { 0 };
+        int offset = 0;
+        int vnet_hdr_len;
+        struct packet_sock *po = pkt_sk(sk);
+        unsigned short gso_type = 0;
+        int hlen, tlen;
+        int extra_len = 0;
+	#ifdef CONFIG_PACKET_PORT_SUPPORT
+	struct pkthdr *ph;
+	int difindex = 0;
+	__be16 dport = 0;
+	#endif
+        /*
+         *      Get and verify the address.
+         */
+
+       /* Destination address is a must for packets to reach desired target */ 
+	if (saddr == NULL) {
+                dev = po->prot_hook.dev;
+                proto   = po->num;
+                addr    = NULL;
+        } else {
+                err = -EINVAL;
+                if (msg->msg_namelen < sizeof(struct sockaddr_ll))
+                        goto out;
+                if (msg->msg_namelen < (saddr->sll_halen + offsetof(struct sockaddr_ll, sll_addr)))
+                        goto out;
+                proto   = saddr->sll_protocol;
+                addr    = saddr->sll_addr;
+#ifdef CONFIG_PACKET_PORT_SUPPORT
+		difindex = saddr->sll_ifindex;
+		dport    = saddr->sll_hatype;
+#endif
+                dev = dev_get_by_index(sock_net(sk), saddr->sll_ifindex);
+                need_rls_dev = true;
+        }
+	
+        err = -ENXIO;
+        if (dev == NULL)
+                goto out_unlock;
+
+        if (sock->type == SOCK_RAW)
+                reserve = dev->hard_header_len;
+
+        err = -ENETDOWN;
+        if (!(dev->flags & IFF_UP))
+	{
+                goto out_unlock;
+	}
+
+        if (po->has_vnet_hdr) {
+         vnet_hdr_len = sizeof(vnet_hdr);
+
+                err = -EINVAL;
+                if (len < vnet_hdr_len)
+                        goto out_unlock;
+
+                len -= vnet_hdr_len;
+
+                err = memcpy_fromiovec((void *)&vnet_hdr, msg->msg_iov,
+                                       vnet_hdr_len);
+                if (err < 0)
+                        goto out_unlock;
+
+                if ((vnet_hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM) &&
+                    (vnet_hdr.csum_start + vnet_hdr.csum_offset + 2 >
+                      vnet_hdr.hdr_len))
+                        vnet_hdr.hdr_len = vnet_hdr.csum_start +
+                                                 vnet_hdr.csum_offset + 2;
+
+                err = -EINVAL;
+                if (vnet_hdr.hdr_len > len)
+                        goto out_unlock;
+
+                if (vnet_hdr.gso_type != VIRTIO_NET_HDR_GSO_NONE) {
+                        switch (vnet_hdr.gso_type & ~VIRTIO_NET_HDR_GSO_ECN) {
+                        case VIRTIO_NET_HDR_GSO_TCPV4:
+                                gso_type = SKB_GSO_TCPV4;
+                                break;
+                        case VIRTIO_NET_HDR_GSO_TCPV6:
+                                gso_type = SKB_GSO_TCPV6;
+                                break;
+                        case VIRTIO_NET_HDR_GSO_UDP:
+                                gso_type = SKB_GSO_UDP;
+                                break;
+                        default:
+                                goto out_unlock;
+                        }
+
+                        if (vnet_hdr.gso_type & VIRTIO_NET_HDR_GSO_ECN)
+                                gso_type |= SKB_GSO_TCP_ECN;
+
+                        if (vnet_hdr.gso_size == 0)
+                                goto out_unlock;
+
+                }
+        }
+
+        if (unlikely(sock_flag(sk, SOCK_NOFCS))) {
+                if (!netif_supports_nofcs(dev)) {
+                        err = -EPROTONOSUPPORT;
+        		 goto out_unlock;
+                }
+                extra_len = 4; /* We're doing our own CRC */
+        }
+
+        err = -EMSGSIZE;
+        if (!gso_type && (len > dev->mtu + reserve + VLAN_HLEN + extra_len))
+                goto out_unlock;
+
+        err = -ENOBUFS;
+        hlen = LL_RESERVED_SPACE(dev);
+#ifdef CONFIG_PACKET_PORT_SUPPORT
+        hlen += sizeof(struct pkthdr);
+#endif
+        tlen = dev->needed_tailroom;
+        skb = packet_alloc_skb(sk, hlen + tlen, hlen, len, vnet_hdr.hdr_len,
+                               msg->msg_flags & MSG_DONTWAIT, &err);
+        if (skb == NULL)
+                goto out_unlock;
+
+#ifdef CONFIG_PACKET_PORT_SUPPORT                                                                             
+        if(saddr)
+        {
+                ph = (struct pkthdr *)skb_push(skb, sizeof(struct pkthdr));
+                if(ph)
+                {
+                        ph->s_addr = dev->ifindex;
+                        ph->d_addr = difindex;
+                        ph->s_port = po->s_port;
+                        ph->d_port = dport;
+                        skb_set_network_header(skb, reserve);
+                        offset = sizeof(struct pkthdr);
+
+                }
+        }
+#endif
+        err = -EINVAL;
+        if (sock->type == SOCK_DGRAM &&
+            (offset += dev_hard_header(skb, dev, ntohs(proto), addr, NULL, len)) < 0)
+                goto out_free;
+	
+        /* Returns -EFAULT on error */
+        err = skb_copy_datagram_from_iovec(skb, offset, msg->msg_iov, 0, len);
+        if (err)
+                goto out_free;
+        err = sock_tx_timestamp(sk, &skb_shinfo(skb)->tx_flags);
+        if (err < 0)
+                goto out_free;
+
+        if (!gso_type && (len > dev->mtu + reserve + extra_len)) {
+                /* Earlier code assumed this would be a VLAN pkt,
+                 * double-check this now that we have the actual
+                 * packet in hand.
+                 */
+                struct ethhdr *ehdr;
+                skb_reset_mac_header(skb);
+                ehdr = eth_hdr(skb);
+                if (ehdr->h_proto != htons(ETH_P_8021Q)) {
+                        err = -EMSGSIZE;
+                        goto out_free;
+                }
+        }
+
+        skb->protocol = proto;
+        skb->dev = dev;
+        skb->priority = sk->sk_priority;
+        skb->mark = sk->sk_mark;
+
+      	if (po->has_vnet_hdr) {
+                if (vnet_hdr.flags & VIRTIO_NET_HDR_F_NEEDS_CSUM) {
+                        if (!skb_partial_csum_set(skb, vnet_hdr.csum_start,
+                                                  vnet_hdr.csum_offset)) {
+                                err = -EINVAL;
+                                goto out_free;
+                        }
+                }
+
+                skb_shinfo(skb)->gso_size = vnet_hdr.gso_size;
+                skb_shinfo(skb)->gso_type = gso_type;
+
+                /* Header must be checked, and gso_segs computed. */
+                skb_shinfo(skb)->gso_type |= SKB_GSO_DODGY;
+                skb_shinfo(skb)->gso_segs = 0;
+
+                len += vnet_hdr_len;
+        }
+
+        if (unlikely(extra_len == 4))
+                skb->no_fcs = 1;
+
+        /*
+         *      Now send it
+         */
+
+        err = dev_queue_xmit(skb);
+        if (err > 0 && (err = net_xmit_errno(err)) != 0)
+                goto out_unlock;
+
+        if (need_rls_dev)
+                dev_put(dev);
+
+        return len;
+
+out_free:
+        kfree_skb(skb);
+out_unlock:
+        if (dev && need_rls_dev)
+                dev_put(dev);
+out:
+        return err;
+}
+ 
+
+#endif
+
 
 static int packet_sendmsg(struct kiocb *iocb, struct socket *sock,
 		struct msghdr *msg, size_t len)
@@ -2322,7 +3122,11 @@ static int packet_sendmsg(struct kiocb *iocb, struct socket *sock,
 	if (po->tx_ring.pg_vec)
 		return tpacket_snd(po, msg);
 	else
+#ifndef CONFIG_PACKET_PORT_SUPPORT
 		return packet_snd(sock, msg, len);
+#else
+		return packet_snd_port_support(sock, msg, len);
+#endif
 }
 
 /*
@@ -2342,7 +3146,7 @@ static int packet_release(struct socket *sock)
 
 	net = sock_net(sk);
 	po = pkt_sk(sk);
-
+#ifndef CONFIG_PACKET_PORT_SUPPORT
 	mutex_lock(&net->packet.sklist_lock);
 	sk_del_node_init_rcu(sk);
 	mutex_unlock(&net->packet.sklist_lock);
@@ -2350,7 +3154,9 @@ static int packet_release(struct socket *sock)
 	preempt_disable();
 	sock_prot_inuse_add(net, sk->sk_prot, -1);
 	preempt_enable();
-
+#else
+	sk_common_release(sk);
+#endif
 	spin_lock(&po->bind_lock);
 	unregister_prot_hook(sk, false);
 	if (po->prot_hook.dev) {
@@ -2459,6 +3265,7 @@ static int packet_bind_spkt(struct socket *sock, struct sockaddr *uaddr,
 	return err;
 }
 
+#ifndef CONFIG_PACKET_PORT_SUPPORT
 static int packet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 {
 	struct sockaddr_ll *sll = (struct sockaddr_ll *)uaddr;
@@ -2487,11 +3294,113 @@ static int packet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len
 out:
 	return err;
 }
+#else
+static int packet_bind_port(struct socket *sock, struct sockaddr *uaddr, int addr_len)
+{
+        struct sockaddr_ll *sll = (struct sockaddr_ll *)uaddr;
+        struct sock *sk = sock->sk;
+        struct net_device *dev = NULL;        
+	unsigned short snum;
+	__be16 protocol;
+	int err = 0;	
+	struct packet_sock *po = pkt_sk(sk);
+
+        /* Check legality */
+
+        if (addr_len < sizeof(struct sockaddr_ll))
+                return -EINVAL;
+        if (sll->sll_family != AF_PACKET)
+                return -EINVAL;
+
+        if (sll->sll_ifindex) {
+                err = -ENODEV;
+                dev = dev_get_by_index(sock_net(sk), sll->sll_ifindex);
+                if (dev == NULL)
+                        goto out;
+        }
+	else
+	{
+		err = -ENODEV;
+                        goto out;
+	}
+	
+        if (po->fanout) {
+                if (dev)
+                        dev_put(dev);
+
+                return -EINVAL;
+        }
+
+	/* Checkings Over */
+	protocol = sll->sll_protocol ? : pkt_sk(sk)->num;
+	
+	lock_sock(sk);
+
+        spin_lock(&po->bind_lock);
+        unregister_prot_hook(sk, true);
+        po->num = protocol;
+        po->prot_hook.type = protocol;
+        if (po->prot_hook.dev)
+                dev_put(po->prot_hook.dev);
+        po->prot_hook.dev = dev;
+	po->ifindex = po->pkt_ifindex = (__be32)dev->ifindex;
+		
+#ifdef CONFIG_PACKET_PORT_SUPPORT 
+        snum = ntohs(sll->sll_hatype);
+        if(sk->sk_prot->get_port(sk, snum))
+        {
+                /* If port can't be attained then return ADDRINUSE */
+                po->ifindex = 0;
+                err = -EADDRINUSE;
+                goto out_unlock;
+        }
+	else
+		err = 0;
+
+        if(snum)
+                sk->sk_userlocks |= SOCK_BINDPORT_LOCK;
+	
+	po->s_port = htons(po->pkt_num);
+	/* Destination params will be filled at the time of sendmsg */
+	po->pkt_difindex = 0;
+	po->pkt_dport = 0;
+#endif
+#ifdef CONFIG_PACKET_PORT_SUPPORT /* Something might be wrong in doing this */
+	 if (protocol == 0)
+                goto out_unlock;
+#endif
+        if (!dev || (dev->flags & IFF_UP)) {
+                register_prot_hook(sk);
+        } else {
+                sk->sk_err = ENETDOWN;
+                if (!sock_flag(sk, SOCK_DEAD))
+                        sk->sk_error_report(sk);
+        }
+
+out_unlock:
+	spin_unlock(&po->bind_lock);
+	release_sock(sk);
+	return err;
+
+out:
+        return err;
+}
+
+#endif
+
+/*
+ *	Create a packet of type SOCK_PACKET.
+ */
 
 static struct proto packet_proto = {
 	.name	  = "PACKET",
 	.owner	  = THIS_MODULE,
 	.obj_size = sizeof(struct packet_sock),
+#ifdef CONFIG_PACKET_PORT_SUPPORT
+	.unhash   = packet_lib_unhash,
+        .get_port = packet_get_port,
+	.h.pkt_table = &pkttable,
+#endif
 };
 
 /*
@@ -2538,8 +3447,11 @@ static int packet_create(struct net *net, struct socket *sock, int protocol,
 
 	spin_lock_init(&po->bind_lock);
 	mutex_init(&po->pg_vec_lock);
+#ifdef CONFIG_PACKET_PORT_SUPPORT 
+	po->prot_hook.func = packet_rcv_port_support;
+#else
 	po->prot_hook.func = packet_rcv;
-
+#endif
 	if (sock->type == SOCK_PACKET)
 		po->prot_hook.func = packet_rcv_spkt;
 
@@ -2549,7 +3461,7 @@ static int packet_create(struct net *net, struct socket *sock, int protocol,
 		po->prot_hook.type = proto;
 		register_prot_hook(sk);
 	}
-
+#ifndef CONFIG_PACKET_PORT_SUPPORT
 	mutex_lock(&net->packet.sklist_lock);
 	sk_add_node_rcu(sk, &net->packet.sklist);
 	mutex_unlock(&net->packet.sklist_lock);
@@ -2557,7 +3469,7 @@ static int packet_create(struct net *net, struct socket *sock, int protocol,
 	preempt_disable();
 	sock_prot_inuse_add(net, &packet_proto, 1);
 	preempt_enable();
-
+#endif
 	return 0;
 out:
 	return err;
@@ -3726,7 +4638,11 @@ static const struct proto_ops packet_ops = {
 	.family =	PF_PACKET,
 	.owner =	THIS_MODULE,
 	.release =	packet_release,
+#ifdef CONFIG_PACKET_PORT_SUPPORT
+	.bind =         packet_bind_port,
+#else
 	.bind =		packet_bind,
+#endif
 	.connect =	sock_no_connect,
 	.socketpair =	sock_no_socketpair,
 	.accept =	sock_no_accept,
@@ -3853,10 +4769,74 @@ static void __exit packet_exit(void)
 	proto_unregister(&packet_proto);
 }
 
+#ifdef CONFIG_PACKET_PORT_SUPPORT
+static __initdata unsigned long phash_entries;
+static int __init set_phash_entries(char *str)
+{
+        ssize_t ret;
+
+        if (!str)
+                return 0;
+
+        ret = kstrtoul(str, 0, &phash_entries);
+        if (ret)
+                return 0;
+
+        if (phash_entries && phash_entries < PKT_HTABLE_SIZE_MIN)
+                phash_entries = PKT_HTABLE_SIZE_MIN;
+        return 1;
+}
+__setup("phash_entries=", set_phash_entries);
+
+
+extern void *alloc_large_system_hash(const char *tablename,
+                                     unsigned long bucketsize,
+                                     unsigned long numentries,
+                                     int scale,
+                                     int flags,
+                                     unsigned int *_hash_shift,
+                                     unsigned int *_hash_mask,
+                                     unsigned long low_limit,
+                                     unsigned long high_limit);
+
+
+
+void __init packet_table_init(struct packet_table *table, const char *name)
+{
+        unsigned int i;
+
+        table->hash = alloc_large_system_hash(name,
+                                              2 * sizeof(struct packet_hslot),
+                                              phash_entries,
+                                              21, /* one slot per 2 MB */
+                                              0,
+                                              &table->log,
+                                              &table->mask,
+                                              PKT_HTABLE_SIZE_MIN,
+                                              64 * 1024);
+
+        table->hash2 = table->hash + (table->mask + 1);
+        for (i = 0; i <= table->mask; i++) {
+                INIT_HLIST_NULLS_HEAD(&table->hash[i].head, i);
+                table->hash[i].count = 0;
+                spin_lock_init(&table->hash[i].lock);
+        }
+        for (i = 0; i <= table->mask; i++) {
+                INIT_HLIST_NULLS_HEAD(&table->hash2[i].head, i);
+                table->hash2[i].count = 0;
+                spin_lock_init(&table->hash2[i].lock);
+        }
+}
+
+
+#endif
+
 static int __init packet_init(void)
 {
 	int rc = proto_register(&packet_proto, 0);
-
+#ifdef CONFIG_PACKET_PORT_SUPPORT	
+	packet_table_init(&pkttable, "PACKET");
+#endif
 	if (rc != 0)
 		goto out;
 

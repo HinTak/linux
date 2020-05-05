@@ -1,0 +1,16 @@
+/*
+ * Novatek Ltd. CA9-72668
+ *
+ * Motherboard 72668 
+ *
+ *
+ */
+
+	motherboard {
+		model = "72668";
+		nvt,cortex_a9,site,site = <0>;
+		compatible = "nvt,ca9-72668,tv-board1", "nvt-amba-bus";
+		#address-cells = <1>; /* chipselect number and offset */
+		#size-cells = <1>;
+		#interrupt-cells = <1>;
+	};

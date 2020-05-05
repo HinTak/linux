@@ -803,6 +803,15 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 				; /* try to free the page below */
 			}
 		}
+#if defined(CONFIG_MSTAR_X14) && !defined(CONFIG_VD_RELEASE) 
+		if(unlikely(page_mapped(page) < 0)) {
+			printk("[LINUX DEBUG] This page might be bad page.\n");
+			dump_page(page);
+			if(mapping)
+				printk("[LINUX DEBUG] Filesystem:%s\n", page->mapping->host->i_sb->s_type->name);
+		}
+#endif
+
 
 		if (PageDirty(page)) {
 			nr_dirty++;
@@ -1117,6 +1126,11 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 			continue;
 
 		default:
+			printk("Page's flag is not valid!!\n");
+			if((unsigned int)page->mapping & 0x1)  //anon
+				printk("This page is anon page. page flags:0x%lx \n", page->flags);
+			else	//file
+				printk("This page is file page. page flags:0x%lx filesystem:%s\n", page->flags, page->mapping->host->i_sb->s_type->name);
 			BUG();
 		}
 	}

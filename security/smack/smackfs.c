@@ -28,6 +28,11 @@
 #include <linux/audit.h>
 #include "smack.h"
 
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+#include <linux/sched.h>
+#include <linux/fs.h>
+#endif /* CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER */
+
 /*
  * smackfs pseudo filesystem.
  */
@@ -35,21 +40,32 @@
 enum smk_inos {
 	SMK_ROOT_INO	= 2,
 	SMK_LOAD	= 3,	/* load policy */
+#ifndef CONFIG_SECURITY_SMACK_NETWORK_DISABLE
 	SMK_CIPSO	= 4,	/* load label -> CIPSO mapping */
 	SMK_DOI		= 5,	/* CIPSO DOI */
 	SMK_DIRECT	= 6,	/* CIPSO level indicating direct label */
 	SMK_AMBIENT	= 7,	/* internet ambient label */
 	SMK_NETLBLADDR	= 8,	/* single label hosts */
+#endif
 	SMK_ONLYCAP	= 9,	/* the only "capable" label */
 	SMK_LOGGING	= 10,	/* logging */
+#ifdef CONFIG_SECURITY_SMACK_ALLOW_LOAD_SELF
 	SMK_LOAD_SELF	= 11,	/* task specific rules */
+#endif
 	SMK_ACCESSES	= 12,	/* access policy */
 	SMK_MAPPED	= 13,	/* CIPSO level indicating mapped label */
 	SMK_LOAD2	= 14,	/* load policy with long labels */
+#ifdef CONFIG_SECURITY_SMACK_ALLOW_LOAD_SELF
 	SMK_LOAD_SELF2	= 15,	/* load task specific rules with long labels */
+#endif
 	SMK_ACCESS2	= 16,	/* make an access check with long labels */
+#ifndef CONFIG_SECURITY_SMACK_NETWORK_DISABLE
 	SMK_CIPSO2	= 17,	/* load long label -> CIPSO mapping */
+#endif
 	SMK_REVOKE_SUBJ	= 18,	/* set rules with subject label to '-' */
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+	SMK_MODE	= 19,	/* Set SMACK mode */
+#endif
 };
 
 /*
@@ -107,6 +123,16 @@ struct smack_master_list {
 	struct list_head	list;
 	struct smack_rule	*smk_rule;
 };
+
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+/*
+ * Credential and tgid of current running process
+ */
+struct smack_manager {
+	struct cred *manager;
+	pid_t  tgid;
+} smk_manager = {NULL, 0};
+#endif
 
 LIST_HEAD(smack_rule_list);
 
@@ -349,6 +375,145 @@ free_out_s:
 	return rc;
 }
 
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+/**
+ * smack_get_exe_path - Get the path of a struct path.
+ *
+ * @path: Pointer to "struct path".
+ *
+ * Returns the buffer on success, an error code otherwise.
+ */
+
+static char *smack_get_exe_path(struct path *path)
+{
+	char *exe_path = NULL;
+	char *buf = NULL;
+	char *pos = ERR_PTR(-ENOMEM);
+	unsigned int buf_len = PAGE_SIZE / 2;
+	struct dentry *dentry = path->dentry;
+	struct super_block *sb;
+	struct inode *inode;
+	if (!dentry)
+		return NULL;
+	sb = dentry->d_sb;
+	buf = kmalloc(buf_len, GFP_NOFS);
+	if (!buf)
+		return NULL;
+	/* To make sure that pos is '\0' terminated. */
+	buf[buf_len - 1] = '\0';
+
+	/*
+	 * Get local name for filesystems without rename() operation
+	 * or dentry without vfsmount.
+	 * else Get absolute name for the rest.
+	 */
+	inode = sb->s_root->d_inode;
+	if (!path->mnt || (inode->i_op && !inode->i_op->rename &&
+				strcmp(sb->s_type->name, "squashfs")))
+		pos = dentry_path_raw(path->dentry, buf, buf_len - 1);
+	else
+		pos = d_absolute_path(path, buf, buf_len - 1);
+
+	if (IS_ERR(pos)) {
+		printk(KERN_WARNING "ERROR (%ld): Fail to get absolute path at %s.\n",
+						PTR_ERR(pos), __func__);
+		kfree(buf);
+		buf = NULL;
+		return NULL;
+	}
+
+	exe_path = kmalloc(strlen(pos)+1, GFP_NOFS);
+	if (!exe_path) {
+		kfree(buf);
+		return NULL;
+	}
+
+	strncpy(exe_path, pos, strlen(pos)+1);
+
+	kfree(buf);
+
+	return exe_path;
+}
+
+/**
+ * smack_get_exe - Get realpath of current process.
+ *
+ * Returns the realpath of current process on success, NULL otherwise.
+ *
+ */
+static const char *smack_get_exe(void)
+{
+	struct mm_struct *mm = current->mm;
+	const char *cp = NULL;
+
+	if (!mm)
+		return NULL;
+	down_read(&mm->mmap_sem);
+	if (mm->exe_file)
+		cp = smack_get_exe_path(&mm->exe_file->f_path);
+	up_read(&mm->mmap_sem);
+	return cp;
+}
+
+/**
+ * is_manager - Compare the tgid and credentials of current process.
+ * with smk_manager.
+ *
+ * Returns 1 on success, 0 on errors.
+ */
+bool is_manager(void)
+{
+	return ((smk_manager.manager == current->cred)
+			&& (smk_manager.tgid == current->tgid));
+}
+
+/**
+ * set_smack_manager - Save the pid and credentials of current process.
+ *
+ */
+void set_smack_manager(void)
+{
+	smk_manager.manager	= (struct cred *)current->cred;
+	smk_manager.tgid	= current->tgid;
+}
+
+/**
+ * smack_manager - Check whether the current process is a policy manager.
+ *
+ * Returns true if the current process is permitted to modify policy
+ * via /smack/ interface.
+ *
+ */
+static bool smack_manager(void)
+{
+	const char *exe;
+	bool found = true;
+	char *policy_controller = NULL;
+
+	if (is_manager() == false) {
+#ifdef CONFIG_SECURITY_SMACK_RULE_WRITER_NAME
+		policy_controller = CONFIG_SECURITY_SMACK_RULE_WRITER_NAME;
+		if (!strcmp("all_process", policy_controller))
+			return true;
+
+		exe = smack_get_exe();
+		if (!exe)
+			return false;
+
+		if (!strcmp(exe, policy_controller))
+			set_smack_manager();
+		else
+			found = false;
+
+		kfree(exe);
+#else
+		found = false;
+#endif
+	}
+	return found;
+}
+#endif /* CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER */
+
 #define SMK_FIXED24_FMT	0	/* Fixed 24byte label format */
 #define SMK_LONG_FMT	1	/* Variable long label format */
 /**
@@ -400,6 +565,7 @@ static ssize_t smk_write_rules_list(struct file *file, const char __user *buf,
 	data = kzalloc(datalen, GFP_KERNEL);
 	if (data == NULL)
 		return -ENOMEM;
+
 
 	if (copy_from_user(data, buf, count) != 0) {
 		rc = -EFAULT;
@@ -581,6 +747,10 @@ static const struct seq_operations load_seq_ops = {
  */
 static int smk_open_load(struct inode *inode, struct file *file)
 {
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
 	return seq_open(file, &load_seq_ops);
 }
 
@@ -684,6 +854,7 @@ static void smk_unlbl_ambient(char *oldambient)
 		       __func__, __LINE__, rc);
 }
 
+#ifndef CONFIG_SECURITY_SMACK_NETWORK_DISABLE
 /*
  * Seq_file read operations for /smack/cipso
  */
@@ -752,6 +923,10 @@ static const struct seq_operations cipso_seq_ops = {
  */
 static int smk_open_cipso(struct inode *inode, struct file *file)
 {
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
 	return seq_open(file, &cipso_seq_ops);
 }
 
@@ -844,6 +1019,8 @@ static ssize_t smk_set_cipso(struct file *file, const char __user *buf,
 		smack_catset_bit(cat, mapcatset);
 	}
 
+	memset(&ncats, 0, sizeof(ncats));
+
 	rc = smk_netlbl_mls(maplevel, mapcatset, &ncats, SMK_CIPSOLEN);
 	if (rc >= 0) {
 		netlbl_secattr_catmap_free(skp->smk_netlabel.attr.mls.cat);
@@ -930,6 +1107,10 @@ static const struct seq_operations cipso2_seq_ops = {
  */
 static int smk_open_cipso2(struct inode *inode, struct file *file)
 {
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
 	return seq_open(file, &cipso2_seq_ops);
 }
 
@@ -1009,6 +1190,10 @@ static const struct seq_operations netlbladdr_seq_ops = {
  */
 static int smk_open_netlbladdr(struct inode *inode, struct file *file)
 {
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
 	return seq_open(file, &netlbladdr_seq_ops);
 }
 
@@ -1242,10 +1427,15 @@ static ssize_t smk_read_doi(struct file *filp, char __user *buf,
 	char temp[80];
 	ssize_t rc;
 
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
+
 	if (*ppos != 0)
 		return 0;
 
-	sprintf(temp, "%d", smk_cipso_doi_value);
+	snprintf(temp, sizeof(temp), "%d", smk_cipso_doi_value);
 	rc = simple_read_from_buffer(buf, count, ppos, temp, strlen(temp));
 
 	return rc;
@@ -1268,6 +1458,11 @@ static ssize_t smk_write_doi(struct file *file, const char __user *buf,
 
 	if (!smack_privileged(CAP_MAC_ADMIN))
 		return -EPERM;
+
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
 
 	if (count >= sizeof(temp) || count == 0)
 		return -EINVAL;
@@ -1308,10 +1503,15 @@ static ssize_t smk_read_direct(struct file *filp, char __user *buf,
 	char temp[80];
 	ssize_t rc;
 
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
+
 	if (*ppos != 0)
 		return 0;
 
-	sprintf(temp, "%d", smack_cipso_direct);
+	snprintf(temp, sizeof(temp), "%d", smack_cipso_direct);
 	rc = simple_read_from_buffer(buf, count, ppos, temp, strlen(temp));
 
 	return rc;
@@ -1335,6 +1535,11 @@ static ssize_t smk_write_direct(struct file *file, const char __user *buf,
 
 	if (!smack_privileged(CAP_MAC_ADMIN))
 		return -EPERM;
+
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
 
 	if (count >= sizeof(temp) || count == 0)
 		return -EINVAL;
@@ -1370,7 +1575,7 @@ static const struct file_operations smk_direct_ops = {
 	.write		= smk_write_direct,
 	.llseek		= default_llseek,
 };
-
+#endif /* CONFIG_SECURITY_SMACK_NETWORK_DISABLE */
 /**
  * smk_read_mapped - read() for /smack/mapped
  * @filp: file pointer, not actually used
@@ -1386,10 +1591,15 @@ static ssize_t smk_read_mapped(struct file *filp, char __user *buf,
 	char temp[80];
 	ssize_t rc;
 
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
+
 	if (*ppos != 0)
 		return 0;
 
-	sprintf(temp, "%d", smack_cipso_mapped);
+	snprintf(temp, sizeof(temp), "%d", smack_cipso_mapped);
 	rc = simple_read_from_buffer(buf, count, ppos, temp, strlen(temp));
 
 	return rc;
@@ -1413,6 +1623,11 @@ static ssize_t smk_write_mapped(struct file *file, const char __user *buf,
 
 	if (!smack_privileged(CAP_MAC_ADMIN))
 		return -EPERM;
+
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
 
 	if (count >= sizeof(temp) || count == 0)
 		return -EINVAL;
@@ -1448,7 +1663,7 @@ static const struct file_operations smk_mapped_ops = {
 	.write		= smk_write_mapped,
 	.llseek		= default_llseek,
 };
-
+#ifndef CONFIG_SECURITY_SMACK_NETWORK_DISABLE
 /**
  * smk_read_ambient - read() for /smack/ambient
  * @filp: file pointer, not actually used
@@ -1463,6 +1678,11 @@ static ssize_t smk_read_ambient(struct file *filp, char __user *buf,
 {
 	ssize_t rc;
 	int asize;
+
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
 
 	if (*ppos != 0)
 		return 0;
@@ -1505,6 +1725,11 @@ static ssize_t smk_write_ambient(struct file *file, const char __user *buf,
 	if (!smack_privileged(CAP_MAC_ADMIN))
 		return -EPERM;
 
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
+
 	data = kzalloc(count + 1, GFP_KERNEL);
 	if (data == NULL)
 		return -ENOMEM;
@@ -1538,7 +1763,7 @@ static const struct file_operations smk_ambient_ops = {
 	.write		= smk_write_ambient,
 	.llseek		= default_llseek,
 };
-
+#endif /* CONFIG_SECURITY_SMACK_NETWORK_DISABLE */
 /**
  * smk_read_onlycap - read() for /smack/onlycap
  * @filp: file pointer, not actually used
@@ -1554,6 +1779,11 @@ static ssize_t smk_read_onlycap(struct file *filp, char __user *buf,
 	char *smack = "";
 	ssize_t rc = -EINVAL;
 	int asize;
+
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
 
 	if (*ppos != 0)
 		return 0;
@@ -1587,6 +1817,11 @@ static ssize_t smk_write_onlycap(struct file *file, const char __user *buf,
 
 	if (!smack_privileged(CAP_MAC_ADMIN))
 		return -EPERM;
+
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
 
 	/*
 	 * This can be done using smk_access() but is done
@@ -1640,10 +1875,15 @@ static ssize_t smk_read_logging(struct file *filp, char __user *buf,
 	char temp[32];
 	ssize_t rc;
 
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
+
 	if (*ppos != 0)
 		return 0;
 
-	sprintf(temp, "%d\n", log_policy);
+	snprintf(temp, sizeof(temp), "%d\n", log_policy);
 	rc = simple_read_from_buffer(buf, count, ppos, temp, strlen(temp));
 	return rc;
 }
@@ -1665,6 +1905,11 @@ static ssize_t smk_write_logging(struct file *file, const char __user *buf,
 
 	if (!smack_privileged(CAP_MAC_ADMIN))
 		return -EPERM;
+
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
 
 	if (count >= sizeof(temp) || count == 0)
 		return -EINVAL;
@@ -1690,6 +1935,85 @@ static const struct file_operations smk_logging_ops = {
 	.llseek		= default_llseek,
 };
 
+
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+/**
+ * smk_read_mode - read() for /smack/mode
+ * @filp: file pointer, not actually used
+ * @buf: where to put the result
+ * @cn: maximum to send along
+ * @ppos: where to start
+ *
+ * Returns number of bytes read or error code, as appropriate
+ */
+static ssize_t smk_read_mode(struct file *filp, char __user *buf,
+				size_t count, loff_t *ppos)
+{
+	char temp[32];
+	ssize_t rc;
+
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
+
+	if (*ppos != 0)
+		return 0;
+
+	snprintf(temp, sizeof(temp) , "%d\n", smack_mode);
+	rc = simple_read_from_buffer(buf, count, ppos, temp, strlen(temp));
+	return rc;
+}
+
+/**
+ * smk_write_mode - write() for /smack/mode
+ * @file: file pointer, not actually used
+ * @buf: where to get the data from
+ * @count: bytes sent
+ * @ppos: where to start
+ *
+ * Returns number of bytes written or error code, as appropriate
+ */
+static ssize_t smk_write_mode(struct file *file, const char __user *buf,
+				size_t count, loff_t *ppos)
+{
+	char temp[32];
+	int i;
+
+	if (!smack_privileged(CAP_MAC_ADMIN))
+		return -EPERM;
+
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
+
+	if (count >= sizeof(temp) || count == 0)
+		return -EINVAL;
+
+	if (copy_from_user(temp, buf, count) != 0)
+		return -EFAULT;
+
+	temp[count] = '\0';
+
+	if (sscanf(temp, "%d", &i) != 1)
+		return -EINVAL;
+	if (i < 0 || i > 2)
+		return -EINVAL;
+	smack_mode = i;
+	return count;
+}
+
+
+
+static const struct file_operations smk_mode_ops = {
+	.read		= smk_read_mode,
+	.write		= smk_write_mode,
+	.llseek		= default_llseek,
+};
+#endif
+
+#ifdef CONFIG_SECURITY_SMACK_ALLOW_LOAD_SELF
 /*
  * Seq_file read operations for /smack/load-self
  */
@@ -1736,6 +2060,10 @@ static const struct seq_operations load_self_seq_ops = {
  */
 static int smk_open_load_self(struct inode *inode, struct file *file)
 {
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
 	return seq_open(file, &load_self_seq_ops);
 }
 
@@ -1763,6 +2091,26 @@ static const struct file_operations smk_load_self_ops = {
 	.write		= smk_write_load_self,
 	.release        = seq_release,
 };
+
+#endif /* CONFIG_SECURITY_SMACK_ALLOW_LOAD_SELF */
+
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+/**
+ * smk_transaction_read - handle transaction read
+ * @file: file pointer
+ * @buf: data from user space
+ * @size: bytes read
+ * @pos: where to start
+ */
+static ssize_t smk_transaction_read(struct file *file, char __user *buf,
+		size_t size, loff_t *pos)
+{
+	if (!smack_manager())
+		return -EPERM;
+
+	return simple_transaction_read(file, buf, size, pos);
+}
+#endif
 
 /**
  * smk_user_access - handle access check transaction
@@ -1830,7 +2178,11 @@ static ssize_t smk_write_access(struct file *file, const char __user *buf,
 
 static const struct file_operations smk_access_ops = {
 	.write		= smk_write_access,
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	.read       = smk_transaction_read,
+#else
 	.read		= simple_transaction_read,
+#endif
 	.release	= simple_transaction_release,
 	.llseek		= generic_file_llseek,
 };
@@ -1867,6 +2219,10 @@ static const struct seq_operations load2_seq_ops = {
  */
 static int smk_open_load2(struct inode *inode, struct file *file)
 {
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
 	return seq_open(file, &load2_seq_ops);
 }
 
@@ -1899,6 +2255,7 @@ static const struct file_operations smk_load2_ops = {
 	.release        = seq_release,
 };
 
+#ifdef CONFIG_SECURITY_SMACK_ALLOW_LOAD_SELF
 /*
  * Seq_file read operations for /smack/load-self2
  */
@@ -1944,6 +2301,10 @@ static const struct seq_operations load_self2_seq_ops = {
  */
 static int smk_open_load_self2(struct inode *inode, struct file *file)
 {
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
 	return seq_open(file, &load_self2_seq_ops);
 }
 
@@ -1972,6 +2333,8 @@ static const struct file_operations smk_load_self2_ops = {
 	.release        = seq_release,
 };
 
+#endif /* CONFIG_SECURITY_SMACK_ALLOW_LOAD_SELF */
+
 /**
  * smk_write_access2 - handle access check transaction
  * @file: file pointer
@@ -1987,7 +2350,11 @@ static ssize_t smk_write_access2(struct file *file, const char __user *buf,
 
 static const struct file_operations smk_access2_ops = {
 	.write		= smk_write_access2,
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	.read       = smk_transaction_read,
+#else
 	.read		= simple_transaction_read,
+#endif
 	.release	= simple_transaction_release,
 	.llseek		= generic_file_llseek,
 };
@@ -2015,6 +2382,11 @@ static ssize_t smk_write_revoke_subj(struct file *file, const char __user *buf,
 
 	if (!smack_privileged(CAP_MAC_ADMIN))
 		return -EPERM;
+
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	if (!smack_manager())
+		return -EPERM;
+#endif
 
 	if (count == 0 || count > SMK_LONGLABEL)
 		return -EINVAL;
@@ -2058,7 +2430,11 @@ free_out:
 
 static const struct file_operations smk_revoke_subj_ops = {
 	.write		= smk_write_revoke_subj,
+#ifdef CONFIG_SECURITY_SMACK_RULE_UPDATE_MANAGER
+	.read       = smk_transaction_read,
+#else
 	.read		= simple_transaction_read,
+#endif
 	.release	= simple_transaction_release,
 	.llseek		= generic_file_llseek,
 };
@@ -2094,6 +2470,7 @@ static int smk_fill_super(struct super_block *sb, void *data, int silent)
 	static struct tree_descr smack_files[] = {
 		[SMK_LOAD] = {
 			"load", &smk_load_ops, S_IRUGO|S_IWUSR},
+#ifndef CONFIG_SECURITY_SMACK_NETWORK_DISABLE
 		[SMK_CIPSO] = {
 			"cipso", &smk_cipso_ops, S_IRUGO|S_IWUSR},
 		[SMK_DOI] = {
@@ -2104,27 +2481,38 @@ static int smk_fill_super(struct super_block *sb, void *data, int silent)
 			"ambient", &smk_ambient_ops, S_IRUGO|S_IWUSR},
 		[SMK_NETLBLADDR] = {
 			"netlabel", &smk_netlbladdr_ops, S_IRUGO|S_IWUSR},
+#endif
 		[SMK_ONLYCAP] = {
 			"onlycap", &smk_onlycap_ops, S_IRUGO|S_IWUSR},
 		[SMK_LOGGING] = {
 			"logging", &smk_logging_ops, S_IRUGO|S_IWUSR},
+#ifdef CONFIG_SECURITY_SMACK_ALLOW_LOAD_SELF
 		[SMK_LOAD_SELF] = {
 			"load-self", &smk_load_self_ops, S_IRUGO|S_IWUGO},
+#endif
 		[SMK_ACCESSES] = {
 			"access", &smk_access_ops, S_IRUGO|S_IWUGO},
 		[SMK_MAPPED] = {
 			"mapped", &smk_mapped_ops, S_IRUGO|S_IWUSR},
 		[SMK_LOAD2] = {
 			"load2", &smk_load2_ops, S_IRUGO|S_IWUSR},
+#ifdef CONFIG_SECURITY_SMACK_ALLOW_LOAD_SELF
 		[SMK_LOAD_SELF2] = {
 			"load-self2", &smk_load_self2_ops, S_IRUGO|S_IWUGO},
+#endif
 		[SMK_ACCESS2] = {
 			"access2", &smk_access2_ops, S_IRUGO|S_IWUGO},
+#ifndef CONFIG_SECURITY_SMACK_NETWORK_DISABLE
 		[SMK_CIPSO2] = {
 			"cipso2", &smk_cipso2_ops, S_IRUGO|S_IWUSR},
+#endif
 		[SMK_REVOKE_SUBJ] = {
 			"revoke-subject", &smk_revoke_subj_ops,
 			S_IRUGO|S_IWUSR},
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+		[SMK_MODE] = {
+			"mode", &smk_mode_ops, S_IRUGO|S_IWUSR},
+#endif
 		/* last one */
 			{""}
 	};

@@ -672,6 +672,9 @@ static int check_bytes_and_report(struct kmem_cache *s, struct page *page,
 					fault, end - 1, fault[0], value);
 	print_trailer(s, page, object);
 
+#if !defined(CONFIG_VD_RELEASE)
+	BUG_ON(1);
+#endif
 	restore_bytes(s, what, value, fault, end);
 	return 0;
 }
@@ -866,6 +869,9 @@ static int on_freelist(struct kmem_cache *s, struct page *page, void *search)
 				break;
 			} else {
 				slab_err(s, page, "Freepointer corrupt");
+#if !defined(CONFIG_VD_RELEASE)
+				BUG_ON(1);
+#endif
 				page->freelist = NULL;
 				page->inuse = page->objects;
 				slab_fix(s, "Freelist cleared");
@@ -1405,7 +1411,9 @@ static void __free_slab(struct kmem_cache *s, struct page *page)
 		-pages);
 
 	__ClearPageSlabPfmemalloc(page);
+#ifndef CONFIG_KDML
 	__ClearPageSlab(page);
+#endif
 
 	memcg_release_pages(s, order);
 	reset_page_mapcount(page);
@@ -2331,13 +2339,18 @@ static __always_inline void *slab_alloc_node(struct kmem_cache *s,
 
 	s = memcg_kmem_get_cache(s, gfpflags);
 redo:
-
 	/*
 	 * Must read kmem_cache cpu data via this cpu ptr. Preemption is
 	 * enabled. We may switch back and forth between cpus while
 	 * reading from one cpu area. That does not matter as long
 	 * as we end up on the original cpu again when doing the cmpxchg.
+	 *
+	 * Preemption is disabled for the retrieval of the tid because that
+	 * must occur from the current processor. We cannot allow rescheduling
+	 * on a different processor between the determination of the pointer
+	 * and the retrieval of the tid.
 	 */
+	preempt_disable();
 	c = __this_cpu_ptr(s->cpu_slab);
 
 	/*
@@ -2347,7 +2360,7 @@ redo:
 	 * linked list in between.
 	 */
 	tid = c->tid;
-	barrier();
+	preempt_enable();
 
 	object = c->freelist;
 	page = c->page;
@@ -2404,6 +2417,17 @@ void *kmem_cache_alloc(struct kmem_cache *s, gfp_t gfpflags)
 	return ret;
 }
 EXPORT_SYMBOL(kmem_cache_alloc);
+
+#ifdef CONFIG_KDML
+/* we need to create a seperate function as other functions are inline */
+void *kmem_cache_alloc_notrace(struct kmem_cache *s, gfp_t gfpflags)
+{
+	void *ret = slab_alloc(s, gfpflags, _RET_IP_);
+	return ret;
+}
+EXPORT_SYMBOL(kmem_cache_alloc_notrace);
+#endif
+
 
 #ifdef CONFIG_TRACING
 void *kmem_cache_alloc_trace(struct kmem_cache *s, gfp_t gfpflags, size_t size)
@@ -2594,10 +2618,11 @@ redo:
 	 * data is retrieved via this pointer. If we are on the same cpu
 	 * during the cmpxchg then the free will succedd.
 	 */
+	preempt_disable();
 	c = __this_cpu_ptr(s->cpu_slab);
 
 	tid = c->tid;
-	barrier();
+	preempt_enable();
 
 	if (likely(page == c->page)) {
 		set_freepointer(s, object, c->freelist);
@@ -2621,10 +2646,31 @@ void kmem_cache_free(struct kmem_cache *s, void *x)
 	s = cache_from_obj(s, x);
 	if (!s)
 		return;
+#ifdef CONFIG_KDML
+	/*
+	 * Required in summary mode.
+	 * We need to use the object to find its size
+	 * If first freed, it won't be available
+	 */
+	trace_kmem_cache_free(_RET_IP_, x);
+	slab_free(s, virt_to_head_page(x), x, _RET_IP_);
+#else
 	slab_free(s, virt_to_head_page(x), x, _RET_IP_);
 	trace_kmem_cache_free(_RET_IP_, x);
+#endif
 }
 EXPORT_SYMBOL(kmem_cache_free);
+
+#ifdef CONFIG_KDML
+void kmem_cache_free_notrace(struct kmem_cache *s, void *x)
+{
+	s = cache_from_obj(s, x);
+	if (!s)
+		return;
+	slab_free(s, virt_to_head_page(x), x, _RET_IP_);
+}
+EXPORT_SYMBOL(kmem_cache_free_notrace);
+#endif
 
 /*
  * Object placement in a slab is made very easy because we always start at
@@ -3406,7 +3452,14 @@ void kfree(const void *x)
 
 	page = virt_to_head_page(x);
 	if (unlikely(!PageSlab(page))) {
-		BUG_ON(!PageCompound(page));
+		if(!PageCompound(page)) {
+			printk(KERN_CRIT "Before BUG ON: Kfree failure : Page Address : 0x%p \n", page_address(page));
+			printk(KERN_CRIT "Page Flags: %lu \n", page->flags);
+			if(page_mapping(page)) {
+				printk(KERN_CRIT "Page Address Mapping ->  Host Inode -> Super Block -> File System Type ->Name %s \n", page->mapping->host->i_sb->s_type->name);
+			}
+			BUG_ON(1);
+		} 
 		kmemleak_free(x);
 		__free_memcg_kmem_pages(page, compound_order(page));
 		return;

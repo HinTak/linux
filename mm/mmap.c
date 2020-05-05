@@ -89,6 +89,274 @@ int sysctl_max_map_count __read_mostly = DEFAULT_MAX_MAP_COUNT;
  */
 struct percpu_counter vm_committed_as ____cacheline_aligned_in_smp;
 
+#ifdef CONFIG_RSS_INFO
+
+#define VMAG_RWXS_MASK	(VM_READ|VM_WRITE|VM_EXEC|VM_SHARED)
+#define VMAG_RWS_MASK	(VM_READ|VM_WRITE|VM_SHARED)
+#define VFN_UP(x)	(((x) + PAGE_SIZE-1) >> PAGE_SHIFT)
+#define VFN_DOWN(x)	((x) >> PAGE_SHIFT)
+
+int _get_group_idx(struct mm_struct *mm, unsigned long flags,
+		    struct file *file, unsigned long start, unsigned long end){
+
+	unsigned int Islibcode = 0;
+	unsigned int Islibdata = 0;
+
+	/* code : (file && (r-xp)) */
+	if (file && (flags & VMAG_RWXS_MASK) == (VM_READ|VM_EXEC)) {
+		/*
+		If the value of mm->end_code,mm->end_data equal zero,
+		we can't check where this vma is included in.(main region? or library region?)
+		To reserve this problem we serarch ".so" string in the name of mapped file.
+		When searching is completed, strstr string library returns valid value(not NULL).
+		So, we can work around this problem.
+		If we find better solution, we will fix it.
+		*/
+		Islibcode = (mm->end_code!=0);
+		Islibcode = Islibcode && !(VFN_DOWN(mm->start_code) <= VFN_DOWN(start) && VFN_UP(end) <= VFN_UP(mm->end_code));
+		Islibcode = Islibcode || (mm->end_code==0 && strstr(file->f_dentry->d_iname,".so"));
+
+		if(Islibcode)
+			return VMAG_LIBCODE;
+
+		return VMAG_CODE;
+	}
+	/* data : (file && (rw*p) && exec file) */
+	else if (file && (flags & VMAG_RWS_MASK) == (VM_READ|VM_WRITE)
+                       && (file->f_dentry->d_inode->i_mode & S_IXUGO)) {
+
+		Islibdata = (mm->end_data!=0);
+		Islibdata = Islibdata && !(VFN_DOWN(mm->start_data) <= VFN_DOWN(start) && VFN_UP(end) <= VFN_UP(mm->end_data));
+		Islibdata = Islibdata || (mm->end_data==0 && strstr(file->f_dentry->d_iname,".so"));
+
+		if(Islibdata)
+			return VMAG_LIBDATA;
+
+		return VMAG_DATA;
+	}
+	/* HEAP : !file && (rw*p) && brk */
+	else if (!file && ((flags & VMAG_RWS_MASK) == (VM_READ|VM_WRITE))
+			&& (VFN_DOWN(start) <= VFN_DOWN(mm->brk) && VFN_UP(end) >= VFN_UP(mm->start_brk))) {
+
+		return VMAG_HEAP;
+	}
+#ifdef  CONFIG_STACK_GROWSUP
+	/* user stack : VM_GROWSUP */
+	else if (flags & VM_GROWSUP) {
+		return VMAG_STACK;
+	}
+#else
+	/* user stack : VM_GROWSDOWN */
+	else if (flags & VM_GROWSDOWN) {
+		return VMAG_STACK;
+	}
+#endif
+	/*
+	 * mmap : anon && (rw-p)
+	 *   cond |= (!vma->vm_file
+	 *   && (vma->vm_flags & mask) == (VM_READ|VM_WRITE));
+	 * shm  : (rw-s)
+	 */
+	else {
+		return VMAG_OTHER;
+	}
+}
+
+int inline get_group_idx(struct vm_area_struct *vma) {
+	return _get_group_idx(vma->vm_mm, vma->vm_flags, vma->vm_file,
+			      vma->vm_start, vma->vm_end);
+}
+
+#ifdef CONFIG_MUPT_TRACE
+/*
+ * Increment MUPT counter values for the given vma.
+ * Save task information in the faulting page.
+ */
+void inc_mupt_counter(struct vm_area_struct *vma, struct page *page, unsigned long addr, int value)
+{
+	struct mm_struct *mm_t = NULL;
+	struct task_struct *tsk = NULL, *t = NULL;
+	int idx;
+
+	/* Get the task instance from current running task. */
+	tsk = current;
+
+	mm_t = get_task_mm(tsk);
+	if (!mm_t)
+		return;
+
+	spin_lock(&(tsk->alloc_lock));
+	idx = get_group_idx(vma);
+
+	tsk->curr_mupt[idx] += value;
+	if (value >= 0) {
+		if (tsk->max_mupt[idx] <= tsk->curr_mupt[idx])
+			tsk->max_mupt[idx] += value;
+	}
+
+	/* Calculate per thread stack. */
+	t = tsk;
+	do {
+		if ((addr <= t->user_ssp) &&  (vma->vm_start <= t->user_ssp &&
+		    vma->vm_end >= t->user_ssp)) {
+			tsk->curr_mupt[VMAG_STACK] += value;
+			tsk->curr_mupt[idx] -= value;
+
+			if (tsk->max_mupt[VMAG_STACK] <= tsk->curr_mupt[VMAG_STACK]) {
+				tsk->max_mupt[VMAG_STACK] += value;
+				tsk->max_mupt[idx] -= value;
+			}
+			break;
+		}
+	} while_each_thread(tsk, t);
+	if (page != NULL)
+		page->pid = tsk->pid;
+
+	spin_unlock(&(tsk->alloc_lock));
+}
+
+/*
+ * Decrement MUPT counter values for the given vma.
+ * Reterive task information from the given page.
+ */
+void dec_mupt_counter(struct vm_area_struct *vma, struct page *page, unsigned long addr, int value)
+{
+	struct mm_struct *mm_t = NULL;
+	struct task_struct *tsk = NULL, *t = NULL;
+	int idx;
+
+	if (!page)
+		return;
+
+	/* Get the task instance from decrementing page. */
+	if (!page->pid)
+		return;
+
+	tsk = find_task_by_vpid(page->pid);
+	if (!tsk)
+		return;
+
+	mm_t = get_task_mm(tsk);
+	if (!mm_t)
+		return;
+
+	spin_lock(&(tsk->alloc_lock));
+	idx = get_group_idx(vma);
+
+	tsk->curr_mupt[idx] -= value;
+
+	t = tsk;
+	do {
+		if ((addr <= t->user_ssp) &&  (vma->vm_start <= t->user_ssp &&
+		    vma->vm_end >= t->user_ssp)) {
+			tsk->curr_mupt[VMAG_STACK] -= value;
+			tsk->curr_mupt[idx] += value;
+			break;
+		}
+	} while_each_thread(tsk, t);
+
+	/* Reset the owner */
+	page->pid = 0;
+	spin_unlock(&(tsk->alloc_lock));
+}
+#else
+void inc_mupt_counter(struct vm_area_struct *vma, struct page *page, unsigned long addr, int value) {}
+void dec_mupt_counter(struct vm_area_struct *vma, struct page *page, unsigned long addr, int value) {}
+#endif
+
+void inc_rss_counter(struct vm_area_struct *vma, unsigned long value)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	int idx = get_group_idx(vma);
+
+	mm->curr_rss[idx] += value;
+	if (mm->max_rss[idx] <= mm->curr_rss[idx])
+		mm->max_rss[idx] += value;
+}
+EXPORT_SYMBOL(inc_rss_counter);
+
+void dec_rss_counter(struct vm_area_struct *vma, unsigned long value)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	int idx = get_group_idx(vma);
+
+	mm->curr_rss[idx] -= value;
+}
+EXPORT_SYMBOL(dec_rss_counter);
+
+int get_rss_cnt(struct mm_struct *mm, int group, unsigned long *cur, unsigned long *max)
+{
+	if (cur) *cur = mm->curr_rss[group];
+	if (max) *max = mm->max_rss[group];
+	return 0;
+}
+
+int is_page_present(struct mm_struct *mm, unsigned long address)
+{
+	pgd_t *pgd;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *ptep, pte;
+	unsigned long pfn;
+
+	pgd = pgd_offset(mm, address);
+	if (pgd_none(*pgd) || unlikely(pgd_bad(*pgd)))
+		goto out;
+
+	pud = pud_offset(pgd, address);
+	if (pud_none(*pud) || unlikely(pud_bad(*pud)))
+		goto out;
+
+	pmd = pmd_offset(pud, address);
+	if (pmd_none(*pmd) || unlikely(pmd_bad(*pmd)))
+		goto out;
+
+
+	ptep = pte_offset_map(pmd, address);
+	if (!ptep)
+		goto out;
+
+	pte = *ptep;
+	pte_unmap(ptep);
+	if (pte_present(pte)) {
+		pfn = pte_pfn(pte);
+		if (pfn_valid(pfn)) {
+			return 1;
+		}
+	}
+
+out:
+	return 0;
+}
+
+int get_vma_rss(struct vm_area_struct *vma)
+{
+	int nr = 0;
+	unsigned long addr = vma->vm_start;
+	struct mm_struct *mm = vma->vm_mm;
+
+	spin_lock(&mm->page_table_lock);
+	do {
+		cond_resched_lock(&mm->page_table_lock);
+		nr += is_page_present(mm, addr);
+		addr += PAGE_SIZE;
+	} while(addr < vma->vm_end);
+	spin_unlock(&mm->page_table_lock);
+	return nr;
+}
+
+#else
+int _get_group_idx(struct mm_struct *mm, unsigned long flags, struct file *file, unsigned long start, unsigned long end ) { return 0; }
+int get_group_idx(struct vm_area_struct *vma) { return 0; }
+void inc_rss_counter(struct vm_area_struct *vma, unsigned long value) {}
+void dec_rss_counter(struct vm_area_struct *vma, unsigned long value) {}
+int get_rss_cnt(struct mm_struct *mm, int group, unsigned long *cur, unsigned long *max) { return 0; }
+int is_page_present(struct mm_struct *mm, unsigned long address) { return 0; }
+int get_vma_rss(struct vm_area_struct *vma) { return 0; }
+void inc_mupt_counter(struct vm_area_struct *vma, struct page *page, unsigned long addr, int value) {}
+void dec_mupt_counter(struct vm_area_struct *vma, struct page *page, unsigned long addr, int value) {}
+#endif  /* CONFIG_RSS_INFO */
+
 /*
  * The global memory commitment made in the system can be a metric
  * that can be used to drive ballooning decisions when Linux is hosted
@@ -1165,9 +1433,20 @@ unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
 	 * (the exception is when the underlying filesystem is noexec
 	 *  mounted, in which case we dont add PROT_EXEC.)
 	 */
-	if ((prot & PROT_READ) && (current->personality & READ_IMPLIES_EXEC))
-		if (!(file && (file->f_path.mnt->mnt_flags & MNT_NOEXEC)))
-			prot |= PROT_EXEC;
+#if defined(CONFIG_PAX_MPROTECT) || defined(CONFIG_PAX_PAGEEXEC)
+	int check_permision = PROT_READ;
+	if ((mm->pax_flags & MF_PAX_MPROTECT) ||
+			(mm->pax_flags & MF_PAX_PAGEEXEC))
+		check_permision |= PROT_WRITE;
+	if ((prot & check_permision)
+			&& (current->personality & READ_IMPLIES_EXEC))
+#else
+		if ((prot & PROT_READ) &&
+				(current->personality & READ_IMPLIES_EXEC))
+#endif
+			if (!(file && (file->f_path.mnt->mnt_flags
+							& MNT_NOEXEC)))
+				prot |= PROT_EXEC;
 
 	if (!len)
 		return -EINVAL;
@@ -1188,10 +1467,17 @@ unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
 	if (mm->map_count > sysctl_max_map_count)
 		return -ENOMEM;
 
+#if defined(CONFIG_PAX_MPROTECT) || defined(CONFIG_PAX_PAGEEXEC)
+	if (mm->pax_flags & MF_PAX_MPROTECT)
+		flags = flags | ((prot & PROT_EXEC) ? MAP_EXECUTABLE : 0);
+	addr = get_unmapped_area(file, addr, len, pgoff, flags);
+#else
+	addr = get_unmapped_area(file, addr, len, pgoff, flags);
+#endif
+
 	/* Obtain the address to map to. we verify (or select) it and ensure
 	 * that it represents a valid section of the address space.
 	 */
-	addr = get_unmapped_area(file, addr, len, pgoff, flags);
 	if (addr & ~PAGE_MASK)
 		return addr;
 
@@ -1201,6 +1487,19 @@ unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
 	 */
 	vm_flags = calc_vm_prot_bits(prot) | calc_vm_flag_bits(flags) |
 			mm->def_flags | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
+
+#ifdef CONFIG_PAX_MPROTECT
+	/*Pax patch changes default vm flags*/
+	if (mm->pax_flags & MF_PAX_MPROTECT) {
+		if ((vm_flags & (VM_WRITE | VM_EXEC)) == (VM_WRITE | VM_EXEC))
+			return -EPERM;
+
+		if (!(vm_flags & VM_EXEC))
+			vm_flags &= ~VM_MAYEXEC;
+		else
+			vm_flags &= ~VM_MAYWRITE;
+	}
+#endif
 
 	if (flags & MAP_LOCKED)
 		if (!can_do_mlock())
@@ -1281,6 +1580,7 @@ unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
 
 	return mmap_region(file, addr, len, flags, vm_flags, pgoff);
 }
+EXPORT_SYMBOL(do_mmap_pgoff);
 
 SYSCALL_DEFINE6(mmap_pgoff, unsigned long, addr, unsigned long, len,
 		unsigned long, prot, unsigned long, flags,
@@ -2503,6 +2803,7 @@ int do_munmap(struct mm_struct *mm, unsigned long start, size_t len)
 
 	return 0;
 }
+EXPORT_SYMBOL(do_munmap);
 
 int vm_munmap(unsigned long start, size_t len)
 {
@@ -2522,12 +2823,18 @@ SYSCALL_DEFINE2(munmap, unsigned long, addr, size_t, len)
 	return vm_munmap(addr, len);
 }
 
+
 static inline void verify_mm_writelocked(struct mm_struct *mm)
 {
-#ifdef CONFIG_DEBUG_VM
+#if defined(CONFIG_DEBUG_VM) || defined(CONFIG_PAX)
 	if (unlikely(down_read_trylock(&mm->mmap_sem))) {
+#ifdef CONFIG_PAX
+		up_read(&mm->mmap_sem);
+		BUG();
+#else
 		WARN_ON(1);
 		up_read(&mm->mmap_sem);
+#endif
 	}
 #endif
 }
@@ -2552,6 +2859,17 @@ static unsigned long do_brk(unsigned long addr, unsigned long len)
 
 	flags = VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags;
 
+#if defined(CONFIG_PAX_PAGEEXEC)
+	if (mm->pax_flags & (MF_PAX_PAGEEXEC)) {
+		flags &= ~VM_EXEC;
+
+#ifdef CONFIG_PAX_MPROTECT
+		if (mm->pax_flags & MF_PAX_MPROTECT)
+			flags &= ~VM_MAYEXEC;
+#endif
+
+	}
+#endif
 	error = get_unmapped_area(NULL, addr, len, 0, MAP_FIXED);
 	if (error & ~PAGE_MASK)
 		return error;
@@ -2888,6 +3206,18 @@ int install_special_mapping(struct mm_struct *mm,
 	vma->vm_start = addr;
 	vma->vm_end = addr + len;
 
+#ifdef CONFIG_PAX_MPROTECT
+	if (mm->pax_flags & MF_PAX_MPROTECT) {
+		if ((vm_flags & (VM_WRITE | VM_EXEC)) == (VM_WRITE | VM_EXEC)) {
+			ret = -EPERM;
+			goto out;
+		}
+		if (!(vm_flags & VM_EXEC))
+			vm_flags &= ~VM_MAYEXEC;
+		else
+			vm_flags &= ~VM_MAYWRITE;
+	}
+#endif
 	vma->vm_flags = vm_flags | mm->def_flags | VM_DONTEXPAND;
 	vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
 

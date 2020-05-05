@@ -158,6 +158,29 @@ config USB_NET_AX8817X
 	  This driver creates an interface named "ethX", where X depends on
 	  what other networking devices you have in use.
 
+config USB_NET_AX88772
+        tristate "USB LAN AX88772 Driver"
+        help
+            Say Y here if you want to use USB LAN AX88772 Driver.
+
+config USB_NET_AX88179_178A
+        tristate "ASIX AX88179/178A USB 3.0/2.0 to Gigabit Ethernet"
+        depends on USB_USBNET
+        select CRC32
+        select PHYLIB
+        default y
+        help
+          This option adds support for ASIX AX88179 based USB 3.0/2.0
+          to Gigabit Ethernet adapters.
+
+          This driver should work with at least the following devices:
+            * ASIX AX88179
+            * ASIX AX88178A
+            * Sitcomm LN-032
+
+          This driver creates an interface named "ethX", where X depends on
+          what other networking devices you have in use.
+
 config USB_NET_CDCETHER
 	tristate "CDC Ethernet support (smart devices such as cable modems)"
 	depends on USB_USBNET
@@ -199,6 +222,16 @@ config USB_NET_CDC_EEM
 	  what other networking devices you have in use.  However, if the
 	  IEEE 802 "local assignment" bit is set in the address, a "usbX"
 	  name is used instead.
+
+config SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+	bool "Samsung modification for CDC-EEM preformance and latency improvement"
+	depends on USB_NET_CDC_EEM
+	default y
+
+config SAMSUNG_PATCH_WITH_USB_MODEMLOG
+	bool "Samsung modification for Supporting webAPI based Dongles"
+	depends on USB_USBNET && EXPERIMENTAL
+	default n
 
 config USB_NET_CDC_NCM
 	tristate "CDC NCM support"

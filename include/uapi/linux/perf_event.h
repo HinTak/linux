@@ -270,8 +270,13 @@ struct perf_event_attr {
 
 				exclude_callchain_kernel : 1, /* exclude kernel callchains */
 				exclude_callchain_user   : 1, /* exclude user callchains */
+#ifdef CONFIG_CACHE_ANALYZER
+				inherit_indep:1, /* inherit as independent */
+				__reserved_1:42;
+#else
+				__reserved_1:43;
+#endif
 
-				__reserved_1   : 41;
 
 	union {
 		__u32		wakeup_events;	  /* wakeup every n events */

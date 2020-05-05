@@ -4,6 +4,10 @@
 
 ccflags-$(CONFIG_USB_DEBUG) := -DDEBUG
 
+ifeq ($(CONFIG_ARCH_NVT72668),y)
+	EXTRA_CFLAGS += -I$(srctree)/arch/arm/mach-nvt72668/include/
+endif
+
 isp1760-y := isp1760-hcd.o isp1760-if.o
 
 fhci-y := fhci-hcd.o fhci-hub.o fhci-q.o
@@ -16,7 +20,15 @@ xhci-hcd-y += xhci-ring.o xhci-hub.o xhci-dbg.o
 xhci-hcd-$(CONFIG_PCI)	+= xhci-pci.o
 
 ifneq ($(CONFIG_USB_XHCI_PLATFORM), )
-	xhci-hcd-y		+= xhci-plat.o
+ifeq ($(CONFIG_ARCH_NVT72668),y)
+        xhci-hcd-y              += xhci-NT72668.o
+else
+        xhci-hcd-y              += xhci-plat.o
+endif
+endif
+
+ifneq ($(CONFIG_USB_XHCI_SDP), )
+	xhci-hcd-y		+= xhci-sdp.o
 endif
 
 obj-$(CONFIG_USB_WHCI_HCD)	+= whci/

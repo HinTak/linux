@@ -1359,6 +1359,13 @@ static int __dev_close_many(struct list_head *head)
 		if (ops->ndo_stop)
 			ops->ndo_stop(dev);
 
+#if 1   /* SP_DEBUG : ifconfig down detect */
+		printk(KERN_EMERG "[SA_DEBUG] trying to ifconfig down (net device close )\n");
+		printk(KERN_EMERG " DEV_NAME : %s PID: %d (%s) PPID: %d (%s)\n",
+				dev->name, current->pid, current->comm, current->real_parent->pid, current->real_parent->comm);        
+		printk(KERN_EMERG "[SA_DEBUG] trying to ifconfig down (net device close )\n");
+#endif
+
 		dev->flags &= ~IFF_UP;
 		net_dmaengine_put();
 	}

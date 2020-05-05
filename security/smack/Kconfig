@@ -12,3 +12,66 @@ config SECURITY_SMACK
 	  of other mandatory security schemes.
 	  If you are unsure how to answer this question, answer N.
 
+config SECURITY_SMACK_CAP_MAC_OVERRIDE
+	bool "CAP_MAC_OVERRIDE Capability check"
+	depends on SECURITY_SMACK
+	default n
+	---help---
+	If a process has CAP_MAC_OVERRIDE then SMACK rule check will bypass.
+	Process running with root user privileges will have CAP_MAC_OVERRIDE
+	capability. By this option we can make it optional. If answer is Y
+	only then CAP_MAC_OVERRIDE check will be performed.
+
+
+config SECURITY_SMACK_SYSTEM_MODE
+	bool "SMACK system mode setting"
+	depends on SECURITY_SMACK
+	default y
+	---help---
+	Using this option we can select system wide mode for SMACK module.
+	If it is set to y in that case there will not be SMACK rule list
+	check for different system calls.
+	By default this is set to y.
+
+
+config SECURITY_SMACK_RULE_UPDATE_MANAGER
+	bool "Allow security tool to update SMACK Rules."
+	depends on SECURITY_SMACK
+	default y
+	---help---
+	Say n if you do not want to allow security tool to update SMACK Rules.
+	On DTV due to security reasons we do not want to allow every user to
+	update SMACK Rules. So only configured tool can update
+	rules.
+
+config	SECURITY_SMACK_RULE_WRITER_NAME
+	string "Location of SMACK tool to update policy."
+	default "/mnt/smackload"
+	depends on SECURITY_SMACK
+	depends on SECURITY_SMACK_RULE_UPDATE_MANAGER
+	---help---
+	This is the default pathname of SMACK tool to update policy.
+	On DTV due to security reasons we do not want to allow every user
+	to update SMACK rules. We want to configure the tool name which
+	can update SMACK rules. You can override this setting via kernel
+	command line option.
+
+config	SECURITY_SMACK_ALLOW_LOAD_SELF
+	bool "Allow load-self smack interface"
+	depends on SECURITY_SMACK
+	depends on SECURITY_SMACK_RULE_UPDATE_MANAGER
+	default n
+	---help---
+	Using this option we can hide the load-self smack interface.
+	If it is set to n in that case smack load-self interface will
+	not available.
+	By default this is set to n.
+
+config SECURITY_SMACK_NETWORK_DISABLE
+	bool "SMACK disable network functionality"
+	depends on SECURITY_SMACK
+	default y
+	---help---
+	Using this option we can disable the network functionality of SMACK module.
+	If it is set to y in that case SMACK will not support the network functionality.
+	By default this is set to y.

@@ -268,6 +268,7 @@ static void usb_dev_complete(struct device *dev)
 	usb_resume_complete(dev);
 }
 
+#ifndef CONFIG_ARCH_NVT72668
 static int usb_dev_suspend(struct device *dev)
 {
 	return usb_suspend(dev, PMSG_SUSPEND);
@@ -277,6 +278,7 @@ static int usb_dev_resume(struct device *dev)
 {
 	return usb_resume(dev, PMSG_RESUME);
 }
+#endif
 
 static int usb_dev_freeze(struct device *dev)
 {
@@ -301,8 +303,13 @@ static int usb_dev_restore(struct device *dev)
 static const struct dev_pm_ops usb_device_pm_ops = {
 	.prepare =	usb_dev_prepare,
 	.complete =	usb_dev_complete,
+#ifdef CONFIG_ARCH_NVT72668
+	.suspend =	usb_dev_poweroff,
+	.resume =	usb_dev_restore,
+#else
 	.suspend =	usb_dev_suspend,
 	.resume =	usb_dev_resume,
+#endif
 	.freeze =	usb_dev_freeze,
 	.thaw =		usb_dev_thaw,
 	.poweroff =	usb_dev_poweroff,
@@ -433,6 +440,11 @@ struct usb_device *usb_alloc_dev(struct usb_device *parent,
 
 		dev->dev.parent = &parent->dev;
 		dev_set_name(&dev->dev, "%d-%s", bus->busnum, dev->devpath);
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+		// change reported devicepath (device1-1.2)
+		memset(dev->devbusportpath, 0x0, sizeof(dev->devbusportpath));
+		snprintf(dev->devbusportpath, sizeof(dev->devbusportpath), "%d-%s", bus->busnum, dev->devpath);
+#endif		  
 
 		/* hub driver sets up TT records */
 	}
@@ -1023,6 +1035,9 @@ static int __init usb_init(void)
 	retval = usb_devio_init();
 	if (retval)
 		goto usb_devio_init_failed;
+	retval = usbfs_init();
+	if (retval)
+		goto fs_init_failed;
 	retval = usb_hub_init();
 	if (retval)
 		goto hub_init_failed;
@@ -1032,6 +1047,8 @@ static int __init usb_init(void)
 
 	usb_hub_cleanup();
 hub_init_failed:
+	usbfs_cleanup();
+fs_init_failed:
 	usb_devio_cleanup();
 usb_devio_init_failed:
 	usb_deregister(&usbfs_driver);
@@ -1059,6 +1076,7 @@ static void __exit usb_exit(void)
 
 	usb_deregister_device_driver(&usb_generic_driver);
 	usb_major_cleanup();
+	usbfs_cleanup();
 	usb_deregister(&usbfs_driver);
 	usb_devio_cleanup();
 	usb_hub_cleanup();

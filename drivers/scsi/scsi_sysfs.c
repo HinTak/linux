@@ -535,6 +535,11 @@ sdev_rd_attr (vendor, "%.8s\n");
 sdev_rd_attr (model, "%.16s\n");
 sdev_rd_attr (rev, "%.4s\n");
 
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+sdev_rd_attr (serial, "%.32s\n");			//add for usb serial number
+sdev_rd_attr (logicalnumber, "%.16s\n");		//add for usb logical number
+sdev_rd_attr (usbdevpath, "%.16s\n");			//add for usb device path
+#endif
 /*
  * TODO: can we make these symlinks to the block layer ones?
  */
@@ -718,6 +723,11 @@ static struct attribute *scsi_sdev_attrs[] = {
 	&dev_attr_scsi_level.attr,
 	&dev_attr_vendor.attr,
 	&dev_attr_model.attr,
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG	
+	&dev_attr_serial.attr,
+  	&dev_attr_logicalnumber.attr,
+ 	&dev_attr_usbdevpath.attr,  
+#endif
 	&dev_attr_rev.attr,
 	&dev_attr_rescan.attr,
 	&dev_attr_delete.attr,

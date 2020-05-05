@@ -20,6 +20,9 @@ config USB_C67X00_HCD
 config USB_XHCI_HCD
 	tristate "xHCI HCD (USB 3.0) support"
 	depends on USB && USB_ARCH_HAS_XHCI
+	select USB_XHCI_PLATFORM if ARCH_SDP
+	select USB_XHCI_PLATFORM if ARCH_NVT72668
+	select USB_OTG_UTILS if ARCH_NVT72668
 	---help---
 	  The eXtensible Host Controller Interface (xHCI) is standard for USB 3.0
 	  "SuperSpeed" host controller hardware.
@@ -27,8 +30,12 @@ config USB_XHCI_HCD
 	  To compile this driver as a module, choose M here: the
 	  module will be called xhci-hcd.
 
+config USB_XHCI_SDP
+	bool 
+	depends on USB_XHCI_HCD
+	
 config USB_XHCI_PLATFORM
-	tristate
+	tristate "Xhci Plat Support"
 	depends on USB_XHCI_HCD
 
 config USB_XHCI_HCD_DEBUGGING
@@ -63,6 +70,8 @@ config USB_EHCI_HCD
 	  To compile this driver as a module, choose M here: the
 	  module will be called ehci-hcd.
 
+
+if !ARCH_NVT72668
 config USB_EHCI_ROOT_HUB_TT
 	bool "Root Hub Transaction Translators"
 	depends on USB_EHCI_HCD || USB_CHIPIDEA_HOST
@@ -94,6 +103,16 @@ config USB_EHCI_TT_NEWSCHED
 	  saying N.
 
 	  If unsure, say Y.
+endif
+
+if ARCH_NVT72668
+config USB_NT72668_HCD
+	bool "NT72668 USB"
+	depends on USB_EHCI_HCD
+	default y
+	help
+	  Supports the NT72668 USB host controller
+endif
 
 config USB_EHCI_PCI
 	tristate

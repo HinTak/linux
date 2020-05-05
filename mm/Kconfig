@@ -446,3 +446,52 @@ config FRONTSWAP
 	  and swap data is stored as normal on the matching swap device.
 
 	  If unsure, say Y to enable frontswap.
+
+ config OOM_RESCUER
+	bool "Enable the support of OOM rescuers machanism"
+	default n
+	depends on KNBD_SUPPORT
+	help
+	  This should be enabled to allow the way to prevent processes from being killed by
+	  the OOM killer.
+choice
+	prompt "CMA pages allocation policy"
+	default ALLOC_CMA_FIRST
+	depends on CMA
+
+config ALLOC_CMA_FIRST
+       bool "Allocate MOVABLE pages from MIGRATE_CMA migrate type first"
+       help
+         This enables attempt to get free pages from buddy allocator from
+         MIGRATE_CMA migrate region if MIGRATE_MOVABLE allocation is requested.
+         This will avoid OOM killer in case there are free pages available only
+         in MIGRATE_CMA region (all other regions are exhausted).
+
+config CMA_APP_ALLOC
+	bool "Application based allocation"
+	help
+	  This prohibits all processes to do memory allocations from CMA areas,
+	  excepting ones selected via HDMA ioctl.
+
+config ALLOC_CMA_DEFAULT
+	bool "Allocate MIGRATE_CMA as a fallback"
+	help
+	  Pages from MIGRATE_CMA migrate type will be allocated only as
+	  a fallback for MIGRATE_MOVABLE migrate type.
+endchoice
+
+config PREVENT_ALLOC_BUFFER_IN_CMA
+	bool "Prevent to use CMA region for allocating buffer"
+	depends on CMA
+	default y
+	help
+	  This should be enabled to prevent to use CMA region for allocating buffer memory
+
+config KNBD_SWAP_EXTENSION
+	bool "Turn on swap extensions necessary for KNBD"
+	depends on SWAP
+	depends on KNBD_SUPPORT
+	default n
+	help
+	  KNBD must satisfy a number of requirements which cannot be satisfied
+	  without some modifications of the swap subsystem.

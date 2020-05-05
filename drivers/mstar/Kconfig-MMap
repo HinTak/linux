@@ -1,0 +1,37 @@
+
+# drivers/MStar/Kconfig-MMap
+
+choice
+        prompt "MStar DTV Memory Map Config"
+
+config MSTAR_X14_MMAP_128MB_128MB
+        depends on MSTAR_PreX14 || MSTAR_X14
+        bool "MMAP 128MB+128MB (X14)"
+
+config MSTAR_X14_MMAP_256MB_256MB
+        depends on MSTAR_PreX14 || MSTAR_X14
+        bool "MMAP 256MB+256MB (X14)"
+
+config MSTAR_X14_MMAP_128MB
+        depends on MSTAR_PreX14 || MSTAR_X14
+        bool "MMAP 128MB (X14)"
+
+endchoice
+
+#===================================================
+#
+#===================================================
+config MSTAR_RESERVE_MEM_FOR_AEON
+    bool "Reserve Memory for AEON"
+    default n
+
+config MSTAR_RESERVE_MEM_FOR_AEON_SIZE
+    depends on MSTAR_RESERVE_MEM_FOR_AEON
+    hex "Reserve memory (bytes) for co-processor"
+    default 0x200000
+    help
+        reserve n MB size for MSTAR co-processor
+
+config MSTAR_OFFSET_FOR_SBOOT
+    bool "Offset for SBoot"
+    default n

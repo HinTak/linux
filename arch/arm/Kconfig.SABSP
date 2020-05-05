@@ -1,0 +1,135 @@
+menu "Samsung SP/BSP options"
+comment "VDLinux 4.x SA/BSP patch"
+
+config MINIMAL_CORE
+		bool "Enable Small core dumps"
+		default n
+		depends on (COREDUMP=y && BINFMT_ELF=y)
+		help
+          coredump only current task for tracing crashes in Market with security (security TBD)
+          Will dump only thread info, register context,
+          File info, stack of crashed thread, .data and .bss section loaded memory
+          and the areas in heap pointed by registers from r0-r12
+
+config MINIMAL_CORE_COMP
+		bool "Enable compression of Minimal core"
+		depends on (MINIMAL_CORE=y && CRYPTO_DEFLATE=y)
+		help
+          Compress the minimal corefile Generated
+
+config MINIMAL_CORE_ENCRYPT
+		bool "Enable encryption of Minimal core"
+		depends on (MINIMAL_CORE_COMP=y)
+		help
+          Encrypt the minimal corefile Generated
+
+config USBEN_GPIO
+	bool "gpio control support for usb power handling"
+	default y
+	help
+	 It support gpio control for usb power 
+
+config BLOCK_STOP_TTY
+       bool "block stop_tty (Ctrl + S)"
+       default y
+       help
+        Noise from UART can make stop signal. This option blocks stop_tty.
+
+config MOUNT_SECURITY
+       bool "security on mount command"
+       default y
+       help
+        In case of release kernel build mode, This option will disable BIND option and apply NOEXEC option to all devices on mount command
+
+config PROHIBIT_SIGNAL_HOOKING
+		bool "coredump when user try signal_hooking"
+		default n
+		help
+		In case of user app trying signal hooking, This option can stop user app and create coredump.
+
+config PROHIBIT_USLEEP_0
+		bool "coredump when user try usleep(0)"
+		default n
+		help
+		In case of user app using usleep(0), This option can stop user app and create coredump.
+
+config PREVENT_MIN_FREE_BYTES
+		bool "prevent min_free_kbytes setting"
+		default y
+		help
+			prevent min_free_kbytes setting from user (sysctl)
+
+config MODULE_VER_CHECK_SKIP
+		bool "Module version check skip"
+		default n
+		depends on MODVERSIONS=n
+		help
+		  'PRINT_MODULE_ADDR' option change VERMAGIC_STRING value. (e.g. 1003_192 DEBUG)
+		  so, If you are using different version name, insmod will be failed
+		  even while 'MODVERSION' option is off.
+		  This option skip the checking the VERMAGIC_STRING.
+
+config SQUASHFS_DEBUGGER
+		bool "squashfs debugger v2.1"
+		default y
+		help
+		  Tool for debugging squashfs error.
+		  It is useful even to debug Flash I/O and memory un-safe problem.
+
+config SQUASHFS_DEBUGGER_AUTO_DIAGNOSE
+		bool "squashfs debugger auto diagnose"
+		default y
+		depends on SQUASHFS_DEBUGGER
+		help
+		  Diagnose the cause of squashfs error.
+
+config MMC_BOOTING_SYNC
+		bool "Wait rootfs mount try till mmc scan is done"
+		default y
+		help
+		  If you use mmc device as rootfs, It could prevent mount fail issue.
+
+config BUSYLOOP_WHILE_OOPS
+		bool "busyloop while oops"
+		default y
+		help
+			In case of oops, This option is useful for attach JTAG device.
+
+config MMC_TIMEOUT
+		bool "MMC_TIMEOUT"
+		default n
+		help
+		  This config stops current mmc request.
+
+config CA9_SYSTEM_HANG
+		bool "CA9 SYSTEM HANG"
+		default n
+		help
+		  This config decides whether it uses flush BTAC/BTB( Branch Target Buffer ) when context switch
+
+config KPI_SYSTEM_SUPPORT
+		bool "KPI (BP error check) system support"
+		default n
+		depends on SHOW_FAULT_TRACE_INFO
+		help
+	      It write error information(Tick, thread name, PC) when user fault is occured
+
+config SWU_SUPPORT
+		bool "SWU mode support for updating single exeDSP"
+		default n
+		help
+		  For single exeDSP case, new update method/execution sequence are needed
+
+config WRITE_PROTECT 
+		bool "Flash write protection"
+		default n
+		help
+		    Flash write protection
+
+config MMC_POWER_ON_WRITE_PROTECTION
+		bool "Use power on write protection"
+		default n
+		help
+		  This will attemp to power on write protection for eMMC boot partition when eMMC init.
+
+endmenu # end of "Samsung SA/BSP options" menu

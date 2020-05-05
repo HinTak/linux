@@ -42,6 +42,10 @@
 
 #define FBPIXMAPSIZE	(1024 * 8)
 
+#ifndef VM_RESERVED
+	#define VM_RESERVED (VM_DONTEXPAND | VM_DONTDUMP)
+#endif
+
 static DEFINE_MUTEX(registration_lock);
 struct fb_info *registered_fb[FB_MAX] __read_mostly;
 int num_registered_fb __read_mostly;
@@ -182,6 +186,21 @@ char* fb_get_buffer_offset(struct fb_info *info, struct fb_pixmap *buf, u32 size
 
 	return addr;
 }
+
+struct fb_info* sdp_get_fb_info(int i)
+{
+	struct fb_info *fi = registered_fb[i];
+	return fi;
+}
+int sdp_set_fb_info(const struct fb_info*new_info,int i)
+{
+	struct fb_info *fi = registered_fb[i];
+	fi->ump_secure_id = new_info->ump_secure_id;	// currently changing only ump secure id;
+	printk(KERN_INFO"\n %s---------->fb = %d  secure id = %x\n",__FUNCTION__, i, fi->ump_secure_id );
+	return 1;
+}
+EXPORT_SYMBOL(sdp_get_fb_info);
+EXPORT_SYMBOL(sdp_set_fb_info);
 
 #ifdef CONFIG_LOGO
 
@@ -1193,6 +1212,23 @@ static long do_fb_ioctl(struct fb_info *info, unsigned int cmd,
 		console_unlock();
 		unlock_fb_info(info);
 		break;
+#ifndef CONFIG_ARCH_NVT_V7
+	case GET_UMP_SECURE_ID:			// X11 mali ump
+	{
+		long var2 ;
+		printk(KERN_INFO"GET_UMP_SECURE_ID icotl recived\n");
+		if (!lock_fb_info(info))
+                        return -ENODEV;
+		console_lock();
+		var2 = info->ump_secure_id;
+		printk(KERN_INFO" UMP Secure ID %08x \n",info->ump_secure_id);
+		if (!ret && copy_to_user(argp, &var2, sizeof(var2)))
+                        ret = -EFAULT;
+		console_unlock();
+		unlock_fb_info(info);	
+	}
+		break;
+#endif
 	default:
 		if (!lock_fb_info(info))
 			return -ENODEV;
@@ -1404,6 +1440,7 @@ fb_mmap(struct file *file, struct vm_area_struct * vma)
 	}
 	mutex_unlock(&info->mm_lock);
 
+	vma->vm_flags |= VM_IO | VM_RESERVED;
 	vma->vm_page_prot = vm_get_page_prot(vma->vm_flags);
 	fb_pgprotect(file, vma, start);
 
@@ -1850,8 +1887,11 @@ int fb_new_modelist(struct fb_info *info)
 	err = 1;
 
 	if (!list_empty(&info->modelist)) {
+		if (!lock_fb_info(info))
+			return -ENODEV;
 		event.info = info;
 		err = fb_notifier_call_chain(FB_EVENT_NEW_MODELIST, &event);
+		unlock_fb_info(info);
 	}
 
 	return err;

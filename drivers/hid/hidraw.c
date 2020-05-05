@@ -37,6 +37,8 @@
 
 #include <linux/hidraw.h>
 
+#define HIDRAW_DEVICE_MAJOR 271
+
 static int hidraw_major;
 static struct cdev hidraw_cdev;
 static struct class *hidraw_class;
@@ -558,10 +560,10 @@ EXPORT_SYMBOL_GPL(hidraw_disconnect);
 int __init hidraw_init(void)
 {
 	int result;
-	dev_t dev_id;
+	dev_t dev_id = MKDEV(HIDRAW_DEVICE_MAJOR, HIDRAW_FIRST_MINOR);
 
-	result = alloc_chrdev_region(&dev_id, HIDRAW_FIRST_MINOR,
-			HIDRAW_MAX_DEVICES, "hidraw");
+	result = register_chrdev_region(dev_id, HIDRAW_MAX_DEVICES,
+						"hidraw");
 
 	hidraw_major = MAJOR(dev_id);
 

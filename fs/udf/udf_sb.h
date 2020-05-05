@@ -181,5 +181,6 @@ static inline void UDF_CLEAR_FLAG(struct super_block *sb, int flag)
 {
 	clear_bit(flag, &UDF_SB(sb)->s_flags);
 }
-
+#define CACHED_METADATA_BDROM 1
+void udf_release_data(struct buffer_head *);
 #endif /* __LINUX_UDF_SB_H */

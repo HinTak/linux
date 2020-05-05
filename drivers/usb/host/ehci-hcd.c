@@ -86,7 +86,12 @@ static const char	hcd_name [] = "ehci_hcd";
  * code).  In an attempt to avoid trouble, we will use a minimum scheduling
  * length of 512 frames instead of 256.
  */
+//hongyabi patch for enlarge async frame list length
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+#define 	EHCI_TUNE_FLS  	0 	/* 1024 frame schedule */
+#else
 #define	EHCI_TUNE_FLS		1	/* (medium) 512-frame schedule */
+#endif
 
 /* Initial IRQ latency:  faster than hw default */
 static int log2_irq_thresh = 0;		// 0 to 6
@@ -99,7 +104,11 @@ module_param (park, uint, S_IRUGO);
 MODULE_PARM_DESC (park, "park setting; 1-3 back-to-back async packets");
 
 /* for flakey hardware, ignore overcurrent indicators */
+#ifdef CONFIG_ARCH_NVT72668
+static bool ignore_oc = 1;
+#else
 static bool ignore_oc = 0;
+#endif
 module_param (ignore_oc, bool, S_IRUGO);
 MODULE_PARM_DESC (ignore_oc, "ignore bogus hardware overcurrent indications");
 
@@ -159,7 +168,7 @@ static int handshake (struct ehci_hcd *ehci, void __iomem *ptr,
 		      u32 mask, u32 done, int usec)
 {
 	u32	result;
-
+		
 	do {
 		result = ehci_readl(ehci, ptr);
 		if (result == ~(u32)0)		/* card removed */
@@ -173,6 +182,7 @@ static int handshake (struct ehci_hcd *ehci, void __iomem *ptr,
 	return -ETIMEDOUT;
 }
 
+#ifndef CONFIG_ARCH_NVT72668
 /* check TDI/ARC silicon is in host mode */
 static int tdi_in_host_mode (struct ehci_hcd *ehci)
 {
@@ -181,6 +191,7 @@ static int tdi_in_host_mode (struct ehci_hcd *ehci)
 	tmp = ehci_readl(ehci, &ehci->regs->usbmode);
 	return (tmp & 3) == USBMODE_CM_HC;
 }
+#endif
 
 /*
  * Force HC to halt state from unknown (EHCI spec section 2.3).
@@ -194,11 +205,12 @@ static int ehci_halt (struct ehci_hcd *ehci)
 
 	/* disable any irqs left enabled by previous code */
 	ehci_writel(ehci, 0, &ehci->regs->intr_enable);
-
+#ifndef CONFIG_ARCH_NVT72668
 	if (ehci_is_TDI(ehci) && !tdi_in_host_mode(ehci)) {
 		spin_unlock_irq(&ehci->lock);
 		return 0;
 	}
+#endif
 
 	/*
 	 * This routine gets called during probe before ehci->command
@@ -341,11 +353,13 @@ static void ehci_silence_controller(struct ehci_hcd *ehci)
 	ehci->rh_state = EHCI_RH_HALTED;
 	ehci_turn_off_all_ports(ehci);
 
+#ifndef CONFIG_ARCH_NVT72668
 	/* make BIOS/etc use companion controller during reboot */
 	ehci_writel(ehci, 0, &ehci->regs->configured_flag);
 
 	/* unblock posted writes */
 	ehci_readl(ehci, &ehci->regs->configured_flag);
+#endif
 	spin_unlock_irq(&ehci->lock);
 }
 
@@ -369,6 +383,13 @@ static void ehci_shutdown(struct usb_hcd *hcd)
 }
 
 /*-------------------------------------------------------------------------*/
+
+#ifdef SAMSUNG_PATCH_WITH_USB_GADGET_ENHANCEMENT
+#define SCAN_PERIODIC_OFF_INTERVEL	250
+extern unsigned int		ehci_periodic_switch;
+extern struct timespec	dbg_set_scan_time;
+extern struct timespec	dbg_reset_scan_time;
+#endif	// SAMSUNG_PATCH_WITH_USB_GADGET_ENHANCEMENT
 
 /*
  * ehci_work is called from some interrupts, timers, and so on.
@@ -449,6 +470,7 @@ static void ehci_stop (struct usb_hcd *hcd)
 		    ehci_readl(ehci, &ehci->regs->status));
 }
 
+#ifndef CONFIG_ARCH_NVT72668
 /* one-time init, only for memory state */
 static int ehci_init(struct usb_hcd *hcd)
 {
@@ -559,6 +581,7 @@ static int ehci_init(struct usb_hcd *hcd)
 		hcd->self.sg_tablesize = ~0;
 	return 0;
 }
+#endif
 
 /* start HC running; it's halted, ehci_init() has been run (once) */
 static int ehci_run (struct usb_hcd *hcd)
@@ -566,7 +589,10 @@ static int ehci_run (struct usb_hcd *hcd)
 	struct ehci_hcd		*ehci = hcd_to_ehci (hcd);
 	u32			temp;
 	u32			hcc_params;
-
+#ifdef CONFIG_ARCH_SDP1302 		//for hsic device
+	u32 reg=0;
+	void __iomem *base = (void __iomem*) (0x10090d00 + DIFF_IO_BASE0);
+#endif
 	hcd->uses_new_polling = 1;
 
 	/* EHCI spec section 4.1 */
@@ -620,7 +646,9 @@ static int ehci_run (struct usb_hcd *hcd)
 	 */
 	down_write(&ehci_cf_port_reset_rwsem);
 	ehci->rh_state = EHCI_RH_RUNNING;
+#ifndef CONFIG_ARCH_NVT72668
 	ehci_writel(ehci, FLAG_CF, &ehci->regs->configured_flag);
+#endif
 	ehci_readl(ehci, &ehci->regs->command);	/* unblock posted writes */
 	msleep(5);
 	up_write(&ehci_cf_port_reset_rwsem);
@@ -643,9 +671,18 @@ static int ehci_run (struct usb_hcd *hcd)
 	create_debug_files(ehci);
 	create_sysfs_files(ehci);
 
+#ifdef CONFIG_ARCH_SDP1302 		//for hsic device
+	udelay(1);
+	reg=readl((void __iomem *)(base+0x18));
+	writel(reg|0x300000,(void __iomem *)base+0x18);
+
+	reg=readl((void __iomem *)base+0x1c);
+	writel(reg|0x20,(void __iomem *)base+0x1c);
+	ehci_info (ehci,"HSIC Device Reset asserted\n");
+#endif
 	return 0;
 }
-
+#ifndef CONFIG_ARCH_NVT72668
 int ehci_setup(struct usb_hcd *hcd)
 {
 	struct ehci_hcd *ehci = hcd_to_ehci(hcd);
@@ -655,7 +692,6 @@ int ehci_setup(struct usb_hcd *hcd)
 	    HC_LENGTH(ehci, ehci_readl(ehci, &ehci->caps->hc_capbase));
 	dbg_hcs_params(ehci, "reset");
 	dbg_hcc_params(ehci, "reset");
-
 	/* cache this readonly data; minimize chip reads */
 	ehci->hcs_params = ehci_readl(ehci, &ehci->caps->hcs_params);
 
@@ -668,14 +704,16 @@ int ehci_setup(struct usb_hcd *hcd)
 
 	retval = ehci_halt(ehci);
 	if (retval)
+		{ehci_info (ehci,"halt:%d\n",retval);
 		return retval;
+		}
 
 	ehci_reset(ehci);
 
 	return 0;
 }
 EXPORT_SYMBOL_GPL(ehci_setup);
-
+#endif
 /*-------------------------------------------------------------------------*/
 
 static irqreturn_t ehci_irq (struct usb_hcd *hcd)
@@ -754,11 +792,12 @@ static irqreturn_t ehci_irq (struct usb_hcd *hcd)
 	/* remote wakeup [4.3.1] */
 	if (status & STS_PCD) {
 		unsigned	i = HCS_N_PORTS (ehci->hcs_params);
+		u32 port_status = readl (&ehci->regs->port_status[0]);
 		u32		ppcd = 0;
 
 		/* kick root hub later */
 		pcd_status = status;
-
+#ifndef CONFIG_ARCH_NVT72668
 		/* resume root hub? */
 		if (ehci->rh_state == EHCI_RH_SUSPENDED)
 			usb_hcd_resume_root_hub(hcd);
@@ -766,6 +805,33 @@ static irqreturn_t ehci_irq (struct usb_hcd *hcd)
 		/* get per-port change detect bits */
 		if (ehci->has_ppcd)
 			ppcd = status >> 16;
+#else
+		/* resume root hub? */
+		if (!(cmd & CMD_RUN) || test_bit(1,&hcd->porcd2))
+		{
+			usb_hcd_resume_root_hub(hcd);
+			/* get per-port change detect bits */
+			if (ehci->has_ppcd)
+				ppcd = status >> 16;
+			set_bit(1, &hcd->porcd2);
+			if( (port_status & PORT_CONNECT) !=0){
+				writel (cmd | CMD_RUN, &ehci->regs->command);
+				clear_bit(1, &hcd->porcd2);
+			} else {
+				hcd->driver->port_nc(hcd);
+			}
+			set_bit(HCD_FLAG_NRY, &hcd->flags);
+			bh = 1;
+		}
+		if( (port_status & PORT_CONNECT) ==0 && test_bit(1,&hcd->modem_dongle))
+		{
+			hcd->driver->port_nc(hcd);				
+			clear_bit(1, &hcd->modem_dongle);
+			set_bit(HCD_FLAG_NRY, &hcd->flags);
+			bh = 1;
+		}
+
+#endif
 
 		while (i--) {
 			int pstatus;
@@ -820,6 +886,12 @@ dead:
 
 	if (bh)
 		ehci_work (ehci);
+
+#ifdef CONFIG_ARCH_NVT72668
+	if (unlikely(test_bit(1,&hcd->porcd2))) 
+		clear_bit(1, &hcd->porcd2);
+#endif
+
 	spin_unlock (&ehci->lock);
 	if (pcd_status)
 		usb_hcd_poll_rh_status(hcd);
@@ -870,10 +942,19 @@ static int ehci_urb_enqueue (
 		return intr_submit(ehci, urb, &qtd_list, mem_flags);
 
 	case PIPE_ISOCHRONOUS:
+#ifndef CONFIG_ARCH_NVT72668
 		if (urb->dev->speed == USB_SPEED_HIGH)
 			return itd_submit (ehci, urb, mem_flags);
 		else
 			return sitd_submit (ehci, urb, mem_flags);
+#else
+		if ((urb->dev->speed == USB_SPEED_HIGH) || ((urb->dev->speed == USB_SPEED_FULL) && (urb->dev->parent->devpath[0] == '0')))
+		{
+			return itd_submit (ehci, urb, mem_flags);
+		}
+		else
+			return sitd_submit (ehci, urb, mem_flags);
+#endif
 	}
 }
 
@@ -1123,6 +1204,7 @@ int ehci_resume(struct usb_hcd *hcd, bool hibernated)
 	 * then we maintained suspend power.
 	 * Just undo the effect of ehci_suspend().
 	 */
+#ifndef CONFIG_ARCH_NVT72668
 	if (ehci_readl(ehci, &ehci->regs->configured_flag) == FLAG_CF &&
 			!hibernated) {
 		int	mask = INTR_MASK;
@@ -1141,7 +1223,7 @@ int ehci_resume(struct usb_hcd *hcd, bool hibernated)
 		spin_unlock_irq(&ehci->lock);
 		return 0;
 	}
-
+#endif
 	/*
 	 * Else reset, to cope with power loss or resume from hibernation
 	 * having let the firmware kick in during reboot.
@@ -1151,11 +1233,21 @@ int ehci_resume(struct usb_hcd *hcd, bool hibernated)
 	(void) ehci_reset(ehci);
 
 	spin_lock_irq(&ehci->lock);
+#ifndef CONFIG_ARCH_NVT72668
 	if (ehci->shutdown)
 		goto skip;
+#else
+	if (ehci->shutdown){
+		spin_unlock_irq(&ehci->lock);
+		return 0;
+	}
+
+#endif
 
 	ehci_writel(ehci, ehci->command, &ehci->regs->command);
+#ifndef CONFIG_ARCH_NVT72668
 	ehci_writel(ehci, FLAG_CF, &ehci->regs->configured_flag);
+#endif
 	ehci_readl(ehci, &ehci->regs->command);	/* unblock posted writes */
 
 	ehci->rh_state = EHCI_RH_SUSPENDED;
@@ -1188,7 +1280,9 @@ static const struct hc_driver ehci_hc_driver = {
 	/*
 	 * basic lifecycle operations
 	 */
+#ifndef CONFIG_ARCH_NVT72668
 	.reset =		ehci_setup,
+#endif	
 	.start =		ehci_run,
 	.stop =			ehci_stop,
 	.shutdown =		ehci_shutdown,
@@ -1238,6 +1332,11 @@ MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_AUTHOR (DRIVER_AUTHOR);
 MODULE_LICENSE ("GPL");
 
+#if defined(CONFIG_ARCH_SDP) && (defined(CONFIG_OF)||defined(CONFIG_ARCH_SDP1202)||defined(CONFIG_ARCH_SDP1106)||defined(CONFIG_ARCH_SDP1207))
+#include "ehci-sdp.c"
+#define PLATFORM_DRIVER		sdp_ehci_driver
+#endif
+
 #ifdef CONFIG_USB_EHCI_FSL
 #include "ehci-fsl.c"
 #define	PLATFORM_DRIVER		ehci_fsl_driver
@@ -1266,6 +1365,17 @@ MODULE_LICENSE ("GPL");
 #ifdef CONFIG_XPS_USB_HCD_XILINX
 #include "ehci-xilinx-of.c"
 #define XILINX_OF_PLATFORM_DRIVER	ehci_hcd_xilinx_of_driver
+#endif
+
+#ifdef CONFIG_USB_NT72668_HCD
+#include "ehci-NT72668.c"
+#define PLATFORM_DRIVER				ehci_hcd_NT72668_driver
+#include "ehci-NT726681.c"
+#define PLATFORM_DRIVER_NT726681		ehci_hcd_NT726681_driver
+#include "ehci-NT726682.c"
+#define PLATFORM_DRIVER_NT726682		ehci_hcd_NT726682_driver
+#include "ehci-NT726683.c"
+#define PLATFORM_DRIVER_NT726683		ehci_hcd_NT726683_driver
 #endif
 
 #ifdef CONFIG_PLAT_ORION
@@ -1345,7 +1455,10 @@ MODULE_LICENSE ("GPL");
 	!defined(PLATFORM_DRIVER) && \
 	!defined(PS3_SYSTEM_BUS_DRIVER) && \
 	!defined(OF_PLATFORM_DRIVER) && \
-	!defined(XILINX_OF_PLATFORM_DRIVER)
+	!defined(XILINX_OF_PLATFORM_DRIVER) && \
+	!defined(PLATFORM_DRIVER_NT726681)  && \
+	!defined(PLATFORM_DRIVER_NT726682)  && \
+	!defined(PLATFORM_DRIVER_NT726683)
 #error "missing bus glue for ehci-hcd"
 #endif
 
@@ -1380,7 +1493,20 @@ static int __init ehci_hcd_init(void)
 	retval = platform_driver_register(&PLATFORM_DRIVER);
 	if (retval < 0)
 		goto clean0;
+#ifdef CONFIG_ARCH_NVT72668
+	retval = platform_driver_register(&PLATFORM_DRIVER_NT726681);
+	if (retval < 0)
+		goto clean0;
+	
+	retval = platform_driver_register(&PLATFORM_DRIVER_NT726682);
+	if (retval < 0)
+		goto clean0;
+	retval = platform_driver_register(&PLATFORM_DRIVER_NT726683);
+	if (retval < 0)
+		goto clean0;
 #endif
+#endif
+
 
 #ifdef PS3_SYSTEM_BUS_DRIVER
 	retval = ps3_ehci_driver_register(&PS3_SYSTEM_BUS_DRIVER);
@@ -1416,7 +1542,13 @@ clean2:
 #ifdef PLATFORM_DRIVER
 	platform_driver_unregister(&PLATFORM_DRIVER);
 clean0:
+#ifdef CONFIG_ARCH_NVT72668
+	platform_driver_unregister(&PLATFORM_DRIVER_NT726681);
+	platform_driver_unregister(&PLATFORM_DRIVER_NT726682);
+	platform_driver_unregister(&PLATFORM_DRIVER_NT726683);
 #endif
+#endif
+
 #ifdef DEBUG
 	debugfs_remove(ehci_debug_root);
 	ehci_debug_root = NULL;
@@ -1437,7 +1569,13 @@ static void __exit ehci_hcd_cleanup(void)
 #endif
 #ifdef PLATFORM_DRIVER
 	platform_driver_unregister(&PLATFORM_DRIVER);
+#ifdef CONFIG_ARCH_NVT72668
+	platform_driver_unregister(&PLATFORM_DRIVER_NT726681);
+	platform_driver_unregister(&PLATFORM_DRIVER_NT726682);
+	platform_driver_unregister(&PLATFORM_DRIVER_NT726683);
 #endif
+#endif
+
 #ifdef PS3_SYSTEM_BUS_DRIVER
 	ps3_ehci_driver_unregister(&PS3_SYSTEM_BUS_DRIVER);
 #endif

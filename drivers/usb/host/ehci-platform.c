@@ -181,13 +181,14 @@ static int ehci_platform_resume(struct device *dev)
 #define ehci_platform_suspend	NULL
 #define ehci_platform_resume	NULL
 #endif /* CONFIG_PM */
-
+#if 1
 static const struct platform_device_id ehci_platform_table[] = {
 	{ "ehci-platform", 0 },
-	{ }
+	{"ehci-platform", 1 },
+	{	 /*sentinel*/		}		// patch for add a null entry in platform_device_id  2013/05/05 sm79.bae@samsung.com
 };
 MODULE_DEVICE_TABLE(platform, ehci_platform_table);
-
+#endif
 static const struct dev_pm_ops ehci_platform_pm_ops = {
 	.suspend	= ehci_platform_suspend,
 	.resume		= ehci_platform_resume,

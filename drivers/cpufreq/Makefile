@@ -9,7 +9,11 @@ obj-$(CONFIG_CPU_FREQ_GOV_POWERSAVE)	+= cpufreq_powersave.o
 obj-$(CONFIG_CPU_FREQ_GOV_USERSPACE)	+= cpufreq_userspace.o
 obj-$(CONFIG_CPU_FREQ_GOV_ONDEMAND)	+= cpufreq_ondemand.o
 obj-$(CONFIG_CPU_FREQ_GOV_CONSERVATIVE)	+= cpufreq_conservative.o
-obj-$(CONFIG_CPU_FREQ_GOV_COMMON)		+= cpufreq_governor.o
+obj-$(CONFIG_CPU_FREQ_GOV_FOXAP)	+= cpufreq_foxap.o
+obj-$(CONFIG_CPU_FREQ_GOV_GOLF)		+= cpufreq_golf.o
+obj-$(CONFIG_CPU_FREQ_GOV_GOLFP)	+= cpufreq_golfp.o
+obj-$(CONFIG_CPU_FREQ_GOV_GOLFS)	+= cpufreq_golfs.o
+obj-$(CONFIG_CPU_FREQ_GOV_COMMON)	+= cpufreq_governor.o
 
 # CPUfreq cross-arch helpers
 obj-$(CONFIG_CPU_FREQ_TABLE)		+= freq_table.o
@@ -52,6 +56,10 @@ obj-$(CONFIG_ARM_EXYNOS4X12_CPUFREQ)	+= exynos4x12-cpufreq.o
 obj-$(CONFIG_ARM_EXYNOS5250_CPUFREQ)	+= exynos5250-cpufreq.o
 obj-$(CONFIG_ARM_OMAP2PLUS_CPUFREQ)     += omap-cpufreq.o
 obj-$(CONFIG_ARM_SPEAR_CPUFREQ)		+= spear-cpufreq.o
+obj-$(CONFIG_ARM_SDP_CPUFREQ)		+= sdp-cpufreq.o 
+obj-$(CONFIG_ARM_SDP1304_CPUFREQ)	+= sdp1304-cpufreq.o
+obj-$(CONFIG_ARM_SDP1302_CPUFREQ)	+= sdp1302-cpufreq.o
+obj-$(CONFIG_ARM_SDP1307_CPUFREQ)	+= sdp1307-cpufreq.o
 
 ##################################################################################
 # PowerPC platform drivers

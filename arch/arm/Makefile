@@ -187,6 +187,7 @@ machine-$(CONFIG_ARCH_U300)		+= u300
 machine-$(CONFIG_ARCH_U8500)		+= ux500
 machine-$(CONFIG_ARCH_VERSATILE)	+= versatile
 machine-$(CONFIG_ARCH_VEXPRESS)		+= vexpress
+machine-$(CONFIG_ARCH_NVT72668)		+= nvt72668
 machine-$(CONFIG_ARCH_VT8500)		+= vt8500
 machine-$(CONFIG_ARCH_W90X900)		+= w90x900
 machine-$(CONFIG_FOOTBRIDGE)		+= footbridge
@@ -196,6 +197,9 @@ machine-$(CONFIG_ARCH_SPEAR3XX)		+= spear3xx
 machine-$(CONFIG_MACH_SPEAR600)		+= spear6xx
 machine-$(CONFIG_ARCH_ZYNQ)		+= zynq
 machine-$(CONFIG_ARCH_SUNXI)		+= sunxi
+machine-$(CONFIG_ARCH_SDP)		+= sdp
+machine-$(CONFIG_MSTAR_PreX14)		+= x14
+machine-$(CONFIG_MSTAR_X14)            += x14
 
 # Platform directory name.  This list is sorted alphanumerically
 # by CONFIG_* macro name.
@@ -208,6 +212,9 @@ plat-$(CONFIG_PLAT_S3C24XX)	+= s3c24xx samsung
 plat-$(CONFIG_PLAT_S5P)		+= samsung
 plat-$(CONFIG_PLAT_SPEAR)	+= spear
 plat-$(CONFIG_PLAT_VERSATILE)	+= versatile
+plat-$(CONFIG_ARCH_SDP)	+= sdp
+plat-$(CONFIG_PLAT_NOVATEK)    += novatek
+plat-$(CONFIG_PLAT_MSTAR)    += mstar
 
 ifeq ($(CONFIG_ARCH_EBSA110),y)
 # This is what happens if you forget the IOCS16 line.
@@ -219,6 +226,20 @@ endif
 # The byte offset of the kernel image in RAM from the start of RAM.
 TEXT_OFFSET := $(textofs-y)
 
+ifneq ($(CONFIG_MSTAR_CHIP),)
+MACHINE  := arch/arm/arm-boards/$(word 1,$(machine-y))/
+machdirs := $(patsubst %,arch/arm/arm-boards/%/,$(machine-y))
+platdirs := $(patsubst %,arch/arm/arm-boards/plat-%/,$(plat-y))
+ifeq ($(KBUILD_SRC),)
+KBUILD_CPPFLAGS += $(patsubst %,-I%/include,$(machdirs) $(platdirs))
+#KBUILD_CPPFLAGS += $(patsubst %,-I%/board,$(machdirs))
+KBUILD_CPPFLAGS += $(patsubst %,-I%,$(machdirs) $(platdirs))
+else
+KBUILD_CPPFLAGS += $(patsubst %,-I$(srctree)/%/include,$(machdirs) $(platdirs))
+KBUILD_CPPFLAGS += $(patsubst %,-I$(srctree)/%,$(machdirs) $(platdirs))
+endif
+
+else
 # The first directory contains additional information for the boot setup code
 ifneq ($(machine-y),)
 MACHINE  := arch/arm/mach-$(word 1,$(machine-y))/
@@ -238,6 +259,8 @@ KBUILD_CPPFLAGS += $(patsubst %,-I%include,$(machdirs) $(platdirs))
 else
 KBUILD_CPPFLAGS += $(patsubst %,-I$(srctree)/%include,$(machdirs) $(platdirs))
 endif
+endif
+
 endif
 
 export	TEXT_OFFSET GZFLAGS MMUEXT
@@ -287,6 +310,9 @@ bzImage: zImage
 
 zImage Image xipImage bootpImage uImage: vmlinux
 	$(Q)$(MAKE) $(build)=$(boot) MACHINE=$(MACHINE) $(boot)/$@
+ifeq ($(CONFIG_PULLOUT_INITRAMFS), y)
+	@./scripts/packramfs initramfs.bin
+endif
 
 zinstall uinstall install: vmlinux
 	$(Q)$(MAKE) $(build)=$(boot) MACHINE=$(MACHINE) $@

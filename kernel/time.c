@@ -194,7 +194,21 @@ SYSCALL_DEFINE2(settimeofday, struct timeval __user *, tv,
 			return -EFAULT;
 	}
 
-	return do_sys_settimeofday(tv ? &new_ts : NULL, tz ? &new_tz : NULL);
+	/*
+	 * Warning!!  - yh2005.choi @ linux team -
+	 *
+	 * DTV Application can't change system time with  settimeofday().
+	 * Cause it can make potential hang problem of pthread_cond_timedwait().
+	 * This request will always return -EFAULT for system safety.
+	 */
+
+	printk("\n");
+	printk("\033[31mERROR : settimeofday was called by - %s -\033[0m\n", current->comm);
+	printk("\033[31m  settimeofday can make potential hang problem of pthread_cond_timedwait.\033[0m\n");
+	printk("\033[31m  You can't use this dangerous function on embedded system.\033[0m\n");
+
+	return -EFAULT;
+	/* return do_sys_settimeofday(tv ? &new_ts : NULL, tz ? &new_tz : NULL); */
 }
 
 SYSCALL_DEFINE1(adjtimex, struct timex __user *, txc_p)

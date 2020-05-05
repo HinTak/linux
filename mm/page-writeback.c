@@ -1418,7 +1418,7 @@ pause:
 	if (laptop_mode)
 		return;
 
-	if (nr_reclaimable > background_thresh)
+	if (nr_reclaimable > background_thresh || over_dirty_bground_bytes(bdi))
 		bdi_start_background_writeback(bdi);
 }
 

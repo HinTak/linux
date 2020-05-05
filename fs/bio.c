@@ -1423,10 +1423,40 @@ EXPORT_SYMBOL(bio_flush_dcache_pages);
  **/
 void bio_endio(struct bio *bio, int error)
 {
+	struct bio_vec *bvec = bio->bi_io_vec + bio->bi_vcnt - 1;
+
 	if (error)
 		clear_bit(BIO_UPTODATE, &bio->bi_flags);
 	else if (!test_bit(BIO_UPTODATE, &bio->bi_flags))
 		error = -EIO;
+
+	/**
+	 * If error is EBADSEC, set the EBAD flag to return
+	 * the correct error. This flag latter can be used
+	 * to send correct error to applications.
+	 */
+	if (error == -EBADSEC) {
+		do {
+			struct page *page = bvec->bv_page;
+			/**
+			 * page->mapping does not always point to physical
+			 * location of the page. In that scenario page->mapping
+			 * is valid, but it does not point to struct
+			 * address_space. In this case lower bit of
+			 * page->mapping is non zero.
+			 *
+			 * Hence lets check for this bit, and if bit is zero
+			 * then only we will set the flag for this page.
+			 */
+			if (page && page->mapping) {
+				if (!((unsigned long) page->mapping &
+							PAGE_MAPPING_ANON)) {
+					set_bit(AS_EBAD, &page->mapping->flags);
+				}
+			}
+			--bvec;
+		} while (bvec >= bio->bi_io_vec);
+	}
 
 	if (bio->bi_end_io)
 		bio->bi_end_io(bio, error);

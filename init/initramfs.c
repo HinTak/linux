@@ -19,6 +19,9 @@
 #include <linux/syscalls.h>
 #include <linux/utime.h>
 
+#include <asm/mach/map.h>
+
+
 static __initdata char *message;
 static void __init error(char *x)
 {
@@ -581,7 +584,15 @@ static void __init clean_rootfs(void)
 
 static int __init populate_rootfs(void)
 {
+#ifdef CONFIG_INITRAMFS_IMG_HDR_ADDR
+	char *err;
+        unsigned int *header;
+	header = (unsigned int *)ioremap(CONFIG_INITRAMFS_IMG_HDR_ADDR,SZ_256);
+	header = (unsigned int *)ioremap(CONFIG_INITRAMFS_IMG_HDR_ADDR,header[1] - header[0]);
+        err = unpack_to_rootfs( (char *)header + 8, header[1] - header[0]);
+#else
 	char *err = unpack_to_rootfs(__initramfs_start, __initramfs_size);
+#endif
 	if (err)
 		panic(err);	/* Failed to decompress INTERNAL initramfs */
 	if (initrd_start) {

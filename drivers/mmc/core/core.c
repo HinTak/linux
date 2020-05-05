@@ -336,6 +336,18 @@ static int __mmc_start_req(struct mmc_host *host, struct mmc_request *mrq)
 	mmc_start_request(host, mrq);
 	return 0;
 }
+#if defined(CONFIG_MMC_TIMEOUT) && defined(CONFIG_MSTAR_X14)
+void mstar_mci_dump_debug_msg(void);
+#endif
+
+#if defined(CONFIG_MMC_TIMEOUT) && defined(CONFIG_ARCH_SDP)
+void sdp_mmch_debug_dump(struct mmc_host *mmc);
+#endif
+
+#ifdef CONFIG_ARCH_SDP
+int g_irq_print =0;
+EXPORT_SYMBOL(g_irq_print);
+#endif
 
 static void mmc_wait_for_req_done(struct mmc_host *host,
 				  struct mmc_request *mrq)
@@ -343,6 +355,38 @@ static void mmc_wait_for_req_done(struct mmc_host *host,
 	struct mmc_command *cmd;
 
 	while (1) {
+#ifdef CONFIG_MMC_TIMEOUT
+    	unsigned long rc;
+    	rc = wait_for_completion_timeout(&mrq->completion, HZ<<2);
+    	if(rc){
+    		cmd = mrq->cmd;
+    		if (!cmd->error || !cmd->retries ||
+    		    mmc_card_removed(host->card))
+    			break;
+
+    		pr_debug("%s: req failed (CMD%u): %d, retrying...\n",
+    			 mmc_hostname(host), cmd->opcode, cmd->error);
+    		cmd->retries--;
+    		cmd->error = 0;
+    		host->ops->request(host, mrq);
+    	} else {
+			printk(KERN_ERR"\n[%s] timeout\n",__FUNCTION__);    	
+
+#ifdef CONFIG_ARCH_SDP
+			sdp_mmch_debug_dump(host);
+			g_irq_print=1;
+#endif
+
+#ifdef CONFIG_SMP
+			smp_send_stop();
+#endif
+
+#ifdef CONFIG_MSTAR_X14
+		mstar_mci_dump_debug_msg();
+#endif
+    		while(1);    	
+    	}
+#else
 		wait_for_completion(&mrq->completion);
 
 		cmd = mrq->cmd;
@@ -355,6 +399,7 @@ static void mmc_wait_for_req_done(struct mmc_host *host,
 		cmd->retries--;
 		cmd->error = 0;
 		host->ops->request(host, mrq);
+#endif
 	}
 }
 
@@ -395,6 +440,7 @@ static void mmc_post_req(struct mmc_host *host, struct mmc_request *mrq,
 		mmc_host_clk_hold(host);
 		host->ops->post_req(host, mrq, err);
 		mmc_host_clk_release(host);
+
 	}
 }
 
@@ -2076,14 +2122,21 @@ static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
 	 */
 	mmc_hw_reset_for_init(host);
 
+#if 0 /* not neccesary on DTV system */
 	/*
 	 * sdio_reset sends CMD52 to reset card.  Since we do not know
 	 * if the card is being re-initialized, just send it.  CMD52
 	 * should be ignored by SD/eMMC cards.
 	 */
 	sdio_reset(host);
+#endif
 	mmc_go_idle(host);
 
+#if 0 
+	/* 
+	 * not neccesary on DTV system 
+	 * skip it for booting time 
+	 */
 	mmc_send_if_cond(host, host->ocr_avail);
 
 	/* Order's important: probe SDIO, then SD, then MMC */
@@ -2091,6 +2144,7 @@ static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
 		return 0;
 	if (!mmc_attach_sd(host))
 		return 0;
+#endif
 	if (!mmc_attach_mmc(host))
 		return 0;
 
@@ -2153,11 +2207,19 @@ int mmc_detect_card_removed(struct mmc_host *host)
 }
 EXPORT_SYMBOL(mmc_detect_card_removed);
 
+#ifdef CONFIG_MMC_BOOTING_SYNC
+DECLARE_COMPLETION(mmc_rescan_work);
+#endif
+
 void mmc_rescan(struct work_struct *work)
 {
 	struct mmc_host *host =
 		container_of(work, struct mmc_host, detect.work);
 	int i;
+
+#ifdef CONFIG_MMC_BOOTING_SYNC
+	init_completion(&mmc_rescan_work);
+#endif
 
 	if (host->rescan_disable)
 		return;
@@ -2213,6 +2275,11 @@ void mmc_rescan(struct work_struct *work)
 			break;
 	}
 	mmc_release_host(host);
+
+#ifdef CONFIG_MMC_BOOTING_SYNC
+	/* completed the work of mmc rescan */
+	complete(&mmc_rescan_work);
+#endif
 
  out:
 	if (host->caps & MMC_CAP_NEEDS_POLL)

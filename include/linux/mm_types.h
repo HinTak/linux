@@ -15,6 +15,18 @@
 #include <asm/page.h>
 #include <asm/mmu.h>
 
+#ifdef CONFIG_RSS_INFO
+/* define VMA group */
+#define VMAG_CNT        7
+#define VMAG_CODE       0       /* exclude so */
+#define VMAG_DATA       1       /* exclude so */
+#define VMAG_LIBCODE    2       /* lib so */
+#define VMAG_LIBDATA    3       /* lib so */
+#define VMAG_HEAP       4       /* process heap */
+#define VMAG_STACK      5       /* process stack */
+#define VMAG_OTHER      6       /* mmap, shm, ... */
+#endif  /* CONFIG_RSS_INFO */
+
 #ifndef AT_VECTOR_SIZE_ARCH
 #define AT_VECTOR_SIZE_ARCH 0
 #endif
@@ -23,6 +35,34 @@
 struct address_space;
 
 #define USE_SPLIT_PTLOCKS	(NR_CPUS >= CONFIG_SPLIT_PTLOCK_CPUS)
+
+#ifdef CONFIG_PTMU_TRACE
+typedef enum {
+	_code_seg = 1,
+	_data_seg,
+	_stack_seg,
+	_heap_seg,
+	_mmap_seg
+} fault_vma_t;
+
+struct mapped_owner {
+	struct task_struct *tsk;
+	pid_t pid;
+	pid_t tgid;
+	fault_vma_t p_flags;
+	spinlock_t m_lock;
+};
+
+#define RESET_RMAP_OWNER(page) {\
+	if (page) {\
+		page->rmap_owner.tsk = NULL; \
+		page->rmap_owner.pid = 0; \
+		page->rmap_owner.tgid = 0; \
+		page->rmap_owner.p_flags = 0;\
+	} \
+}
+
+#endif
 
 /*
  * Each physical page in the system has a struct page associated with
@@ -176,6 +216,14 @@ struct page {
 #ifdef CONFIG_NUMA_BALANCING
 	int _last_nid;
 #endif
+
+#ifdef CONFIG_PTMU_TRACE
+	struct mapped_owner rmap_owner;
+#endif
+#ifdef CONFIG_MUPT_TRACE
+	/* Save pid information for the allocated page. */
+	pid_t pid;
+#endif
 }
 /*
  * The struct page can be forced to be double word aligned so that atomic ops
@@ -299,6 +347,9 @@ struct core_state {
 	atomic_t nr_threads;
 	struct core_thread dumper;
 	struct completion startup;
+#ifdef CONFIG_ACCURATE_COREDUMP
+	struct task_struct *owner;
+#endif
 };
 
 enum {
@@ -366,6 +417,11 @@ struct mm_struct {
 	unsigned long arg_start, arg_end, env_start, env_end;
 
 	unsigned long saved_auxv[AT_VECTOR_SIZE]; /* for /proc/PID/auxv */
+#ifdef CONFIG_RSS_INFO
+	unsigned long curr_rss[VMAG_CNT];
+	unsigned long max_rss[VMAG_CNT];
+#endif  /* CONFIG_RSS_INFO */
+
 
 	/*
 	 * Special counters, in some configurations protected by the
@@ -436,6 +492,9 @@ struct mm_struct {
 	int first_nid;
 #endif
 	struct uprobes_state uprobes_state;
+#if defined(CONFIG_PAX)
+	unsigned long pax_flags;
+#endif
 };
 
 /* first nid will either be a valid NID or one of these values */

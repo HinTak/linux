@@ -148,6 +148,9 @@ void blk_rq_init(struct request_queue *q, struct request *rq)
 	rq->start_time = jiffies;
 	set_start_time_ns(rq);
 	rq->part = NULL;
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	clear_bit(__REQ_DIRECTIO, (unsigned long *)&rq->cmd_flags);
+#endif
 }
 EXPORT_SYMBOL(blk_rq_init);
 
@@ -1359,6 +1362,12 @@ static bool bio_attempt_back_merge(struct request_queue *q, struct request *req,
 	req->ioprio = ioprio_best(req->ioprio, bio_prio(bio));
 
 	drive_stat_acct(req, 0);
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	if (test_bit(BIO_DIRECT, (unsigned long *)&bio->bi_flags)) {
+		/*printk(KERN_DEBUG "%s: ELEVATOR_BACK_MERGE, BIO_DIRECT->__REQ_DIRECTIO\n", __FUNCTION__);*/
+		set_bit(__REQ_DIRECTIO, (unsigned long *)&req->cmd_flags);
+	}
+#endif
 	return true;
 }
 
@@ -1389,6 +1398,12 @@ static bool bio_attempt_front_merge(struct request_queue *q,
 	req->ioprio = ioprio_best(req->ioprio, bio_prio(bio));
 
 	drive_stat_acct(req, 0);
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	if (test_bit(BIO_DIRECT, (unsigned long *)&bio->bi_flags)) {
+		/*printk(KERN_DEBUG "%s: ELEVATOR_FRONT_MERGE, BIO_DIRECT->__REQ_DIRECTIO\n", __FUNCTION__);*/
+		set_bit(__REQ_DIRECTIO, (unsigned long *)&req->cmd_flags);
+	}
+#endif
 	return true;
 }
 
@@ -1536,6 +1551,11 @@ get_rq:
 
 	if (test_bit(QUEUE_FLAG_SAME_COMP, &q->queue_flags))
 		req->cpu = raw_smp_processor_id();
+
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	if (test_bit(BIO_DIRECT, (unsigned long *)&bio->bi_flags))
+		set_bit(__REQ_DIRECTIO, (unsigned long *)&req->cmd_flags);
+#endif
 
 	plug = current->plug;
 	if (plug) {
@@ -2264,7 +2284,7 @@ bool blk_update_request(struct request *req, int error, unsigned int nr_bytes)
 	if (!req->bio)
 		return false;
 
-	trace_block_rq_complete(req->q, req);
+	trace_block_rq_complete(req->q, req, nr_bytes);
 
 	/*
 	 * For fs requests, rq is just carrier of independent bio's

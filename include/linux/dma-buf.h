@@ -30,7 +30,8 @@
 #include <linux/list.h>
 #include <linux/dma-mapping.h>
 #include <linux/fs.h>
-
+#include <linux/kds.h>
+#include <linux/wait.h>
 struct device;
 struct dma_buf;
 struct dma_buf_attachment;
@@ -61,13 +62,6 @@ struct dma_buf_attachment;
  * 		   This Callback must not sleep.
  * @kmap: maps a page from the buffer into kernel address space.
  * @kunmap: [optional] unmaps a page from the buffer.
- * @mmap: used to expose the backing storage to userspace. Note that the
- * 	  mapping needs to be coherent - if the exporter doesn't directly
- * 	  support this, it needs to fake coherency by shooting down any ptes
- * 	  when transitioning away from the cpu domain.
- * @vmap: [optional] creates a virtual mapping for the buffer into kernel
- *	  address space. Same restrictions as for vmap and friends apply.
- * @vunmap: [optional] unmaps a vmap from the buffer
  */
 struct dma_buf_ops {
 	int (*attach)(struct dma_buf *, struct device *,
@@ -99,7 +93,6 @@ struct dma_buf_ops {
 	void (*kunmap_atomic)(struct dma_buf *, unsigned long, void *);
 	void *(*kmap)(struct dma_buf *, unsigned long);
 	void (*kunmap)(struct dma_buf *, unsigned long, void *);
-
 	int (*mmap)(struct dma_buf *, struct vm_area_struct *vma);
 
 	void *(*vmap)(struct dma_buf *);
@@ -121,6 +114,10 @@ struct dma_buf {
 	const struct dma_buf_ops *ops;
 	/* mutex to serialize list manipulation and attach/detach */
 	struct mutex lock;
+	struct kds_resource kds;
+	wait_queue_head_t wq_exclusive;
+	wait_queue_head_t wq_shared;
+	struct kds_callback kds_cb;
 	void *priv;
 };
 
@@ -155,6 +152,13 @@ static inline void get_dma_buf(struct dma_buf *dmabuf)
 {
 	get_file(dmabuf->file);
 }
+#if 1
+static inline struct kds_resource *
+	get_dma_buf_kds_resource(struct dma_buf *dmabuf)
+{
+	return &dmabuf->kds;
+}
+#endif
 
 struct dma_buf_attachment *dma_buf_attach(struct dma_buf *dmabuf,
 							struct device *dev);
@@ -178,10 +182,9 @@ void *dma_buf_kmap_atomic(struct dma_buf *, unsigned long);
 void dma_buf_kunmap_atomic(struct dma_buf *, unsigned long, void *);
 void *dma_buf_kmap(struct dma_buf *, unsigned long);
 void dma_buf_kunmap(struct dma_buf *, unsigned long, void *);
+int dma_buf_mmap(struct dma_buf *, struct vm_area_struct *,unsigned long);
 
-int dma_buf_mmap(struct dma_buf *, struct vm_area_struct *,
-		 unsigned long);
 void *dma_buf_vmap(struct dma_buf *);
 void dma_buf_vunmap(struct dma_buf *, void *vaddr);
-
+int kds_dma_buf_module_register(struct kds_dma_buf_register *kds_funcs);
 #endif /* __DMA_BUF_H__ */

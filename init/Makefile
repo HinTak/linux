@@ -2,7 +2,20 @@
 # Makefile for the linux kernel.
 #
 
+ifeq ($(CONFIG_EXECUTE_AUTHULD),y)
 obj-y                          := main.o version.o mounts.o
+obj-y   += secureboot/Secureboot.o
+obj-y   += secureboot/MicomCtrl_api.o
+obj-y   += secureboot/SBKN_bignum.o
+obj-y   += secureboot/SBKN_CC_API.o
+obj-y   += secureboot/SBKN_rsa.o
+obj-y   += secureboot/sha1.o
+obj-y   += secureboot/sha256.o
+obj-y   += secureboot/sha1_API.o
+else
+obj-y                          := main.o version.o mounts.o
+endif
+
 ifneq ($(CONFIG_BLK_DEV_INITRD),y)
 obj-y                          += noinitramfs.o
 else

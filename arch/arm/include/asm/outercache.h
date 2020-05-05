@@ -24,8 +24,14 @@
 #include <linux/types.h>
 
 struct outer_cache_fns {
+	#if defined(CONFIG_MSTAR_CHIP)
+	int (*is_enable)(void); 
+	#endif	
 	void (*inv_range)(unsigned long, unsigned long);
 	void (*clean_range)(unsigned long, unsigned long);
+	#if defined(CONFIG_MSTAR_CHIP)
+	void (*clean_all)(void);
+	#endif
 	void (*flush_range)(unsigned long, unsigned long);
 	void (*flush_all)(void);
 	void (*inv_all)(void);

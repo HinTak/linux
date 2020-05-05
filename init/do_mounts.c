@@ -40,6 +40,11 @@ static char * __initdata root_device_name;
 static char __initdata saved_root_name[64];
 static int root_wait;
 
+#ifdef CONFIG_EXECUTE_AUTHULD
+char rootfs_name[64];
+#endif
+
+
 dev_t ROOT_DEV;
 
 static int __init load_ramdisk(char *str)
@@ -285,6 +290,9 @@ done:
 static int __init root_dev_setup(char *line)
 {
 	strlcpy(saved_root_name, line, sizeof(saved_root_name));
+#ifdef CONFIG_EXECUTE_AUTHULD
+	strlcpy(rootfs_name, line, sizeof(rootfs_name));
+#endif
 	return 1;
 }
 

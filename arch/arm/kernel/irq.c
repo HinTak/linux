@@ -43,6 +43,11 @@
 
 unsigned long irq_err_count;
 
+#ifdef CONFIG_ARCH_SDP
+extern int g_irq_print;
+extern void show_irq(void);
+#endif
+
 int arch_show_interrupts(struct seq_file *p, int prec)
 {
 #ifdef CONFIG_FIQ
@@ -65,6 +70,13 @@ void handle_IRQ(unsigned int irq, struct pt_regs *regs)
 {
 	struct pt_regs *old_regs = set_irq_regs(regs);
 
+#ifdef CONFIG_ARCH_SDP
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+	if(g_irq_print)
+		show_irq();
+#endif
+#endif
+
 	irq_enter();
 
 	/*
@@ -77,6 +89,28 @@ void handle_IRQ(unsigned int irq, struct pt_regs *regs)
 		ack_bad_irq(irq);
 	} else {
 		generic_handle_irq(irq);
+
+		/* VDLinux 3.x , based VDLP.4.2.1.x default patch No.12,
+		detect kernel stack overflow, SP Team 2010-02-08 */
+#ifdef CONFIG_DEBUG_STACKOVERFLOW
+#ifndef STACK_WARN
+#define STACK_WARN (THREAD_SIZE/8)
+#endif
+		/* Debugging check for stack overflow */
+		{
+			register unsigned long sp __asm__("sp");
+			unsigned long thread_info ;
+			extern void print_modules(void);
+			thread_info =(sp & ~(THREAD_SIZE - 1));
+
+			if (unlikely(sp < thread_info + sizeof(struct thread_info) + STACK_WARN)) {
+				printk(KERN_ERR "stack overflow: 0x%lx\n", sp);
+				print_modules();
+				show_regs(get_irq_regs());
+				dump_stack();
+			}
+		}
+#endif
 	}
 
 	irq_exit();

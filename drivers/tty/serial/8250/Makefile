@@ -3,7 +3,16 @@
 #
 
 obj-$(CONFIG_SERIAL_8250)		+= 8250_core.o
+ifeq ($(CONFIG_MSTAR_CHIP),y)
+ifeq ($(CONFIG_MSTAR_PreX14),y)
+8250_core-y				:= 8250_x14.o
+endif
+ifeq ($(CONFIG_MSTAR_X14),y)
+8250_core-y                             := 8250_x14.o
+endif
+else
 8250_core-y				:= 8250.o
+endif
 8250_core-$(CONFIG_SERIAL_8250_PNP)	+= 8250_pnp.o
 obj-$(CONFIG_SERIAL_8250_GSC)		+= 8250_gsc.o
 obj-$(CONFIG_SERIAL_8250_PCI)		+= 8250_pci.o

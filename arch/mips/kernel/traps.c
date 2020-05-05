@@ -56,6 +56,10 @@
 #include <asm/stacktrace.h>
 #include <asm/uasm.h>
 
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+#endif
+
 extern void check_wait(void);
 extern asmlinkage void r4k_wait(void);
 extern asmlinkage void rollback_handle_int(void);
@@ -147,6 +151,325 @@ static void show_backtrace(struct task_struct *task, const struct pt_regs *regs)
 	} while (pc);
 	printk("\n");
 }
+
+/* VDLinux, based VDLP.Mstar default patch No.5,show fault user stack, 2010-01-29 */
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+static void dump_mem(const char *str, unsigned long bottom, unsigned long top)
+{
+	unsigned long p = bottom & ~31;
+	mm_segment_t fs;
+	int i;
+
+	/*
+	 * We need to switch to kernel mode so that we can use __get_user
+	 * to safely read from kernel space.  Note that we now dump the
+	 * code first, just in case the backtrace kills us.
+	 */
+	fs = get_fs();
+	set_fs(KERNEL_DS);
+
+	printk(KERN_ALERT "%s(0x%08lx to 0x%08lx)\n", str, bottom, top);
+
+	for (p = bottom & ~31; p <= top;) {
+		printk(KERN_ALERT "%04lx: ", p & 0xffff);
+
+		for (i = 0; i < 8; i++, p += 4) {
+			unsigned int val;
+
+			if (p < bottom || p > top)
+				printk("         ");
+			else {
+				__get_user(val, (unsigned long *)p);
+				printk("%08x ", val);
+			}
+		}
+		printk ("\n");
+	}
+	set_fs(fs);
+}
+
+/*
+ * VDLP 4.2.x Chelsea Kernel Patch
+ * Show user stack
+ *  : assumes that user program uses frame pointer
+ *  : TODO : consider context safety
+ */
+void show_user_stack(struct task_struct *task, struct pt_regs * regs)
+{
+	struct vm_area_struct *vma;
+
+	vma = find_vma(task->mm, task->user_ssp);
+	if (vma) {
+		printk(KERN_ALERT "task stack info : pid(%d) stack area (0x%08lx ~ 0x%08lx)\n",
+			(int)task->pid, vma->vm_start, vma->vm_end );
+	} else {
+		printk(KERN_ALERT "pid(%d) : printing user stack failed.\n", (int)task->pid);
+		return;
+	}
+
+	if (regs->regs[29] < vma->vm_start) {
+		printk(KERN_ALERT  "pid(%d) : seems stack overflow.\n"
+			"  sp(%lx), stack vma (0x%08lx ~ 0x%08lx)\n"
+			, (int)task->pid, regs->regs[29], vma->vm_start, vma->vm_end );
+		return;
+	}
+
+	printk(KERN_ALERT "-----------------------------------------------------------\n");
+	printk(KERN_ALERT "* dump user stack\n");
+	printk(KERN_ALERT "-----------------------------------------------------------\n");
+	dump_mem( "dump user stack", regs->regs[29], task->user_ssp);
+	printk(KERN_ALERT "-----------------------------------------------------------\n\n");
+}
+
+#ifdef CONFIG_SHOW_EPC_RA_INFO
+void show_epc_ra(struct task_struct* task, struct pt_regs * regs)
+{
+	struct vm_area_struct *epc_vma = NULL;
+	struct vm_area_struct *ra_vma = NULL;
+	unsigned long addr_epc, addr_ra;
+
+	printk("\n");
+	printk("--------------------------------------------------------------------------------------\n");
+	printk("EPC, RA MEMINFO\n");
+	printk("--------------------------------------------------------------------------------------\n");
+
+	addr_epc = regs->cp0_epc - 0x400;   // for 1024 byte
+	addr_ra = regs->regs[31] - 0x800;   // for 2048 byte
+
+	// find vma including epc, ra
+	// calculate a print range according to vma
+	epc_vma = find_vma(task->mm, regs->cp0_epc);
+	if (epc_vma == NULL) {
+		printk("No VMA for epc\n");
+		return;
+	}
+
+	if(addr_epc < epc_vma->vm_start)
+		addr_epc = epc_vma->vm_start;
+
+	ra_vma = find_vma( task->mm, regs->regs[31]);
+	if (ra_vma == NULL) {
+		printk("No VMA for ra\n");
+		return;
+	}
+
+	if(addr_ra < ra_vma->vm_start)
+		addr_ra = ra_vma->vm_start;
+
+	// find a duplicated address range case1
+	if((addr_ra <= regs->cp0_epc) && (regs->cp0_epc < regs->regs[31])) {
+		addr_ra = regs->cp0_epc + 0x4;
+	}
+	// find a duplicated address range case2
+	else if((addr_epc <= regs->regs[31]) && (regs->regs[31] < regs->cp0_epc)) {
+		addr_epc = regs->regs[31] + 0x4;
+	}
+
+	printk("epc:%lx, ra:%lx\n", regs->cp0_epc, regs->regs[31]);
+	printk("--------------------------------------------------------------------------------------\n");
+	dump_mem("EPC meminfo ", addr_epc, regs->cp0_epc );
+	printk("--------------------------------------------------------------------------------------\n");
+	dump_mem("RA meminfo ", addr_ra, regs->regs[31]);
+	printk("--------------------------------------------------------------------------------------\n");
+
+	printk("\n");
+}
+
+static void show_epc_ra_kernel(const struct pt_regs * regs)
+{
+	unsigned long addr_epc, addr_ra;
+	int valid_pc = 0, valid_lr = 0;
+	int valid_pc_mod, valid_lr_mod;
+	struct module *mod;
+
+	addr_epc = regs->cp0_epc - 0x400;   // for 1024 byte
+	addr_ra = regs->regs[31] - 0x800;   // for 2048 byte
+
+	valid_pc_mod=((regs->cp0_epc >= VMALLOC_START && regs->cp0_epc < VMALLOC_END)
+#ifdef MODULE_START
+		      ||(regs->cp0_epc >= MODULE_START && regs->cp0_epc < MODULE_START)
+#endif
+		     );
+	valid_lr_mod=((regs->regs[31] >= VMALLOC_START && regs->regs[31] < VMALLOC_END)
+#ifdef MODULE_START
+		      ||(regs->regs[31] >= MODULE_START && regs->regs[31] < MODULE_START)
+#endif
+		     );
+
+	valid_pc = (TASK_SIZE <= regs->cp0_epc && regs->cp0_epc < (unsigned long)high_memory) || valid_pc_mod;
+	valid_lr = (TASK_SIZE <= regs->regs[31] && regs->regs[31] < (unsigned long)high_memory) || valid_lr_mod;
+
+	/* Adjust the addr_epc according to the correct module virtual memory range. */
+	if(valid_pc) {
+		if (addr_epc < TASK_SIZE)
+			addr_epc = TASK_SIZE;
+		else if (valid_pc_mod) {
+			mod = __module_address(regs->cp0_epc);
+			if (!mod)
+				valid_pc = 0;
+			else if (!within_module_init(addr_epc, mod) &&
+				 !within_module_core(addr_epc, mod))
+				addr_epc = regs->cp0_epc & PAGE_MASK;
+		}
+	}
+
+	/* Adjust the addr_ra according to the correct module virtual memory range. */
+	if(valid_lr) {
+		if (addr_ra < TASK_SIZE)
+			addr_ra = TASK_SIZE;
+		else if (valid_lr_mod) {
+			mod = __module_address(regs->regs[31]);
+			if (!mod)
+				valid_lr = 0;
+			else if (!within_module_init(addr_ra, mod) &&
+				 !within_module_core(addr_ra, mod))
+				addr_ra = regs->regs[31] & PAGE_MASK;
+		}
+	}
+
+	if(valid_pc && valid_lr) {
+		// find a duplicated address rage case1
+		if((addr_ra<=regs->cp0_epc) && (regs->cp0_epc<regs->regs[31])) {
+			addr_ra = regs->cp0_epc + 0x4;
+		}
+		// find a duplicated address rage case2
+		else if((addr_epc<=regs->regs[31]) && (regs->regs[31]<regs->cp0_epc)) {
+			addr_epc = regs->regs[31] + 0x4;
+		}
+	}
+
+	printk("--------------------------------------------------------------------------------------\n");
+	printk("[VDLP] DISPLAY EPC, RA in KERNEL Level\n");
+	printk("epc:%lx, ra:%lx\n", regs->cp0_epc, regs->regs[31]);
+	printk("--------------------------------------------------------------------------------------\n");
+
+	if(valid_pc){
+		dump_mem_kernel("EPC meminfo in kernel", addr_epc, regs->cp0_epc);
+		printk("--------------------------------------------------------------------------------------\n");
+		dump_mem_kernel("EPC meminfo in kernel", regs->cp0_epc + 0x4, regs->cp0_epc + 0x20);
+	} else {
+		printk("[VDLP] Invalid pc addr\n");
+	}
+	printk("--------------------------------------------------------------------------------------\n");
+
+	if(valid_lr){
+		dump_mem_kernel("RA meminfo in kernel", addr_ra, regs->regs[31]);
+	} else {
+		printk("[VDLP] Invalid lr addr\n");
+	}
+	printk("--------------------------------------------------------------------------------------\n");
+	printk("\n");
+}
+
+#ifdef CONFIG_DUMP_RANGE_BASED_ON_REGISTER
+int is_valid_kernel_addr(unsigned long register_value)
+{
+	if (register_value < PAGE_OFFSET ||
+	    !virt_addr_valid((void*)register_value)){
+		//includes checking NULL and user address
+		return 0;
+	} else {
+		return 1;
+	}
+}
+
+void show_register_memory_kernel(struct pt_regs * regs)
+{
+	unsigned long start_addr_for_printing = 0;
+	unsigned long end_addr_for_printing = 0;
+	int register_num;
+
+	printk("--------------------------------------------------------------------------------------\n");
+	printk("REGISTER MEMORY INFO\n");
+	printk("--------------------------------------------------------------------------------------\n");
+
+	for(register_num = 0; register_num<sizeof(regs->regs)/sizeof(regs->regs[0]); register_num++) {
+		printk("\n\n* REGISTER : r%d\n",register_num);
+
+		start_addr_for_printing = (regs->regs[register_num] & PAGE_MASK) - 0x1000; //-4kbyte
+		if (regs->regs[register_num] >= 0xfffff000){
+			// if virtual address is 0xffffffff, skip dump address to prevent overflow
+			end_addr_for_printing = 0xffffffff;
+		} else {
+			end_addr_for_printing = (regs->regs[register_num] & PAGE_MASK) + PAGE_SIZE + 0xfff;
+		} //+about 8kbyte
+
+		if (!is_valid_kernel_addr(regs->regs[register_num])) {
+			printk("# Register value 0x%lx is wrong address.\n", regs->regs[register_num]);
+			printk("# We can't do anything.\n");
+			printk("# So, we search next register.\n");
+			continue;
+		}
+
+		if (!is_valid_kernel_addr(start_addr_for_printing)) {
+			printk("# 'start_addr_for_printing' is wrong address.\n");
+			printk("# So, we use just 'regs->regs[register_num] & PAGE_MASK)'\n");
+			start_addr_for_printing = (regs->regs[register_num] & PAGE_MASK);
+		}
+
+		if (!is_valid_kernel_addr(end_addr_for_printing)) {
+			printk("# 'end_addr_for_printing' is wrong address.\n");
+			printk("# So, we use 'PAGE_ALIGN(regs->regs[register_num]) + PAGE_SIZE-1'\n");
+			end_addr_for_printing = (regs->regs[register_num] & PAGE_MASK) + PAGE_SIZE-1;
+		}
+
+		// dump
+		printk("# r%d register :0x%lx, start_addr : 0x%lx, end_addr : 0x%lx\n",
+			register_num, regs->regs[register_num], start_addr_for_printing, end_addr_for_printing);
+		printk("--------------------------------------------------------------------------------------\n");
+		dump_mem_kernel("meminfo ", start_addr_for_printing, end_addr_for_printing);
+		printk("--------------------------------------------------------------------------------------\n");
+		printk("\n");
+	}
+}
+#endif
+#endif
+
+/*VDLinux 3.x, based VDLP.4.3.1.x default patch No.6,
+  separate printk, SP Team 2010-02-07 */
+#ifndef CONFIG_SEPARATE_PRINTK_FROM_USER
+#define sep_printk_start
+#define sep_printk_end
+#else
+extern void _sep_printk_start(void);
+extern void _sep_printk_end(void);
+#define sep_printk_start _sep_printk_start
+#define sep_printk_end _sep_printk_end
+#endif
+
+void show_info(struct task_struct *task, struct pt_regs * regs)
+{
+	static atomic_t prn_once = ATOMIC_INIT(0);
+
+	if(atomic_cmpxchg(&prn_once, 0, 1)) {
+		return;
+	}
+
+#ifdef CONFIG_SEPARATE_PRINTK_FROM_USER
+	sep_printk_start();
+#endif
+	preempt_disable();
+	/*if(addr) {
+		show_pte(task->mm, addr);
+	}*/
+#ifdef CONFIG_VDLP_VERSION_INFO
+	printk(KERN_ALERT"================================================================================\n");
+	printk(KERN_ALERT" KERNEL Version : %s\n", DTV_KERNEL_VERSION);
+	printk(KERN_ALERT"================================================================================\n");
+#endif
+
+#ifdef CONFIG_SHOW_EPC_RA_INFO
+	show_epc_ra(task, regs);
+#endif
+	show_regs(regs);
+	show_pid_maps(task);
+	show_user_stack(task, regs);
+	preempt_enable();
+#ifdef CONFIG_SEPARATE_PRINTK_FROM_USER
+	sep_printk_end();
+#endif
+}
+#endif /* CONFIG_SHOW_FAULT_TRACE_INFO */
 
 /*
  * This routine abuses get_user()/put_user() to reference pointers
@@ -386,6 +709,19 @@ void __noreturn die(const char *str, struct pt_regs *regs)
 
 	console_verbose();
 	raw_spin_lock_irq(&die_lock);
+	/*
+	 * VDLP Mstar 10.01.29 added
+	 * epc, ra area dump for kernel area
+	 */
+#ifdef CONFIG_VDLP_VERSION_INFO
+	printk(KERN_ALERT"================================================================================\n");
+	printk(KERN_ALERT" KERNEL Version : %s\n", DTV_KERNEL_VERSION);
+	printk(KERN_ALERT"================================================================================\n");
+#endif
+
+#ifdef CONFIG_SHOW_EPC_RA_INFO
+	show_epc_ra_kernel(regs);
+#endif
 #ifdef CONFIG_MIPS_MT_SMTC
 	dvpret = dvpe();
 #endif /* CONFIG_MIPS_MT_SMTC */
@@ -396,6 +732,9 @@ void __noreturn die(const char *str, struct pt_regs *regs)
 
 	printk("%s[#%d]:\n", str, ++die_counter);
 	show_registers(regs);
+#ifdef CONFIG_DUMP_RANGE_BASED_ON_REGISTER
+	show_register_memory_kernel((void*)regs);
+#endif
 	add_taint(TAINT_DIE);
 	raw_spin_unlock_irq(&die_lock);
 
@@ -672,10 +1011,19 @@ asmlinkage void do_ov(struct pt_regs *regs)
 	info.si_signo = SIGFPE;
 	info.si_errno = 0;
 	info.si_addr = (void __user *) regs->cp0_epc;
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+	printk(KERN_ALERT "%s() : sending SIGFPE to %s, PID:%d\n", __func__,  current->comm, current->pid);
+	show_info(current, regs);
+#endif
 	force_sig_info(SIGFPE, &info, current);
 }
 
+#ifndef CONFIG_SHOW_FAULT_TRACE_INFO
 static int process_fpemu_return(int sig, void __user *fault_addr)
+#else
+/* VDLinux 3.x, added regs args in process_fpemu_return(), 2012-04-02 */
+static int process_fpemu_return(int sig, void __user *fault_addr, struct pt_regs *regs)
+#endif
 {
 	if (sig == SIGSEGV || sig == SIGBUS) {
 		struct siginfo si = {0};
@@ -689,9 +1037,17 @@ static int process_fpemu_return(int sig, void __user *fault_addr)
 		} else {
 			si.si_code = BUS_ADRERR;
 		}
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+		printk(KERN_ALERT "%s() : sending SIG:%d to %s, PID:%d\n", __func__, sig, current->comm, current->pid);
+		show_info(current, regs);
+#endif
 		force_sig_info(sig, &si, current);
 		return 1;
 	} else if (sig) {
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+		printk(KERN_ALERT "%s() : sending SIG:%d to %s, PID:%d\n", __func__, sig, current->comm, current->pid);
+		show_info(current, regs);
+#endif
 		force_sig(sig, current);
 		return 1;
 	} else {
@@ -742,7 +1098,11 @@ asmlinkage void do_fpe(struct pt_regs *regs, unsigned long fcr31)
 		own_fpu(1);	/* Using the FPU again.  */
 
 		/* If something went wrong, signal */
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+		process_fpemu_return(sig, fault_addr, regs);
+#else
 		process_fpemu_return(sig, fault_addr);
+#endif
 
 		return;
 	} else if (fcr31 & FPU_CSR_INV_X)
@@ -760,6 +1120,10 @@ asmlinkage void do_fpe(struct pt_regs *regs, unsigned long fcr31)
 	info.si_signo = SIGFPE;
 	info.si_errno = 0;
 	info.si_addr = (void __user *) regs->cp0_epc;
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+	printk(KERN_ALERT "%s() : sending SIGFPE to %s, PID:%d\n", __func__, current->comm, current->pid);
+	show_info(current, regs);
+#endif
 	force_sig_info(SIGFPE, &info, current);
 }
 
@@ -795,6 +1159,10 @@ static void do_trap_or_bp(struct pt_regs *regs, unsigned int code,
 		info.si_signo = SIGFPE;
 		info.si_errno = 0;
 		info.si_addr = (void __user *) regs->cp0_epc;
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+		printk(KERN_ALERT "%s() : sending SIGFPE to %s, PID:%d\n", __func__, current->comm, current->pid);
+		show_info(current, regs);
+#endif
 		force_sig_info(SIGFPE, &info, current);
 		break;
 	case BRK_BUG:
@@ -917,6 +1285,18 @@ asmlinkage void do_ri(struct pt_regs *regs)
 
 	if (unlikely(status > 0)) {
 		regs->cp0_epc = old_epc;		/* Undo skip-over.  */
+
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+		if(status == SIGILL) {
+			printk(KERN_ALERT "%s() : sending SIGILL to %s, PID:%d\n", __func__,
+				current->comm, current->pid);
+		} else {
+			printk(KERN_ALERT "%s() : sending SIGNAL(%d) to %s, PID:%d\n"
+				, __func__, status
+				, current->comm, current->pid);
+		}
+		show_info(current, regs);
+#endif
 		force_sig(status, current);
 	}
 }
@@ -1057,7 +1437,11 @@ asmlinkage void do_cpu(struct pt_regs *regs)
 			sig = fpu_emulator_cop1Handler(regs,
 						       &current->thread.fpu,
 						       0, &fault_addr);
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+			if (!process_fpemu_return(sig, fault_addr, regs))
+#else
 			if (!process_fpemu_return(sig, fault_addr))
+#endif
 				mt_ase_fp_affinity();
 		}
 
@@ -1067,12 +1451,19 @@ asmlinkage void do_cpu(struct pt_regs *regs)
 		raw_notifier_call_chain(&cu2_chain, CU2_EXCEPTION, regs);
 		return;
 	}
-
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+	printk(KERN_ALERT "%s() : sending SIGILL to %s, PID:%d\n", __func__, current->comm, current->pid);
+	show_info(current, regs);
+#endif
 	force_sig(SIGILL, current);
 }
 
 asmlinkage void do_mdmx(struct pt_regs *regs)
 {
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+	printk(KERN_ALERT "%s() : sending SIGILL to %s, PID:%d\n", __func__, current->comm, current->pid);
+	show_info(current, regs);
+#endif
 	force_sig(SIGILL, current);
 }
 
@@ -1165,7 +1556,10 @@ asmlinkage void do_mt(struct pt_regs *regs)
 		break;
 	}
 	die_if_kernel("MIPS MT Thread exception in kernel", regs);
-
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+	printk(KERN_ALERT "%s() : sending SIGILL to %s, PID:%d\n", __func__, current->comm, current->pid);
+	show_info(current, regs);
+#endif
 	force_sig(SIGILL, current);
 }
 
@@ -1174,7 +1568,10 @@ asmlinkage void do_dsp(struct pt_regs *regs)
 {
 	if (cpu_has_dsp)
 		panic("Unexpected DSP exception");
-
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+	printk(KERN_ALERT "%s() : sending SIGILL to %s, PID:%d\n", __func__, current->comm, current->pid);
+	show_info(current, regs);
+#endif
 	force_sig(SIGILL, current);
 }
 

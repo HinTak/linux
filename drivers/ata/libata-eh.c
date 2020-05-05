@@ -71,7 +71,8 @@ enum {
 	ATA_ECAT_DUBIOUS_UNK_DEV	= 7,
 	ATA_ECAT_NR			= 8,
 
-	ATA_EH_CMD_DFL_TIMEOUT		=  5000,
+	/* to prevent qc timeout for read_10 in d7500 case, increase this timeout(request sense key) to 5000(5sec)->15000*/
+	ATA_EH_CMD_DFL_TIMEOUT		=  15000,
 
 	/* always put at least this amount of time between resets */
 	ATA_EH_RESET_COOL_DOWN		=  5000,

@@ -2433,10 +2433,17 @@ static int usb_hcd_request_irqs(struct usb_hcd *hcd,
 			return retval;
 		}
 		hcd->irq = irqnum;
+#ifndef CONFIG_ARCH_NVT72668		
 		dev_info(hcd->self.controller, "irq %d, %s 0x%08llx\n", irqnum,
 				(hcd->driver->flags & HCD_MEMORY) ?
 					"io mem" : "io base",
 					(unsigned long long)hcd->rsrc_start);
+#else
+                dev_info(hcd->self.controller, "irq %d, %s 0x%08llx mapped %p\n", irqnum,
+                                (hcd->driver->flags & HCD_MEMORY) ?
+	                                  "io mem" : "io base",
+                                   (unsigned long long)hcd->rsrc_start,hcd->regs);
+#endif		
 	} else {
 		hcd->irq = 0;
 		if (hcd->rsrc_start)

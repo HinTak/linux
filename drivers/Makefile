@@ -17,6 +17,7 @@ obj-$(CONFIG_PARISC)		+= parisc/
 obj-$(CONFIG_RAPIDIO)		+= rapidio/
 obj-y				+= video/
 obj-y				+= idle/
+obj-$(CONFIG_USE_MSTAR_DRIVER)	+= mstar/
 
 # IPMI must come before ACPI in order to provide IPMI opregion support
 obj-$(CONFIG_IPMI_HANDLER)	+= char/ipmi/
@@ -60,6 +61,8 @@ obj-$(CONFIG_SCSI)		+= scsi/
 obj-$(CONFIG_ATA)		+= ata/
 obj-$(CONFIG_TARGET_CORE)	+= target/
 obj-$(CONFIG_MTD)		+= mtd/
+obj-$(CONFIG_TINY_FSR)      += tfsr/
+obj-$(CONFIG_RFS_FSR)       += fsr/
 obj-$(CONFIG_SPI)		+= spi/
 obj-y				+= hsi/
 obj-y				+= net/
@@ -131,10 +134,12 @@ obj-y				+= platform/
 obj-y				+= clk/
 
 obj-$(CONFIG_HWSPINLOCK)	+= hwspinlock/
+obj-y				+= samsung/
 obj-$(CONFIG_NFC)		+= nfc/
 obj-$(CONFIG_IOMMU_SUPPORT)	+= iommu/
 obj-$(CONFIG_REMOTEPROC)	+= remoteproc/
 obj-$(CONFIG_RPMSG)		+= rpmsg/
+obj-$(CONFIG_HDMA_DEVICE)       += hdma/
 
 # Virtualization drivers
 obj-$(CONFIG_VIRT_DRIVERS)	+= virt/
@@ -146,3 +151,9 @@ obj-$(CONFIG_MEMORY)		+= memory/
 obj-$(CONFIG_IIO)		+= iio/
 obj-$(CONFIG_VME_BUS)		+= vme/
 obj-$(CONFIG_IPACK_BUS)		+= ipack/
+
+# MStar device drivers.
+obj-$(CONFIG_MSTAR_EMAC)                            += emac/
+
+# VD-Time feature driver
+obj-$(CONFIG_VDTIME_SUPPORT)           += vd_time/

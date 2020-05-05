@@ -20,6 +20,7 @@
 #include <linux/nfsd/debug.h>
 #include <linux/nfsd/export.h>
 #include <linux/nfsd/stats.h>
+#include <linux/workqueue.h>
 
 /*
  * nfsd version
@@ -60,6 +61,9 @@ extern unsigned int		nfsd_drc_max_mem;
 extern unsigned int		nfsd_drc_mem_used;
 
 extern const struct seq_operations nfs_exports_op;
+
+extern struct workqueue_struct *nfs_umountd_workqueue;
+extern struct work_struct nfs_umount_work;
 
 /*
  * Function prototypes.

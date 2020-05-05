@@ -16,6 +16,18 @@ config ZRAM
 	  See zram.txt for more information.
 	  Project home: http://compcache.googlecode.com/
 
+config ZRAMDEVICES
+	int  "Default NO OF RAMDEVICES"
+	depends on ZRAM
+	default 4
+	help
+
+config DISKDEVICES
+	int  "Default size of RAMDEVICES"
+	depends on ZRAM
+	default 20480
+	help
+
 config ZRAM_DEBUG
 	bool "Compressed RAM block device debug support"
 	depends on ZRAM
@@ -23,3 +35,7 @@ config ZRAM_DEBUG
 	help
 	  This option adds additional debugging code to the compressed
 	  RAM block device driver.
+
+config KNBD_ZRAM_DEBUG
+	bool
+	depends on KNBD_SUPPORT

@@ -27,8 +27,20 @@
 #include <linux/dma-buf.h>
 #include <linux/anon_inodes.h>
 #include <linux/export.h>
+#include <linux/poll.h>
+#include <linux/sched.h>
 
+#if 0
+/* what to do when waitall must wait for a synchronous locked resource: */
+#define KDS_FLAG_LOCKED_FAIL    (0u <<  0) /* fail waitall */
+#define KDS_FLAG_LOCKED_IGNORE  (1u <<  0) /* don't wait, but block other
+that waits */
+#define KDS_FLAG_LOCKED_WAIT    (2u <<  0) /* wait (normal */
+#define KDS_FLAG_LOCKED_ACTION  (3u <<  0) /* mask to extract the action to
+do on locked resources */
+#endif
 static inline int is_dma_buf_file(struct file *);
+struct kds_dma_buf_register *g_kds_dma_buf_register;
 
 static int dma_buf_release(struct inode *inode, struct file *file)
 {
@@ -40,6 +52,13 @@ static int dma_buf_release(struct inode *inode, struct file *file)
 	dmabuf = file->private_data;
 
 	dmabuf->ops->release(dmabuf);
+	if(g_kds_dma_buf_register)
+	{
+		if(g_kds_dma_buf_register->kds_callback_term)
+			g_kds_dma_buf_register->kds_callback_term(&dmabuf->kds_cb);
+		if(g_kds_dma_buf_register->kds_resource_term)
+			g_kds_dma_buf_register->kds_resource_term(&dmabuf->kds);
+	}
 	kfree(dmabuf);
 	return 0;
 }
@@ -61,9 +80,95 @@ static int dma_buf_mmap_internal(struct file *file, struct vm_area_struct *vma)
 	return dmabuf->ops->mmap(dmabuf, vma);
 }
 
+#if 1
+static void dma_buf_kds_cb_fn (void *param1, void *param2)
+{
+	struct kds_resource_set **rset_ptr = param1;
+	struct kds_resource_set *rset = *rset_ptr;
+	wait_queue_head_t *wait_queue = param2;
+
+	kfree(rset_ptr);
+	if(g_kds_dma_buf_register && g_kds_dma_buf_register->kds_resource_set_release)
+		g_kds_dma_buf_register->kds_resource_set_release(&rset);
+	wake_up(wait_queue);
+}
+
+static int dma_buf_kds_check(struct kds_resource *kds,
+                             long unsigned int exclusive, int *poll_ret)
+{
+	/* Synchronous wait with 0 timeout - poll availability */
+	struct kds_resource_set *rset = g_kds_dma_buf_register->kds_waitall(1,&exclusive,&kds,0);
+
+	if (IS_ERR(rset))
+		return POLLERR;
+
+	if (rset){
+		if(g_kds_dma_buf_register && g_kds_dma_buf_register->kds_resource_set_release)
+			g_kds_dma_buf_register->kds_resource_set_release(&rset);
+		*poll_ret = POLLIN | POLLRDNORM;
+		if (exclusive)
+			*poll_ret |=  POLLOUT | POLLWRNORM;
+		return 1;
+	}else{
+		return 0;
+	}
+}
+
+static unsigned int dma_buf_poll(struct file *file,
+                                 struct poll_table_struct *wait)
+{
+	struct dma_buf *dmabuf;
+	struct kds_resource *kds;
+	unsigned int ret = 0;
+
+	if (!is_dma_buf_file(file))
+		return POLLERR;
+
+	dmabuf = file->private_data;
+	kds    = &dmabuf->kds;
+
+	if (poll_does_not_wait(wait)){
+		/* Check for exclusive access (superset of shared) first */
+		if(!dma_buf_kds_check(kds, 1ul, &ret))
+			dma_buf_kds_check(kds, 0ul, &ret);
+	}else{
+		int events = poll_requested_events(wait);
+		unsigned long exclusive;
+		wait_queue_head_t *wq;
+		struct kds_resource_set **rset_ptr = kmalloc(sizeof(*rset_ptr), GFP_KERNEL);
+
+		if (!rset_ptr)
+			return POLL_ERR;
+
+		if (events & POLLOUT){
+			wq = &dmabuf->wq_exclusive;
+			exclusive = 1;
+		}else{
+			wq = &dmabuf->wq_shared;
+			exclusive = 0;
+		}
+		poll_wait(file, wq, wait);
+		if(g_kds_dma_buf_register && g_kds_dma_buf_register->kds_async_waitall)
+		{
+			ret = g_kds_dma_buf_register->kds_async_waitall(rset_ptr, KDS_FLAG_LOCKED_WAIT, &dmabuf->kds_cb,
+		                        rset_ptr, wq, 1, &exclusive, &kds);
+
+		if (IS_ERR_VALUE(ret)){
+			ret = POLL_ERR;
+			kfree(rset_ptr);
+		}else{
+			/* Can't allow access until callback */
+			ret = 0;
+		}
+	}
+	}
+	return ret;
+}
+#endif
 static const struct file_operations dma_buf_fops = {
 	.release	= dma_buf_release,
 	.mmap		= dma_buf_mmap_internal,
+	.poll		= dma_buf_poll,
 };
 
 /*
@@ -114,12 +219,24 @@ struct dma_buf *dma_buf_export(void *priv, const struct dma_buf_ops *ops,
 	dmabuf->size = size;
 
 	file = anon_inode_getfile("dmabuf", &dma_buf_fops, dmabuf, flags);
+	if (IS_ERR(file)) { 
+		kfree(dmabuf); 
+	 	return ERR_CAST(file); 
+	 } 
 
 	dmabuf->file = file;
 
 	mutex_init(&dmabuf->lock);
 	INIT_LIST_HEAD(&dmabuf->attachments);
-
+	init_waitqueue_head(&dmabuf->wq_exclusive);
+	init_waitqueue_head(&dmabuf->wq_shared);
+	if(g_kds_dma_buf_register)
+	{
+		if(g_kds_dma_buf_register->kds_resource_init)
+			g_kds_dma_buf_register->kds_resource_init(&dmabuf->kds);
+		if(g_kds_dma_buf_register->kds_callback_init)
+			g_kds_dma_buf_register->kds_callback_init(&dmabuf->kds_cb, 1, dma_buf_kds_cb_fn);
+	}
 	return dmabuf;
 }
 EXPORT_SYMBOL_GPL(dma_buf_export);
@@ -174,7 +291,7 @@ struct dma_buf *dma_buf_get(int fd)
 
 	return file->private_data;
 }
-EXPORT_SYMBOL_GPL(dma_buf_get);
+EXPORT_SYMBOL(dma_buf_get);
 
 /**
  * dma_buf_put - decreases refcount of the buffer
@@ -187,9 +304,11 @@ void dma_buf_put(struct dma_buf *dmabuf)
 	if (WARN_ON(!dmabuf || !dmabuf->file))
 		return;
 
+	mutex_lock(&dmabuf->lock);
 	fput(dmabuf->file);
+	mutex_unlock(&dmabuf->lock);
 }
-EXPORT_SYMBOL_GPL(dma_buf_put);
+EXPORT_SYMBOL(dma_buf_put);
 
 /**
  * dma_buf_attach - Add the device to dma_buf's attachments list; optionally,
@@ -234,7 +353,7 @@ err_attach:
 	mutex_unlock(&dmabuf->lock);
 	return ERR_PTR(ret);
 }
-EXPORT_SYMBOL_GPL(dma_buf_attach);
+EXPORT_SYMBOL(dma_buf_attach);
 
 /**
  * dma_buf_detach - Remove the given attachment from dmabuf's attachments list;
@@ -256,7 +375,7 @@ void dma_buf_detach(struct dma_buf *dmabuf, struct dma_buf_attachment *attach)
 	mutex_unlock(&dmabuf->lock);
 	kfree(attach);
 }
-EXPORT_SYMBOL_GPL(dma_buf_detach);
+EXPORT_SYMBOL(dma_buf_detach);
 
 /**
  * dma_buf_map_attachment - Returns the scatterlist table of the attachment;
@@ -283,7 +402,7 @@ struct sg_table *dma_buf_map_attachment(struct dma_buf_attachment *attach,
 
 	return sg_table;
 }
-EXPORT_SYMBOL_GPL(dma_buf_map_attachment);
+EXPORT_SYMBOL(dma_buf_map_attachment);
 
 /**
  * dma_buf_unmap_attachment - unmaps and decreases usecount of the buffer;might
@@ -298,15 +417,13 @@ void dma_buf_unmap_attachment(struct dma_buf_attachment *attach,
 				struct sg_table *sg_table,
 				enum dma_data_direction direction)
 {
-	might_sleep();
-
 	if (WARN_ON(!attach || !attach->dmabuf || !sg_table))
 		return;
 
 	attach->dmabuf->ops->unmap_dma_buf(attach, sg_table,
 						direction);
 }
-EXPORT_SYMBOL_GPL(dma_buf_unmap_attachment);
+EXPORT_SYMBOL(dma_buf_unmap_attachment);
 
 
 /**
@@ -446,6 +563,9 @@ EXPORT_SYMBOL_GPL(dma_buf_kunmap);
 int dma_buf_mmap(struct dma_buf *dmabuf, struct vm_area_struct *vma,
 		 unsigned long pgoff)
 {
+	struct file *oldfile;
+	int ret;
+
 	if (WARN_ON(!dmabuf || !vma))
 		return -EINVAL;
 
@@ -459,16 +579,23 @@ int dma_buf_mmap(struct dma_buf *dmabuf, struct vm_area_struct *vma,
 		return -EINVAL;
 
 	/* readjust the vma */
-	if (vma->vm_file)
-		fput(vma->vm_file);
-
-	vma->vm_file = get_file(dmabuf->file);
-
+	get_file(dmabuf->file);
+	oldfile = vma->vm_file;
+	vma->vm_file = dmabuf->file;
 	vma->vm_pgoff = pgoff;
 
-	return dmabuf->ops->mmap(dmabuf, vma);
+	ret = dmabuf->ops->mmap(dmabuf, vma);
+	if (ret) {
+		/* restore old parameters on failure */
+		vma->vm_file = oldfile;
+		fput(dmabuf->file);
+	} else {
+		if (oldfile)
+			fput(oldfile);
+	}
+	return ret;
 }
-EXPORT_SYMBOL_GPL(dma_buf_mmap);
+EXPORT_SYMBOL(dma_buf_mmap);
 
 /**
  * dma_buf_vmap - Create virtual mapping for the buffer object into kernel
@@ -489,7 +616,7 @@ void *dma_buf_vmap(struct dma_buf *dmabuf)
 		return dmabuf->ops->vmap(dmabuf);
 	return NULL;
 }
-EXPORT_SYMBOL_GPL(dma_buf_vmap);
+EXPORT_SYMBOL(dma_buf_vmap);
 
 /**
  * dma_buf_vunmap - Unmap a vmap obtained by dma_buf_vmap.
@@ -504,4 +631,14 @@ void dma_buf_vunmap(struct dma_buf *dmabuf, void *vaddr)
 	if (dmabuf->ops->vunmap)
 		dmabuf->ops->vunmap(dmabuf, vaddr);
 }
-EXPORT_SYMBOL_GPL(dma_buf_vunmap);
+EXPORT_SYMBOL(dma_buf_vunmap);
+
+int kds_dma_buf_module_register(struct kds_dma_buf_register *kds_funcs)
+{
+	if(!kds_funcs)
+		return NULL;
+	
+	g_kds_dma_buf_register=kds_funcs;
+	return 1;
+}
+EXPORT_SYMBOL(kds_dma_buf_module_register);

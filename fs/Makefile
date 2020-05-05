@@ -15,6 +15,7 @@ obj-y :=	open.o read_write.o file_table.o super.o \
 
 ifeq ($(CONFIG_BLOCK),y)
 obj-y +=	buffer.o bio.o block_dev.o direct-io.o mpage.o ioprio.o
+obj-$(CONFIG_FS_SEL_READAHEAD)  += fs-readahead.o
 else
 obj-y +=	no-block.o
 endif
@@ -39,6 +40,7 @@ obj-$(CONFIG_BINFMT_MISC)	+= binfmt_misc.o
 obj-y				+= binfmt_script.o
 
 obj-$(CONFIG_BINFMT_ELF)	+= binfmt_elf.o
+obj-$(CONFIG_MINIMAL_CORE)	+= minimal_core.o
 obj-$(CONFIG_COMPAT_BINFMT_ELF)	+= compat_binfmt_elf.o
 obj-$(CONFIG_BINFMT_ELF_FDPIC)	+= binfmt_elf_fdpic.o
 obj-$(CONFIG_BINFMT_SOM)	+= binfmt_som.o
@@ -73,7 +75,12 @@ obj-$(CONFIG_EXT4_FS)		+= ext4/
 obj-$(CONFIG_JBD)		+= jbd/
 obj-$(CONFIG_JBD2)		+= jbd2/
 obj-$(CONFIG_CRAMFS)		+= cramfs/
+ifneq ($(CONFIG_RFS_FS),)
+obj-$(CONFIG_RFS_FS)		+= rfs/
+endif
 obj-$(CONFIG_SQUASHFS)		+= squashfs/
+obj-$(CONFIG_EMMCFS_FS)         += emmcfs/
+obj-$(CONFIG_VDFS_FS)		+= vdfs/
 obj-y				+= ramfs/
 obj-$(CONFIG_HUGETLBFS)		+= hugetlbfs/
 obj-$(CONFIG_CODA_FS)		+= coda/
@@ -95,6 +102,7 @@ obj-$(CONFIG_CIFS)		+= cifs/
 obj-$(CONFIG_NCP_FS)		+= ncpfs/
 obj-$(CONFIG_HPFS_FS)		+= hpfs/
 obj-$(CONFIG_NTFS_FS)		+= ntfs/
+obj-$(CONFIG_TNTFS_FS)		+= tntfs/
 obj-$(CONFIG_UFS_FS)		+= ufs/
 obj-$(CONFIG_EFS_FS)		+= efs/
 obj-$(CONFIG_JFFS2_FS)		+= jffs2/
@@ -127,3 +135,4 @@ obj-$(CONFIG_F2FS_FS)		+= f2fs/
 obj-y				+= exofs/ # Multiple modules
 obj-$(CONFIG_CEPH_FS)		+= ceph/
 obj-$(CONFIG_PSTORE)		+= pstore/
+obj-$(CONFIG_EXFAT_FS)		+= exfat/

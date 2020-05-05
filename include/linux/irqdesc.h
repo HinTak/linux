@@ -52,6 +52,9 @@ struct irq_desc {
 	unsigned int		irq_count;	/* For detecting broken IRQs */
 	unsigned long		last_unhandled;	/* Aging timer for unhandled count */
 	unsigned int		irqs_unhandled;
+#ifdef CONFIG_IRQ_TIME
+	unsigned int        runtime;
+#endif
 	raw_spinlock_t		lock;
 	struct cpumask		*percpu_enabled;
 #ifdef CONFIG_SMP
@@ -103,6 +106,30 @@ static inline struct msi_desc *irq_desc_get_msi_desc(struct irq_desc *desc)
 	return desc->irq_data.msi_desc;
 }
 
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+
+//#define TIMER_IRQ_NUM
+
+extern void vd_irq_set(int irq, struct irq_desc *desc);
+extern void vd_irq_unset(int irq, struct irq_desc *desc);
+extern void show_irq(void);
+extern int check_timer_irq(struct irq_desc *desc);
+
+#ifdef CONFIG_IRQ_TIME
+#include <linux/jiffies.h>
+#include <linux/interrupt.h>
+#include <linux/time.h>
+extern void do_gettimeofday(struct timeval *tv);
+struct irq_desc_debug{
+	long		last_time;
+	long		last_time_kth;
+	long		last_time_tint;
+	const char	*name;
+	unsigned int	irq;
+};
+extern struct irq_desc_debug irq_desc_last[4];
+#endif
+#endif
 /*
  * Architectures call this to let the generic IRQ layer
  * handle an interrupt. If the descriptor is attached to an
@@ -111,7 +138,55 @@ static inline struct msi_desc *irq_desc_get_msi_desc(struct irq_desc *desc)
  */
 static inline void generic_handle_irq_desc(unsigned int irq, struct irq_desc *desc)
 {
+#ifdef CONFIG_IRQ_TIME
+	struct timeval before;
+	struct timeval after;
+	long time_value;
+	unsigned int cpu = smp_processor_id(); 
+	struct irqaction *action;
+#endif
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+	vd_irq_set(irq, desc);
+#endif
+#ifdef CONFIG_IRQ_TIME
+	do_gettimeofday(&before);
+#endif
 	desc->handle_irq(irq, desc);
+#ifdef CONFIG_IRQ_TIME
+	do_gettimeofday(&after);
+
+	// additional info 
+	time_value = ((after.tv_sec  - before.tv_sec)*1000000) + (after.tv_usec  - before.tv_usec);
+	if(desc->runtime < time_value)
+	{
+		desc->runtime = time_value;
+	}
+	irq_desc_last[cpu].last_time=(before.tv_sec*1000000) + before.tv_usec;
+
+	action=desc->action;
+	if(action)
+	{
+		irq_desc_last[cpu].name = action->name;
+
+		if(check_timer_irq(desc))
+			irq_desc_last[cpu].last_time_tint=(before.tv_sec*1000000) + before.tv_usec;
+	}
+	irq_desc_last[cpu].irq = irq;
+	// end
+
+	if(unlikely(time_value > 1000000) && !check_timer_irq(desc) )
+	{
+		printk(KERN_ALERT "============================================================\n");
+		printk(KERN_ALERT "before time : %ld.%ld\n", before.tv_sec, before.tv_usec );
+		printk(KERN_ALERT "after time : %ld.%ld\n", after.tv_sec, after.tv_usec );
+		printk(KERN_ALERT "[CPU:%d] irq(number:%d, name:%s) handling takes 1 more second!!!\n", smp_processor_id(), irq, desc->name );
+		show_irq();
+		printk(KERN_ALERT "============================================================\n");
+	}
+#endif
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+	vd_irq_unset(irq, desc);
+#endif
 }
 
 int generic_handle_irq(unsigned int irq);

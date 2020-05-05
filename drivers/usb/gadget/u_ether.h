@@ -21,7 +21,6 @@
 
 #include "gadget_chips.h"
 
-
 /*
  * This represents the USB side of an "ethernet" link, managed by a USB
  * function which provides control and (maybe) framing.  Two functions
@@ -39,6 +38,12 @@ struct gether {
 	/* updated by gether_{connect,disconnect} */
 	struct eth_dev			*ioport;
 
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+	u8						devnum;
+	void*					dev_info;
+#endif	// CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+
+	bool				is_enable;
 	/* endpoints handle full and/or high speeds */
 	struct usb_ep			*in_ep;
 	struct usb_ep			*out_ep;
@@ -63,6 +68,24 @@ struct gether {
 	void				(*open)(struct gether *);
 	void				(*close)(struct gether *);
 };
+
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+struct multi_eem_gadget {
+	u8 hostaddr1[ETH_ALEN];
+	u8 hostaddr2[ETH_ALEN];
+
+	u8 devaddr1[ETH_ALEN];
+	u8 devaddr2[ETH_ALEN];
+
+#ifdef SAM_MULTI_STREAMING_GADGET
+	struct eth_dev			*dev[4];
+#else
+	struct eth_dev			*dev[2];
+#endif
+	u32				eem_num;
+	struct usb_composite_dev 	*cdev;
+};
+#endif	// CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
 
 #define	DEFAULT_FILTER	(USB_CDC_PACKET_TYPE_BROADCAST \
 			|USB_CDC_PACKET_TYPE_ALL_MULTICAST \

@@ -13,13 +13,22 @@
 #include <linux/init.h>
 
 extern void printch(int);
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+extern void prom_putchar(int);
+#endif
 
 static void early_write(const char *s, unsigned n)
 {
 	while (n-- > 0) {
+#if defined(CONFIG_MSTAR_PreX14) || defined(CONFIG_MSTAR_X14)
+		if (*s == '\n')
+			prom_putchar('\r');
+		prom_putchar(*s);
+#else
 		if (*s == '\n')
 			printch('\r');
 		printch(*s);
+#endif
 		s++;
 	}
 }

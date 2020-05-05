@@ -2,6 +2,9 @@
 # Makefile for USB Core files and filesystem
 #
 
+ifeq ($(CONFIG_ARCH_NVT72668),y)
+	EXTRA_CFLAGS += -I$(srctree)/arch/arm/mach-nvt72668/include/
+endif
 ccflags-$(CONFIG_USB_DEBUG) := -DDEBUG
 
 usbcore-y := usb.o hub.o hcd.o urb.o message.o driver.o
@@ -10,5 +13,6 @@ usbcore-y += devio.o notify.o generic.o quirks.o devices.o
 
 usbcore-$(CONFIG_PCI)		+= hcd-pci.o
 usbcore-$(CONFIG_ACPI)		+= usb-acpi.o
+usbcore-$(CONFIG_USB_DEVICEFS)	+= inode.o
 
 obj-$(CONFIG_USB)		+= usbcore.o

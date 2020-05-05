@@ -34,6 +34,7 @@ obj-$(CONFIG_USB_MV_UDC)	+= mv_udc.o
 mv_udc-y			:= mv_udc_core.o
 obj-$(CONFIG_USB_FUSB300)	+= fusb300_udc.o
 obj-$(CONFIG_USB_MV_U3D)	+= mv_u3d_core.o
+obj-$(CONFIG_USB_SDP_OTGD)	+= sdp_udc_otg.o
 
 #
 # USB gadget drivers
@@ -48,6 +49,7 @@ g_mass_storage-y		:= mass_storage.o
 g_printer-y			:= printer.o
 g_cdc-y				:= cdc2.o
 g_multi-y			:= multi.o
+g_sam_multi-y          := sam_multi_dual_eem.o
 g_hid-y				:= hid.o
 g_dbgp-y			:= dbgp.o
 g_nokia-y			:= nokia.o
@@ -69,6 +71,7 @@ obj-$(CONFIG_USB_CDC_COMPOSITE) += g_cdc.o
 obj-$(CONFIG_USB_G_HID)		+= g_hid.o
 obj-$(CONFIG_USB_G_DBGP)	+= g_dbgp.o
 obj-$(CONFIG_USB_G_MULTI)	+= g_multi.o
+obj-$(CONFIG_USB_G_SAM_MULTI)  += g_sam_multi.o
 obj-$(CONFIG_USB_G_NOKIA)	+= g_nokia.o
 obj-$(CONFIG_USB_G_WEBCAM)	+= g_webcam.o
 obj-$(CONFIG_USB_G_NCM)		+= g_ncm.o

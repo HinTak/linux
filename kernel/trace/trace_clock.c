@@ -20,6 +20,11 @@
 #include <linux/sched.h>
 #include <linux/ktime.h>
 #include <linux/trace_clock.h>
+#ifdef CONFIG_KDEBUGD_FTRACE
+#include "kdbg_util.h"
+#include <trace/kdbg_ftrace_helper.h>
+#include <trace/kdbg-ftrace.h>
+#endif /* CONFIG_KDEBUGD_FTRACE */
 
 #include "trace.h"
 
@@ -40,6 +45,9 @@ u64 notrace trace_clock_local(void)
 	 */
 	preempt_disable_notrace();
 	clock = sched_clock();
+#ifdef CONFIG_KDEBUGD_FTRACE_HR_CLOCK
+	clock += kdbg_ftrace_timekeeping_get_ns_raw();
+#endif /* CONFIG_KDEBUGD_FTRACE_HR_CLOCK */
 	preempt_enable_notrace();
 
 	return clock;

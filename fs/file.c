@@ -22,6 +22,9 @@
 #include <linux/spinlock.h>
 #include <linux/rcupdate.h>
 #include <linux/workqueue.h>
+#ifdef CONFIG_KDEBUGD
+#include <kdebugd.h>
+#endif
 
 struct fdtable_defer {
 	spinlock_t lock;
@@ -576,6 +579,46 @@ repeat:
 #endif
 
 out:
+
+#ifdef CONFIG_OPEN_FILE_CHECKER
+	if (error == -EMFILE) {
+		int i;
+
+		pr_emerg("=== [System Arch] File open checker v1.0 ========\n");
+		pr_emerg(" There are Too many open files.\n");
+		pr_emerg(" -- FILE LIST\n");
+
+		for (i = 0; i < fdt->max_fds; i++) {
+			char buf[256];
+			struct file *file;
+			const char *name, *tsk_name;
+			struct task_struct *tsk;
+
+			file = fdt->fd[i];
+			if (!file)
+				continue;
+
+			name = d_path(&file->f_path, buf, sizeof(buf));
+			if (IS_ERR(name))
+				name = "(error)";
+
+#ifdef CONFIG_FD_PID
+			rcu_read_lock();
+			tsk = pid_task(file->f_pid, PIDTYPE_PID);
+			tsk_name = (tsk ? tsk->comm : "task exited");
+			pr_emerg("%5d : %s - %s(%d)\n",
+				 i, name, tsk_name, pid_nr(file->f_pid));
+			rcu_read_unlock();
+#else
+			(void)tsk;
+			(void)tsk_name;
+			pr_emerg("%5d : %s\n", i, name);
+#endif
+		}
+		pr_emerg("================================================\n");
+	}
+#endif /* CONFIG_OPEN_FILE_CHECKER */
+
 	spin_unlock(&files->file_lock);
 	return error;
 }
@@ -662,6 +705,31 @@ int __close_fd(struct files_struct *files, unsigned fd)
 	file = fdt->fd[fd];
 	if (!file)
 		goto out_unlock;
+
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+	if (kdbg_fd_debug_status()) {
+		struct inode *inode;
+		struct task_struct *p;
+
+		inode = file->f_path.dentry->d_inode;
+		/*
+		 * Check if child1 is going to close a regular file opened by child2
+		 * where child1 and child 2 belongs to same parent of tgid
+		 */
+		if (file->f_pid != task_pid(current) && S_ISREG(inode->i_mode)) {
+			rcu_read_lock();
+			p = pid_task(file->f_pid, PIDTYPE_PID);
+			if (p && (p->tgid == current->tgid)) {
+				PRINT_KD(KERN_ERR "****************************************\n");
+				PRINT_KD(KERN_ERR "file [%s] open_thread [%s] pid[%u] close_thread[%s] pid[%u]\n ",
+						file->f_dentry->d_name.name, p->comm, p->pid, current->comm, current->pid);
+				PRINT_KD(KERN_ERR "****************************************\n");
+			}
+			rcu_read_unlock();
+		}
+	}
+#endif
+
 	rcu_assign_pointer(fdt->fd[fd], NULL);
 	__clear_close_on_exec(fd, fdt);
 	__put_unused_fd(files, fd);

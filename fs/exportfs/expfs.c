@@ -15,6 +15,8 @@
 #include <linux/mount.h>
 #include <linux/namei.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
+#include <linux/nfs3.h>
 
 #define dprintk(fmt, args...) do{}while(0)
 
@@ -382,7 +384,7 @@ struct dentry *exportfs_decode_fh(struct vfsmount *mnt, struct fid *fid,
 {
 	const struct export_operations *nop = mnt->mnt_sb->s_export_op;
 	struct dentry *result, *alias;
-	char nbuf[NAME_MAX+1];
+	char *nbuf;
 	int err;
 
 	/*
@@ -395,6 +397,13 @@ struct dentry *exportfs_decode_fh(struct vfsmount *mnt, struct fid *fid,
 		result = ERR_PTR(-ESTALE);
 	if (IS_ERR(result))
 		return result;
+
+	nbuf = kmalloc(NFS3_MAXNAMLEN + 1, GFP_KERNEL);
+	if (nbuf == NULL) {
+		err = -ENOMEM;
+		dput(result);
+		return ERR_PTR(err);
+	}
 
 	if (S_ISDIR(result->d_inode->i_mode)) {
 		/*
@@ -416,6 +425,7 @@ struct dentry *exportfs_decode_fh(struct vfsmount *mnt, struct fid *fid,
 			goto err_result;
 		}
 
+		kfree(nbuf);
 		return result;
 	} else {
 		/*
@@ -433,8 +443,10 @@ struct dentry *exportfs_decode_fh(struct vfsmount *mnt, struct fid *fid,
 		 * it's connected to the filesystem root.
 		 */
 		alias = find_acceptable_alias(result, acceptable, context);
-		if (alias)
+		if (alias) {
+			kfree(nbuf);
 			return alias;
+		}
 
 		/*
 		 * Try to extract a dentry for the parent directory from the
@@ -499,11 +511,13 @@ struct dentry *exportfs_decode_fh(struct vfsmount *mnt, struct fid *fid,
 			goto err_result;
 		}
 
+		kfree(nbuf);
 		return alias;
 	}
 
  err_result:
 	dput(result);
+	kfree(nbuf);
 	return ERR_PTR(err);
 }
 EXPORT_SYMBOL_GPL(exportfs_decode_fh);

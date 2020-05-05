@@ -84,6 +84,10 @@
 #define MMC_APP_CMD              55   /* ac   [31:16] RCA        R1  */
 #define MMC_GEN_CMD              56   /* adtc [0] RD/WR          R1  */
 
+#ifndef CONFIG_VD_RELEASE
+#define MMC_VERDOR_CMD  62
+#endif
+
 static inline bool mmc_op_multi(u32 opcode)
 {
 	return opcode == MMC_WRITE_MULTIPLE_BLOCK ||
@@ -327,6 +331,11 @@ struct _mmc_csd {
 #define EXT_CSD_BKOPS_SUPPORT		502	/* RO */
 #define EXT_CSD_HPI_FEATURES		503	/* RO */
 
+#ifndef CONFIG_VD_RELEASE
+#define BOOT_CONFIG     179 /*RW 1byte */
+#define BOOT_BUS_WIDTH      177 /*RW 1byte */
+#endif
+
 /*
  * EXT_CSD field definitions
  */
@@ -367,6 +376,12 @@ struct _mmc_csd {
 #define EXT_CSD_BUS_WIDTH_8	2	/* Card is in 8 bit mode */
 #define EXT_CSD_DDR_BUS_WIDTH_4	5	/* Card is in 4 bit DDR mode */
 #define EXT_CSD_DDR_BUS_WIDTH_8	6	/* Card is in 8 bit DDR mode */
+
+#ifndef CONFIG_VD_RELEASE
+#define BOOT_CONFIG_ENABLE 0x49 /*BOOT_ACK=YES, nBOOT_PARTITION_ENABLE=Partition1, PARTITION_ACCESS=Partition1*/
+#define BOOT_CONFIG_DISABLE 0x48 /*BOOT_ACK=YES, nBOOT_PARTITION_ENABLE=Partition1, PARTITION_ACCESS=Partition1*/
+#define BOOT_BUS_WIDTH_8 0x2 /*BOOT_MODE=default, RESET_BOOT_BUS_WIDTH=default, BOOT_BUS_WIDTH=8-bit*/
+#endif
 
 #define EXT_CSD_SEC_ER_EN	BIT(0)
 #define EXT_CSD_SEC_BD_BLK_EN	BIT(2)

@@ -1,0 +1,7 @@
+# machine-dependent configs
+#
+if MACH_ECHOP
+
+
+endif # MACH_ECHOP
+

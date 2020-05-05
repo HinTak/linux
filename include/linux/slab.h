@@ -445,4 +445,10 @@ static inline unsigned int kmem_cache_size(struct kmem_cache *s)
 
 void __init kmem_cache_init_late(void);
 
+#ifdef CONFIG_KDML
+/* notrace functions for alloc/free to avoid tracepoints */
+extern void *kmem_cache_alloc_notrace(struct kmem_cache *cachep, gfp_t flags);
+extern void kmem_cache_free_notrace(struct kmem_cache *, void *);
+#endif
+
 #endif	/* _LINUX_SLAB_H */

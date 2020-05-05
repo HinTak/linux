@@ -83,3 +83,43 @@ config ARM_SPEAR_CPUFREQ
 	default y
 	help
 	  This adds the CPUFreq driver support for SPEAr SOCs.
+
+config ARM_SDP_CPUFREQ
+	bool "Samsung DTV Processor"
+	depends on ARCH_SDP && !ARCH_SDP1202
+	default y
+	help
+	  This adds the CPUFreq driver common part for SDP SoCs.
+
+	  If in doubt, say N
+
+config ARM_SDP1304_CPUFREQ
+	bool "SDP1304 CPUFreq support"
+	depends on ARM_SDP_CPUFREQ
+	help
+	  This adds the CPUFreq driver for SDP1304 SoC.
+
+config ARM_SDP1304_CPUFREQ_DEBUG
+	bool "SDP1304 CPUFreq debug print support"
+	depends on ARM_SDP1304_CPUFREQ
+
+config ARM_SDP1302_CPUFREQ
+	bool "SDP1302 CPUFreq support"
+	depends on ARM_SDP_CPUFREQ
+	help
+	  This adds the CPUFreq driver for SDP1302 SoC.
+
+config ARM_SDP1302_CPUFREQ_DEBUG
+	bool "SDP1302 CPUFreq debug print support"
+	depends on ARM_SDP1302_CPUFREQ
+
+config ARM_SDP1307_CPUFREQ
+	bool "SDP1307 CPUFreq support"
+	depends on ARM_SDP_CPUFREQ
+	help
+	  This adds the CPUFreq driver for SDP1307 SoC.
+
+config ARM_SDP1307_CPUFREQ_DEBUG
+	bool "SDP1307 CPUFreq debug print support"
+	depends on ARM_SDP1307_CPUFREQ
+

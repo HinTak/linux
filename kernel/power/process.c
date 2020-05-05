@@ -21,7 +21,14 @@
 /* 
  * Timeout for stopping processes
  */
-#define TIMEOUT	(20 * HZ)
+#ifdef SAMSUNG_PATCH_WITH_SUSPEND_TRY_END_TIME_INCREASED
+	//21_mar_2014 by kanak.priey@samsung.com
+	#define TIMEOUT	(50 * HZ)
+#else
+	#define TIMEOUT	(20 * HZ)
+#endif
+
+extern int micom_poweroff(void);
 
 static int try_to_freeze_tasks(bool user_only)
 {
@@ -95,6 +102,9 @@ static int try_to_freeze_tasks(bool user_only)
 			} while_each_thread(g, p);
 			read_unlock(&tasklist_lock);
 		}
+#ifdef CONFIG_PM_BUG_ON_PROBLEM
+		BUG();
+#endif
 	} else {
 		printk("(elapsed %d.%02d seconds) ", elapsed_csecs / 100,
 			elapsed_csecs % 100);
@@ -130,8 +140,15 @@ int freeze_processes(void)
 	printk("\n");
 	BUG_ON(in_atomic());
 
-	if (error)
+	if (error){
+		printk(KERN_ERR "Task freezing failed - cold power off\n");
+#if defined (CONFIG_ARCH_SDP)
+		pm_power_off();
+#else
+		micom_poweroff();
+#endif
 		thaw_processes();
+	}
 	return error;
 }
 
@@ -156,8 +173,15 @@ int freeze_kernel_threads(void)
 	printk("\n");
 	BUG_ON(in_atomic());
 
-	if (error)
+	if (error){
+		printk(KERN_ERR "Task freezing failed - cold power off\n");
+#if defined (CONFIG_ARCH_SDP)
+		pm_power_off();
+#else
+		micom_poweroff();
+#endif
 		thaw_kernel_threads();
+	}
 	return error;
 }
 

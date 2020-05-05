@@ -79,6 +79,18 @@
 
 static const char *scsi_null_device_strs = "nullnullnullnull";
 
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+//add for usb serial number
+static const char *scsi_default_serial_strs = "FFFFFFFFFFFF";
+//add for usb logical number
+static const char *scsi_0_logical_strs = "0";
+static const char *scsi_1_logical_strs = "1";
+static const char *scsi_2_logical_strs = "2";
+static const char *scsi_3_logical_strs = "3";
+static const char *scsi_4_logical_strs = "4";
+// add for usb device path
+static const char *scsi_usb_devpath_strs = "0.0.0.0";
+#endif
 #define MAX_SCSI_LUNS	512
 
 #ifdef CONFIG_SCSI_MULTI_LUN
@@ -240,6 +252,14 @@ static struct scsi_device *scsi_alloc_sdev(struct scsi_target *starget,
 	sdev->vendor = scsi_null_device_strs;
 	sdev->model = scsi_null_device_strs;
 	sdev->rev = scsi_null_device_strs;
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+ //add for usb serial number
+        sdev->serial = scsi_default_serial_strs;
+ //hongyabi add for usb logical number
+        sdev->logicalnumber = scsi_0_logical_strs;
+ //add for usb device path
+        sdev->usbdevpath = scsi_usb_devpath_strs;
+#endif
 	sdev->host = shost;
 	sdev->queue_ramp_up_period = SCSI_DEFAULT_RAMP_UP_PERIOD;
 	sdev->id = starget->id;
@@ -926,6 +946,30 @@ static int scsi_add_lun(struct scsi_device *sdev, unsigned char *inq_result,
 
 	transport_configure_device(&sdev->sdev_gendev);
 
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+	//add for usb logical number	
+	switch(sdev->lun)	
+	{		
+		case 0:
+			sdev->logicalnumber = (char *)scsi_0_logical_strs;
+			break;
+		case 1:
+			sdev->logicalnumber = (char *)scsi_1_logical_strs;
+			break;
+		case 2:
+			sdev->logicalnumber = (char *)scsi_2_logical_strs;
+			break;		
+		case 3:
+			sdev->logicalnumber = (char *)scsi_3_logical_strs;
+			break;
+		case 4:	
+			sdev->logicalnumber = (char *)scsi_4_logical_strs;
+			break;
+		default:
+			sdev->logicalnumber = (char *)scsi_0_logical_strs;
+			break;
+	}
+#endif
 	if (sdev->host->hostt->slave_configure) {
 		ret = sdev->host->hostt->slave_configure(sdev);
 		if (ret) {

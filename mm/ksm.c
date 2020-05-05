@@ -807,11 +807,13 @@ static int replace_page(struct vm_area_struct *vma, struct page *page,
 
 	get_page(kpage);
 	page_add_anon_rmap(kpage, vma, addr);
+	inc_ptmu_counter(mm, vma, kpage, addr, 1);
 
 	flush_cache_page(vma, addr, pte_pfn(*ptep));
 	ptep_clear_flush(vma, addr, ptep);
 	set_pte_at_notify(mm, addr, ptep, mk_pte(kpage, vma->vm_page_prot));
 
+	dec_ptmu_counter(mm, vma, page, addr, 1);
 	page_remove_rmap(page);
 	if (!page_mapped(page))
 		try_to_free_swap(page);

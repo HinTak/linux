@@ -573,6 +573,39 @@ void tty_flip_buffer_push(struct tty_struct *tty)
 }
 EXPORT_SYMBOL(tty_flip_buffer_push);
 
+#ifdef CONFIG_UART_BROADCAST
+extern struct list_head broadcast_tty_list;
+extern void tty_B_lock(void);
+extern void tty_B_unlock(void);
+
+void broadcast_tty_flip_buffer_push(void)
+{
+	struct tty_struct *btty = NULL;
+
+	tty_B_lock();
+	list_for_each_entry(btty, &broadcast_tty_list, list)
+	{
+		tty_flip_buffer_push(btty);
+	}
+	tty_B_unlock();
+}
+EXPORT_SYMBOL(broadcast_tty_flip_buffer_push);
+
+#include <linux/tty_flip.h>
+void push_char_delayed_tty( unsigned int ch )
+{
+	struct tty_struct *btty = NULL;
+
+	tty_B_lock();
+	list_for_each_entry(btty, &broadcast_tty_list, list)
+	{
+		tty_insert_flip_char(btty, ch, TTY_NORMAL);
+	}
+	tty_B_unlock();
+}
+EXPORT_SYMBOL(push_char_delayed_tty);
+#endif
+
 /**
  *	tty_buffer_init		-	prepare a tty buffer structure
  *	@tty: tty to initialise

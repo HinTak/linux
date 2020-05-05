@@ -14,6 +14,24 @@ config PRINTK_TIME
 	  The behavior is also controlled by the kernel command line
 	  parameter printk.time=1. See Documentation/kernel-parameters.txt
 
+config SHOW_SWPINF_OOM
+	bool "Show information about swaps spaces in OOM log"
+	depends on PRINTK
+	depends on KNBD_SUPPORT
+	help
+	  If you want see information about swaps spaces when happens
+	  out of memory killer, from "/proc/swaps", select this item.
+
+config PRINTK_CPUID
+	bool "Show cpu id information on printks"
+	depends on PRINTK && SMP
+	help
+	  Selecting this option causes cpu identifier to be added to the
+	  output of the syslog() system call and at the console.
+
+	  The feature can be disabled by the kernel command line
+	  parameter printk.cpuid=0.
+
 config DEFAULT_MESSAGE_LOGLEVEL
 	int "Default message log level (1-7)"
 	range 1 7
@@ -315,6 +333,11 @@ config BOOTPARAM_HUNG_TASK_PANIC_VALUE
 	range 0 1
 	default 0 if !BOOTPARAM_HUNG_TASK_PANIC
 	default 1 if BOOTPARAM_HUNG_TASK_PANIC
+
+config HUNG_TASK_CHILD_PRINT
+	bool "show child process call stack() when hung task happen"
+	depends on DETECT_HUNG_TASK
+	default n
 
 config SCHED_DEBUG
 	bool "Collect scheduler debugging info"

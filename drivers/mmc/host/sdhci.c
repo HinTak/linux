@@ -44,6 +44,12 @@
 
 #define MAX_TUNING_LOOP 40
 
+#ifdef CONFIG_ARCH_NVT72668
+#define ADMA_MAX_SEGS		(32)
+#else
+#define ADMA_MAX_SEGS		(128)
+#endif
+
 static unsigned int debug_quirks = 0;
 static unsigned int debug_quirks2;
 
@@ -68,8 +74,62 @@ static inline int sdhci_runtime_pm_put(struct sdhci_host *host)
 }
 #endif
 
+#ifdef CONFIG_MMC_ALWAYS_DUMP_SDHCI_REGS
+static void sdhci_always_dumpregs(struct sdhci_host *host)
+{
+	printk(": =========== REGISTER DUMP (%s)===========\n",
+		mmc_hostname(host->mmc));
+
+	printk(": Sys addr: 0x%08x | Version:  0x%08x\n",
+		sdhci_readl(host, SDHCI_DMA_ADDRESS),
+		sdhci_readw(host, SDHCI_HOST_VERSION));
+	printk(": Blk size: 0x%08x | Blk cnt:  0x%08x\n",
+		sdhci_readw(host, SDHCI_BLOCK_SIZE),
+		sdhci_readw(host, SDHCI_BLOCK_COUNT));
+	printk(": Argument: 0x%08x | Trn mode: 0x%08x\n",
+		sdhci_readl(host, SDHCI_ARGUMENT),
+		sdhci_readw(host, SDHCI_TRANSFER_MODE));
+	printk(": Present:  0x%08x | Host ctl: 0x%08x\n",
+		sdhci_readl(host, SDHCI_PRESENT_STATE),
+		sdhci_readb(host, SDHCI_HOST_CONTROL));
+	printk(": Power:    0x%08x | Blk gap:  0x%08x\n",
+		sdhci_readb(host, SDHCI_POWER_CONTROL),
+		sdhci_readb(host, SDHCI_BLOCK_GAP_CONTROL));
+	printk(": Wake-up:  0x%08x | Clock:    0x%08x\n",
+		sdhci_readb(host, SDHCI_WAKE_UP_CONTROL),
+		sdhci_readw(host, SDHCI_CLOCK_CONTROL));
+	printk(": Timeout:  0x%08x | Int stat: 0x%08x\n",
+		sdhci_readb(host, SDHCI_TIMEOUT_CONTROL),
+		sdhci_readl(host, SDHCI_INT_STATUS));
+	printk(": Int enab: 0x%08x | Sig enab: 0x%08x\n",
+		sdhci_readl(host, SDHCI_INT_ENABLE),
+		sdhci_readl(host, SDHCI_SIGNAL_ENABLE));
+	printk(": AC12 err: 0x%08x | Slot int: 0x%08x\n",
+		sdhci_readw(host, SDHCI_ACMD12_ERR),
+		sdhci_readw(host, SDHCI_SLOT_INT_STATUS));
+	printk(": Caps:     0x%08x | Caps_1:   0x%08x\n",
+		sdhci_readl(host, SDHCI_CAPABILITIES),
+		sdhci_readl(host, SDHCI_CAPABILITIES_1));
+	printk(": Cmd:      0x%08x | Max curr: 0x%08x\n",
+		sdhci_readw(host, SDHCI_COMMAND),
+		sdhci_readl(host, SDHCI_MAX_CURRENT));
+	printk(": Host ctl2: 0x%08x\n",
+		sdhci_readw(host, SDHCI_HOST_CONTROL2));
+
+	if (host->flags & SDHCI_USE_ADMA)
+		printk(": ADMA Err: 0x%08x | ADMA Ptr: 0x%08x\n",
+		       readl(host->ioaddr + SDHCI_ADMA_ERROR),
+		       readl(host->ioaddr + SDHCI_ADMA_ADDRESS));
+
+	printk(": ===========================================\n");
+}
+#endif //end of CONFIG_MMC_ALWAYS_DUMP_SDHCI_REGS
+
 static void sdhci_dumpregs(struct sdhci_host *host)
 {
+#ifdef CONFIG_MMC_ALWAYS_DUMP_SDHCI_REGS
+	sdhci_always_dumpregs(host);
+#else
 	pr_debug(DRIVER_NAME ": =========== REGISTER DUMP (%s)===========\n",
 		mmc_hostname(host->mmc));
 
@@ -115,6 +175,7 @@ static void sdhci_dumpregs(struct sdhci_host *host)
 		       readl(host->ioaddr + SDHCI_ADMA_ADDRESS));
 
 	pr_debug(DRIVER_NAME ": ===========================================\n");
+#endif //end of !CONFIG_MMC_ALWAYS_DUMP_SDHCI_REGS
 }
 
 /*****************************************************************************\
@@ -496,7 +557,7 @@ static int sdhci_adma_table_pre(struct sdhci_host *host,
 	 */
 
 	host->align_addr = dma_map_single(mmc_dev(host->mmc),
-		host->align_buffer, 128 * 4, direction);
+		host->align_buffer, ADMA_MAX_SEGS * 4, direction);
 	if (dma_mapping_error(mmc_dev(host->mmc), host->align_addr))
 		goto fail;
 	BUG_ON(host->align_addr & 0x3);
@@ -555,7 +616,7 @@ static int sdhci_adma_table_pre(struct sdhci_host *host,
 		 * If this triggers then we have a calculation bug
 		 * somewhere. :/
 		 */
-		WARN_ON((desc - host->adma_desc) > (128 * 2 + 1) * 4);
+		WARN_ON((desc - host->adma_desc) > (ADMA_MAX_SEGS * 2 + 1) * 4);
 	}
 
 	if (host->quirks & SDHCI_QUIRK_NO_ENDATTR_IN_NOPDESC) {
@@ -580,11 +641,11 @@ static int sdhci_adma_table_pre(struct sdhci_host *host,
 	 */
 	if (data->flags & MMC_DATA_WRITE) {
 		dma_sync_single_for_device(mmc_dev(host->mmc),
-			host->align_addr, 128 * 4, direction);
+			host->align_addr, ADMA_MAX_SEGS * 4, direction);
 	}
 
 	host->adma_addr = dma_map_single(mmc_dev(host->mmc),
-		host->adma_desc, (128 * 2 + 1) * 4, DMA_TO_DEVICE);
+		host->adma_desc, (ADMA_MAX_SEGS * 2 + 1) * 4, DMA_TO_DEVICE);
 	if (dma_mapping_error(mmc_dev(host->mmc), host->adma_addr))
 		goto unmap_entries;
 	BUG_ON(host->adma_addr & 0x3);
@@ -596,7 +657,7 @@ unmap_entries:
 		data->sg_len, direction);
 unmap_align:
 	dma_unmap_single(mmc_dev(host->mmc), host->align_addr,
-		128 * 4, direction);
+		ADMA_MAX_SEGS * 4, direction);
 fail:
 	return -EINVAL;
 }
@@ -618,10 +679,10 @@ static void sdhci_adma_table_post(struct sdhci_host *host,
 		direction = DMA_TO_DEVICE;
 
 	dma_unmap_single(mmc_dev(host->mmc), host->adma_addr,
-		(128 * 2 + 1) * 4, DMA_TO_DEVICE);
+		(ADMA_MAX_SEGS * 2 + 1) * 4, DMA_TO_DEVICE);
 
 	dma_unmap_single(mmc_dev(host->mmc), host->align_addr,
-		128 * 4, direction);
+		ADMA_MAX_SEGS * 4, direction);
 
 	if (data->flags & MMC_DATA_READ) {
 		dma_sync_sg_for_cpu(mmc_dev(host->mmc), data->sg,
@@ -968,12 +1029,23 @@ static void sdhci_finish_data(struct sdhci_host *host)
 		tasklet_schedule(&host->finish_tasklet);
 }
 
+#ifdef	CONFIG_WRITE_PROTECT
+#ifdef CONFIG_MACH_NT14M
+unsigned int check_protection_area(unsigned int address, struct mmc_host *mmc);
+#else
+unsigned int check_protection_area(unsigned int address);
+#endif
+#endif
+
 static void sdhci_send_command(struct sdhci_host *host, struct mmc_command *cmd)
 {
 	int flags;
 	u32 mask;
 	unsigned long timeout;
 
+#ifdef	CONFIG_WRITE_PROTECT
+	unsigned int part_type = 0;
+#endif
 	WARN_ON(host->cmd);
 
 	/* Wait max 10 ms */
@@ -1000,10 +1072,20 @@ static void sdhci_send_command(struct sdhci_host *host, struct mmc_command *cmd)
 		timeout--;
 		mdelay(1);
 	}
-
 	mod_timer(&host->timer, jiffies + 10 * HZ);
 
 	host->cmd = cmd;
+#ifdef CONFIG_MMC_SDHCI_NVT_TOSHIBA_BUSY_HANDLING
+	host->busy_handle = 0;
+#endif
+#ifdef	CONFIG_WRITE_PROTECT
+	if(cmd->opcode == 24 || cmd->opcode == 25)
+#ifdef CONFIG_MACH_NT14M
+	    part_type = check_protection_area(cmd->arg, host->mmc);
+#else
+	    part_type = check_protection_area(cmd->arg);
+#endif
+#endif
 
 	sdhci_prepare_data(host, cmd);
 
@@ -2199,9 +2281,17 @@ static void sdhci_cmd_irq(struct sdhci_host *host, u32 intmask)
 		if (host->cmd->data)
 			DBG("Cannot wait for busy signal when also "
 				"doing a data transfer");
+#ifdef CONFIG_MMC_SDHCI_NVT_TOSHIBA_BUSY_HANDLING
+		else if (!(host->quirks & SDHCI_QUIRK_NO_BUSY_IRQ) && 
+				!host->busy_handle) {
+			/* Mark that command complete before busy is ended */
+			host->busy_handle = 1;
+			return;
+		}
+#else
 		else if (!(host->quirks & SDHCI_QUIRK_NO_BUSY_IRQ))
 			return;
-
+#endif
 		/* The controller does not support the end-of-busy IRQ,
 		 * fall through and take the SDHCI_INT_RESPONSE */
 	}
@@ -2263,7 +2353,20 @@ static void sdhci_data_irq(struct sdhci_host *host, u32 intmask)
 		 */
 		if (host->cmd && (host->cmd->flags & MMC_RSP_BUSY)) {
 			if (intmask & SDHCI_INT_DATA_END) {
+#ifdef CONFIG_MMC_SDHCI_NVT_TOSHIBA_BUSY_HANDLING
+				/*
+				 * Some cards handle busy-end interrupt
+				 * before the command completed, so make
+				 * sure we do things in the proper order.
+				 */
+				if(host->busy_handle)
+					sdhci_finish_command(host);
+				else
+					host->busy_handle = 1;
+
+#else
 				sdhci_finish_command(host);
+#endif
 				return;
 			}
 		}
@@ -2517,7 +2620,20 @@ int sdhci_resume_host(struct sdhci_host *host)
 		mmiowb();
 	}
 
+#ifdef CONFIG_MMC_SDHCI_NVT
+	{
+	int retry_count = 10;
+	while ((ret = mmc_resume_host(host->mmc)) != 0) {
+		printk("*** retry mmc controller resume\n");
+		if (retry_count-- == 0) {
+			break;
+			/* might cause kernel oops...but at least we can let watchdog to restart system... */
+		}
+	}
+	}
+#else
 	ret = mmc_resume_host(host->mmc);
+#endif
 	sdhci_enable_card_detection(host);
 
 	if (host->ops->platform_resume)
@@ -2731,8 +2847,8 @@ int sdhci_add_host(struct sdhci_host *host)
 		 * (128) and potentially one alignment transfer for
 		 * each of those entries.
 		 */
-		host->adma_desc = kmalloc((128 * 2 + 1) * 4, GFP_KERNEL);
-		host->align_buffer = kmalloc(128 * 4, GFP_KERNEL);
+		host->adma_desc = kmalloc((ADMA_MAX_SEGS * 2 + 1) * 4, GFP_KERNEL);
+		host->align_buffer = kmalloc(ADMA_MAX_SEGS * 4, GFP_KERNEL);
 		if (!host->adma_desc || !host->align_buffer) {
 			kfree(host->adma_desc);
 			kfree(host->align_buffer);
@@ -3025,7 +3141,7 @@ int sdhci_add_host(struct sdhci_host *host)
 	 * can do scatter/gather or not.
 	 */
 	if (host->flags & SDHCI_USE_ADMA)
-		mmc->max_segs = 128;
+		mmc->max_segs = ADMA_MAX_SEGS;
 	else if (host->flags & SDHCI_USE_SDMA)
 		mmc->max_segs = 1;
 	else /* PIO */

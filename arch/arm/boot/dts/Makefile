@@ -153,7 +153,10 @@ dtb-$(CONFIG_ARCH_VT8500) += vt8500-bv07.dtb \
 	wm8505-ref.dtb \
 	wm8650-mid.dtb
 dtb-$(CONFIG_ARCH_ZYNQ) += zynq-zc702.dtb
-
+dtb-$(CONFIG_ARCH_SDP)	+= sdp1304-eval-uhd.dtb \
+	sdp1304-eval-fhd.dtb
+dtb-$(CONFIG_ARCH_NVT72668) += nvtca9-72668.dtb
+ 
 targets += dtbs
 targets += $(dtb-y)
 endif

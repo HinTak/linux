@@ -290,8 +290,15 @@ static ssize_t gpio_direction_store(struct device *dev,
 	return status ? : size;
 }
 
+#if defined(CONFIG_ARCH_SDP)
+static /* const */ DEVICE_ATTR(direction, 0666,
+		gpio_direction_show, gpio_direction_store);
+
+#else
 static /* const */ DEVICE_ATTR(direction, 0644,
 		gpio_direction_show, gpio_direction_store);
+
+#endif
 
 static ssize_t gpio_value_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -347,8 +354,15 @@ static ssize_t gpio_value_store(struct device *dev,
 	return status;
 }
 
+#if defined(CONFIG_ARCH_SDP)
+static const DEVICE_ATTR(value, 0666,
+		gpio_value_show, gpio_value_store);
+
+#else
 static const DEVICE_ATTR(value, 0644,
 		gpio_value_show, gpio_value_store);
+
+#endif
 
 static irqreturn_t gpio_sysfs_irq(int irq, void *priv)
 {
@@ -699,11 +713,19 @@ done:
 	return status ? : len;
 }
 
+#if defined(CONFIG_ARCH_SDP)
+static struct class_attribute gpio_class_attrs[] = {
+	__ATTR(export, 0222, NULL, export_store),
+	__ATTR(unexport, 0222, NULL, unexport_store),
+	__ATTR_NULL,
+};
+#else
 static struct class_attribute gpio_class_attrs[] = {
 	__ATTR(export, 0200, NULL, export_store),
 	__ATTR(unexport, 0200, NULL, unexport_store),
 	__ATTR_NULL,
 };
+#endif
 
 static struct class gpio_class = {
 	.name =		"gpio",

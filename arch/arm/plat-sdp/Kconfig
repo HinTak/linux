@@ -1,0 +1,264 @@
+######################################################################
+#
+# 	Kconfig for platform device about Samsung Costom Consumer Electronics
+#
+# 	created by tukho.kim@samsung.com
+#
+######################################################################
+#
+# May,31,2010:	created by tukho.kim
+#
+
+if ARCH_SDP
+
+menu "Samsung SDP Implementation"
+
+config POLL_INTR_PEND
+	bool "Polling interrupt pending register instead of WFI instruction"
+	default n
+
+config SDP_INTC64
+	depends on !ARM_GIC
+	bool
+
+config 	SDP12XX_TIMER
+	bool
+	default n
+	select GENERIC_TIME
+	select GENERIC_CLOCKEVENTS
+
+config 	SDP_TIMER
+	bool
+	default n
+	select GENERIC_TIME
+	select GENERIC_CLOCKEVENTS
+
+config SERIAL_SDP
+	tristate "UART Controller support"
+	default y
+	depends on ARCH_SDP
+	select SERIAL_CORE
+
+config SERIAL_SDP_CONSOLE
+	bool "Support Serial Console"
+	default y
+	depends on SERIAL_SDP=y
+	select SERIAL_CORE_CONSOLE
+
+config SDP_I2C
+	tristate "custom I2C Driver"
+	default y
+
+config SDP_I2C_WR_WR_RD
+	depends on SDP_I2C
+	bool "I2C Write:Write:Read frame support"
+
+#config 	SDP_PCIE
+#	depends on PCI && (ARCH_SDP1307)
+#	bool "Support PCI Express 1.0/2.0 Root complex"
+
+#config	SDP_PCIE_EP
+#	depends on !SDP_PCIE && (ARCH_SDP1307)
+#	tristate "Support PCI Express 1.0/2.0 Endpoint"
+
+config SDP_GPIO
+	depends on !ARCH_SDP_FPGA
+	bool "Support SDP GPIO"
+	default y
+
+config SDP_SMC
+	depends on !ARCH_SDP_FPGA
+	bool "Support SDP SMC"
+
+config SDP_SMC_DMA
+	depends on SDP_SMC
+	bool "Support SMC DMA"
+
+config SDP_MAC
+        depends on ARCH_SDP
+        tristate "Ethernet MAC Driver"
+        select NET
+        select INET
+        select NETDEVICES
+        select MII
+        select ETHERNET
+        select PHYLIB
+
+config SDP_MAC_DEBUG
+		depends on SDP_MAC
+		bool "Print Debug Msg for SDP MAC"
+
+if SDP_MAC
+
+# Use Normal Descriptor
+config SDP_MAC_NORMAL_DESC
+		default n
+		bool	"MAC Use Normal Descriptor"
+
+choice
+        prompt "How to set MAC Address?"
+        default MAC_SET_RAMDOM
+
+config MAC_SET_BY_USER
+        depends on SDP_MAC
+        bool    "MAC set mac address by user"
+
+config MAC_SET_RAMDOM
+        depends on SDP_MAC
+        bool    "Generate software assigned random ethernet addr"
+
+
+endchoice
+
+
+if MAC_SET_BY_USER
+config MAC_FRONT_4BYTE
+        depends on MAC_SET_BY_USER
+        hex     "MAC Mac address front 4 byte"
+        default 0xFFFFFFFF
+
+config MAC_END_2BYTE
+        depends on MAC_SET_BY_USER
+        hex     "MAC Mac address end 2 byte"
+        default 0xFFFF
+endif # MAC_SET_BY_USER
+
+endif # SDP_GMAC
+
+config SDP_MMC
+	depends on ARCH_SDP
+	tristate "SDP MMC/SD Controller"
+	default y
+	select MMC
+
+config SDP_MMC_DMA
+	bool "Using Internal DMA Controler"
+	default y
+	depends on SDP_MMC
+
+config SDP_MMC_USE_AUTO_STOP_CMD
+	bool "Use to send H/W auto stop cmd"
+	default y
+	depends on SDP_MMC
+
+config SDP_MMC_USE_PRE_DEFINED_XFER
+	bool "Use Pre-defined data xfer(CMD23)"
+	default n
+	depends on SDP_MMC
+	help
+	  No: Open-ended xfer, Yes: Pre-defined xfer
+
+config SDP_MMC_USE_CACHE_CTRL
+    bool "Use MMC_CAP2_CACHE_CTRL"
+    default n
+    depends on SDP_MMC
+
+
+config SDP_SPI
+	tristate "SDP SPI Master Controller Driver"
+	default n
+	depends on ARCH_SDP
+	select SPI
+	select SPI_MASTER
+	help
+	  SDP SPI Master Controller Driver.
+
+config SDP_SPI_NUM_OF_CS
+	int "Number of chip select."
+	default 1
+	depends on SDP_SPI
+	help
+	  Default CS is 1, but if you used the GPIO CS, CS can be larger than 1.
+
+config SDP_SPIDEV
+	tristate "User Level SPI Device Driver for SDP SPI"
+	depends on SDP_SPI
+
+config SDP_SPI_DEBUG
+	bool "Print Debug Msg for SDP SPI"
+	depends on SDP_SPI
+
+
+
+config SDP_DMA330
+	tristate "SDP DMA330 Controller Driver"
+	default n
+	depends on (ARCH_SDP1202 || ARCH_SDP1207 || ARCH_SDP1302 || ARCH_SDP)
+	select DMADEVICES
+	select DMA_ENGINE
+
+config SDP_DMA330_DEBUG
+	bool "Print Debug Msg for SDP DMA330"
+	depends on SDP_DMA330
+
+config SDP_GADMA
+	tristate "SDP GADMA Controller Driver"
+	default n
+	depends on (ARCH_SDP)
+	select DMADEVICES
+	select DMA_ENGINE
+
+
+config SDP_GDMA
+	tristate "SDP General DMA Controller Driver"
+	default n
+	depends on (ARCH_SDP1207 || ARCH_SDP1307 || ARCH_SDP)
+	select DMADEVICES
+	select DMA_ENGINE
+
+
+config SDP_DMADEV
+	tristate "SDP DMADEV : Using user mode DMA"
+	default n
+	depends on DMA_ENGINE
+
+config SDP_DMATEST
+	tristate "SDP DMATEST : Simple DMA test client."
+	default n
+	depends on DMA_ENGINE
+
+
+config SDP_UNZIP
+	bool "SDP GZIP decompressor for Squashfs"
+	default y
+config SDP_UNZIP_TEST_DRIVER
+	tristate "SDP GZIP decompressor Driver for Test"
+	default n
+	depends on SDP_UNZIP
+
+config SDP_CLOCK_GATING
+	bool "Enable Clock Gating for Power-saving"
+	default n
+
+config SDP_THERMAL
+	depends on ARCH_SDP && CPU_FREQ && !ARCH_SDP1202
+	bool "Thermal Management"
+	default y
+
+
+config SDP1202_THERMAL
+	depends on ARCH_SDP && CPU_FREQ && ARCH_SDP1202
+	bool "Thermal Management"
+	default y
+
+config SDP1304_THERMAL
+	depends on SDP_THERMAL
+	bool "TMU for SDP1304"
+
+config SDP1302_THERMAL
+	depends on SDP_THERMAL
+	bool "TMU for SDP1302"
+
+config SDP1307_THERMAL
+	depends on SDP_THERMAL
+	bool "TMU for SDP1307"
+
+config SDP_DEV_USB_HSOTG
+	bool
+	help
+	  Compile in platform device definition for USB hi-speed OtG
+
+endmenu
+
+endif # ARCH_SDP
+

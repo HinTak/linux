@@ -92,7 +92,7 @@ drm_gem_init(struct drm_device *dev)
 {
 	struct drm_gem_mm *mm;
 
-	spin_lock_init(&dev->object_name_lock);
+	mutex_init(&dev->object_name_lock);
 	idr_init(&dev->object_name_idr);
 
 	mm = kzalloc(sizeof(struct drm_gem_mm), GFP_KERNEL);
@@ -204,15 +204,18 @@ EXPORT_SYMBOL(drm_gem_object_alloc);
 static void
 drm_gem_remove_prime_handles(struct drm_gem_object *obj, struct drm_file *filp)
 {
-	if (obj->import_attach) {
-		drm_prime_remove_buf_handle(&filp->prime,
-				obj->import_attach->dmabuf);
-	}
+	/*
+	 * Note: obj->dma_buf can't disappear as long as we still hold a
+	 * handle reference in obj->handle_count.
+	 */
+	mutex_lock(&filp->prime.lock);
 	if (obj->export_dma_buf) {
-		drm_prime_remove_buf_handle(&filp->prime,
-				obj->export_dma_buf);
-	}
+		drm_prime_remove_buf_handle_locked(&filp->prime,
+						   obj->export_dma_buf);
+ 	}
+	mutex_unlock(&filp->prime.lock);
 }
+
 
 /**
  * Removes the mapping from handle to filp for this object.
@@ -262,32 +265,41 @@ EXPORT_SYMBOL(drm_gem_handle_delete);
  * will likely want to dereference the object afterwards.
  */
 int
-drm_gem_handle_create(struct drm_file *file_priv,
+drm_gem_handle_create_tail(struct drm_file *file_priv,
 		       struct drm_gem_object *obj,
 		       u32 *handlep)
 {
 	struct drm_device *dev = obj->dev;
 	int ret;
 
+	WARN_ON(!mutex_is_locked(&dev->object_name_lock));
+	
 	/*
 	 * Get the user-visible handle using idr.
 	 */
 again:
 	/* ensure there is space available to allocate a handle */
-	if (idr_pre_get(&file_priv->object_idr, GFP_KERNEL) == 0)
+	if (idr_pre_get(&file_priv->object_idr, GFP_KERNEL) == 0) {
+		mutex_unlock(&dev->object_name_lock);
 		return -ENOMEM;
+	}
 
 	/* do the allocation under our spinlock */
 	spin_lock(&file_priv->table_lock);
 	ret = idr_get_new_above(&file_priv->object_idr, obj, 1, (int *)handlep);
+
+	
 	spin_unlock(&file_priv->table_lock);
 	if (ret == -EAGAIN)
 		goto again;
 	else if (ret)
+	{
+		mutex_unlock(&dev->object_name_lock);
 		return ret;
-
-	drm_gem_object_handle_reference(obj);
-
+	}
+	
+	mutex_unlock(&dev->object_name_lock);
+	drm_gem_object_handle_reference(obj);	
 	if (dev->driver->gem_open_object) {
 		ret = dev->driver->gem_open_object(obj, file_priv);
 		if (ret) {
@@ -298,6 +310,17 @@ again:
 
 	return 0;
 }
+
+int
+drm_gem_handle_create(struct drm_file *file_priv,
+		       struct drm_gem_object *obj,
+		       u32 *handlep)
+{
+	mutex_lock(&obj->dev->object_name_lock);
+
+	return drm_gem_handle_create_tail(file_priv, obj, handlep);
+}
+
 EXPORT_SYMBOL(drm_gem_handle_create);
 
 
@@ -451,18 +474,17 @@ drm_gem_flink_ioctl(struct drm_device *dev, void *data,
 	if (obj == NULL)
 		return -ENOENT;
 
+        mutex_lock(&dev->object_name_lock);
 again:
 	if (idr_pre_get(&dev->object_name_idr, GFP_KERNEL) == 0) {
 		ret = -ENOMEM;
 		goto err;
 	}
 
-	spin_lock(&dev->object_name_lock);
 	if (!obj->name) {
 		ret = idr_get_new_above(&dev->object_name_idr, obj, 1,
 					&obj->name);
 		args->name = (uint64_t) obj->name;
-		spin_unlock(&dev->object_name_lock);
 
 		if (ret == -EAGAIN)
 			goto again;
@@ -473,14 +495,15 @@ again:
 		drm_gem_object_reference(obj);
 	} else {
 		args->name = (uint64_t) obj->name;
-		spin_unlock(&dev->object_name_lock);
 		ret = 0;
 	}
 
 err:
+	mutex_unlock(&dev->object_name_lock);
 	drm_gem_object_unreference_unlocked(obj);
 	return ret;
 }
+
 
 /**
  * Open an object using the global name, returning a handle and the size.
@@ -500,15 +523,17 @@ drm_gem_open_ioctl(struct drm_device *dev, void *data,
 	if (!(dev->driver->driver_features & DRIVER_GEM))
 		return -ENODEV;
 
-	spin_lock(&dev->object_name_lock);
+	mutex_lock(&dev->object_name_lock);
 	obj = idr_find(&dev->object_name_idr, (int) args->name);
 	if (obj)
 		drm_gem_object_reference(obj);
-	spin_unlock(&dev->object_name_lock);
 	if (!obj)
+        {
+                mutex_unlock(&dev->object_name_lock);
 		return -ENOENT;
+        }
 
-	ret = drm_gem_handle_create(file_priv, obj, &handle);
+	ret = drm_gem_handle_create_tail(file_priv, obj, &handle);
 	drm_gem_object_unreference_unlocked(obj);
 	if (ret)
 		return ret;
@@ -569,6 +594,7 @@ drm_gem_release(struct drm_device *dev, struct drm_file *file_private)
 void
 drm_gem_object_release(struct drm_gem_object *obj)
 {
+	WARN_ON(obj->export_dma_buf);
 	if (obj->filp)
 	    fput(obj->filp);
 }
@@ -610,11 +636,11 @@ void drm_gem_object_handle_free(struct drm_gem_object *obj)
 	struct drm_device *dev = obj->dev;
 
 	/* Remove any name for this object */
-	spin_lock(&dev->object_name_lock);
+	mutex_lock(&dev->object_name_lock);
 	if (obj->name) {
 		idr_remove(&dev->object_name_idr, obj->name);
 		obj->name = 0;
-		spin_unlock(&dev->object_name_lock);
+		mutex_unlock(&dev->object_name_lock);
 		/*
 		 * The object name held a reference to this object, drop
 		 * that now.
@@ -623,7 +649,7 @@ void drm_gem_object_handle_free(struct drm_gem_object *obj)
 		 */
 		kref_put(&obj->refcount, drm_gem_object_ref_bug);
 	} else
-		spin_unlock(&dev->object_name_lock);
+		mutex_unlock(&dev->object_name_lock);
 
 }
 EXPORT_SYMBOL(drm_gem_object_handle_free);

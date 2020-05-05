@@ -168,9 +168,12 @@ int smk_access(char *subject_label, char *object_label, int request,
 	 * indicates there is no entry for this pair.
 	 */
 	skp = smk_find_entry(subject_label);
-	rcu_read_lock();
-	may = smk_access_entry(subject_label, object_label, &skp->smk_rules);
-	rcu_read_unlock();
+	if (NULL != skp) {
+		rcu_read_lock();
+		may = smk_access_entry(subject_label, object_label,
+				&skp->smk_rules);
+		rcu_read_unlock();
+	}
 
 	if (may > 0 && (request & may) == request)
 		goto out_audit;
@@ -179,7 +182,13 @@ int smk_access(char *subject_label, char *object_label, int request,
 out_audit:
 #ifdef CONFIG_AUDIT
 	if (a)
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+		smack_log(subject_label, object_label, request, rc, a,
+					smack_mode);
+#else
 		smack_log(subject_label, object_label, request, rc, a);
+#endif
+
 #endif
 	return rc;
 }
@@ -222,13 +231,28 @@ int smk_curacc(char *obj_label, u32 mode, struct smk_audit_info *a)
 	/*
 	 * Allow for priviliged to override policy.
 	 */
+#ifdef CONFIG_SECURITY_SMACK_CAP_MAC_OVERRIDE
 	if (rc != 0 && smack_privileged(CAP_MAC_OVERRIDE))
 		rc = 0;
+#endif
 
 out_audit:
 #ifdef CONFIG_AUDIT
 	if (a)
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+		smack_log(sp, obj_label, mode, rc, a, smack_mode);
+#else
 		smack_log(sp, obj_label, mode, rc, a);
+#endif
+
+#endif
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+	/*
+	 * Allow access when SMACK module is set for
+	 * permissive mode (1)
+	 */
+	if (rc != 0 && (smack_mode == 1))
+		rc = 0;
 #endif
 	return rc;
 }
@@ -268,6 +292,10 @@ static void smack_log_callback(struct audit_buffer *ab, void *a)
 	audit_log_format(ab, "lsm=SMACK fn=%s action=%s",
 			 ad->smack_audit_data->function,
 			 sad->result ? "denied" : "granted");
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+	audit_log_format(ab, " mode=%s",
+		(sad->mode == 1) ? "permissive" : "enforcing");
+#endif
 	audit_log_format(ab, " subject=");
 	audit_log_untrustedstring(ab, sad->subject);
 	audit_log_format(ab, " object=");
@@ -286,8 +314,13 @@ static void smack_log_callback(struct audit_buffer *ab, void *a)
  * Audit the granting or denial of permissions in accordance
  * with the policy.
  */
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+void smack_log(char *subject_label, char *object_label, int request,
+	       int result, struct smk_audit_info *ad, int mode)
+#else
 void smack_log(char *subject_label, char *object_label, int request,
 	       int result, struct smk_audit_info *ad)
+#endif
 {
 	char request_buffer[SMK_NUM_ACCESS_TYPE + 1];
 	struct smack_audit_data *sad;
@@ -310,14 +343,27 @@ void smack_log(char *subject_label, char *object_label, int request,
 	sad->object  = object_label;
 	sad->request = request_buffer;
 	sad->result  = result;
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+	sad->mode    = mode;
+#endif
 
 	common_lsm_audit(a, smack_log_callback, NULL);
 }
 #else /* #ifdef CONFIG_AUDIT */
+
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
 void smack_log(char *subject_label, char *object_label, int request,
-               int result, struct smk_audit_info *ad)
+		int result, struct smk_audit_info *ad, int mode)
 {
 }
+
+#else
+
+void smack_log(char *subject_label, char *object_label, int request,
+		int result, struct smk_audit_info *ad)
+{
+}
+#endif
 #endif
 
 DEFINE_MUTEX(smack_known_lock);
@@ -400,6 +446,8 @@ int smk_netlbl_mls(int level, char *catset, struct netlbl_lsm_secattr *sap,
 	sap->flags |= NETLBL_SECATTR_MLS_CAT;
 	sap->attr.mls.lvl = level;
 	sap->attr.mls.cat = netlbl_secattr_catmap_alloc(GFP_ATOMIC);
+	if (NULL == sap->attr.mls.cat)
+		return -ENOMEM;
 	sap->attr.mls.cat->startbit = 0;
 
 	for (cat = 1, cp = catset, byte = 0; byte < len; cp++, byte++)

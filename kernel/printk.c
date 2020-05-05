@@ -20,6 +20,7 @@
 #include <linux/mm.h>
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
+#include <linux/vt_kern.h>
 #include <linux/console.h>
 #include <linux/init.h>
 #include <linux/jiffies.h>
@@ -208,6 +209,9 @@ struct log {
 	u8 facility;		/* syslog facility */
 	u8 flags:5;		/* internal record flags */
 	u8 level:3;		/* syslog level */
+#ifdef CONFIG_PRINTK_CPUID
+	u16 cpuid;		/* cpu invoking the log */
+#endif
 };
 
 /*
@@ -305,7 +309,8 @@ static u32 log_next(u32 idx)
 static void log_store(int facility, int level,
 		      enum log_flags flags, u64 ts_nsec,
 		      const char *dict, u16 dict_len,
-		      const char *text, u16 text_len)
+		      const char *text, u16 text_len,
+		      const u16 cpuid)
 {
 	struct log *msg;
 	u32 size, pad_len;
@@ -356,6 +361,9 @@ static void log_store(int facility, int level,
 		msg->ts_nsec = local_clock();
 	memset(log_dict(msg) + dict_len, 0, pad_len);
 	msg->len = sizeof(struct log) + text_len + dict_len + pad_len;
+#ifdef CONFIG_PRINTK_CPUID
+	msg->cpuid = cpuid;
+#endif
 
 	/* insert message */
 	log_next_idx += msg->len;
@@ -873,6 +881,23 @@ static size_t print_time(u64 ts, char *buf)
 		       (unsigned long)ts, rem_nsec / 1000);
 }
 
+#ifdef CONFIG_PRINTK_CPUID
+static bool printk_cpuid = 1;
+module_param_named(cpuid, printk_cpuid, bool, S_IRUGO | S_IWUSR);
+
+static size_t print_cpuid(u16 cpuid, char *buf)
+{
+
+	if (!printk_cpuid)
+		return 0;
+
+	if (!buf)
+		return snprintf(NULL, 0, "[%2d]", cpuid);
+
+	return snprintf(buf, 7, "[%2d]", cpuid);
+}
+#endif
+
 static size_t print_prefix(const struct log *msg, bool syslog, char *buf)
 {
 	size_t len = 0;
@@ -892,6 +917,9 @@ static size_t print_prefix(const struct log *msg, bool syslog, char *buf)
 		}
 	}
 
+#ifdef CONFIG_PRINTK_CPUID
+	len += print_cpuid(msg->cpuid, buf ? buf + len : NULL);
+#endif
 	len += print_time(msg->ts_nsec, buf ? buf + len : NULL);
 	return len;
 }
@@ -1250,6 +1278,68 @@ SYSCALL_DEFINE3(syslog, int, type, char __user *, buf, int, len)
 	return do_syslog(type, buf, len, SYSLOG_FROM_CALL);
 }
 
+#ifdef CONFIG_SEPARATE_PRINTK_FROM_USER
+void _sep_printk_start(void)
+{
+	struct console *con;
+	struct tty_driver *tty_drv, *tty_driver;
+	int index;
+	struct tty_struct *tty = NULL;
+
+	for_each_console(con) {
+		if ((con->flags & CON_ENABLED) && con->write &&
+		    (cpu_online(raw_smp_processor_id()) ||
+		    (con->flags & CON_ANYTIME))) {
+			tty_drv = con->device(con, &index);
+			tty_driver =  tty_driver_kref_get(tty_drv);
+			if (tty_driver) {
+				if (strcmp(con->name, "tty") == 0) {
+					index = fg_console;
+					tty = tty_init_dev(tty_driver, index);
+				}
+				else {
+					if (tty_drv->ttys[index])
+						tty = tty_drv->ttys[index];
+					else
+						tty = tty_init_dev(tty_driver, index);
+				}
+				tty_driver_kref_put(tty_driver);
+			}
+			if (!IS_ERR_OR_NULL(tty)) {
+				tty->hw_stopped = 1;
+				/* tty_drv->stop(tty_drv->ttys[index]); */
+			}
+		}
+	}
+}
+
+void _sep_printk_end(void)
+{
+	struct console *con;
+	struct tty_driver *tty_drv, *tty_driver;
+	int index;
+	struct tty_struct *tty = NULL;
+
+	for_each_console(con) {
+		if ((con->flags & CON_ENABLED) && con->write &&
+		    (cpu_online(raw_smp_processor_id()) ||
+		    (con->flags & CON_ANYTIME))) {
+			tty_drv = con->device(con, &index);
+			tty_driver = tty_driver_kref_get(tty_drv);
+			if (tty_driver) {
+				if (strcmp(con->name, "tty") == 0)
+					index = fg_console;
+					tty = tty_drv->ttys[index];
+					tty->hw_stopped = 0;
+					/* tty_drv->start(tty_drv->ttys[index]); */
+					tty_driver_kref_put(tty_driver);
+					tty_wakeup(tty);
+			}
+		}
+	}
+}
+#endif
+
 /*
  * Call the console drivers, asking them to write out
  * log_buf[start] to log_buf[end - 1].
@@ -1392,6 +1482,7 @@ static struct cont {
 	u64 ts_nsec;			/* time of first print */
 	u8 level;			/* log level of first message */
 	u8 facility;			/* log level of first message */
+	u16 cpuid;			/* cpu invoking the logging request */
 	enum log_flags flags;		/* prefix, newline flags */
 	bool flushed:1;			/* buffer sealed and committed */
 } cont;
@@ -1410,7 +1501,8 @@ static void cont_flush(enum log_flags flags)
 		 * line. LOG_NOCONS suppresses a duplicated output.
 		 */
 		log_store(cont.facility, cont.level, flags | LOG_NOCONS,
-			  cont.ts_nsec, NULL, 0, cont.buf, cont.len);
+			  cont.ts_nsec, NULL, 0, cont.buf, cont.len,
+			  cont.cpuid);
 		cont.flags = flags;
 		cont.flushed = true;
 	} else {
@@ -1419,12 +1511,14 @@ static void cont_flush(enum log_flags flags)
 		 * just submit it to the store and free the buffer.
 		 */
 		log_store(cont.facility, cont.level, flags, 0,
-			  NULL, 0, cont.buf, cont.len);
+			  NULL, 0, cont.buf, cont.len,
+			  cont.cpuid);
 		cont.len = 0;
 	}
 }
 
-static bool cont_add(int facility, int level, const char *text, size_t len)
+static bool cont_add(int facility, int level, const char *text, size_t len,
+			const u16 cpuid)
 {
 	if (cont.len && cont.flushed)
 		return false;
@@ -1447,6 +1541,7 @@ static bool cont_add(int facility, int level, const char *text, size_t len)
 
 	memcpy(cont.buf + cont.len, text, len);
 	cont.len += len;
+	cont.cpuid = cpuid;
 
 	if (cont.len > (sizeof(cont.buf) * 80) / 100)
 		cont_flush(LOG_CONT);
@@ -1460,7 +1555,10 @@ static size_t cont_print_text(char *text, size_t size)
 	size_t len;
 
 	if (cont.cons == 0 && (console_prev & LOG_NEWLINE)) {
-		textlen += print_time(cont.ts_nsec, text);
+#ifdef CONFIG_PRINTK_CPUID
+		textlen += print_cpuid(cont.cpuid, text);
+#endif
+		textlen += print_time(cont.ts_nsec, text + textlen);
 		size -= textlen;
 	}
 
@@ -1532,7 +1630,14 @@ asmlinkage int vprintk_emit(int facility, int level,
 		printed_len += strlen(recursion_msg);
 		/* emit KERN_CRIT message */
 		log_store(0, 2, LOG_PREFIX|LOG_NEWLINE, 0,
-			  NULL, 0, recursion_msg, printed_len);
+			  NULL, 0, recursion_msg, printed_len, this_cpu);
+
+#ifdef CONFIG_DTVLOGD
+		/*
+		 * Write printk messages to dlog buffer
+		 */
+		do_dtvlog(3, recursion_msg, printed_len);
+#endif
 	}
 
 	/*
@@ -1582,9 +1687,9 @@ asmlinkage int vprintk_emit(int facility, int level,
 			cont_flush(LOG_NEWLINE);
 
 		/* buffer line if possible, otherwise store it right away */
-		if (!cont_add(facility, level, text, text_len))
+		if (!cont_add(facility, level, text, text_len, this_cpu))
 			log_store(facility, level, lflags | LOG_CONT, 0,
-				  dict, dictlen, text, text_len);
+				  dict, dictlen, text, text_len, this_cpu);
 	} else {
 		bool stored = false;
 
@@ -1596,15 +1701,28 @@ asmlinkage int vprintk_emit(int facility, int level,
 		 */
 		if (cont.len && cont.owner == current) {
 			if (!(lflags & LOG_PREFIX))
-				stored = cont_add(facility, level, text, text_len);
+				stored = cont_add(facility, level, text, text_len,
+						this_cpu);
 			cont_flush(LOG_NEWLINE);
 		}
 
 		if (!stored)
 			log_store(facility, level, lflags, 0,
-				  dict, dictlen, text, text_len);
+				  dict, dictlen, text, text_len,
+				  this_cpu);
 	}
 	printed_len += text_len;
+
+#ifdef CONFIG_DTVLOGD
+	/*
+	 * Write printk messages to dlog buffer,
+	 * we skip the printk levels, include newline too.
+	 */
+	if (lflags & LOG_NEWLINE)
+		text_len++;
+
+	do_dtvlog(3, text, text_len);
+#endif
 
 	/*
 	 * Try to acquire and then immediately release the console semaphore.
@@ -1838,7 +1956,11 @@ int update_console_cmdline(char *name, int idx, char *name_new, int idx_new, cha
 	return -1;
 }
 
+#ifdef CONFIG_PM_DEBUG
+bool console_suspend_enabled = 0;
+#else
 bool console_suspend_enabled = 1;
+#endif
 EXPORT_SYMBOL(console_suspend_enabled);
 
 static int __init console_suspend_disable(char *str)

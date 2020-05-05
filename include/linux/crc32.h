@@ -8,6 +8,10 @@
 #include <linux/types.h>
 #include <linux/bitrev.h>
 
+/* VDLinux, based VDLP (Mstar) default patch No.10,
+   ultimate coredump v0.3, SP Team 2009-06-08 */
+extern unsigned long  gzip_crc32_le(unsigned char const *p, unsigned long len);
+
 extern u32  crc32_le(u32 crc, unsigned char const *p, size_t len);
 extern u32  crc32_be(u32 crc, unsigned char const *p, size_t len);
 

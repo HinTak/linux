@@ -1,10 +1,16 @@
 # generic gpio support: platform drivers, dedicated expander chips, etc
+ifeq ($(CONFIG_ARCH_NVT72668),y)
+	EXTRA_CFLAGS += -I$(srctree)/arch/arm/mach-nvt72668/include/
+endif
 
 ccflags-$(CONFIG_DEBUG_GPIO)	+= -DDEBUG
 
 obj-$(CONFIG_GPIOLIB)		+= gpiolib.o devres.o
 obj-$(CONFIG_OF_GPIO)		+= gpiolib-of.o
 obj-$(CONFIG_GPIO_ACPI)		+= gpiolib-acpi.o
+
+# Added gpio control code for usb power enable by bsp team.
+obj-$(CONFIG_USBEN_GPIO)		+= usben-gpio.o
 
 # Device drivers. Generally keep list sorted alphabetically
 obj-$(CONFIG_GPIO_GENERIC)	+= gpio-generic.o

@@ -46,6 +46,10 @@
 #include <asm/virt.h>
 #include <asm/mach/arch.h>
 
+#ifdef CONFIG_ARCH_NVT72668
+#include <mach/motherboard.h>
+#endif
+
 /*
  * as from 2.5, kernels no longer have an init_tasks structure
  * so we need some other way of telling a new secondary core
@@ -66,6 +70,9 @@ enum ipi_msg_type {
 	IPI_CALL_FUNC,
 	IPI_CALL_FUNC_SINGLE,
 	IPI_CPU_STOP,
+#ifdef CONFIG_ACCURATE_COREDUMP
+	IPI_SYNC_BLOCK,
+#endif
 };
 
 static DECLARE_COMPLETION(cpu_running);
@@ -302,6 +309,7 @@ asmlinkage void __cpuinit secondary_start_kernel(void)
 	 * switch away from it before attempting any exclusive accesses.
 	 */
 	cpu_switch_mm(mm->pgd, mm);
+	local_flush_bp_all();
 	enter_lazy_tlb(mm, current);
 	local_flush_tlb_all();
 
@@ -501,7 +509,11 @@ static void __cpuinit broadcast_timer_setup(struct clock_event_device *evt)
 	evt->features	= CLOCK_EVT_FEAT_ONESHOT |
 			  CLOCK_EVT_FEAT_PERIODIC |
 			  CLOCK_EVT_FEAT_DUMMY;
+#if defined(CONFIG_ARCH_NVT_V7)
+	evt->rating	= 100;
+#else
 	evt->rating	= 400;
+#endif
 	evt->mult	= 1;
 	evt->set_mode	= broadcast_timer_set_mode;
 
@@ -513,8 +525,10 @@ static struct local_timer_ops *lt_ops;
 #ifdef CONFIG_LOCAL_TIMERS
 int local_timer_register(struct local_timer_ops *ops)
 {
+#ifndef CONFIG_ARCH_NVT_V7
 	if (!is_smp() || !setup_max_cpus)
 		return -ENXIO;
+#endif
 
 	if (lt_ops)
 		return -EBUSY;
@@ -557,12 +571,19 @@ static DEFINE_RAW_SPINLOCK(stop_lock);
 /*
  * ipi_cpu_stop - handle IPI from smp_send_stop()
  */
-static void ipi_cpu_stop(unsigned int cpu)
+static void ipi_cpu_stop(unsigned int cpu, struct pt_regs *regs)
 {
+	struct thread_info *thread = current_thread_info();
+
 	if (system_state == SYSTEM_BOOTING ||
 	    system_state == SYSTEM_RUNNING) {
 		raw_spin_lock(&stop_lock);
 		printk(KERN_CRIT "CPU%u: stopping\n", cpu);
+
+		printk(KERN_CRIT "Process %.*s (pid: %d, stack limit = 0x%p)\n",
+				TASK_COMM_LEN, thread->task->comm, task_pid_nr(thread->task), thread + 1);
+
+		__show_regs(regs);
 		dump_stack();
 		raw_spin_unlock(&stop_lock);
 	}
@@ -572,9 +593,43 @@ static void ipi_cpu_stop(unsigned int cpu)
 	local_fiq_disable();
 	local_irq_disable();
 
-	while (1)
+	while (1){
 		cpu_relax();
+	#ifdef CONFIG_ARCH_NVT72668
+		CPU_CEASE(1);
+	#endif
+	}
 }
+
+#ifdef CONFIG_ACCURATE_COREDUMP
+int lock_other_cpus;
+
+void block_other_cpus_on_core_dump(void)
+{
+	cpumask_t mask;
+	
+	preempt_disable();
+
+	cpumask_copy(&mask, cpu_online_mask);
+	lock_other_cpus = 1;
+	cpu_clear(smp_processor_id(), mask);
+	smp_cross_call(&mask, IPI_SYNC_BLOCK);
+}
+
+void unblock_other_cpus_on_core_dump(void)
+{
+	lock_other_cpus = 0;
+	preempt_enable();
+}
+
+void ipi_sync_block(void)
+{
+	preempt_disable();
+	while (lock_other_cpus)
+		cpu_relax();
+	preempt_enable();
+}
+#endif
 
 /*
  * Main handler for inter-processor interrupts
@@ -620,9 +675,20 @@ void handle_IPI(int ipinr, struct pt_regs *regs)
 
 	case IPI_CPU_STOP:
 		irq_enter();
-		ipi_cpu_stop(cpu);
+		ipi_cpu_stop(cpu, regs);
 		irq_exit();
 		break;
+
+#ifdef CONFIG_ACCURATE_COREDUMP
+	case IPI_SYNC_BLOCK:
+		/* ipi irq statistics is not update */
+		irq_enter();
+		ipi_sync_block();
+		irq_exit();
+		scheduler_ipi();
+		/* rescheduling starts after handler return */
+		break;
+#endif
 
 	default:
 		printk(KERN_CRIT "CPU%u: Unknown IPI message 0x%x\n",
@@ -637,21 +703,14 @@ void smp_send_reschedule(int cpu)
 	smp_cross_call(cpumask_of(cpu), IPI_RESCHEDULE);
 }
 
-#ifdef CONFIG_HOTPLUG_CPU
-static void smp_kill_cpus(cpumask_t *mask)
-{
-	unsigned int cpu;
-	for_each_cpu(cpu, mask)
-		platform_cpu_kill(cpu);
-}
-#else
-static void smp_kill_cpus(cpumask_t *mask) { }
-#endif
-
 void smp_send_stop(void)
 {
 	unsigned long timeout;
 	struct cpumask mask;
+
+	printk(KERN_ERR"================================================================================\n");
+	printk(KERN_ERR" SMP Send Stop Other CPU!\n");
+	printk(KERN_ERR"================================================================================\n");
 
 	cpumask_copy(&mask, cpu_online_mask);
 	cpumask_clear_cpu(smp_processor_id(), &mask);
@@ -665,8 +724,6 @@ void smp_send_stop(void)
 
 	if (num_online_cpus() > 1)
 		pr_warning("SMP: failed to stop secondary CPUs\n");
-
-	smp_kill_cpus(&mask);
 }
 
 /*

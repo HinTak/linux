@@ -156,6 +156,14 @@ config PM_DEBUG
 	code. This is helpful when debugging and reporting PM bugs, like
 	suspend support.
 
+config PM_BUG_ON_PROBLEM
+	bool "Stop suspending on unfreezable task and halt"
+	depends on PM_DEBUG
+	---help---
+	This option halts the kernel in case when while suspending 
+	some of the process could not be freezed 20 sec
+	Use it ONLY FOR DEBUGGING OF SUSPEND MODE
+
 config PM_ADVANCED_DEBUG
 	bool "Extra PM attributes in sysfs for low-level debugging/testing"
 	depends on PM_DEBUG

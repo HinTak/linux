@@ -32,6 +32,7 @@
 #include <linux/lzo.h>
 #include <linux/string.h>
 #include <linux/vmalloc.h>
+#include <linux/seq_file.h>
 
 #include "zram_drv.h"
 
@@ -40,7 +41,7 @@ static int zram_major;
 struct zram *zram_devices;
 
 /* Module params (documentation at end) */
-static unsigned int num_devices;
+static unsigned int num_devices = CONFIG_ZRAMDEVICES;
 
 static void zram_stat_inc(u32 *v)
 {
@@ -536,6 +537,9 @@ void __zram_reset_device(struct zram *zram)
 
 	zram->disksize = 0;
 }
+#if defined(CONFIG_KNBD_SUPPORT)
+EXPORT_SYMBOL(__zram_reset_device);
+#endif
 
 void zram_reset_device(struct zram *zram)
 {
@@ -543,6 +547,9 @@ void zram_reset_device(struct zram *zram)
 	__zram_reset_device(zram);
 	up_write(&zram->init_lock);
 }
+#if defined(CONFIG_KNBD_SUPPORT)
+EXPORT_SYMBOL(zram_reset_device);
+#endif
 
 int zram_init_device(struct zram *zram)
 {
@@ -586,7 +593,11 @@ int zram_init_device(struct zram *zram)
 	/* zram devices sort of resembles non-rotational disks */
 	queue_flag_set_unlocked(QUEUE_FLAG_NONROT, zram->disk->queue);
 
+#ifdef CONFIG_OOM_RESCUER
+	zram->mem_pool = zs_create_pool("zram", GFP_NOIO | __GFP_HIGHMEM | __GFP_NORESCUE);
+#else
 	zram->mem_pool = zs_create_pool("zram", GFP_NOIO | __GFP_HIGHMEM);
+#endif
 	if (!zram->mem_pool) {
 		pr_err("Error creating memory pool\n");
 		ret = -ENOMEM;
@@ -608,6 +619,9 @@ fail:
 	pr_err("Initialization failed: err=%d\n", ret);
 	return ret;
 }
+#if defined(CONFIG_KNBD_SUPPORT)
+EXPORT_SYMBOL(zram_init_device);
+#endif
 
 static void zram_slot_free_notify(struct block_device *bdev,
 				unsigned long index)
@@ -710,6 +724,7 @@ unsigned int zram_get_num_devices(void)
 static int __init zram_init(void)
 {
 	int ret, dev_id;
+	struct zram *zram;
 
 	if (num_devices > max_num_devices) {
 		pr_warn("Invalid value for num_devices: %u\n",
@@ -739,22 +754,104 @@ static int __init zram_init(void)
 	}
 
 	for (dev_id = 0; dev_id < num_devices; dev_id++) {
-		ret = create_device(&zram_devices[dev_id], dev_id);
+		zram = &zram_devices[dev_id];
+		ret = create_device(zram, dev_id);
 		if (ret)
 			goto free_devices;
+
+		zram->disksize = CONFIG_DISKDEVICES << 10;
+		ret = zram_init_device(zram);
+		if (ret) {
+			destroy_device(zram);
+			goto free_devices;
+		}
 	}
 
 	return 0;
 
 free_devices:
-	while (dev_id)
-		destroy_device(&zram_devices[--dev_id]);
+	while (dev_id) {
+		zram = &zram_devices[--dev_id];
+		if (zram->init_done)
+			zram_reset_device(zram);
+		destroy_device(zram);
+	}
 	kfree(zram_devices);
 unregister:
 	unregister_blkdev(zram_major, "zram");
 out:
 	return ret;
 }
+
+static int zram_printf(struct seq_file *seq, const char *f, ...)
+{
+	int ret;
+	va_list args;
+	va_start(args, f);
+	if (seq)
+		ret = seq_vprintf(seq, f, args);
+	else
+		ret = vprintk(f, args);
+	va_end(args);
+	return ret;
+}
+
+void print_zram_info(struct seq_file *seq)
+{
+	size_t dev_id;
+	size_t mem_used = 0;
+	struct zram *rzs = NULL;
+	struct zram_stats *stats = NULL;
+
+	if (zram_devices == NULL) {
+		zram_printf(seq, "zram driver has never been initialized (devices == NULL)\n");
+		return;
+	}
+
+	zram_printf(seq, "VDLinux msg, zram info:\n");
+	for (dev_id = 0; dev_id < num_devices; dev_id++) {
+		rzs = &zram_devices[dev_id];
+
+		if (rzs->init_done) {
+			stats = &rzs->stats;
+			mem_used = zs_get_total_size_bytes(rzs->mem_pool);
+
+			zram_printf(seq, "zram%u: OrigDataSize %u kB ComprDataSize %llu kB MemUsedTotal %u kB\n",
+					dev_id, (stats->pages_stored << PAGE_SHIFT) >> 10, stats->compr_size >> 10, mem_used >> 10);
+		} else
+			zram_printf(seq, "zram%u: not initialized\n", dev_id);
+	}
+}
+EXPORT_SYMBOL(print_zram_info);
+
+size_t get_zram_info(void)
+{
+	size_t dev_id;
+	size_t mem_used = 0;
+	struct zram *rzs = NULL;
+
+	if (zram_devices == NULL)
+		return 0;
+
+	for (dev_id = 0; dev_id < num_devices; dev_id++) {
+		rzs = &zram_devices[dev_id];
+
+		down_read(&rzs->init_lock);
+		if (rzs->init_done)
+			mem_used += zs_get_total_size_bytes(rzs->mem_pool);
+		up_read(&rzs->init_lock);
+	}
+
+	return mem_used >> 10;
+}
+EXPORT_SYMBOL(get_zram_info);
+
+int show_zram_info(void)
+{
+	print_zram_info(NULL);
+	return 0;
+}
+EXPORT_SYMBOL(show_zram_info);
 
 static void __exit zram_exit(void)
 {

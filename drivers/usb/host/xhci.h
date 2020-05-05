@@ -35,6 +35,10 @@
 /* xHCI PCI Configuration Registers */
 #define XHCI_SBRN_OFFSET	(0x60)
 
+#define DWC_BULK_WA 
+#define DWC_BULK_NOPS (5)
+
+
 /* Max number of USB devices for any host controller - limit in section 6.1 */
 #define MAX_HC_SLOTS		256
 /* Section 5.3.3 - MaxPorts */
@@ -1076,7 +1080,9 @@ struct xhci_event_cmd {
 /* bits 24:31 are the slot ID */
 #define TRB_TO_SLOT_ID(p)	(((p) & (0xff<<24)) >> 24)
 #define SLOT_ID_FOR_TRB(p)	(((p) & 0xff) << 24)
-
+#ifdef SAMSUNG_PATCH_WITH_NEW_xHCI_API_FOR_BUGGY_DEVICE
+#define BSR_FOR_TRB(p)		(((p) & 0x01) << 9)
+#endif
 /* Stop Endpoint TRB - ep_index to endpoint ID for this TRB */
 #define TRB_TO_EP_INDEX(p)		((((p) & (0x1f << 16)) >> 16) - 1)
 #define	EP_ID_FOR_TRB(p)		((((p) + 1) & 0x1f) << 16)
@@ -1537,6 +1543,11 @@ struct xhci_hcd {
 	u32			port_status_u0;
 /* Compliance Mode Timer Triggered every 2 seconds */
 #define COMP_MODE_RCVRY_MSECS 2000
+#ifdef CONFIG_ARCH_NVT72668
+        void __iomem            *apbs;          /* device memory/io */
+        resource_size_t         rsrc_start;     /* memory/io resource start */
+        resource_size_t         rsrc_len;       /* memory/io resource length */
+#endif
 };
 
 /* convert between an HCD pointer and the corresponding EHCI_HCD */
@@ -1711,8 +1722,11 @@ static inline int xhci_register_pci(void) { return 0; }
 static inline void xhci_unregister_pci(void) {}
 #endif
 
+
+
 #if defined(CONFIG_USB_XHCI_PLATFORM) \
-	|| defined(CONFIG_USB_XHCI_PLATFORM_MODULE)
+	|| defined(CONFIG_USB_XHCI_PLATFORM_MODULE)\
+	|| defined(CONFIG_USB_XHCI_SDP)
 int xhci_register_plat(void);
 void xhci_unregister_plat(void);
 #else
@@ -1766,8 +1780,11 @@ int xhci_update_hub_device(struct usb_hcd *hcd, struct usb_device *hdev,
 			struct usb_tt *tt, gfp_t mem_flags);
 int xhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb, gfp_t mem_flags);
 int xhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status);
+#ifdef SAMSUNG_PATCH_WITH_NEW_xHCI_API_FOR_BUGGY_DEVICE
 int xhci_add_endpoint(struct usb_hcd *hcd, struct usb_device *udev, struct usb_host_endpoint *ep);
+#endif
 int xhci_drop_endpoint(struct usb_hcd *hcd, struct usb_device *udev, struct usb_host_endpoint *ep);
+int xhci_enable_control_endpoint(struct usb_hcd *hcd, struct usb_device *udev);
 void xhci_endpoint_reset(struct usb_hcd *hcd, struct usb_host_endpoint *ep);
 int xhci_discover_or_reset_device(struct usb_hcd *hcd, struct usb_device *udev);
 int xhci_check_bandwidth(struct usb_hcd *hcd, struct usb_device *udev);
@@ -1783,6 +1800,10 @@ void xhci_ring_cmd_db(struct xhci_hcd *xhci);
 int xhci_queue_slot_control(struct xhci_hcd *xhci, u32 trb_type, u32 slot_id);
 int xhci_queue_address_device(struct xhci_hcd *xhci, dma_addr_t in_ctx_ptr,
 		u32 slot_id);
+#ifdef SAMSUNG_PATCH_WITH_NEW_xHCI_API_FOR_BUGGY_DEVICE
+int xhci_queue_enable_control_endpoint(struct xhci_hcd *xhci, dma_addr_t in_ctx_ptr,
+		u32 slot_id);
+#endif
 int xhci_queue_vendor_command(struct xhci_hcd *xhci,
 		u32 field1, u32 field2, u32 field3, u32 field4);
 int xhci_queue_stop_endpoint(struct xhci_hcd *xhci, int slot_id,

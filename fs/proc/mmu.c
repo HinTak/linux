@@ -38,18 +38,28 @@ void get_vmalloc_info(struct vmalloc_info *vmi)
 			/*
 			 * Some archs keep another range for modules in vmlist
 			 */
+#ifndef CONFIG_VMALLOCUSED_PLUS
 			if (addr < VMALLOC_START)
 				continue;
+#endif
 			if (addr >= VMALLOC_END)
 				break;
 
 			vmi->used += vma->size;
 
+#ifdef CONFIG_VMALLOCUSED_PLUS
+			free_area_size = (addr > VMALLOC_START) ? (addr-prev_end) : 0;
+#else
 			free_area_size = addr - prev_end;
+#endif
 			if (vmi->largest_chunk < free_area_size)
 				vmi->largest_chunk = free_area_size;
 
+#ifdef CONFIG_VMALLOCUSED_PLUS
+			prev_end = (addr >= VMALLOC_START) ? (vma->size + addr) : prev_end;
+#else
 			prev_end = vma->size + addr;
+#endif
 		}
 
 		if (VMALLOC_END - prev_end > vmi->largest_chunk)

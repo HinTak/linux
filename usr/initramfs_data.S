@@ -26,7 +26,9 @@
 
 .section .init.ramfs,"a"
 __irf_start:
+#ifndef CONFIG_PULLOUT_INITRAMFS
 .incbin __stringify(INITRAMFS_IMAGE)
+#endif
 __irf_end:
 .section .init.ramfs.info,"a"
 .globl VMLINUX_SYMBOL(__initramfs_size)

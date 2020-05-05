@@ -178,6 +178,9 @@ struct ext4_ext_path {
 #define EXT_MAX_INDEX(__hdr__) \
 	(EXT_FIRST_INDEX((__hdr__)) + le16_to_cpu((__hdr__)->eh_max) - 1)
 
+#define EXTENT_START_FLAG	0x1
+#define INDEX_START_FLAG	0x2
+
 static inline struct ext4_extent_header *ext_inode_hdr(struct inode *inode)
 {
 	return (struct ext4_extent_header *) EXT4_I(inode)->i_data;
@@ -275,6 +278,11 @@ static inline void ext4_idx_store_pblock(struct ext4_extent_idx *ix,
 	ix->ei_leaf_hi = cpu_to_le16((unsigned long) ((pb >> 31) >> 1) &
 				     0xffff);
 }
+
+extern int ext4_split_move_extents(struct inode *isrc, __u64 offset_block,
+				   struct inode *idest);
+extern int get_ext_path(struct inode *inode, ext4_lblk_t lblock,
+			struct ext4_ext_path **path);
 
 #endif /* _EXT4_EXTENTS */
 

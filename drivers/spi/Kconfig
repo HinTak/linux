@@ -161,6 +161,10 @@ config SPI_FALCON
 	  has only been tested with m25p80 type chips. The hardware has no
 	  support for other types of SPI peripherals.
 
+choice
+	prompt "Generic GPIO-based bitbanging SPI Master"
+	default SPI_GPIO
+
 config SPI_GPIO
 	tristate "GPIO-based bitbanging SPI Master"
 	depends on GENERIC_GPIO
@@ -176,6 +180,15 @@ config SPI_GPIO
 	  making it unusually slow for SPI.  If your platform can inline
 	  GPIO operations, you should be able to leverage that for better
 	  speed with a custom version of this driver; see the source code.
+
+config SPI_GPIO_NT14U
+	tristate "NT14U GPIO-based bitbanging SPI Master"
+	depends on ARCH_NVT_V7
+	select SPI_BITBANG
+	help
+	  Same as generic SPI_GPIO but with NT14U specific.
+
+endchoice
 
 config SPI_IMX
 	tristate "Freescale i.MX SPI controllers"

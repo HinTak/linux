@@ -455,6 +455,30 @@ config REGULATOR_TPS80031
 	  converters, 11 general purpose LDOs, VBUS generator and digital
 	  output to control regulators.
 
+config REGULATOR_TPS56X20
+	bool "TI TPS56X20 power regulator driver"
+	depends on I2C
+	help
+	  This driver supports TPS56X20 voltage regulator chips.
+
+config REGULATOR_TPS56921
+	bool "TI TPS56921 power regulator driver"
+	depends on I2C
+	help
+	  This driver supports TPS56921 voltage regulator chips.
+
+config REGULATOR_SN1202033OF
+	bool "TI SN1202033 power regulator driver for Device Tree"
+	depends on I2C
+	help
+	  This driver supports SN1202033 voltage regulator chips for Device Tree.
+
+config REGULATOR_TPS563900
+	bool "TI TPS563900 power rugulator driver"
+	depends on I2C
+	help
+	  This driver supports TPS563900 voltage regulator chips.
+
 config REGULATOR_TWL4030
 	bool "TI TWL4030/TWL5030/TWL6030/TPS659x0 PMIC"
 	depends on TWL4030_CORE
@@ -503,6 +527,30 @@ config REGULATOR_AS3711
 	help
 	  This driver provides support for the voltage regulators on the
 	  AS3711 PMIC
+
+config REGULATOR_TPS54921
+	bool "TPS54921 regulator"
+	depends on ARCH_SDP && SDP_I2C
+	help
+	  This driver supports TPS54921 voltage regulator chips.
+
+config TPS54921_DEBUGGING
+	bool "TPS54921 Debug print"
+	depends on REGULATOR_TPS54921
+	help
+	  TPS54921 debug print
+	  
+config REGULATOR_SN1202033
+	bool "SN1202033 regulator"
+	depends on ARCH_SDP && SDP_I2C
+	help
+	  This driver supports SN1202033 voltage regulator chips.
+
+config SN1202033_DEBUGGING
+	bool "SN1202033 Debug print"
+	depends on REGULATOR_SN1202033
+	help
+	  SN1202033 debug print
 
 endif
 

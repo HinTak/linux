@@ -4,6 +4,13 @@
 
 menu "Misc devices"
 
+config NVT_AHB_STATUS
+	tristate "Novatek AHB BUS error detector"
+	depends on ARCH_NVT_V7
+	help
+	  This option enables NVT's AHB status driver which can detect some
+	  abnormal AHB bus behaviors.
+
 config SENSORS_LIS3LV02D
 	tristate
 	depends on INPUT

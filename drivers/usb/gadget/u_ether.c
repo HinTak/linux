@@ -21,9 +21,12 @@
 #include <linux/etherdevice.h>
 #include <linux/ethtool.h>
 #include <linux/if_vlan.h>
-
+#include <linux/interrupt.h>
 #include "u_ether.h"
 
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+#define CONFIG_SAMSUNG_BUTTOM_HALF    1
+#endif // CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
 
 /*
  * This component encapsulates the Ethernet link glue needed to provide
@@ -60,10 +63,18 @@ struct eth_dev {
 
 	spinlock_t		req_lock;	/* guard {rx,tx}_reqs */
 	struct list_head	tx_reqs, rx_reqs;
+	struct list_head	rx_active_reqs;
 	atomic_t		tx_qlen;
 
 	struct sk_buff_head	rx_frames;
 
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+#ifdef CONFIG_SAMSUNG_BUTTOM_HALF
+   struct sk_buff_head     rx_done;
+   struct tasklet_struct   bh;
+#endif
+#endif // CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+      
 	unsigned		header_len;
 	struct sk_buff		*(*wrap)(struct gether *, struct sk_buff *skb);
 	int			(*unwrap)(struct gether *,
@@ -74,6 +85,10 @@ struct eth_dev {
 
 	unsigned long		todo;
 #define	WORK_RX_MEMORY		0
+	/* CBR related functionality */
+#ifdef CBR_CHANNEL	
+	struct cbr_channel	*cbr;
+#endif
 
 	bool			zlp;
 	u8			host_mac[ETH_ALEN];
@@ -85,7 +100,12 @@ struct eth_dev {
 
 #define DEFAULT_QLEN	2	/* double buffering by default */
 
-static unsigned qmult = 5;
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+ static unsigned qmult = 10;
+#else  // CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+ static unsigned qmult = 5;
+#endif // CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+
 module_param(qmult, uint, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(qmult, "queue length multiplier at high/super speed");
 
@@ -137,19 +157,32 @@ static inline int qlen(struct usb_gadget *gadget)
 /*-------------------------------------------------------------------------*/
 
 /* NETWORK DRIVER HOOKUP (to the layer above this driver) */
-
+static void defer_kevent(struct eth_dev *dev, int flag);
 static int ueth_change_mtu(struct net_device *net, int new_mtu)
 {
 	struct eth_dev	*dev = netdev_priv(net);
+	struct usb_request *req;
 	unsigned long	flags;
 	int		status = 0;
 
 	/* don't change MTU on "live" link (peer won't know) */
 	spin_lock_irqsave(&dev->lock, flags);
-	if (dev->port_usb)
-		status = -EBUSY;
-	else if (new_mtu <= ETH_HLEN || new_mtu > ETH_FRAME_LEN)
-		status = -ERANGE;
+	if(net->mtu < new_mtu)
+	{
+		net->mtu = new_mtu;
+		netif_stop_queue(net);
+
+		// unlinking all rx urbs
+		while (!list_empty(&dev->rx_active_reqs))
+		{
+			req = container_of(dev->rx_active_reqs.next,struct usb_request, list);
+			if(req->status != ECONNRESET)
+				usb_ep_dequeue(dev->port_usb->out_ep,req);
+		}
+		defer_kevent(dev, WORK_RX_MEMORY);
+
+		netif_wake_queue(net);
+	}
 	else
 		net->mtu = new_mtu;
 	spin_unlock_irqrestore(&dev->lock, flags);
@@ -240,7 +273,17 @@ rx_submit(struct eth_dev *dev, struct usb_request *req, gfp_t gfp_flags)
 	 * but on at least one, checksumming fails otherwise.  Note:
 	 * RNDIS headers involve variable numbers of LE32 values.
 	 */
-	skb_reserve(skb, NET_IP_ALIGN);
+	//skb_reserve(skb, NET_IP_ALIGN);
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+   /*
+    * RX: Do not move data by IP_ALIGN:
+    * if your DMA controller cannot handle it
+    */
+   if(!gadget_dma32(dev->gadget))
+//     skb_reserve(skb, NET_IP_ALIGN);
+#else  // CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+   skb_reserve(skb, NET_IP_ALIGN);
+#endif // CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
 
 	req->buf = skb->data;
 	req->length = size;
@@ -255,12 +298,80 @@ enomem:
 		DBG(dev, "rx submit --> %d\n", retval);
 		if (skb)
 			dev_kfree_skb_any(skb);
-		spin_lock_irqsave(&dev->req_lock, flags);
+    	spin_lock_irqsave(&dev->req_lock, flags);
+		list_del_init(&req->list);
 		list_add(&req->list, &dev->rx_reqs);
 		spin_unlock_irqrestore(&dev->req_lock, flags);
 	}
 	return retval;
 }
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+#ifdef CONFIG_SAMSUNG_BUTTOM_HALF
+static void uether_bh(unsigned long param)
+{
+	struct eth_dev	*dev = (struct eth_dev *) param;
+	struct sk_buff	*skb, *skb2;
+	int				status = 0;
+
+	while((skb = skb_dequeue(&dev->rx_done)))
+	{
+		if(dev->unwrap)
+		{
+			unsigned long flags;
+
+			spin_lock_irqsave(&dev->lock, flags);
+			if(dev->port_usb)
+				status = dev->unwrap(dev->port_usb,skb,&dev->rx_frames);
+			else
+			{
+				dev_kfree_skb_any(skb);
+				status = -ENOTCONN;
+			}
+			spin_unlock_irqrestore(&dev->lock, flags);
+		}
+		else
+			skb_queue_tail(&dev->rx_frames, skb);
+
+		skb = NULL;
+		skb2 = skb_dequeue(&dev->rx_frames);
+		while(skb2)
+		{
+			if(status < 0 || ETH_HLEN > skb2->len)
+			{
+				dev->net->stats.rx_errors++;
+				dev->net->stats.rx_length_errors++;
+				DBG(dev, "rx length %d\n", skb2->len);
+				dev_kfree_skb_any(skb2);
+				goto next_frame;
+			}
+			skb2->protocol = eth_type_trans(skb2, dev->net);
+			dev->net->stats.rx_packets++;
+			dev->net->stats.rx_bytes += skb2->len;
+
+			/* no buffer copies needed, unless hardware can't
+			 * use skb buffers.
+			 */
+			status = netif_rx(skb2);
+next_frame:
+			skb2 = skb_dequeue(&dev->rx_frames);            
+		}
+	}
+
+	return;
+}
+
+static void defer_bh(struct eth_dev *dev, struct sk_buff *skb)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&dev->rx_done.lock, flags);
+	__skb_queue_tail(&dev->rx_done, skb);
+	if(dev->rx_done.qlen == 1)
+		tasklet_schedule(&dev->bh);
+	spin_unlock_irqrestore(&dev->rx_done.lock, flags);
+}
+#endif
+#endif	// CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
 
 static void rx_complete(struct usb_ep *ep, struct usb_request *req)
 {
@@ -272,6 +383,15 @@ static void rx_complete(struct usb_ep *ep, struct usb_request *req)
 
 	/* normal completion */
 	case 0:
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+#if CONFIG_SAMSUNG_BUTTOM_HALF
+		if(!dev->port_usb->devnum)
+		{
+			skb_put(skb, req->actual);
+			break;
+		}
+#endif
+#endif	// CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
 		skb_put(skb, req->actual);
 
 		if (dev->unwrap) {
@@ -294,9 +414,9 @@ static void rx_complete(struct usb_ep *ep, struct usb_request *req)
 
 		skb2 = skb_dequeue(&dev->rx_frames);
 		while (skb2) {
-			if (status < 0
-					|| ETH_HLEN > skb2->len
-					|| skb2->len > VLAN_ETH_FRAME_LEN) {
+			if (status < 0 || ETH_HLEN > skb2->len)
+            { 
+
 				dev->net->stats.rx_errors++;
 				dev->net->stats.rx_length_errors++;
 				DBG(dev, "rx length %d\n", skb2->len);
@@ -340,12 +460,22 @@ quiesce:
 		DBG(dev, "rx status %d\n", status);
 		break;
 	}
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+#if CONFIG_SAMSUNG_BUTTOM_HALF
+	if(!dev->port_usb->devnum)
+	{  
+		defer_bh(dev,skb);
+	}
+	else
+#endif
+#endif	// CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+	    if (skb)
+		    dev_kfree_skb_any(skb);
 
-	if (skb)
-		dev_kfree_skb_any(skb);
 	if (!netif_running(dev->net)) {
 clean:
 		spin_lock(&dev->req_lock);
+		list_del_init(&req->list);
 		list_add(&req->list, &dev->rx_reqs);
 		spin_unlock(&dev->req_lock);
 		req = NULL;
@@ -396,7 +526,6 @@ extra:
 static int alloc_requests(struct eth_dev *dev, struct gether *link, unsigned n)
 {
 	int	status;
-
 	spin_lock(&dev->req_lock);
 	status = prealloc(&dev->tx_reqs, link->in_ep, n);
 	if (status < 0)
@@ -418,11 +547,12 @@ static void rx_fill(struct eth_dev *dev, gfp_t gfp_flags)
 	unsigned long		flags;
 
 	/* fill unused rxq slots with some skb */
-	spin_lock_irqsave(&dev->req_lock, flags);
+      	spin_lock_irqsave(&dev->req_lock, flags);
 	while (!list_empty(&dev->rx_reqs)) {
 		req = container_of(dev->rx_reqs.next,
 				struct usb_request, list);
 		list_del_init(&req->list);
+		list_add(&req->list, &dev->rx_active_reqs);
 		spin_unlock_irqrestore(&dev->req_lock, flags);
 
 		if (rx_submit(dev, req, gfp_flags) < 0) {
@@ -465,8 +595,7 @@ static void tx_complete(struct usb_ep *ep, struct usb_request *req)
 		dev->net->stats.tx_bytes += skb->len;
 	}
 	dev->net->stats.tx_packets++;
-
-	spin_lock(&dev->req_lock);
+   	spin_lock(&dev->req_lock);
 	list_add(&req->list, &dev->tx_reqs);
 	spin_unlock(&dev->req_lock);
 	dev_kfree_skb_any(skb);
@@ -481,7 +610,7 @@ static inline int is_promisc(u16 cdc_filter)
 	return cdc_filter & USB_CDC_PACKET_TYPE_PROMISCUOUS;
 }
 
-static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
+static netdev_tx_t eem_start_xmit(struct sk_buff *skb,
 					struct net_device *net)
 {
 	struct eth_dev		*dev = netdev_priv(net);
@@ -491,7 +620,12 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 	unsigned long		flags;
 	struct usb_ep		*in;
 	u16			cdc_filter;
-
+   	
+	if(!dev->port_usb->is_enable) {
+       		netif_stop_queue(net);
+       		return NETDEV_TX_OK;
+   	}
+   
 	spin_lock_irqsave(&dev->lock, flags);
 	if (dev->port_usb) {
 		in = dev->port_usb->in_ep;
@@ -528,8 +662,7 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 		}
 		/* ignores USB_CDC_PACKET_TYPE_DIRECTED */
 	}
-
-	spin_lock_irqsave(&dev->req_lock, flags);
+ 	spin_lock_irqsave(&dev->req_lock, flags);
 	/*
 	 * this freelist can be empty if an interrupt triggered disconnect()
 	 * and reconfigured the gadget (shutting down this queue) after the
@@ -547,7 +680,7 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 	if (list_empty(&dev->tx_reqs))
 		netif_stop_queue(net);
 	spin_unlock_irqrestore(&dev->req_lock, flags);
-
+    
 	/* no buffer copies needed, unless the network stack did it
 	 * or the hardware can't use skb buffers.
 	 * or there's not enough space for extra headers we need
@@ -580,8 +713,15 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 	 * though any robust network rx path ignores extra padding.
 	 * and some hardware doesn't like to write zlps.
 	 */
-	if (req->zero && !dev->zlp && (length % in->maxpacket) == 0)
+	if (length % in->maxpacket == 0)
+	{
+		if (skb_tailroom(skb))
+		{
+			skb->data[skb->len] = 0;
+			__skb_put(skb, 1);
+		}
 		length++;
+	}
 
 	req->length = length;
 
@@ -615,11 +755,52 @@ drop:
 	return NETDEV_TX_OK;
 }
 
+netdev_tx_t eth_start_xmit(struct sk_buff *skb,
+					struct net_device *net)
+{
+ 	struct eth_dev          *dev = netdev_priv(net);
+	struct cbr_channel		*cbr = dev->cbr; 
+    int                     length = skb->len;
+
+#ifdef CBR_CHANNEL
+	if((dev->port_usb->devnum == 2) || (dev->port_usb->devnum == 3)) {
+		/* required data has been sent on time slot */
+		if(cbr->token < 0) {
+
+				netif_stop_queue(dev->net);	
+				return NETDEV_TX_BUSY;
+		}
+
+		if(cbr->token < length) {
+	//		if(cbr->flip_flag) {
+				eem_start_xmit(skb, net);
+	//			cbr->flip_flag = 0x01;
+				netif_stop_queue(dev->net);	
+				cbr->token -= length;
+				return NETDEV_TX_OK;
+	/*		}
+			else {
+				netif_stop_queue(dev->net);	
+				cbr->flip_flag = 0x00;
+				return NETDEV_TX_BUSY;
+			}
+	*/	}
+		cbr->token -= length;
+	}
+#endif
+	return eem_start_xmit(skb, net);
+}
 /*-------------------------------------------------------------------------*/
 
 static void eth_start(struct eth_dev *dev, gfp_t gfp_flags)
 {
 	DBG(dev, "%s\n", __func__);
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+#ifdef CONFIG_SAMSUNG_BUTTOM_HALF
+	dev->bh.func = uether_bh;
+	dev->bh.data = (unsigned long) dev;
+#endif
+#endif	// CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
 
 	/* fill the rx queue */
 	rx_fill(dev, gfp_flags);
@@ -635,6 +816,7 @@ static int eth_open(struct net_device *net)
 	struct gether	*link;
 
 	DBG(dev, "%s\n", __func__);
+
 	if (netif_carrier_ok(dev->net))
 		eth_start(dev, GFP_KERNEL);
 
@@ -691,6 +873,12 @@ static int eth_stop(struct net_device *net)
 			usb_ep_enable(link->out_ep);
 		}
 	}
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+#ifdef CONFIG_SAMSUNG_BUTTOM_HALF
+	tasklet_kill(&dev->bh);
+#endif
+#endif	// CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+
 	spin_unlock_irqrestore(&dev->lock, flags);
 
 	return 0;
@@ -778,13 +966,20 @@ int gether_setup_name(struct usb_gadget *g, u8 ethaddr[ETH_ALEN],
 	INIT_WORK(&dev->work, eth_work);
 	INIT_LIST_HEAD(&dev->tx_reqs);
 	INIT_LIST_HEAD(&dev->rx_reqs);
+	INIT_LIST_HEAD(&dev->rx_active_reqs);
 
 	skb_queue_head_init(&dev->rx_frames);
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+#ifdef CONFIG_SAMSUNG_BUTTOM_HALF
+	skb_queue_head_init(&dev->rx_done);
+#endif
+#endif	// CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
 
 	/* network device setup */
 	dev->net = net;
 	snprintf(net->name, sizeof(net->name), "%s%%d", netname);
 
+	printk("\n%s\n", net->name);
 	if (get_ether_addr(dev_addr, net->dev_addr))
 		dev_warn(&g->dev,
 			"using random %s ethernet address\n", "self");
@@ -792,8 +987,10 @@ int gether_setup_name(struct usb_gadget *g, u8 ethaddr[ETH_ALEN],
 		dev_warn(&g->dev,
 			"using random %s ethernet address\n", "host");
 
-	if (ethaddr)
+#ifndef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+	if(ethaddr)
 		memcpy(ethaddr, dev->host_mac, ETH_ALEN);
+#endif	// CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
 
 	net->netdev_ops = &eth_netdev_ops;
 
@@ -860,11 +1057,20 @@ void gether_cleanup(void)
  */
 struct net_device *gether_connect(struct gether *link)
 {
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+	struct multi_eem_gadget *multi_eem = (struct multi_eem_gadget *) link->dev_info;
+#endif	// CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+
 	struct eth_dev		*dev = the_dev;
 	int			result = 0;
 
 	if (!dev)
 		return ERR_PTR(-EINVAL);
+
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+	if(multi_eem)
+		dev = multi_eem->dev[link->devnum];
+#endif	// CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
 
 	link->in_ep->driver_data = dev;
 	result = usb_ep_enable(link->in_ep);
@@ -919,6 +1125,15 @@ fail0:
 	/* caller is responsible for cleanup on error */
 	if (result < 0)
 		return ERR_PTR(result);
+#ifdef CBR_CHANNEL
+	if(dev->cbr != NULL) {
+		/* CBR channel initialization */
+		printk(KERN_EMERG"mod timer !!");
+		result = mod_timer(&dev->cbr->timer, jiffies + 2*HZ/*msecs_to_jiffies(2000)*/);
+		if(result)
+			printk(KERN_ERR"Error in mod_timer\n");
+	}	
+#endif
 	return dev->net;
 }
 
@@ -938,12 +1153,25 @@ void gether_disconnect(struct gether *link)
 {
 	struct eth_dev		*dev = link->ioport;
 	struct usb_request	*req;
+	int 			result;
 
 	WARN_ON(!dev);
 	if (!dev)
 		return;
 
 	DBG(dev, "%s\n", __func__);
+
+#ifdef CBR_CHANNEL
+	if(dev->cbr != NULL) {
+		/* CBR channel initialization */
+		printk(KERN_EMERG"delete timer !!");
+		result = try_to_del_timer_sync(&dev->cbr->timer);
+		if(result < 0)
+			printk(KERN_ERR"Error in del_timer_sync\n");
+	}
+#endif
+	
+
 
 	netif_stop_queue(dev->net);
 	netif_carrier_off(dev->net);

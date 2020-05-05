@@ -106,6 +106,14 @@ struct scsi_device {
 	const char * vendor;		/* [back_compat] point into 'inquiry' ... */
 	const char * model;		/* ... after scan; point to static string */
 	const char * rev;		/* ... "nullnullnullnull" before scan */
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG	 
+	//add for usb serial number	 
+	const char * serial;	 
+	//add for usb logical number
+	const char * logicalnumber;
+	// add for usb device path
+	const char * usbdevpath;
+#endif
 	unsigned char current_tag;	/* current tag */
 	struct scsi_target      *sdev_target;   /* used only for single_lun */
 

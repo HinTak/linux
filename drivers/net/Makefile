@@ -71,3 +71,6 @@ obj-$(CONFIG_USB_IPHETH)        += usb/
 obj-$(CONFIG_USB_CDC_PHONET)   += usb/
 
 obj-$(CONFIG_HYPERV_NET) += hyperv/
+
+#For SMSC9500
+obj-$(CONFIG_SMSC_9500) += smsc9500/

@@ -369,6 +369,9 @@ static inline struct page *compound_head(struct page *page)
 static inline void reset_page_mapcount(struct page *page)
 {
 	atomic_set(&(page)->_mapcount, -1);
+#ifdef CONFIG_PTMU_TRACE
+	RESET_RMAP_OWNER(page);   /* reset the owner */
+#endif
 }
 
 static inline int page_mapcount(struct page *page)
@@ -579,7 +582,20 @@ static inline pte_t maybe_mkwrite(pte_t pte, struct vm_area_struct *vma)
  * The zone field is never updated after free_area_init_core()
  * sets it, so none of the operations on it need to be atomic.
  */
-
+/* functions related to RSS quota */
+int _get_group_idx(struct mm_struct *mm, unsigned long flags,
+		    struct file *file, unsigned long start, unsigned long end);
+int get_group_idx(struct vm_area_struct *vma);
+void inc_rss_counter(struct vm_area_struct *vma, unsigned long value);
+void dec_rss_counter(struct vm_area_struct *vma, unsigned long value);
+int get_rss_cnt(struct mm_struct *mm, int group, unsigned long *cur, unsigned long *max);
+int vmg_enough_memory(struct mm_struct *mm, int group, long pages);
+int check_enough_pages(unsigned long required);
+int is_page_present(struct mm_struct *mm, unsigned long address);
+int get_vma_rss(struct vm_area_struct *vma);
+void inc_mupt_counter(struct vm_area_struct *vma, struct page *page, unsigned long addr, int value);
+void dec_mupt_counter(struct vm_area_struct *vma, struct page *page, unsigned long addr, int value);
+/* --- */
 
 /*
  * page->flags layout:
@@ -929,6 +945,7 @@ extern void pagefault_out_of_memory(void);
 extern void show_free_areas(unsigned int flags);
 extern bool skip_free_areas_node(unsigned int flags, int nid);
 
+void vdshmem_set_file(struct vm_area_struct *vma, struct file *file);
 int shmem_zero_setup(struct vm_area_struct *);
 
 extern int can_do_mlock(void);
@@ -1096,7 +1113,7 @@ static inline int stack_guard_page_end(struct vm_area_struct *vma,
 		!vma_growsup(vma->vm_next, addr);
 }
 
-extern pid_t
+extern struct task_struct *
 vm_is_stack(struct task_struct *task, struct vm_area_struct *vma, int in_group);
 
 extern unsigned long move_page_tables(struct vm_area_struct *vma,
@@ -1532,6 +1549,7 @@ int write_one_page(struct page *page, int wait);
 void task_dirty_inc(struct task_struct *tsk);
 
 /* readahead.c */
+#define BD_VM_MAX_READAHEAD_PAGES 	128 /* nr of pages for BDCACHE */
 #define VM_MAX_READAHEAD	128	/* kbytes */
 #define VM_MIN_READAHEAD	16	/* kbytes (includes current page) */
 
@@ -1711,7 +1729,6 @@ int vmemmap_populate_basepages(struct page *start_page,
 int vmemmap_populate(struct page *start_page, unsigned long pages, int node);
 void vmemmap_populate_print_last(void);
 
-
 enum mf_flags {
 	MF_COUNT_INCREASED = 1 << 0,
 	MF_ACTION_REQUIRED = 1 << 1,
@@ -1753,6 +1770,53 @@ static inline bool page_is_guard(struct page *page)
 static inline unsigned int debug_guardpage_minorder(void) { return 0; }
 static inline bool page_is_guard(struct page *page) { return false; }
 #endif /* CONFIG_DEBUG_PAGEALLOC */
+
+#ifdef CONFIG_PTMU_TRACE
+int do_thread_page_count(struct mm_struct *, struct vm_area_struct *,
+			 struct page *, unsigned long, int);
+#define inc_ptmu_counter(mm, vma, page, addr, v)   \
+				do_thread_page_count(mm, vma, page, addr, v)
+#define dec_ptmu_counter(mm, vma, page, addr, v)   \
+				do_thread_page_count(mm, vma, page, addr, -v)
+#else
+#define inc_ptmu_counter(mm, vma, page, addr, v)
+#define dec_ptmu_counter(mm, vma, page, addr, v)
+#endif
+
+struct kernel_mem_usage {
+	unsigned long total_mem_size;	/* total memory */
+	unsigned long free_mem_size;	/* free memory */
+	unsigned long hdma_declared;    /* memory, declared by hdma device */
+	unsigned long hdma_allocated;	/* memory, allocated by hdma device */
+	unsigned long slab_size;	/* slab size */
+	unsigned long vmallocused_size;	/* vmalloc used size (incl. ioremap) */
+	unsigned long ioremap_size;	/* ioremap size */
+	unsigned long pagetable_size;	/* pagetable size */
+	unsigned long kernelstack_size;	/* kernel stack size */
+	unsigned long zram_size;	/* zram used memory size */
+	unsigned long buddy_size;	/* size of calling alloc_page directly*/
+
+	unsigned long sum_kernel_size;	/* total memory used by kernel */
+};
+
+struct user_mem_usage {
+	unsigned long page_cache_size;		/* NR_FILE_PAGE */
+	unsigned long active_anon_size;		/* Active Anon */
+	unsigned long inactive_anon_size;	/* Inactive Anon */
+	unsigned long active_file_size;		/* Active File */
+	unsigned long inactive_file_size;	/* inactive file */
+	unsigned long unevictable_size;		/* unevictable pages */
+
+	unsigned long anon_pages_size;	/* Anon Pages */
+	unsigned long mapped_size;	/* mapped File */
+	unsigned long shmem_size;	/* shmem  size */
+
+	unsigned long sum_user_size;	/* total user memory size */
+};
+
+extern void vd_get_mem_usage(struct kernel_mem_usage *kernel_usage,
+			     struct user_mem_usage *user_usage);
+extern size_t get_zram_info(void);
 
 #endif /* __KERNEL__ */
 #endif /* _LINUX_MM_H */

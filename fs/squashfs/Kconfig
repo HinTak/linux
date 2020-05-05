@@ -100,6 +100,18 @@ config SQUASHFS_4K_DEVBLK_SIZE
 
 	  If unsure, say N.
 
+config HWSQUASHFS2
+	bool "[HWSQUASHFS2] Do reading and decompression directly in MMC device"
+	depends on SQUASHFS
+	depends on HW_DECOMP_BLK_MMC_SUBSYSTEM
+	depends on SQUASHFS_4K_DEVBLK_SIZE
+	default n
+	help
+	  This is as per the HWSquashfs2 requirements that will bypass the
+	  block layer and use MMC cache for input buffer and do the decompression
+	  at the time of reading the data. It should also select MMC and block
+	  layer as the dependency of this module.
+
 config SQUASHFS_EMBEDDED
 	bool "Additional option for memory-constrained systems"
 	depends on SQUASHFS
@@ -121,3 +133,8 @@ config SQUASHFS_FRAGMENT_CACHE_SIZE
 
 	  Note there must be at least one cached fragment.  Anything
 	  much more than three will probably not make much difference.
+
+config ENABLE_SQUASHFS_EXPORT
+	bool "(SABSP) squashfs export enable support through NFSD"
+	depends on SQUASHFS
+	default y

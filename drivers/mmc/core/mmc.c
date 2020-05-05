@@ -174,6 +174,10 @@ static int mmc_decode_csd(struct mmc_card *card)
 	return 0;
 }
 
+#ifndef CONFIG_VD_RELEASE
+extern unsigned int high_capacity;
+#endif
+
 /*
  * Read extended CSD.
  */
@@ -292,7 +296,7 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 	}
 
 	card->ext_csd.rev = ext_csd[EXT_CSD_REV];
-	if (card->ext_csd.rev > 6) {
+	if (card->ext_csd.rev > 7) {
 		pr_err("%s: unrecognised EXT_CSD revision %d\n",
 			mmc_hostname(card->host), card->ext_csd.rev);
 		err = -EINVAL;
@@ -312,7 +316,14 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 
 		/* Cards with density > 2GiB are sector addressed */
 		if (card->ext_csd.sectors > (2u * 1024 * 1024 * 1024) / 512)
+#ifndef	CONFIG_VD_RELEASE
+		{
+			high_capacity=1; 
 			mmc_card_set_blockaddr(card);
+		}
+#else
+			mmc_card_set_blockaddr(card);
+#endif
 	}
 
 	card->ext_csd.raw_card_type = ext_csd[EXT_CSD_CARD_TYPE];
@@ -475,6 +486,7 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 		}
 
 		/* check whether the eMMC card supports HPI */
+#if !defined(CONFIG_ARM_SDP1302_CPUFREQ)
 		if (ext_csd[EXT_CSD_HPI_FEATURES] & 0x1) {
 			card->ext_csd.hpi = 1;
 			if (ext_csd[EXT_CSD_HPI_FEATURES] & 0x2)
@@ -488,7 +500,7 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 			card->ext_csd.out_of_int_time =
 				ext_csd[EXT_CSD_OUT_OF_INTERRUPT_TIME] * 10;
 		}
-
+#endif
 		card->ext_csd.rel_param = ext_csd[EXT_CSD_WR_REL_PARAM];
 		card->ext_csd.rst_n_function = ext_csd[EXT_CSD_RST_N_FUNCTION];
 
@@ -958,6 +970,21 @@ static int mmc_init_card(struct mmc_host *host, u32 ocr,
 		/* Erase size depends on CSD and Extended CSD */
 		mmc_set_erase_size(card);
 	}
+
+#ifdef CONFIG_SHUTDOWN
+#ifdef CONFIG_MMC_POWER_ON_WRITE_PROTECTION
+	/*
+	 * Power on write protection for boot partition.
+	 */
+	err = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
+			 EXT_CSD_BOOT_WP, 0x1,
+			 card->ext_csd.generic_cmd6_time);
+	if (err) {
+		pr_warning("%s: set power on write protection failed\n",
+				   mmc_hostname(card->host));
+	}
+#endif
+#endif
 
 	/*
 	 * If enhanced_area_en is TRUE, host needs to enable ERASE_GRP_DEF

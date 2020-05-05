@@ -24,8 +24,11 @@
 #include <linux/pci.h>
 #include <linux/slab.h>
 #include <linux/dmapool.h>
-
 #include "xhci.h"
+
+#if (defined CONFIG_ARCH_SDP) && (defined DWC_BULK_WA)
+extern int is_apply_dwc_bulk_wa(u32 speed, struct usb_endpoint_descriptor *desc);
+#endif
 
 /*
  * Allocates a generic ring segment from the ring pool, sets the dma address,
@@ -1410,8 +1413,19 @@ int xhci_endpoint_init(struct xhci_hcd *xhci,
 
 	type = usb_endpoint_type(&ep->desc);
 	/* Set up the endpoint ring */
-	virt_dev->eps[ep_index].new_ring =
-		xhci_ring_alloc(xhci, 2, 1, type, mem_flags);
+#if (defined CONFIG_ARCH_SDP) && (defined DWC_BULK_WA) 
+	if ( is_apply_dwc_bulk_wa(udev->speed, &ep->desc) && 
+			usb_endpoint_xfer_bulk(&ep->desc)){
+		virt_dev->eps[ep_index].new_ring = 
+			xhci_ring_alloc(xhci, 256*(DWC_BULK_NOPS+1), 1, type, mem_flags);		
+	}
+	else
+#endif	
+	{
+		virt_dev->eps[ep_index].new_ring =
+			xhci_ring_alloc(xhci, 2, 1, type, mem_flags);
+	}
+
 	if (!virt_dev->eps[ep_index].new_ring) {
 		/* Attempt to use the ring cache */
 		if (virt_dev->num_rings_cached == 0)

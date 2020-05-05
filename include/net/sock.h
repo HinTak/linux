@@ -958,6 +958,9 @@ struct proto {
 		struct inet_hashinfo	*hashinfo;
 		struct udp_table	*udp_table;
 		struct raw_hashinfo	*raw_hash;
+#ifdef CONFIG_PACKET_PORT_SUPPORT
+		struct packet_table	*pkt_table;
+#endif
 	} h;
 
 	struct module		*owner;

@@ -66,6 +66,10 @@
 
 #include <trace/events/sched.h>
 
+#ifdef CONFIG_PAX_RANDUSTACK
+#include <linux/random.h>
+#endif
+
 int suid_dumpable = 0;
 
 static LIST_HEAD(formats);
@@ -276,6 +280,12 @@ static int __bprm_mm_init(struct linux_binprm *bprm)
 	mm->stack_vm = mm->total_vm = 1;
 	up_write(&mm->mmap_sem);
 	bprm->p = vma->vm_end - sizeof(void *);
+
+#ifdef CONFIG_PAX_RANDUSTACK
+	if (randomize_va_space)
+		bprm->p ^= (get_random_int() & ~15) & ~PAGE_MASK;
+#endif
+
 	return 0;
 err:
 	up_write(&mm->mmap_sem);
@@ -689,6 +699,16 @@ int setup_arg_pages(struct linux_binprm *bprm,
 	down_write(&mm->mmap_sem);
 	vm_flags = VM_STACK_FLAGS;
 
+#if defined(CONFIG_PAX_PAGEEXEC)
+	if (mm->pax_flags & (MF_PAX_PAGEEXEC)) {
+		vm_flags &= ~VM_EXEC;
+#ifdef CONFIG_PAX_MPROTECT
+		if (mm->pax_flags & MF_PAX_MPROTECT)
+			vm_flags &= ~VM_MAYEXEC;
+#endif
+	}
+#endif
+
 	/*
 	 * Adjust stack execute permissions; explicitly enable for
 	 * EXSTACK_ENABLE_X, disable for EXSTACK_DISABLE_X and leave alone
@@ -1042,6 +1062,12 @@ void set_task_comm(struct task_struct *tsk, char *buf)
 	memset(tsk->comm, 0, TASK_COMM_LEN);
 	wmb();
 	strlcpy(tsk->comm, buf, sizeof(tsk->comm));
+#ifdef CONFIG_PTMU_TRACE
+	if (tsk->pp_usage) {
+		strlcpy(tsk->pp_usage->comm, tsk->comm, sizeof(tsk->comm));
+		set_usage_trace_enable(tsk->pp_usage);
+	}
+#endif
 	task_unlock(tsk);
 	perf_event_comm(tsk);
 }
@@ -1450,6 +1476,17 @@ int search_binary_handler(struct linux_binprm *bprm)
 
 EXPORT_SYMBOL(search_binary_handler);
 
+
+#ifdef CONFIG_USE_ARS
+///////////////////////////////// MODIFY BY LKH (From here)  ////////////////////////////////////////
+bool exist_exec_verify_module = false;
+int (*verify_exec)(char*, struct user_arg_ptr , struct user_arg_ptr, rwlock_t * const tasklist_lock) = NULL;
+
+EXPORT_SYMBOL(exist_exec_verify_module);
+EXPORT_SYMBOL(verify_exec);
+//////////////////////////////////// (End) ///////////////////////////////////////////////////////
+#endif // CONFIG_USE_ARS
+
 /*
  * sys_execve() executes a new program.
  */
@@ -1463,6 +1500,23 @@ static int do_execve_common(const char *filename,
 	bool clear_in_exec;
 	int retval;
 	const struct cred *cred = current_cred();
+
+#ifdef CONFIG_USE_ARS
+	if(__builtin_expect(exist_exec_verify_module, true))
+	{
+		//printk("Exec Verify Module is exist\n");
+		if(verify_exec != NULL)
+		{
+			retval = verify_exec(filename, argv, envp, &tasklist_lock);  
+			if(retval)
+				goto out_ret;
+		}
+	}
+	else
+	{
+		//printk("Exec Verify Module is *NOT* exist\n");
+	}
+#endif // CONFIG_USE_ARS
 
 	/*
 	 * We move the actual failure in case of RLIMIT_NPROC excess from
@@ -1698,5 +1752,13 @@ asmlinkage long compat_sys_execve(const char __user * filename,
 		putname(path);
 	}
 	return error;
+}
+#endif
+
+
+#if defined(CONFIG_PAX_PAGEEXEC)
+void pax_report_fault()
+{
+	printk(KERN_ERR"PAX: terminating task: due to executable code in heap, stack and data area\n");
 }
 #endif

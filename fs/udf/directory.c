@@ -18,6 +18,8 @@
 #include <linux/string.h>
 #include <linux/buffer_head.h>
 
+void udf_release_data(struct buffer_head *bh);
+
 struct fileIdentDesc *udf_fileident_read(struct inode *dir, loff_t *nf_pos,
 					 struct udf_fileident_bh *fibh,
 					 struct fileIdentDesc *cfi,
@@ -67,7 +69,7 @@ struct fileIdentDesc *udf_fileident_read(struct inode *dir, loff_t *nf_pos,
 		else
 			epos->offset = lextoffset;
 
-		brelse(fibh->sbh);
+		udf_release_data(fibh->sbh);
 		fibh->sbh = fibh->ebh = udf_tread(dir->i_sb, block);
 		if (!fibh->sbh)
 			return NULL;
@@ -85,16 +87,16 @@ struct fileIdentDesc *udf_fileident_read(struct inode *dir, loff_t *nf_pos,
 						!buffer_locked(tmp))
 					bha[num++] = tmp;
 				else
-					brelse(tmp);
+					udf_release_data(tmp);
 			}
 			if (num) {
 				ll_rw_block(READA, num, bha);
 				for (i = 0; i < num; i++)
-					brelse(bha[i]);
+					udf_release_data(bha[i]);
 			}
 		}
 	} else if (fibh->sbh != fibh->ebh) {
-		brelse(fibh->sbh);
+		udf_release_data(fibh->sbh);
 		fibh->sbh = fibh->ebh;
 	}
 

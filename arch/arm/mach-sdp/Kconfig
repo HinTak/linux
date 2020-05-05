@@ -1,0 +1,136 @@
+######################################################################
+#
+# 	Kconfig for machine about Costom Consumer Electronics 
+# 	
+# 	created by tukho.kim@samsung.com
+#
+######################################################################
+#
+# 5 Feb 2013	support linux-3.8.x for golf-s
+# May,31,2010	created by tukho.kim
+# 
+
+if ARCH_SDP
+
+# machine types
+choice
+	prompt "SDP Machine type"
+	default MACH_FOXAP
+
+config MACH_SDP_DT
+	bool "Samsung DTV Machine using device tree"
+	select USE_OF
+	select ARM_GIC
+	select GIC_NON_BANKED
+	select USB_ARCH_HAS_EHCI if USB_SUPPORT
+	select USB_ARCH_HAS_OHCI if USB_SUPPORT
+	select USB_ARCH_HAS_XHCI if USB_SUPPORT
+	select PINCTRL
+	select PINCTRL_SDP
+	select ARCH_REQUIRE_GPIOLIB
+	select ARCH_DMA_ADDR_T_64BIT if ARM_LPAE
+	select ARM_HAS_SG_CHAIN
+ 	help
+	  Say 'Y' here if you want your kernel to support the
+	  Samsung DTV using flattened device tree.
+
+config MACH_FOXAP
+	bool "Fox-AP platform, 2012"
+	select ARCH_SDP1202
+	select ARM_PATCH_PHYS_VIRT
+	select ARCH_HAS_HOLES_MEMORYMODEL
+	help
+	  This enables support for Fox-P Samsung VD BD board.
+
+config MACH_FOXB
+	bool "Fox-B platform, 2012"
+	select ARCH_SDP1207
+	select ARM_PATCH_PHYS_VIRT
+	select ARCH_HAS_HOLES_MEMORYMODEL
+	help
+	  This enables support for Fox-B Samsung VD BD board.
+
+config MACH_ECHOP
+	bool "Echo-P platform, 2011"
+	select ARCH_SDP1106
+	select ARM_PATCH_PHYS_VIRT
+	select ARCH_HAS_HOLES_MEMORYMODEL
+	help
+	  This enables support for Echo-P Samsung VD DTV board.
+
+endchoice
+
+if MACH_FOXB
+source "arch/arm/mach-sdp/platform/foxb/Kconfig"
+endif
+
+if MACH_ECHOP
+source "arch/arm/mach-sdp/platform/echop/Kconfig"
+endif
+
+# SoC types
+config ARCH_SDP1202
+	bool
+	select ARCH_SDP_SOC_CA15
+	select HAVE_SMP
+	select LOCAL_TIMERS if SMP
+	select SDP12XX_TIMER
+	select ARM_GIC
+	select GIC_NON_BANKED
+	select ARCH_HAS_CPUFREQ
+	select CPU_FREQ
+
+config ARCH_SDP1207
+	bool
+	select ARCH_SDP_SOC_CA9
+	select HAVE_SMP
+	select LOCAL_TIMERS
+	select SDP12XX_TIMER
+	select ARM_GIC
+	select ARM_ERRATA_754322
+	select ARM_ERRATA_764369
+	select SDP_MAC_NORMAL_DESC if SDP_MAC
+
+config ARCH_SDP1106
+	bool
+	select ARCH_SDP_SOC_CA9
+	select HAVE_SMP
+	select LOCAL_TIMERS if SMP
+	select SDP12XX_TIMER
+	select ARM_GIC
+
+config ARCH_SDP1202_EVAL
+        bool "SDP1202 Eval board"
+        depends on ARCH_SDP1202
+
+config ARM_TRUSTZONE
+	bool "Support TrustZone-enabled Trusted Execution Environment"
+	default n
+	help
+	  Select if you want a kernel to be executed at non-secure world.
+	  This option should be used with related secure bootloader and
+	  TrustZone software.
+
+	  If you don't know about TrustZone, say 'N'.
+
+
+# ARM Core type
+config ARCH_SDP_SOC_CA9
+	bool
+
+config ARCH_SDP_SOC_CA15
+	bool
+
+config ARCH_SDP_PL310
+	bool "Enables PL310 L2 cache controller"
+	depends on ARCH_SDP_SOC_CA9
+	default y
+	select CACHE_L2X0
+	select CACHE_PL310
+
+menu "Select ARM Errata Patch"
+
+endmenu
+
+endif # ARCH_SDP	
+

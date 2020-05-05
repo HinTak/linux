@@ -1,0 +1,134 @@
+/*
+ * Copyright (C) 2013 Samsung Electronics Co.Ltd
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
+/dts-v1/;
+/include/ "sdp1307.dtsi"
+
+/ {
+	model = "Samsung STB based on SDP1307 SoC - Eval Board";
+	compatible = "samsung,stb", "samsung,sdp1307";
+
+	memory {
+		device_type = "memory";
+		reg =  <0x80000000 0x20000000>, <0xc0000000 0x10000000>, <0xe0000000 0x10000000>;
+	};
+
+	chosen {
+		bootargs = "console=ttyS2,115200N8 root=/dev/mmcblk0p3 rootfstype=squashfs rootwait earlyprintk sdp_sparsemem";
+		//bootargs = "console=ttyS2,115200N8 initrd=0x80800000,8M root=/dev/ram0 rootfstype=squashfs rw rootwait earlyprintk user_debug=31 sdp_sparsemem";
+	};
+
+	fixed-rate-clocks {
+		fin {
+			compatible = "samsung,sdp-clock-fin";
+			clock-frequency = <24000000>;
+		};
+	};
+
+	serial@18090A00 {
+		status = "okay";
+	};
+
+	serial@18090A40 {
+		status = "okay";
+	};
+
+	serial@18090A80 {
+		status = "okay";
+	};
+
+	i2c@10090100 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x100901F4>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+/*
+	dummy_panel {
+		compatible = "dummy_panel";
+
+		display-timings {
+			native-mode = <&timing0>;
+
+			timing0: timing-0 {
+				 clock-frequency = <0>;
+				 hactive = <1920>;
+				 vactive = <1080>;
+				 hfront-porch = <0>;
+				 hback-porch = <0>;
+				 hsync-len = <0>;
+				 vfront-porch = <0>;
+				 vback-porch = <0>;
+				 vsync-len = <0>;
+			};
+		};
+	};
+*/
+
+	ehci@0x18800000 {
+		status = "disabled";
+		samsung,sw-reset = <0x18090000 0x8F4 0x1000>;
+	//	samsung,ehci-gpr_reg = <0x18850000 0x14 0x400>;
+	//	samsung,ehci-gpr_reg1 = <0x100FC000 0x18 0x5000>;//------
+		samsung,sw-reset-release = <0x18090000 0x8F4 0x1000>;
+		samsung,vbus-enable = <0x18090000 0xC90 0x33300>;
+	};
+
+	ehci@0x18810000 {
+		status = "disabled";
+		samsung,sw-reset = <0x18090000 0x8F4 0x2000>;
+	//	samsung,ehci-gpr_reg = <0x18850000 0x14 0x200>;
+	//	samsung,ehci-gpr_reg1 = <0x100FC000 0x18 0x5000>;
+		samsung,sw-reset-release = <0x18090000 0x8F4 0x2000>;
+		samsung,vbus-enable = <0x18090000 0xC94 0x1C>;
+	};
+	
+	ehci@0x180E0000 {
+		status = "disabled";
+		samsung,sw-reset = <0x18090000 0x8F4 0x4000>;
+	//	samsung,ehci-gpr_reg = <0x18850000 0x14 0x100>;
+	//	samsung,ehci-gpr_reg1 = <0x100FC000 0x18 0x5000>;
+	//	samsung,ehci-link-set = <0x100C0000 0x08 0x1e000>;
+		samsung,sw-reset-release = <0x18090000 0x8F4 0x4000>;
+	};
+
+	sata@18870000 {
+		status = "okay";
+	};
+
+	sata@18880000 {
+		status = "okay";
+	};
+
+	tmu@18090CDC {
+//		status = "okay";
+		
+		sensor_id = <0>;
+
+		start_zero_throttle	= <0>;
+		stop_zero_throttle	= <5>;
+		stop_1st_throttle	= <102>;
+		start_1st_throttle	= <110>;
+		stop_2nd_throttle	= <112>;
+		start_2nd_throttle	= <118>;
+		stop_3rd_throttle	= <120>;
+		start_3rd_throttle	= <125>;
+
+		cpu_limit_1st_throttle	= <800000>;
+		cpu_limit_2nd_throttle	= <600000>;
+		cpu_limit_3rd_throttle	= <100000>;
+
+		gpu_limit_1st_throttle	= <200000>;
+		gpu_limit_2nd_throttle	= <200000>;
+		gpu_limit_3rd_throttle	= <50000>;
+
+		log_file_path = "/rwarea/ThermalThrottle.txt";
+	};
+};

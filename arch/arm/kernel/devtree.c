@@ -26,6 +26,9 @@
 #include <asm/mach/arch.h>
 #include <asm/mach-types.h>
 
+#ifdef CONFIG_NVT_USE_UIMAGE_DTB
+extern void __init nvt_fetch_tags(phys_addr_t __atags_pointer);
+#endif
 void __init early_init_dt_add_memory_arch(u64 base, u64 size)
 {
 	arm_add_memory(base, size);
@@ -223,9 +226,12 @@ struct machine_desc * __init setup_machine_fdt(unsigned int dt_phys)
 	if (!model)
 		model = "<unknown>";
 	pr_info("Machine: %s, model: %s\n", mdesc_best->name, model);
-
+#ifdef CONFIG_NVT_USE_UIMAGE_DTB
+  	nvt_fetch_tags(dt_phys-0x1000);
+#else
 	/* Retrieve various information from the /chosen node */
 	of_scan_flat_dt(early_init_dt_scan_chosen, boot_command_line);
+#endif	
 	/* Initialize {size,address}-cells info */
 	of_scan_flat_dt(early_init_dt_scan_root, NULL);
 	/* Setup memory, calling early_init_dt_add_memory_arch */

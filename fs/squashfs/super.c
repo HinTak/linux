@@ -268,7 +268,9 @@ allocate_id_index_table:
 	}
 	next_table = le64_to_cpu(msblk->inode_lookup_table[0]);
 
+#ifdef CONFIG_ENABLE_SQUASHFS_EXPORT
 	sb->s_export_op = &squashfs_export_ops;
+#endif
 
 handle_fragments:
 	fragments = le32_to_cpu(sblk->fragments);

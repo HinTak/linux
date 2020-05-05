@@ -200,6 +200,54 @@ u32 __pure __crc32c_le(u32 crc, unsigned char const *p, size_t len)
 EXPORT_SYMBOL(crc32_le);
 EXPORT_SYMBOL(__crc32c_le);
 
+/* VDLinux, based VDLP (Mstar) default patch No.10,
+   ultimate coredump v0.3, SP Team 2009-06-08 */
+unsigned long __pure gzip_crc32_le(unsigned char const *p, unsigned long len);
+
+unsigned long __pure gzip_crc32_le(unsigned char const *p, unsigned long len)
+{
+	register unsigned long c = 0xffffffffL;              /* temporary variable */
+#if CRC_LE_BITS == 32
+	const u32 *tab = (const u32 *)crc32table_le;
+	static unsigned long crc = (unsigned long)0xffffffffL;     /* shift register contents */
+	register unsigned long d;                   /* temporary variable */
+
+	if (p != NULL) {
+		c = crc;
+		if (len) do {
+			d = ((int)c ^ (*p++)) & 0xff;
+			c = le32_to_cpu(tab[d]) ^ (c >> 8);
+			} while (--len);
+	}
+	crc = c;
+#else
+	printk(KERN_ALERT " ##### CRC_LE_BITS is not set 32, occurred crc check error : %s, %d\n", __func__, __LINE__);
+#endif
+	return c ^ 0xffffffffL;            /* (instead of ~c for 64-bit machines) */
+}
+
+#ifdef CONFIG_MINIMAL_CORE_COMP
+unsigned long updcrc(unsigned long *seed_crc, unsigned char const *s,
+					unsigned long n)
+{
+	unsigned long c;         /* temporary variable */
+	const unsigned long *crc_32_tab = (const unsigned long *)crc32table_le;
+
+	if (s == NULL) {
+		c = 0xffffffffL;
+	} else {
+		c = *seed_crc;
+		if (n)
+			do {
+				c = crc_32_tab[((int)c ^ (*s++)) & 0xff] ^ (c >> 8);
+			} while (--n);
+	}
+	*seed_crc = c;
+	/* (instead of ~c for 64-bit machines) */
+	return c ^ 0xffffffffL;
+}
+#endif
+
 /**
  * crc32_be() - Calculate bitwise big-endian Ethernet AUTODIN II CRC32
  * @crc: seed value for computation.  ~0 for Ethernet, sometimes 0 for

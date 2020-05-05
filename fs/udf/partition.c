@@ -27,6 +27,8 @@
 #include <linux/buffer_head.h>
 #include <linux/mutex.h>
 
+void udf_release_data(struct buffer_head *bh);
+
 uint32_t udf_get_pblock(struct super_block *sb, uint32_t block,
 			uint16_t partition, uint32_t offset)
 {
@@ -91,7 +93,7 @@ uint32_t udf_get_pblock_virt15(struct super_block *sb, uint32_t block,
 
 	loc = le32_to_cpu(((__le32 *)bh->b_data)[index]);
 
-	brelse(bh);
+	udf_release_data(bh);
 
 translate:
 	if (iinfo->i_location.partitionReferenceNum == partition) {
@@ -299,7 +301,7 @@ static uint32_t udf_try_read_meta(struct inode *inode, uint32_t block,
 			map->s_partition_num, ext_offset + offset);
 	}
 
-	brelse(epos.bh);
+	udf_release_data(epos.bh);
 	return phyblock;
 }
 

@@ -32,6 +32,16 @@ static inline bool freezing(struct task_struct *p)
 	return freezing_slow_path(p);
 }
 
+/*
+ * Check the status of system_freezing_cnt
+ */
+static inline bool check_freezing(void)
+{
+	if (likely(atomic_read(&system_freezing_cnt) == 0))
+		return false;
+	return true;
+}
+
 /* Takes and releases task alloc lock using task_lock() */
 extern void __thaw_task(struct task_struct *t);
 

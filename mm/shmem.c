@@ -1303,6 +1303,8 @@ static int shmem_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	if (error)
 		return ((error == -ENOMEM) ? VM_FAULT_OOM : VM_FAULT_SIGBUS);
 
+	inc_ptmu_counter(current->mm, vma, vmf->page, vmf->pgoff, 1);
+
 	if (ret & VM_FAULT_MAJOR) {
 		count_vm_event(PGMAJFAULT);
 		mem_cgroup_count_vm_event(vma->vm_mm, PGMAJFAULT);
@@ -2527,10 +2529,14 @@ out:
 static int shmem_show_options(struct seq_file *seq, struct dentry *root)
 {
 	struct shmem_sb_info *sbinfo = SHMEM_SB(root->d_sb);
-
 	if (sbinfo->max_blocks != shmem_default_max_blocks())
 		seq_printf(seq, ",size=%luk",
 			sbinfo->max_blocks << (PAGE_CACHE_SHIFT - 10));
+#ifdef CONFIG_VD_MEMINFO
+        seq_printf(seq, ",used_memory=%lldk",
+               (percpu_counter_read(&sbinfo->used_blocks)) << (PAGE_CACHE_SHIFT - 10));
+#endif
+
 	if (sbinfo->max_inodes != shmem_default_max_inodes())
 		seq_printf(seq, ",nr_inodes=%lu", sbinfo->max_inodes);
 	if (sbinfo->mode != (S_IRWXUGO | S_ISVTX))
@@ -2934,6 +2940,14 @@ put_memory:
 	return ERR_PTR(error);
 }
 EXPORT_SYMBOL_GPL(shmem_file_setup);
+
+void vdshmem_set_file(struct vm_area_struct *vma, struct file *file)
+{
+	if (vma->vm_file)
+		fput(vma->vm_file);
+	vma->vm_file = file;
+	vma->vm_ops = &shmem_vm_ops;
+}
 
 /**
  * shmem_zero_setup - setup a shared anonymous mapping

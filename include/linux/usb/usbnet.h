@@ -32,6 +32,9 @@ struct usbnet {
 	void			*driver_priv;
 	wait_queue_head_t	*wait;
 	struct mutex		phy_mutex;
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
+	u32			intf_id;
+#endif	// CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_COMMON
 	unsigned char		suspend_count;
 	unsigned char		pkt_cnt, pkt_err;
 

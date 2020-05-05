@@ -300,6 +300,10 @@ static int irq_expand_nr_irqs(unsigned int nr)
 
 #endif /* !CONFIG_SPARSE_IRQ */
 
+#ifdef CONFIG_IRQ_TIME
+struct irq_desc_debug irq_desc_last[4];
+#endif
+
 /**
  * generic_handle_irq - Invoke the handler for a particular irq
  * @irq:	The irq number to handle

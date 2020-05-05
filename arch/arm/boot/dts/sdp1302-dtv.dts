@@ -1,0 +1,275 @@
+/*
+ * Copyright (C) 2013 Samsung Electronics Co.Ltd
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
+/dts-v1/;
+/include/ "sdp1302.dtsi"
+
+/ {
+	model = "Samsung DTV based on SDP1302 SoC";
+	compatible = "samsung,dtv", "samsung,sdp1302";
+
+	memory {
+		device_type = "memory";
+		reg =  <0x80000000 0xB800000>, <0xc0000000 0x19000000>;
+	};
+
+	chosen {
+		bootargs = "console=ttyS1,115200N8 root=/dev/mmcblk0p7 rootfstype=squashfs rootwait earlyprintk no_console_suspend SELP_ENABLE=20102011 sdp_sparsemem vmalloc=350M";
+	};
+
+	fixed-rate-clocks {
+		fin {
+			compatible = "samsung,sdp-clock-fin";
+			clock-frequency = <24576000>;
+		};
+		fin-lvds {
+			compatible = "samsung,sdp-clock-fin-lvds";
+			clock-frequency = <27000000>;
+		};
+	};
+
+	serial@10090A00 {
+		status = "okay";
+	};
+
+	serial@10090A40 {
+		status = "okay";
+	};
+
+	serial@10090A80 {
+		status = "okay";
+	};
+
+	serial@10090AC0 {
+		status = "okay";
+	};
+
+	ethernet@100B0000 {
+	};
+
+	mmc {
+		hs200;/* enable HS200 */
+	};
+
+	spi: ssp@0x10090200 {
+		status = "okay";
+
+		flash: w25x40@0 {
+			#address-cells = <1>;
+			#size-cells = <1>;
+			compatible = "winbond,w25x40";
+			spi-max-frequency = <10000000>;
+			reg = <0>;
+
+			partition@0 {
+				label = "ucode";
+				reg = <0x0 0x80000>;
+			};
+		};
+	};
+
+	i2c@10090100 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x100901F4>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+	i2c@10090120 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x100901F4>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+	i2c@10090140 { 
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x100901F4>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+	i2c@10090160 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x100901F4>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+	i2c@10090180 {
+		status = "okay";
+		samsung,i2c-sda-delay = <2>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x100901F4>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+	i2c@100901A0 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x100901F4>;
+		samsung,i2c-cpu-affinity = <3>;
+
+		tps56520@36 {
+			compatible = "ti,tps56520";
+			reg = <0x36>;
+
+			regulator-name = "CPU_PW";
+			regulator-min-microvolt = <720000>;
+			regulator-max-microvolt = <1480000>;
+			regulator-always-on;
+			regulator-boot-on;
+
+			default_volt = <1350000>;
+		};
+	};
+
+	i2c@100901C0 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x100901F4>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+
+	i2c@100901E0 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x100901F4>;
+		samsung,i2c-cpu-affinity = <3>;
+
+	};
+
+	i2c@10090300 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x100903F4>;
+		samsung,i2c-cpu-affinity = <3>;
+	};
+	
+	i2c@10090320 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x100903F4>;
+		samsung,i2c-cpu-affinity = <3>;
+
+	};
+	
+	i2c@10090340 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x100903F4>;
+		samsung,i2c-cpu-affinity = <3>;
+
+		tps56520@34 {
+			compatible = "ti,tps56520";
+			reg = <0x34>;
+
+			regulator-name = "CORE_PW";
+			regulator-min-microvolt = <720000>;
+			regulator-max-microvolt = <1480000>;
+			regulator-always-on;
+			regulator-boot-on;
+
+			default_volt = <1300000>;
+		};
+	};
+
+/*
+	i2c-gpio-0 {
+		compatible = "i2c-gpio";
+		gpios = <&gpio1 2 0>, <&gpio1 1 0>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		panel@76 {
+			compatible = "samsung,foxft1-tcon";
+			reg = <0x76>;
+		};
+	};
+*/
+
+	dummy_panel {
+		compatible = "dummy_panel";
+
+		display-timings {
+			native-mode = <&timing0>;
+
+			timing0: timing-0 {
+				 clock-frequency = <0>;
+				 hactive = <1920>;
+				 vactive = <1080>;
+				 hfront-porch = <0>;
+				 hback-porch = <0>;
+				 hsync-len = <0>;
+				 vfront-porch = <0>;
+				 vback-porch = <0>;
+				 vsync-len = <0>;
+			};
+		};
+	};
+
+	ehci@100D0000 {
+		status = "okay";
+		samsung,synopsys-portreset-bug;
+		samsung,sw-reset = <0x10090000 0x958 0x100000>;
+		samsung,ehci-link-set = <0x100C0000 0x00 0x1e000>;
+		samsung,ehci-24.576Mhz = <0x10090000 0x930 0x1000000>;
+		samsung,vbus-enable = <0x10090000 0xD18 0x00000003 0x01>;
+		samsung,hsic-reset = <0x10090000 0xDA8 0x00000030 0x02>;//ok
+		hsic-i2c-ch = <8 10>;
+	};
+
+	ehci@100E0000 {
+		status = "okay";
+		samsung,synopsys-portreset-bug;
+		samsung,sw-reset = <0x10090000 0x958 0x200000>;
+		samsung,ehci-link-set = <0x100C0000 0x08 0x1e000>;
+	//	samsung,vbus-enable = <0x10090000 0xDA8 0x00000030>;
+		samsung,hsic-reset = <0x10090000 0xDA8 0x00000300 0x04>;
+		hsic-i2c-ch = <8 10>;
+	};
+	
+	xhci@10100000 {
+		status = "okay";
+	};
+
+	tmu@10090CDC {
+		status = "okay";
+		
+		sensor_id = <0>;
+
+		start_zero_throttle	= <40>;
+		stop_zero_throttle	= <45>;
+		stop_1st_throttle	= <102>;
+		start_1st_throttle	= <110>;
+		stop_2nd_throttle	= <112>;
+		start_2nd_throttle	= <118>;
+		stop_3rd_throttle	= <120>;
+		start_3rd_throttle	= <125>;
+
+		cpu_limit_1st_throttle	= <700000>;
+		cpu_limit_2nd_throttle	= <400000>;
+		cpu_limit_3rd_throttle	= <100000>;
+
+		gpu_limit_1st_throttle	= <250000>;
+		gpu_limit_2nd_throttle	= <200000>;
+		gpu_limit_3rd_throttle	= <50000>;
+
+		log_file_path = "/mtd_rwarea/ThermalThrottle.txt";
+	};
+};

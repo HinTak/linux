@@ -2563,6 +2563,8 @@ source "fs/Kconfig"
 
 source "arch/mips/Kconfig.debug"
 
+source "arch/Kconfig.VDLP"
+
 source "security/Kconfig"
 
 source "crypto/Kconfig"

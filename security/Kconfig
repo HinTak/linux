@@ -4,7 +4,213 @@
 
 menu "Security options"
 
+config PAX
+	bool "PAX Security Features"
+	depends on ARM
+	help
+	  This allows you to enable various PaX features.  PaX adds
+	  intrusion prevention mechanisms to the kernel that reduce
+	  the risks posed by exploitable memory corruption bugs.
+	  Features like ASLR and DEP.
+
+config PAX_ASLR
+	bool "Address Space Layout Randomization"
+	depends on PAX
+	help
+	  Many if not most exploit techniques rely on the knowledge of
+	  certain addresses in the attacked program.  The following options
+	  will allow the kernel to apply a certain amount of randomization
+	  to specific parts of the program thereby forcing an attacker to
+	  guess them in most cases.  Any failed guess will most likely crash
+	  the attacked program which allows the kernel to detect such attempts
+	  and react on them.  PaX itself provides no reaction mechanisms,
+	  instead it is strongly encouraged that you make use of Nergal's
+	  segvguard (ftp://ftp.pl.openwall.com/misc/segvguard/) or grsecurity's
+	  (http://www.grsecurity.net/) built-in crash detection features or
+	  develop one yourself.
+
+	  By saying Y here you can choose to randomize the following areas:
+	   - top of the task's kernel stack
+	   - top of the task's userland stack
+	   - base address for mmap() requests that do not specify one
+	     (this includes all libraries)
+	   - base address of the main executable
+
+	  It is strongly recommended to say Y here as address space layout
+	  randomization has negligible impact on performance yet it provides
+	  a very effective protection.
+
+	  NOTE: you can use the 'chpax' or 'paxctl' utilities to control
+	  this feature on a per file basis.
+
+config PAX_RANDUSTACK
+	bool "Randomize user stack base"
+	depends on PAX_ASLR
+	help
+	  By saying Y here the kernel will randomize every task's userland
+	  stack.  The randomization is done in two steps where the second
+	  one may apply a big amount of shift to the top of the stack and
+	  cause problems for programs that want to use lots of memory (more
+	  than 2.5 GB if SEGMEXEC is not active, or 1.25 GB when it is).
+	  For this reason the second step can be controlled by 'chpax' or
+	  'paxctl' on a per file basis.
+
+config PAX_RANDMMAP
+	bool "Randomize mmap() base"
+	depends on PAX_ASLR
+	help
+	  By saying Y here the kernel will use a randomized base address for
+	  mmap() requests that do not specify one themselves.  As a result
+	  all dynamically loaded libraries will appear at random addresses
+	  and therefore be harder to exploit by a technique where an attacker
+	  attempts to execute library code for his purposes (e.g. spawn a
+	  shell from an exploited program that is running at an elevated
+	  privilege level).
+
+	  Furthermore, if a program is relinked as a dynamic ELF file, its
+	  base address will be randomized as well, completing the full
+	  randomization of the address space layout.  Attacking such programs
+	  becomes a guess game.
+
+config PAX_NOEXEC
+	bool "Enforce non-executable pages"
+	depends on PAX
+	help
+	  By design some architectures do not allow for protecting memory
+	  pages against execution or even if they do, Linux does not make
+	  use of this feature.  In practice this means that if a page is
+	  readable (such as the stack or heap) it is also executable.
+
+	  There is a well known exploit technique that makes use of this
+	  fact and a common programming mistake where an attacker can
+	  introduce code of his choice somewhere in the attacked program's
+	  memory (typically the stack or the heap) and then execute it.
+
+	  If the attacked program was running with different (typically
+	  higher) privileges than that of the attacker, then he can elevate
+	  his own privilege level (e.g. get a root shell, write to files for
+	  which he does not have write access to, etc).
+
+	  Enabling this option will let you choose from various features
+	  that prevent the injection and execution of 'foreign' code in
+	  a program.
+
+	  This will also break programs that rely on the old behaviour and
+	  expect that dynamically allocated memory via the malloc() family
+	  of functions is executable (which it is not).  Notable examples
+	  are the XFree86 4.x server, the java runtime and wine.
+
+config PAX_PAGEEXEC
+	bool "Paging based non-executable pages"
+	depends on PAX_NOEXEC
+	help
+	  This implementation is based on the paging feature of the CPU.
+	  On i386 without hardware non-executable bit support there is a
+	  variable but usually low performance impact, however on Intel's
+	  P4 core based CPUs it is very high so you should not enable this
+	  for kernels meant to be used on such CPUs.
+
+	  On alpha, avr32, ia64, parisc, sparc, sparc64, x86_64 and i386
+	  with hardware non-executable bit support there is no performance
+	  impact, on ppc the impact is negligible.
+
+	  Note that several architectures require various emulations due to
+	  badly designed userland ABIs, this will cause a performance impact
+	  but will disappear as soon as userland is fixed. For example, ppc
+	  userland MUST have been built with secure-plt by a recent toolchain.
+
+config PAX_MPROTECT
+	bool "Restrict mprotect()"
+	depends on PAX_PAGEEXEC
+	help
+	  Enabling this option will prevent programs from
+	   - changing the executable status of memory pages that were
+	     not originally created as executable,
+	   - making read-only executable pages writable again,
+	   - creating executable pages from anonymous memory,
+	   - making read-only-after-relocations (RELRO) data pages writable again.
+
+	  You should say Y here to complete the protection provided by
+	  the enforcement of non-executable pages.
+
+	  NOTE: you can use the 'chpax' or 'paxctl' utilities to control
+	  this feature on a per file basis.
+
+config PER_PROCESS
+	bool "Allow to control per process"
+	depends on PAX
+	default n
+	help
+	 This provides a features that allows to control MPROTECT/PAGEEXEC(DEP)
+	 and ASLR featutes per process by providing a process list.
+ 	 By default ASLR and DEP will be enabled on the system. This config
+	 option allow to make a process list by two methods one is from proc
+	 interface and other is to hardcode a static list.  MPROTECT, PAGEEXEC
+	 and ASLR features for processes listed in process list can be
+	 controlled(enabled/disabled).
+
+config MPROTECT_PERPROCESS
+	bool "Allow to control MPROTECT/PAGEEXEC per process"
+	depends on PER_PROCESS && PAX_MPROTECT && PAX_PAGEEXEC
+	default n
+	help
+	  This features allows to control MPROTECT/PAGEEXEC per process. By default
+	  it is set to n. When selected it will not Restrict MPROTECT and
+	  PAGEEXEC feature for processes listed in proc interface named
+	  /proc/dep_aslr_disable_process_list.
+
+config ASLR_PER_PROCESS
+	bool "Enable ASLR control per process"
+	depends on PER_PROCESS
+	default n
+	help
+	  This feature allows us to control ASLR on per process basis. By
+	  default it is set to n, that means ALSR will be enabled for entire
+	  system. By setting it to y makes ASLR disabled for the processes
+	  having entry in proc interface name /proc/dep_alsr_process_list.
+
+config REGISTER_PROCESSLIST_BY_PROC
+	bool "Enable the proc interface for registering process list"
+	depends on PER_PROCESS
+	default n
+	help
+	  This feature allows us to control ASLR on per process basis. By
+	  default it is set to n, that means ALSR will be enabled for entire
+	  system. By setting it to y makes ASLR disabled for the processes
+	  having entry in proc interface name /proc/dep_alsr_process_list.
+
+
 source security/keys/Kconfig
+
+config SKIP_DAC_CAP_PERMISSION
+	bool "Enable SKIP DAC/Capability Permission"
+	default n
+	help
+	  This option provides support to skip when the error
+	  (permission denied, operation permitted) occur.
+          If you want to check detail information please on
+          this configuration of DAC_CAP_ERROR_LOG_MSG.
+
+	  If you are unsure how to answer this question, answer N.
+
+config DAC_CAP_ERROR_LOG_MSG
+	bool "Enable Log Message DAC/Capability Permission"
+	default n
+	help
+          This option provides support to log messages,
+          when the DAC/Capability error (permission denied,
+          operation permitted) occurs.
+
+	  If you are unsure how to answer this question, answer N.
+
+config SKIP_DAC_PERMISSION_NFS
+	bool "Enable DAC PERMISSION only NFS file system"
+	default n
+	help
+	  this option provide support to skip DAC Permission
+	  only for NFS file system.
+	  If you turn on this configuration , all of nfs filesystem
+	  will not check DAC Permission.
 
 config SECURITY_DMESG_RESTRICT
 	bool "Restrict unprivileged access to the kernel syslog"
@@ -29,6 +235,24 @@ config SECURITY
 	  model will be used.
 
 	  If you are unsure how to answer this question, answer N.
+
+config NETSEC_LSM_SECURITY
+	bool "Enable the LSM Functions only for NetSec Security Module"
+	depends on !SECURITY
+	default n
+	help
+	  This configration is to support LSM framework only for NetSec
+	  security module. NetSec Security module is a loadable Kernel
+	  module. This module is inserted in kernel by insmod command at DTV
+	  boot time. This module has backend implementation for two LSM
+	  hook functions (mmap_file , bprm_check_security).
+	  If we don't use LSM Security module like SMACK , SELinux, TOMOYO,
+	  and so on , then we have to disable SECURITY Config for improving
+	  performance. But disabling CONFIG_SECURITY creates problem for NetSec
+	  module as NetSec module can not register its security hooks. This
+	  configuration will provide required LSM framework to support LSM hook
+	  functions (mmap_file , bprm_check_security) for NetSec module.
+	  module infomation : AP/CNC/AP_SecurityMW/App/SMonitor/NetSec
 
 config SECURITYFS
 	bool "Enable the securityfs filesystem"

@@ -38,6 +38,7 @@ obj-$(CONFIG_PINCTRL_COH901)	+= pinctrl-coh901.o
 obj-$(CONFIG_PINCTRL_SAMSUNG)	+= pinctrl-samsung.o
 obj-$(CONFIG_PINCTRL_EXYNOS)	+= pinctrl-exynos.o
 obj-$(CONFIG_PINCTRL_EXYNOS5440)	+= pinctrl-exynos5440.o
+obj-$(CONFIG_PINCTRL_SDP)	+= pinctrl-sdp.o
 obj-$(CONFIG_PINCTRL_XWAY)	+= pinctrl-xway.o
 obj-$(CONFIG_PINCTRL_LANTIQ)	+= pinctrl-lantiq.o
 

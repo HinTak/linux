@@ -20,19 +20,51 @@
 #include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/mm.h>
+#if defined(CONFIG_MACH_NT14U) && !defined(CONFIG_VD_RELEASE)
+#include <linux/fs.h>
+#endif
 #include <linux/slab.h>
 #include <linux/export.h>
 #include <linux/suspend.h>
 #include <linux/syscore_ops.h>
 #include <linux/ftrace.h>
 #include <trace/events/power.h>
-
 #include "power.h"
+
+bool is_suspending(void);
+bool is_resuming(void);
 
 const char *const pm_states[PM_SUSPEND_MAX] = {
 	[PM_SUSPEND_STANDBY]	= "standby",
 	[PM_SUSPEND_MEM]	= "mem",
 };
+
+extern int micom_poweroff(void);
+#if defined(CONFIG_MSTAR_USB_STR_PATCH) && defined(CONFIG_MSTAR_X14)
+typedef enum
+{
+    E_STR_NONE = 0x0,
+    E_STR_IN_SUSPEND = 0x1,    
+    E_STR_IN_RESUME = 0x2,
+    E_STR_IN_WAKE = 0x4    
+}EN_STR_STATUS;
+
+static EN_STR_STATUS enStrStatus=E_STR_NONE;
+
+bool is_suspending(void)
+{
+    //printk("[USB STR Debug] enStrStatus = %d\n", enStrStatus);
+    return ((enStrStatus & E_STR_IN_SUSPEND) != 0);
+}
+EXPORT_SYMBOL_GPL(is_suspending);
+
+bool is_resuming(void)
+{
+    //printk("[USB STR Debug] enStrStatus = %d\n", enStrStatus);
+    return ((enStrStatus & E_STR_IN_RESUME) != 0);
+}
+EXPORT_SYMBOL_GPL(is_resuming);
+#endif
 
 static const struct platform_suspend_ops *suspend_ops;
 
@@ -126,6 +158,10 @@ void __attribute__ ((weak)) arch_suspend_enable_irqs(void)
 	local_irq_enable();
 }
 
+#ifdef CONFIG_PM_CRC_CHECK
+extern void save_suspend_crc(void);
+extern void compare_resume_crc(void);
+#endif
 /**
  * suspend_enter - Make the system enter the given sleep state.
  * @state: System sleep state to enter.
@@ -169,9 +205,18 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 	if (!error) {
 		*wakeup = pm_wakeup_pending();
 		if (!(suspend_test(TEST_CORE) || *wakeup)) {
+#ifdef CONFIG_PM_CRC_CHECK
+			save_suspend_crc();
+#endif
 			error = suspend_ops->enter(state);
+#ifdef CONFIG_PM_CRC_CHECK
+			compare_resume_crc();
+#endif
 			events_check_enabled = false;
 		}
+#if defined(CONFIG_MSTAR_USB_STR_PATCH) && defined(CONFIG_MSTAR_X14)
+		enStrStatus |= E_STR_IN_RESUME;
+#endif
 		syscore_resume();
 	}
 
@@ -191,6 +236,9 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 	if (suspend_ops->finish)
 		suspend_ops->finish();
 
+#if defined(CONFIG_MSTAR_USB_STR_PATCH) && defined(CONFIG_MSTAR_X14)
+	enStrStatus |= E_STR_IN_WAKE;
+#endif    
 	return error;
 }
 
@@ -218,6 +266,12 @@ int suspend_devices_and_enter(suspend_state_t state)
 	error = dpm_suspend_start(PMSG_SUSPEND);
 	if (error) {
 		printk(KERN_ERR "PM: Some devices failed to suspend\n");
+		printk(KERN_ERR "System will be down - cold power off\n");
+#if defined (CONFIG_ARCH_SDP)
+		pm_power_off();
+#else
+		micom_poweroff();
+#endif
 		goto Recover_platform;
 	}
 	suspend_test_finish("suspend devices");
@@ -278,10 +332,16 @@ static int enter_state(suspend_state_t state)
 	if (!mutex_trylock(&pm_mutex))
 		return -EBUSY;
 
+#if defined(CONFIG_MSTAR_USB_STR_PATCH) && defined(CONFIG_MSTAR_X14)
+	enStrStatus |= E_STR_IN_SUSPEND;
+#endif
+
 	printk(KERN_INFO "PM: Syncing filesystems ... ");
 	sys_sync();
 	printk("done.\n");
-
+#if defined(CONFIG_MACH_NT14U) && !defined(CONFIG_VD_RELEASE)
+	dump_proc_entries();
+#endif
 	pr_debug("PM: Preparing system for %s sleep\n", pm_states[state]);
 	error = suspend_prepare();
 	if (error)
@@ -298,7 +358,13 @@ static int enter_state(suspend_state_t state)
  Finish:
 	pr_debug("PM: Finishing wakeup.\n");
 	suspend_finish();
+#if  defined(CONFIG_MACH_NT14U) && !defined(CONFIG_VD_RELEASE)
+	dump_proc_entries();
+#endif
  Unlock:
+#if defined(CONFIG_MSTAR_USB_STR_PATCH) && defined(CONFIG_MSTAR_X14)
+	enStrStatus=E_STR_NONE;
+#endif  
 	mutex_unlock(&pm_mutex);
 	return error;
 }
@@ -319,6 +385,11 @@ int pm_suspend(suspend_state_t state)
 
 	error = enter_state(state);
 	if (error) {
+#if defined (CONFIG_ARCH_SDP)
+		pm_power_off();
+#else
+		micom_poweroff();
+#endif
 		suspend_stats.fail++;
 		dpm_save_failed_errno(error);
 	} else {

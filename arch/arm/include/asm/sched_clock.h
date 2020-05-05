@@ -11,4 +11,6 @@
 extern void sched_clock_postinit(void);
 extern void setup_sched_clock(u32 (*read)(void), int bits, unsigned long rate);
 
+#define DEFINE_CLOCK_DATA(name) struct clock_data name
+
 #endif

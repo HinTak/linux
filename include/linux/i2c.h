@@ -385,6 +385,9 @@ struct i2c_adapter {
 
 	int timeout;			/* in jiffies */
 	int retries;
+#if  defined(CONFIG_ARCH_SDP)
+	int byte_delay;
+#endif
 	struct device dev;		/* the adapter device */
 
 	int nr;

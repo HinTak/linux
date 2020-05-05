@@ -184,6 +184,10 @@ static int ____call_usermodehelper(void *data)
 	struct subprocess_info *sub_info = data;
 	struct cred *new;
 	int retval;
+#ifdef CONFIG_ARM
+	struct pt_regs regs;
+	struct pt_regs *curr_ptr;
+#endif
 
 	spin_lock_irq(&current->sighand->siglock);
 	flush_signal_handlers(current, 1);
@@ -222,6 +226,36 @@ static int ____call_usermodehelper(void *data)
 	retval = do_execve(sub_info->path,
 			   (const char __user *const __user *)sub_info->argv,
 			   (const char __user *const __user *)sub_info->envp);
+
+#ifdef CONFIG_ARM
+	if (retval)
+		goto fail;
+	curr_ptr = current_pt_regs();
+	memcpy(&regs, curr_ptr, sizeof(struct pt_regs));
+	/*
+	 * Save argc to the register structure for userspace.
+	 */
+	regs.ARM_r0 = retval;
+
+	/*
+	 * We were successful.  We won't be returning to our caller, but
+	 * instead to user space by manipulating the kernel stack.
+	 */
+	asm(    "add    r0, %0, %1\n\t"
+		"mov    r1, %2\n\t"
+		"mov    r2, %3\n\t"
+		"bl     memmove\n\t"    /* copy regs to top of stack */
+		"mov    r8, #0\n\t"     /* not a syscall */
+		"mov    r9, %0\n\t"     /* thread structure */
+		"mov    sp, r0\n\t"     /* reposition stack pointer */
+		"b      ret_to_user"
+		:
+		: "r" (current_thread_info()),
+		  "Ir" (THREAD_START_SP - sizeof(regs)),
+		  "r" (&regs),
+		  "Ir" (sizeof(regs))
+		: "r0", "r1", "r2", "r3", "r8", "r9", "ip", "lr", "memory");
+#endif
 	if (!retval)
 		return 0;
 

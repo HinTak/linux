@@ -131,6 +131,13 @@ struct interrupt_data {
 
 /*-------------------------------------------------------------------------*/
 
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_STORAGE_INTERFACE_MODIFY
+enum storage_media_cmd {
+   NOOP_STORAGE_MEDIA = 0, 
+   ADD_STORAGE_MEDIA,  
+   DELETE_STORAGE_MEDIA        
+};
+#endif 
 
 struct fsg_lun {
 	struct file	*filp;
@@ -153,6 +160,10 @@ struct fsg_lun {
 	unsigned int	blkbits;	/* Bits of logical block size of bound block device */
 	unsigned int	blksize;	/* logical block size of bound block device */
 	struct device	dev;
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_STORAGE_INTERFACE_MODIFY
+    char        filename[48];
+#endif
+      
 };
 
 static inline bool fsg_lun_is_open(struct fsg_lun *curlun)
@@ -468,6 +479,10 @@ static void fsg_lun_close(struct fsg_lun *curlun)
 		LDBG(curlun, "close backing file\n");
 		fput(curlun->filp);
 		curlun->filp = NULL;
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_STORAGE_INTERFACE_MODIFY
+        curlun->filename[0] = 0; /* empty curlun filename */
+#endif
+          
 	}
 }
 
@@ -563,6 +578,9 @@ static int fsg_lun_open(struct fsg_lun *curlun, const char *filename)
 	curlun->file_length = size;
 	curlun->num_sectors = num_sectors;
 	LDBG(curlun, "open backing file: %s\n", filename);
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_STORAGE_INTERFACE_MODIFY
+    strcpy(curlun->filename, filename); /* fill curlun filename */
+#endif     
 	return 0;
 
 out:
@@ -705,19 +723,91 @@ static ssize_t fsg_store_nofua(struct device *dev,
 	return count;
 }
 
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_STORAGE_INTERFACE_MODIFY
+int filter_media_command(char* buf, size_t count, char**filename)
+{
+        int     cmd_state;
+        char    *cmdname; 
+
+        cmdname = *filename = NULL;
+        cmd_state = NOOP_STORAGE_MEDIA;
+
+        /* Remove a trailing newline */
+        if (count > 4 && (buf[count-1] == '\n' || buf[count-1] == ' '))
+                ((char *) buf)[count-1] = 0;            /* Ugh! */
+
+        /* filter command */
+        if((count > 4) && (buf[3] == ' ')) {
+                *filename = (char*)buf + 4;
+                cmdname = (char*)buf;
+                ((char*)buf)[3] = 0;
+
+                if (strcmp(cmdname, "add") == 0) {
+                        cmd_state = ADD_STORAGE_MEDIA;
+
+                }
+                else if (strcmp(cmdname, "del") == 0) {
+                        cmd_state = DELETE_STORAGE_MEDIA;
+                }
+               else
+                        *filename = NULL;
+        } 
+
+        return cmd_state;
+}
+#endif
+
 static ssize_t fsg_store_file(struct device *dev, struct device_attribute *attr,
 			      const char *buf, size_t count)
 {
 	struct fsg_lun	*curlun = fsg_lun_from_dev(dev);
 	struct rw_semaphore	*filesem = dev_get_drvdata(dev);
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_STORAGE_INTERFACE_MODIFY
+   int cmd_state, rc = -EINVAL;
+   char    *filename;
+   
+   cmd_state = filter_media_command((char*)buf, count, &filename);
+#else   
 	int		rc = 0;
+#endif
 
+#ifndef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_STORAGE_REMOVABLE
 	if (curlun->prevent_medium_removal && fsg_lun_is_open(curlun)) {
 		LDBG(curlun, "eject attempt prevented\n");
 		return -EBUSY;				/* "Door is locked" */
 	}
+#endif     //CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_STORAGE_REMOVABLE
 
-	/* Remove a trailing newline */
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_GADGET_STORAGE_INTERFACE_MODIFY
+   down_write(filesem);
+   switch (cmd_state) {
+   /* Eject current medium */
+       case DELETE_STORAGE_MEDIA:
+       if (fsg_lun_is_open(curlun)) {
+               if(strcmp(filename,curlun->filename) == 0) {
+               fsg_lun_close(curlun);
+               curlun->unit_attention_data = SS_MEDIUM_NOT_PRESENT;
+               rc = 0;
+           }
+       }
+       break;
+   /* Load new medium */
+      case ADD_STORAGE_MEDIA:
+       if(!fsg_lun_is_open(curlun) && filename[0]) {
+           rc = fsg_lun_open(curlun, filename);
+           if (rc == 0)
+               curlun->unit_attention_data =
+                   SS_NOT_READY_TO_READY_TRANSITION;
+       }
+       break;
+       default:
+       break;
+   }
+   up_write(filesem);
+   
+   return (rc < 0 ? rc : (count));
+#else
+      	/* Remove a trailing newline */
 	if (count > 0 && buf[count-1] == '\n')
 		((char *) buf)[count-1] = 0;		/* Ugh! */
 
@@ -735,4 +825,5 @@ static ssize_t fsg_store_file(struct device *dev, struct device_attribute *attr,
 	}
 	up_write(filesem);
 	return (rc < 0 ? rc : count);
+#endif
 }

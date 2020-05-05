@@ -187,6 +187,9 @@ struct smack_audit_data {
 	char *object;
 	char *request;
 	int result;
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+	int mode;
+#endif
 };
 
 /*
@@ -295,6 +298,13 @@ static inline int smack_privileged(int cap)
 	return 0;
 }
 
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+/*
+ * SMACK Mode
+ */
+extern int smack_mode;
+#endif
+
 /*
  * logging functions
  */
@@ -302,9 +312,18 @@ static inline int smack_privileged(int cap)
 #define SMACK_AUDIT_ACCEPT 0x2
 extern int log_policy;
 
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+
+void smack_log(char *subject_label, char *object_label,
+		int request,
+		int result, struct smk_audit_info *auditdata, int mode);
+#else
+
 void smack_log(char *subject_label, char *object_label,
 		int request,
 		int result, struct smk_audit_info *auditdata);
+
+#endif
 
 #ifdef CONFIG_AUDIT
 

@@ -1,0 +1,6 @@
+if PLAT_NOVATEK
+
+config PLAT_NOVATEK_CLOCK
+	default y
+
+endif

@@ -3779,6 +3779,163 @@ int xhci_address_device(struct usb_hcd *hcd, struct usb_device *udev)
 	return 0;
 }
 
+#ifdef SAMSUNG_PATCH_WITH_NEW_xHCI_API_FOR_BUGGY_DEVICE
+/*
+ * Issue an Address Device command with BSR flag set (which will enable control
+ * endpoint transfer to the device).
+ * We should be protected by the usb_address0_mutex in khubd's hub_port_init, so
+ * we should only issue and wait on one address command at the same time.
+ *
+ */
+int xhci_enable_control_endpoint(struct usb_hcd *hcd, struct usb_device *udev)
+{
+	unsigned long flags;
+	int timeleft;
+	struct xhci_virt_device *virt_dev;
+	int ret = 0;
+	struct xhci_hcd *xhci = hcd_to_xhci(hcd);
+	struct xhci_slot_ctx *slot_ctx;
+	struct xhci_input_control_ctx *ctrl_ctx;
+	u64 temp_64;
+#ifdef SAMSUNG_PATCH_WITH_USB_XHCI_BUGFIX
+	union xhci_trb *cmd_trb;
+#endif
+
+	if (!udev->slot_id) {
+		xhci_dbg(xhci, "Bad Slot ID %d\n", udev->slot_id);
+		return -EINVAL;
+	}
+
+	virt_dev = xhci->devs[udev->slot_id];
+
+	if (WARN_ON(!virt_dev)) {
+		/*
+		 * In plug/unplug torture test with an NEC controller,
+		 * a zero-dereference was observed once due to virt_dev = 0.
+		 * Print useful debug rather than crash if it is observed again!
+		 */
+		xhci_warn(xhci, "Virt dev invalid for slot_id 0x%x!\n",
+			udev->slot_id);
+		return -EINVAL;
+	}
+
+	slot_ctx = xhci_get_slot_ctx(xhci, virt_dev->in_ctx);
+	/*
+	 * If this is the first Set Address since device plug-in or
+	 * virt_device realloaction after a resume with an xHCI power loss,
+	 * then set up the slot context.
+	 */
+	if (!slot_ctx->dev_info)
+		xhci_setup_addressable_virt_dev(xhci, udev);
+	/* Otherwise, update the control endpoint ring enqueue pointer. */
+	else
+		xhci_copy_ep0_dequeue_into_input_ctx(xhci, udev);
+	ctrl_ctx = xhci_get_input_control_ctx(xhci, virt_dev->in_ctx);
+	ctrl_ctx->add_flags = cpu_to_le32(SLOT_FLAG | EP0_FLAG);
+	ctrl_ctx->drop_flags = 0;
+
+	xhci_dbg(xhci, "Slot ID %d Input Context:\n", udev->slot_id);
+	xhci_dbg_ctx(xhci, virt_dev->in_ctx, 2);
+
+	spin_lock_irqsave(&xhci->lock, flags);
+#ifdef SAMSUNG_PATCH_WITH_USB_XHCI_BUGFIX
+	cmd_trb = xhci->cmd_ring->dequeue;
+#endif	
+	ret = xhci_queue_enable_control_endpoint(xhci, virt_dev->in_ctx->dma,
+					udev->slot_id);
+	if (ret) {
+		spin_unlock_irqrestore(&xhci->lock, flags);
+		xhci_dbg(xhci, "FIXME: allocate a command ring segment\n");
+		return ret;
+	}
+	xhci_ring_cmd_db(xhci);
+	spin_unlock_irqrestore(&xhci->lock, flags);
+
+	/* ctrl tx can take up to 5 sec; XXX: need more time for xHC? */
+#ifdef SAMSUNG_PATCH_WITH_USB_XHCI_BUGFIX
+			timeleft = wait_for_completion_interruptible_timeout(&xhci->addr_dev,
+			XHCI_CMD_DEFAULT_TIMEOUT);
+#else
+			timeleft = wait_for_completion_interruptible_timeout(&xhci->addr_dev,
+			USB_CTRL_SET_TIMEOUT);
+#endif
+	/* FIXME: From section 4.3.4: "Software shall be responsible for timing
+	 * the SetAddress() "recovery interval" required by USB and aborting the
+	 * command on a timeout.
+	 */
+	if (timeleft <= 0) {
+#ifdef SAMSUNG_PATCH_WITH_USB_XHCI_CODE_CLEANUP
+		xhci_warn(xhci, "%s while waiting for enable control endpoint command\n",
+				timeleft == 0 ? "Timeout" : "Signal");
+#else
+		xhci_warn(xhci, "%s while waiting for a slot\n",
+				timeleft == 0 ? "Timeout" : "Signal");
+#endif	
+			
+#ifdef SAMSUNG_PATCH_WITH_USB_XHCI_BUGFIX
+		/* cancel the address device command */
+		ret = xhci_cancel_cmd(xhci, NULL, cmd_trb);
+		if (ret < 0)
+			return ret;
+#endif
+		/* FIXME cancel the address device command */
+		return -ETIME;
+
+	}
+
+	switch (virt_dev->cmd_status) {
+	case COMP_CTX_STATE:
+	case COMP_EBADSLT:
+		xhci_err(xhci, "Setup ERROR: enable control endpoint command for slot %d.\n",
+				udev->slot_id);
+		ret = -EINVAL;
+		break;
+	case COMP_TX_ERR:
+		dev_warn(&udev->dev, "Device not responding to enable control endpoint\n");
+		ret = -EPROTO;
+		break;
+	case COMP_DEV_ERR:
+		dev_warn(&udev->dev, "ERROR: Incompatible device for enable control endpoint "
+				"command.\n");
+		ret = -ENODEV;
+		break;
+	case COMP_SUCCESS:
+		xhci_dbg(xhci, "Successful enable control endpoint command\n");
+		break;
+	default:
+		xhci_err(xhci, "ERROR: unexpected command completion "
+				"code 0x%x.\n", virt_dev->cmd_status);
+		xhci_dbg(xhci, "Slot ID %d Output Context:\n", udev->slot_id);
+		xhci_dbg_ctx(xhci, virt_dev->out_ctx, 2);
+		ret = -EINVAL;
+		break;
+	}
+	if (ret) {
+		return ret;
+	}
+	temp_64 = xhci_read_64(xhci, &xhci->op_regs->dcbaa_ptr);
+	xhci_dbg(xhci, "Op regs DCBAA ptr = %#016llx\n", temp_64);
+	xhci_dbg(xhci, "Slot ID %d dcbaa entry @%p = %#016llx\n",
+		 udev->slot_id,
+		 &xhci->dcbaa->dev_context_ptrs[udev->slot_id],
+		 (unsigned long long)
+		 le64_to_cpu(xhci->dcbaa->dev_context_ptrs[udev->slot_id]));
+	xhci_dbg(xhci, "Output Context DMA address = %#08llx\n",
+			(unsigned long long)virt_dev->out_ctx->dma);
+	xhci_dbg(xhci, "Slot ID %d Input Context:\n", udev->slot_id);
+	xhci_dbg_ctx(xhci, virt_dev->in_ctx, 2);
+	xhci_dbg(xhci, "Slot ID %d Output Context:\n", udev->slot_id);
+	xhci_dbg_ctx(xhci, virt_dev->out_ctx, 2);
+	
+	slot_ctx = xhci_get_slot_ctx(xhci, virt_dev->out_ctx);
+	/* Zero the input context control for later use */
+	ctrl_ctx->add_flags = 0;
+	ctrl_ctx->drop_flags = 0;
+
+	return 0;
+}
+#endif
+
 #ifdef CONFIG_USB_SUSPEND
 
 /* BESL to HIRD Encoding array for USB2 LPM */
@@ -4660,6 +4817,14 @@ int xhci_gen_setup(struct usb_hcd *hcd, xhci_get_quirks_t get_quirks)
 	xhci_print_registers(xhci);
 
 	get_quirks(dev, xhci);
+
+	/* <amitabh.d@samsung.com>
+	 * In xhci controllers which follow xhci 1.0 spec gives a spurious
+	 * success event after a short transfer. This quirk will ignore such
+	 * spurious event.
+	 */
+	if (xhci->hci_version > 0x96)
+		xhci->quirks |= XHCI_SPURIOUS_SUCCESS;
 
 	/* Make sure the HC is halted. */
 	retval = xhci_halt(xhci);

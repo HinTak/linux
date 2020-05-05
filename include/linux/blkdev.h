@@ -794,6 +794,11 @@ extern void blk_execute_rq_nowait(struct request_queue *, struct gendisk *,
 
 static inline struct request_queue *bdev_get_queue(struct block_device *bdev)
 {
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+        // FEB-01-2007
+        if(bdev->bd_disk == NULL)
+                return NULL;
+#endif
 	return bdev->bd_disk->queue;
 }
 
@@ -1488,6 +1493,11 @@ struct block_device_operations {
 	int (*compat_ioctl) (struct block_device *, fmode_t, unsigned, unsigned long);
 	int (*direct_access) (struct block_device *, sector_t,
 						void **, unsigned long *);
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+	int (*hw_decompress) (struct block_device *, struct page **,
+			      unsigned int, sector_t, unsigned int,
+			      unsigned int);
+#endif
 	unsigned int (*check_events) (struct gendisk *disk,
 				      unsigned int clearing);
 	/* ->media_changed() is DEPRECATED, use ->check_events() instead */

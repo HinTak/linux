@@ -657,6 +657,14 @@ void __init mem_init(void)
 		reserved_pages << (PAGE_SHIFT-10),
 		totalhigh_pages << (PAGE_SHIFT-10));
 
+#ifdef CONFIG_ARM_LPAE
+	pr_notice("Page table translation value <LPAE>:\n"
+#else
+	pr_notice("Page table translation value <default>:\n"
+#endif
+	"    num_pgd:%d, num_pmd:%d,  num_pte:%d\n",
+	PTRS_PER_PGD, PTRS_PER_PMD, PTRS_PER_PTE);
+
 #define MLK(b, t) b, t, ((t) - (b)) >> 10
 #define MLM(b, t) b, t, ((t) - (b)) >> 20
 #define MLK_ROUNDUP(b, t) b, t, DIV_ROUND_UP(((t) - (b)), SZ_1K)

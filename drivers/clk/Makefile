@@ -27,3 +27,7 @@ obj-$(CONFIG_ARCH_ZYNQ)		+= clk-zynq.o
 obj-$(CONFIG_COMMON_CLK_WM831X) += clk-wm831x.o
 obj-$(CONFIG_COMMON_CLK_MAX77686) += clk-max77686.o
 obj-$(CONFIG_CLK_TWL6040)	+= clk-twl6040.o
+
+obj-$(CONFIG_ARCH_SDP)		+= clk-sdp.o
+obj-$(CONFIG_ARCH_SDP1302)	+= clk-sdp1302.o
+obj-$(CONFIG_ARCH_SDP1106)	+= clk-sdp1106.o

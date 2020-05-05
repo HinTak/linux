@@ -791,6 +791,17 @@ static int usbdev_open(struct inode *inode, struct file *file)
 	if (imajor(inode) == USB_DEVICE_MAJOR)
 		dev = usbdev_lookup_by_devt(inode->i_rdev);
 
+#ifdef CONFIG_USB_DEVICEFS
+	/* procfs file */
+	if (!dev) {
+		dev = inode->i_private;
+		if (dev && dev->usbfs_dentry &&
+					dev->usbfs_dentry->d_inode == inode)
+			usb_get_dev(dev);
+		else
+			dev = NULL;
+	}
+#endif
 	mutex_unlock(&usbfs_mutex);
 
 	if (!dev)
@@ -1098,6 +1109,21 @@ static int proc_connectinfo(struct dev_state *ps, void __user *arg)
 	return 0;
 }
 
+// Newly add
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+static int proc_devpath(struct dev_state *ps, void __user *arg)
+{
+	struct usbdevfs_devpath dp;
+
+	memset(dp.devpath, 0x0, sizeof(dp.devpath));
+	//080507 
+	strncpy(dp.devpath, ps->dev->devbusportpath, sizeof(dp.devpath)-1);
+	
+	if (copy_to_user(arg, &dp, sizeof(dp)))
+		return -EFAULT; 
+	return 0;
+}
+#endif
 static int proc_resetdevice(struct dev_state *ps)
 {
 	return usb_reset_device(ps->dev);
@@ -2028,6 +2054,13 @@ static long usbdev_do_ioctl(struct file *file, unsigned int cmd,
 		snoop(&dev->dev, "%s: CONNECTINFO\n", __func__);
 		ret = proc_connectinfo(ps, p);
 		break;
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG  
+	//add for usb devpath
+	case USBDEVFS_DEVPATH:
+		snoop(&dev->dev, "%s: DEVPATH\n", __func__);
+		ret = proc_devpath(ps, p);
+  	  	break;
+#endif
 
 	case USBDEVFS_SETINTERFACE:
 		snoop(&dev->dev, "%s: SETINTERFACE\n", __func__);
@@ -2217,6 +2250,29 @@ static void usbdev_remove(struct usb_device *udev)
 	}
 }
 
+#ifdef CONFIG_USB_DEVICE_CLASS
+static struct class *usb_classdev_class;
+
+static int __maybe_unused usb_classdev_add(struct usb_device *dev)
+{
+	struct device *cldev;
+
+	cldev = device_create(usb_classdev_class, &dev->dev, dev->dev.devt,
+			      NULL, "usbdev%d.%d", dev->bus->busnum,
+			      dev->devnum);
+	if (IS_ERR(cldev))
+		return PTR_ERR(cldev);
+	dev->usb_classdev = cldev;
+	return 0;
+}
+
+static void __maybe_unused usb_classdev_remove(struct usb_device *dev)
+{
+	if (dev->usb_classdev)
+		device_unregister(dev->usb_classdev);
+}
+#endif
+
 static int usbdev_notify(struct notifier_block *self,
 			       unsigned long action, void *dev)
 {
@@ -2253,6 +2309,21 @@ int __init usb_devio_init(void)
 		       USB_DEVICE_MAJOR);
 		goto error_cdev;
 	}
+#ifdef CONFIG_USB_DEVICE_CLASS
+	usb_classdev_class = class_create(THIS_MODULE, "usb_device");
+	if (IS_ERR(usb_classdev_class)) {
+		printk(KERN_ERR "Unable to register usb_device class\n");
+		retval = PTR_ERR(usb_classdev_class);
+		cdev_del(&usb_device_cdev);
+		usb_classdev_class = NULL;
+		goto out;
+	}
+	/* devices of this class shadow the major:minor of their parent
+	 * device, so clear ->dev_kobj to prevent adding duplicate entries
+	 * to /sys/dev
+	 */
+	usb_classdev_class->dev_kobj = NULL;
+#endif
 	usb_register_notify(&usbdev_nb);
 out:
 	return retval;
@@ -2265,6 +2336,9 @@ error_cdev:
 void usb_devio_cleanup(void)
 {
 	usb_unregister_notify(&usbdev_nb);
+#ifdef CONFIG_USB_DEVICE_CLASS
+	class_destroy(usb_classdev_class);
+#endif
 	cdev_del(&usb_device_cdev);
 	unregister_chrdev_region(USB_DEVICE_DEV, USB_DEVICE_MAX);
 }

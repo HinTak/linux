@@ -320,10 +320,24 @@ static void usb_wwan_outdat_callback(struct urb *urb)
 
 	port = urb->context;
 	intfdata = port->serial->private;
-
+	
+	// Modification to resolve the DTV crash issue on Connecting USB Stick
+	// and disconnecting 3G Dongle..
+	if(port==NULL){
+                printk(KERN_ERR"[VA]--%s: port is NULL\n", __func__);
+        return;
+        }
+	/////////////////////////////////////////////////////
 	usb_serial_port_softint(port);
 	usb_autopm_put_interface_async(port->serial->interface);
 	portdata = usb_get_serial_port_data(port);
+	
+	////////////////////////////////////////////////////
+	 if(portdata== NULL){
+                printk(KERN_ERR "[VA] --%s: port->private is NULL, status=%d\n",__func__,urb->status);
+                return;
+        }
+	////////////////////////////////////////////////////
 	spin_lock(&intfdata->susp_lock);
 	intfdata->in_flight--;
 	spin_unlock(&intfdata->susp_lock);

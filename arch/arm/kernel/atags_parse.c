@@ -30,6 +30,10 @@
 
 #include "atags.h"
 
+#ifdef CONFIG_NVT_USE_UIMAGE_DTB
+void __init nvt_fetch_tags(phys_addr_t __atags_pointer);
+#endif
+
 static char default_command_line[COMMAND_LINE_SIZE] __initdata = CONFIG_CMDLINE;
 
 #ifndef MEM_SIZE
@@ -236,3 +240,26 @@ struct machine_desc * __init setup_machine_tags(phys_addr_t __atags_pointer,
 
 	return mdesc;
 }
+
+#ifdef CONFIG_NVT_USE_UIMAGE_DTB
+void __init nvt_fetch_tags(phys_addr_t __atags_pointer)
+{
+	struct tag *tags = (struct tag *)&default_tags;
+
+	if (__atags_pointer) {
+		tags = phys_to_virt(__atags_pointer);
+		if (tags->hdr.tag != ATAG_CORE) {
+			early_print("Warning: Atags not found\n");
+			tags = (struct tag *)&default_tags;
+		}
+		if (tags->hdr.tag == ATAG_CORE) {	
+			for (; tags->hdr.size; tags = tag_next(tags))
+		  		if (tags->hdr.tag == ATAG_CMDLINE) {
+		    		strlcpy(boot_command_line,(char *)(tags->u.cmdline.cmdline),(tags->hdr.size)<<2);
+		    	break;
+				}
+		}
+	}
+}
+#endif
+

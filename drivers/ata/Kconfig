@@ -83,6 +83,14 @@ config SATA_AHCI_PLATFORM
 
 	  If unsure, say N.
 
+config SATA_AHCI_SDP
+	tristate "SDP AHCI SATA support"
+	help
+	  This option enables support for SDP AHCI Serial ATA
+	  controllers.
+
+	  If unsure, say N.
+
 config SATA_FSL
 	tristate "Freescale 3.0Gbps SATA support"
 	depends on FSL_SOC

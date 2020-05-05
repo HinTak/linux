@@ -140,6 +140,16 @@ static long fat_generic_compat_ioctl(struct file *filp, unsigned int cmd,
 
 static int fat_file_release(struct inode *inode, struct file *filp)
 {
+	if (MSDOS_SB(inode->i_sb)->options.nfs) {
+		spin_lock(&filp->f_dentry->d_lock);
+		if ((filp->f_dentry->d_count == 1) ||
+			((filp->f_dentry->d_count == 2)	&&
+			 (fat_get_nfs_clnt_open_count(inode) == 0))) {
+				fat_remove_busy_entry(inode);
+				inode->i_ino = MSDOS_I(inode)->i_pos;
+		}
+		spin_unlock(&filp->f_dentry->d_lock);
+	}
 	if ((filp->f_mode & FMODE_WRITE) &&
 	     MSDOS_SB(inode->i_sb)->options.flush) {
 		fat_flush_inodes(inode->i_sb, inode, NULL);
@@ -152,9 +162,20 @@ int fat_file_fsync(struct file *filp, loff_t start, loff_t end, int datasync)
 {
 	struct inode *inode = filp->f_mapping->host;
 	int res, err;
+	char b[BDEVNAME_SIZE];
+	const char mtd_n[] = "mtdblock";
+	const int len = min(sizeof(b), sizeof(mtd_n) - 1);
+	struct block_device *bdev = inode->i_sb->s_bdev;
 
 	res = generic_file_fsync(filp, start, end, datasync);
 	err = sync_mapping_buffers(MSDOS_SB(inode->i_sb)->fat_inode->i_mapping);
+
+	/* Issue flush only for mtd block device.
+	   They say that there are some usb flashes that may hang
+	   while doing hardware cache flush. Ok. Let it be. */
+	if (!res && !err && bdev &&
+	    !strncmp(bdevname(bdev, b), mtd_n, len))
+		err = blkdev_issue_flush(bdev, GFP_KERNEL, NULL);
 
 	return res ? res : err;
 }
@@ -256,7 +277,7 @@ static int fat_free(struct inode *inode, int skip)
 			return 0;
 
 		fatent_init(&fatent);
-		ret = fat_ent_read(inode, &fatent, dclus);
+		ret = fat_ent_read(sb, &fatent, dclus);
 		if (ret == FAT_ENT_EOF) {
 			fatent_brelse(&fatent);
 			return 0;

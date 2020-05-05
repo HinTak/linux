@@ -10,9 +10,43 @@ source "drivers/mtd/Kconfig"
 
 source "drivers/of/Kconfig"
 
+
+config USE_MSTAR_DRIVER
+	bool "Use Mstar Driver"
+	default n
+	help
+
+if USE_MSTAR_DRIVER 
+source "drivers/mstar/Kconfig"
+
+source "drivers/emac/Kconfig"
+endif
+
+config USE_FSR
+       bool "Use Flash FSR"
+       default n
+       help
+
+if USE_FSR
+source "drivers/fsr/Kconfig"
+endif
+
+config USE_TINY_FSR
+       bool "Use Flash TINY FSR"
+       default n
+       help
+
+if USE_TINY_FSR
+source "drivers/tfsr/Kconfig"
+endif
+
 source "drivers/parport/Kconfig"
 
 source "drivers/pnp/Kconfig"
+
+source "drivers/pci/Kconfig"
+
+source "drivers/pci/pcie/Kconfig"
 
 source "drivers/block/Kconfig"
 
@@ -88,7 +122,11 @@ source "sound/Kconfig"
 
 source "drivers/hid/Kconfig"
 
+if !USE_MSTAR_DRIVER
+
 source "drivers/usb/Kconfig"
+
+endif
 
 source "drivers/uwb/Kconfig"
 
@@ -140,6 +178,8 @@ source "drivers/remoteproc/Kconfig"
 
 source "drivers/rpmsg/Kconfig"
 
+source "drivers/samsung/Kconfig"
+
 source "drivers/virt/Kconfig"
 
 source "drivers/devfreq/Kconfig"
@@ -158,4 +198,8 @@ source "drivers/irqchip/Kconfig"
 
 source "drivers/ipack/Kconfig"
 
+source "drivers/hdma/Kconfig"
+
+# VD-Time feature driver
+source "drivers/vd_time/Kconfig"
 endmenu

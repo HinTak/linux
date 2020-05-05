@@ -49,6 +49,10 @@
 #include <linux/init_task.h>
 #include <linux/perf_event.h>
 #include <trace/events/sched.h>
+#ifdef CONFIG_KDEBUGD_THREAD_PROFILER
+#include <kdebugd/endtask_trace.h>
+#include <trace/events/task.h>
+#endif
 #include <linux/hw_breakpoint.h>
 #include <linux/oom.h>
 #include <linux/writeback.h>
@@ -444,6 +448,26 @@ assign_new_owner:
 }
 #endif /* CONFIG_MM_OWNER */
 
+#ifdef CONFIG_KNBD_SUPPORT
+static void (*knbd_mm_exit_callback)(void) = NULL;
+void register_knbd_mm_exit_callback(void (*callback)(void))
+{
+	knbd_mm_exit_callback = callback;
+}
+EXPORT_SYMBOL(register_knbd_mm_exit_callback);
+void unregister_knbd_mm_exit_callback(void)
+{
+	knbd_mm_exit_callback = NULL;
+}
+EXPORT_SYMBOL(unregister_knbd_mm_exit_callback);
+
+static void knbd_mm_exit(void)
+{
+	if (knbd_mm_exit_callback)
+		knbd_mm_exit_callback();
+}
+#endif
+
 /*
  * Turn us into a lazy TLB process if we
  * aren't already..
@@ -498,6 +522,10 @@ static void exit_mm(struct task_struct * tsk)
 	task_unlock(tsk);
 	mm_update_next_owner(mm);
 	mmput(mm);
+
+#ifdef CONFIG_KNBD_SUPPORT
+	knbd_mm_exit();
+#endif
 }
 
 /*
@@ -804,6 +832,11 @@ void do_exit(long code)
 	 * because of cgroup mode, must be called before cgroup_exit()
 	 */
 	perf_event_exit_task(tsk);
+
+#ifdef CONFIG_KDEBUGD_THREAD_PROFILER
+	/* trace the exit of task */
+	trace_task_endtask(tsk);
+#endif
 
 	cgroup_exit(tsk, 1);
 

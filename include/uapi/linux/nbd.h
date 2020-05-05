@@ -28,6 +28,7 @@
 #define NBD_DISCONNECT  _IO( 0xab, 8 )
 #define NBD_SET_TIMEOUT _IO( 0xab, 9 )
 #define NBD_SET_FLAGS   _IO( 0xab, 10)
+#define NBD_STOP        _IO( 0xab, 11)
 
 enum {
 	NBD_CMD_READ = 0,

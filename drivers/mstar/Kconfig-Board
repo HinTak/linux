@@ -1,0 +1,20 @@
+# drivers/MStar/Kconfig-Board
+
+choice
+        prompt "MStar DTV Board Config"
+        default MSTAR_X14_BD_GENERIC  if MSTAR_PreX14 || MSTAR_X14
+
+    config MSTAR_BD_NONE
+        bool "None"
+
+
+if MSTAR_PreX14 || MSTAR_X14
+
+    config MSTAR_X14_BD_FPGA
+        bool "FPGA X14 Board Setting"
+
+    config MSTAR_X14_BD_GENERIC
+        bool "Generic Board Setting"
+endif
+
+endchoice

@@ -50,6 +50,9 @@ enum {
 #endif
 };
 
+struct workqueue_struct *nfs_umountd_workqueue;
+struct work_struct nfs_umount_work;
+
 /*
  * write() for these nodes.
  */
@@ -1109,6 +1112,18 @@ static struct pernet_operations nfsd_net_ops = {
 	.size = sizeof(struct nfsd_net),
 };
 
+static void nfs_umountd_fn(struct work_struct *unused)
+{
+	struct net *net = &init_net;
+	nfsd_export_flush(net);
+}
+
+static void nfsd_umount_destroy(void)
+{
+	if (nfs_umountd_workqueue)
+		destroy_workqueue(nfs_umountd_workqueue);
+}
+
 static int __init init_nfsd(void)
 {
 	int retval;
@@ -1138,6 +1153,13 @@ static int __init init_nfsd(void)
 	retval = register_filesystem(&nfsd_fs_type);
 	if (retval)
 		goto out_free_all;
+
+	nfs_umountd_workqueue = create_singlethread_workqueue("nfs.umountd");
+	if (!nfs_umountd_workqueue)
+		pr_err("nfsd: Failed to create nfs.umountd workqueue\n");
+	else
+		INIT_WORK(&nfs_umount_work, nfs_umountd_fn);
+
 	return 0;
 out_free_all:
 	remove_proc_entry("fs/nfs/exports", NULL);
@@ -1159,6 +1181,7 @@ out_unregister_notifier:
 
 static void __exit exit_nfsd(void)
 {
+	nfsd_umount_destroy();
 	nfsd_reply_cache_shutdown();
 	remove_proc_entry("fs/nfs/exports", NULL);
 	remove_proc_entry("fs/nfs", NULL);

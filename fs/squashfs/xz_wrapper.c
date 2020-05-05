@@ -110,6 +110,7 @@ static int squashfs_xz_uncompress(struct squashfs_sb_info *msblk, void **buffer,
 	enum xz_ret xz_err;
 	int avail, total = 0, k = 0, page = 0;
 	struct squashfs_xz *stream = msblk->stream;
+	int err = -EINVAL;
 
 	mutex_lock(&msblk->read_data_mutex);
 
@@ -125,8 +126,10 @@ static int squashfs_xz_uncompress(struct squashfs_sb_info *msblk, void **buffer,
 			avail = min(length, msblk->devblksize - offset);
 			length -= avail;
 			wait_on_buffer(bh[k]);
-			if (!buffer_uptodate(bh[k]))
+			if (!buffer_uptodate(bh[k])) {
+				err = -EIO;
 				goto release_mutex;
+			}
 
 			stream->buf.in = bh[k]->b_data + offset;
 			stream->buf.in_size = avail;
@@ -167,7 +170,7 @@ release_mutex:
 	for (; k < b; k++)
 		put_bh(bh[k]);
 
-	return -EIO;
+	return err;
 }
 
 const struct squashfs_decompressor squashfs_xz_comp_ops = {

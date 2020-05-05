@@ -233,4 +233,15 @@ static inline const char *usb_phy_type_string(enum usb_phy_type type)
 		return "UNKNOWN PHY TYPE";
 	}
 }
+
+#ifdef CONFIG_ARCH_NVT72668
+struct nvt_u3_phy{
+	void __iomem *regs[3];
+	struct usb_phy u_phy;
+	struct device *dev;
+	u32	status;
+	struct timer_list	phy_timer;
+};
+#endif
+
 #endif /* __LINUX_USB_PHY_H */
