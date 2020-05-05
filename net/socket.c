@@ -108,6 +108,13 @@
 #include <net/busy_poll.h>
 #include <linux/errqueue.h>
 
+/**
+* @brief Include Security Framework security operations
+* @author Drm.Pokevian (drm.pokevian@samsung.com)
+* @date Sep 05, 2016
+*/
+#include <linux/sf_security.h>
+
 #ifdef CONFIG_NET_RX_BUSY_POLL
 unsigned int sysctl_net_busy_read __read_mostly;
 unsigned int sysctl_net_busy_poll __read_mostly;
@@ -619,6 +626,11 @@ int sock_sendmsg(struct socket *sock, struct msghdr *msg)
 {
 	int err = security_socket_sendmsg(sock, msg,
 					  msg_data_left(msg));
+	//! @brief Call of the Security Framework routine for socket sendmsg()
+	//! drm.pokevian (drm.pokevian@samsung.com)
+	//! @date Sep 05, 2016
+	if ( !err )
+		err = sf_security_socket_sendmsg(sock, msg, msg_data_left(msg));
 
 	return err ?: sock_sendmsg_nosec(sock, msg);
 }
@@ -720,6 +732,11 @@ int sock_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
 {
 	int err = security_socket_recvmsg(sock, msg, size, flags);
 
+    //! @brief Call of the Security Framework routine for socket recvmsg()
+	//! @author Drm Pokevian(drm.pokevian@samsung.com)
+	//! @date Sep 05, 2016
+	if ( !err )
+		err = sf_security_socket_recvmsg(sock, msg, size, flags);
 	return err ?: sock_recvmsg_nosec(sock, msg, size, flags);
 }
 EXPORT_SYMBOL(sock_recvmsg);
@@ -969,6 +986,15 @@ int sock_create_lite(int family, int type, int protocol, struct socket **res)
 	if (err)
 		goto out;
 
+	/**
+	* @brief Call of the Security Framework routine for socket creation
+	* @author Drm Pokevian (drm.pokevian@samsung.com)
+	* @date Sep 05, 2016
+	*/
+	err = sf_security_socket_create(family, type, protocol, 1);
+	if (err)
+		goto out;
+
 	sock = sock_alloc();
 	if (!sock) {
 		err = -ENOMEM;
@@ -1126,6 +1152,15 @@ int __sock_create(struct net *net, int family, int type, int protocol,
 
 	err = security_socket_create(family, type, protocol, kern);
 	if (err)
+		return err;
+
+	/**
+	* @brief Call of the Security Framework routine for socket creation
+	* @author Drm Pokevian (drm.pokevian@samsung.com)
+	* @date Sep 05, 2016
+	*/
+	err = sf_security_socket_create(family, type, protocol, 1);
+    if (err)
 		return err;
 
 	/*
@@ -1383,9 +1418,20 @@ SYSCALL_DEFINE3(bind, int, fd, struct sockaddr __user *, umyaddr, int, addrlen)
 						   (struct sockaddr *)&address,
 						   addrlen);
 			if (!err)
-				err = sock->ops->bind(sock,
-						      (struct sockaddr *)
-						      &address, addrlen);
+			{
+				/**
+				* @brief Call of the Security Framework routine for socket bind
+				* @author Drm Pokevian (drm.pokevian@samsung.com)
+				* @date Sep 05, 2016
+				*/
+				err = sf_security_socket_bind(sock,
+					(struct sockaddr*) &address, addrlen);
+
+				if (!err)
+					err = sock->ops->bind(sock,
+						     			(struct sockaddr *)
+						      			&address, addrlen);
+			}
 		}
 		fput_light(sock->file, fput_needed);
 	}
@@ -1412,7 +1458,16 @@ SYSCALL_DEFINE2(listen, int, fd, int, backlog)
 
 		err = security_socket_listen(sock, backlog);
 		if (!err)
-			err = sock->ops->listen(sock, backlog);
+		{
+			/**
+			* @brief Call of the Security Framework routine for socket listen
+			* @author Drm Pokevian (drm.pokevian@samsung.com)
+			* @date Sep 05, 2016
+			*/
+			err = sf_security_socket_listen(sock, backlog);
+			if (!err)
+				err = sock->ops->listen(sock, backlog);
+		}
 
 		fput_light(sock->file, fput_needed);
 	}
@@ -1481,6 +1536,15 @@ SYSCALL_DEFINE4(accept4, int, fd, struct sockaddr __user *, upeer_sockaddr,
 	if (err)
 		goto out_fd;
 
+	/**
+	* @brief Call of the Security Framework routine for socket accept
+	* @author Drm Pokevian (drm.pokevian@samsung.com)
+	* @date Sep 05, 2016
+	*/
+	err = sf_security_socket_accept(sock, newsock);
+	if (err)
+		goto out_fd;
+
 	err = sock->ops->accept(sock, newsock, sock->file->f_flags);
 	if (err < 0)
 		goto out_fd;
@@ -1546,6 +1610,16 @@ SYSCALL_DEFINE3(connect, int, fd, struct sockaddr __user *, uservaddr,
 
 	err =
 	    security_socket_connect(sock, (struct sockaddr *)&address, addrlen);
+	if (err)
+		goto out_put;
+
+	/**
+	* @brief Call of the Security Framework routine for socket connect
+	* @author Drm Pokevian (drm.pokevian@samsung.com)
+	* @date Sep 05, 2016
+	*/
+	err = sf_security_socket_connect(sock,
+		(struct sockaddr*) &address, addrlen);
 	if (err)
 		goto out_put;
 
@@ -3214,6 +3288,14 @@ EXPORT_SYMBOL(kernel_accept);
 int kernel_connect(struct socket *sock, struct sockaddr *addr, int addrlen,
 		   int flags)
 {
+#ifdef CONFIG_SECURITY_SMACK
+	int err;
+
+	err = security_socket_connect(sock, addr, addrlen);
+	if (err)
+		return err;
+	else
+#endif
 	return sock->ops->connect(sock, addr, addrlen, flags);
 }
 EXPORT_SYMBOL(kernel_connect);

@@ -1,0 +1,52 @@
+[ BUILD Instructions ]
+
+GPL/LGPL software for the Samsung product.
+This software distribution consists of GPL and LGPL components used in the Samsung product.
+
+================================================================
+Samsung Electronics, Co. Ltd. (¡°Samsung¡±) is pleased to make available to you the various source codes ("Source Codes") for download from this website (¡°Download Service¡±) at no charge. 
+By using the Source Code and/or the Download Service, you expressly assume all risk and liability associated with and/or caused by the same and complying with all applicable user agreements 
+that accompany each Source Code. To the extent any of the Source Codes are licensed under public licenses such as the GNU General Public License and/or GNU Lesser General Public License, 
+such licenses can be found in each of the files containing the Source Codes.
+ 
+SAMSUNG PROVIDES THE SOURCE CODES AND THIS DOWNLOADING SERVICE "AS IS" WITHOUT REPRESENTATION OR WARRANTY OF ANY KIND AND ALL SUCH WARRANTIES, EXPRESS OR IMPLIED, ARE HEREBY DISCLAIMED, 
+INCLUDING, WITHOUT LIMITATION, WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE ACCURACY, COMPLETENESS, CURRENCY, AVAILABILITY, TITLE, OR NON-INFRINGEMENT. 
+SAMSUNG WILL NOT BE LIABLE FOR ANY DAMAGES OF ANY KIND ARISING FROM THE USE OF THE SOURCE CODE AND THIS DOWNLOADING SERVICE, INCLUDING, BUT NOT LIMITED TO DIRECT, INDIRECT, INCIDENTAL, PUNITIVE, AND CONSEQUENTIAL DAMAGES. YOU ACKNOWLEDGE THAT SAMSUNG IS NOT OBLIGATED TO PROVIDE AND DOES NOT PROVIDE ANY SUPPORT OR ASSISTANCE WITH RESPECT TO THE SOURCE CODES OR THE DOWNLOAD SERVICE.
+ 
+This downloading service shall not affect nor extend any warranty or disclaimer which Samsung makes in each of Samsung's products in which the Source Code (or object/executable code based thereon) is incorporated.
+================================================================
+
+¡á Opensource List and Released version
+
+  * kernel : Linux version 4.1.10, GPL v2
+
+¡á System Requirement ( OS, compiler, toolchain infomation )
+* OS: RHEL 5.0 or CentOS 5.0/4.0
+
+This product has an ARM processor;  
+the software is normally cross-compiled for that processor.  
+All of those softwares have to be built with the MontaVista
+ARM toolchain gcc version 4.9.2
+ 
+¡á build script or command
+
+* Building linux kernel:
+* Source code name : linux-4.1.10.tgz
+
+* Unpack the kernel tarball and cd into it.
+	$ tar xzf linux-4.1.10.tgz
+
+* Run "cd ./linux-4.1.10-production/".
+
+in case target is Kant.M2 chip,
+* Run "cp -ar arch/arm/configs/Kant.M2-Tizen_release_defconfig .config".
+
+in case target is Kant.SU chip
+* Run "cp -ar arch/arm/configs/Kant.SU-Tizen_release_defconfig .config".
+
+* Run "make oldconfig ARCH=arm"
+* Run "make uImage -k ARCH=arm"
+* Run "make modules -k ARCH=arm"
+
+- End of File -
+

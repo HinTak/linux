@@ -49,6 +49,13 @@
 #include <linux/init_task.h>
 #include <linux/perf_event.h>
 #include <trace/events/sched.h>
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+#include <kdebugd.h>
+#endif
+#ifdef CONFIG_KDEBUGD_THREAD_PROFILER
+#include <agent/endtask_trace.h>
+#include <trace/events/task.h>
+#endif
 #include <linux/hw_breakpoint.h>
 #include <linux/oom.h>
 #include <linux/writeback.h>
@@ -58,6 +65,9 @@
 #include <asm/unistd.h>
 #include <asm/pgtable.h>
 #include <asm/mmu_context.h>
+#ifdef CONFIG_MINCORE_RLIMIT_NOFILE
+#include <linux/mincore.h>
+#endif
 
 static void exit_mm(struct task_struct *tsk);
 
@@ -204,6 +214,15 @@ repeat:
 
 	write_unlock_irq(&tasklist_lock);
 	release_thread(p);
+
+#ifdef CONFIG_MINCORE_RLIMIT_NOFILE
+	/* Cleanup only if main thread exits */
+	rcu_read_lock();
+	if (get_nr_threads(current) == 0)
+		free_open_file_task_list();
+	rcu_read_unlock();
+#endif
+
 	call_rcu(&p->rcu, delayed_put_task_struct);
 
 	p = leader;
@@ -754,6 +773,14 @@ void do_exit(long code)
 	 */
 	perf_event_exit_task(tsk);
 
+#ifdef CONFIG_KDEBUGD_THREAD_PROFILER
+	/* trace the exit of task */
+	trace_task_endtask(tsk);
+#endif
+
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+	kdbg_fd_clear(tsk->pid);
+#endif
 	cgroup_exit(tsk);
 
 	/*

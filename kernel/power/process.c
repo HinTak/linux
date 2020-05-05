@@ -18,11 +18,21 @@
 #include <linux/workqueue.h>
 #include <linux/kmod.h>
 #include <trace/events/power.h>
+#include <linux/cpuset.h>
 
-/* 
+/*
  * Timeout for stopping processes
  */
 unsigned int __read_mostly freeze_timeout_msecs = 20 * MSEC_PER_SEC;
+
+#ifdef CONFIG_ALWAYS_INSTANT_ON
+extern int is_always_instantOn(void);
+extern void machine_restart_standby(char *cmd);
+#endif
+
+#ifdef CONFIG_SLP_LOWMEM_NOTIFY
+extern bool dump_tasks_once_lv2;
+#endif
 
 static int try_to_freeze_tasks(bool user_only)
 {
@@ -35,7 +45,11 @@ static int try_to_freeze_tasks(bool user_only)
 	unsigned int elapsed_msecs;
 	bool wakeup = false;
 	int sleep_usecs = USEC_PER_MSEC;
-
+#ifdef CONFIG_INFO_TASK_FREEZE_FAIL
+#define TASKS 8
+	struct task_struct *failed[TASKS];
+	int i, failed_cnt;
+#endif
 	do_gettimeofday(&start);
 
 	end_time = jiffies + msecs_to_jiffies(freeze_timeout_msecs);
@@ -51,12 +65,24 @@ static int try_to_freeze_tasks(bool user_only)
 				continue;
 
 			if (!freezer_should_skip(p))
+#ifndef CONFIG_INFO_TASK_FREEZE_FAIL
 				todo++;
+#else
+			{
+				if(todo < TASKS)
+					failed[todo] = p;
+				todo++;
+			}
+#endif
 		}
 		read_unlock(&tasklist_lock);
 
 		if (!user_only) {
+#ifdef CONFIG_INFO_TASK_FREEZE_FAIL
+			wq_busy = freeze_workqueues_busy(false);
+#else
 			wq_busy = freeze_workqueues_busy();
+#endif
 			todo += wq_busy;
 		}
 
@@ -91,6 +117,21 @@ static int try_to_freeze_tasks(bool user_only)
 		       elapsed_msecs / 1000, elapsed_msecs % 1000,
 		       todo - wq_busy, wq_busy);
 
+#ifdef CONFIG_INFO_TASK_FREEZE_FAIL
+		failed_cnt = todo - wq_busy;
+		if(failed_cnt > TASKS)
+			failed_cnt = TASKS;
+
+		if(failed_cnt > 0)
+		{
+			for(i = 0 ; i < failed_cnt ; i++) {
+				if(failed[i])
+					pr_err("[%s->%s(%d)] Freezing is failed\n", failed[i]->parent?failed[i]->parent->comm:" ", failed[i]->comm, failed[i]->pid);
+			}
+		}
+		if(wq_busy)
+			freeze_workqueues_busy(true);
+#endif
 		if (!wakeup) {
 			read_lock(&tasklist_lock);
 			for_each_process_thread(g, p) {
@@ -136,6 +177,9 @@ int freeze_processes(void)
 	if (!error) {
 		__usermodehelper_set_disable_depth(UMH_DISABLED);
 		pr_cont("done.");
+#ifdef CONFIG_SLP_LOWMEM_NOTIFY
+		dump_tasks_once_lv2 = false;
+#endif
 	}
 	pr_cont("\n");
 	BUG_ON(in_atomic());
@@ -149,7 +193,17 @@ int freeze_processes(void)
 		error = -EBUSY;
 
 	if (error)
+	{
+#ifdef CONFIG_ALWAYS_INSTANT_ON
+		printk(KERN_ERR "PM:fail to suspend. [%s] Failed to Freeze user space "
+						"processes - cold power off\n", __func__);
+		if(is_always_instantOn())
+			machine_restart_standby("Suspend fail - reboot\n");
+		else
+			pm_power_off();
+#endif
 		thaw_processes();
+	}
 	return error;
 }
 
@@ -176,9 +230,73 @@ int freeze_kernel_threads(void)
 	BUG_ON(in_atomic());
 
 	if (error)
+	{
+#ifdef CONFIG_ALWAYS_INSTANT_ON
+		printk(KERN_ERR "PM:fail to suspend. [%s] Failed to Freeze freezable "
+						"tasks - cold power off\n", __func__);
+		if(is_always_instantOn())
+			machine_restart_standby("Suspend fail - reboot\n");
+		else
+			pm_power_off();
+#endif
 		thaw_kernel_threads();
+	}
 	return error;
 }
+
+#ifdef CONFIG_POWER_SAVING_MODE
+
+//it is only called by thaw_processes_prepare below
+static void thaw_processes_finish(void)
+{
+        struct task_struct *g, *p;
+
+	pwsv_freezing = false;
+
+        printk("Restarting tasks ... ");
+
+	read_lock(&tasklist_lock);
+	do_each_thread(g, p) {
+		__thaw_task(p);
+	} while_each_thread(g, p);
+	read_unlock(&tasklist_lock);
+
+}
+void thaw_processes_prepare(void)
+{
+
+	if(pwsv_freezing){
+		thaw_processes_finish();
+		return;
+	}
+
+        if (pm_freezing)
+                atomic_dec(&system_freezing_cnt);
+        pm_freezing = false;
+        pm_nosig_freezing = false;
+
+        oom_killer_enable();
+
+        __usermodehelper_set_disable_depth(UMH_FREEZING);
+        thaw_workqueues();
+
+	if(pwsv_current_mode != PWSV_MODE_TV){
+		pwsv_freezing = true;
+	}else{
+		thaw_processes_finish();
+	}
+	usermodehelper_enable();
+
+	schedule();
+}
+
+//nobody uses this function
+void thaw_processes(void)
+{
+	thaw_processes_prepare();
+	printk("done.\n");
+}
+#else
 
 void thaw_processes(void)
 {
@@ -198,6 +316,8 @@ void thaw_processes(void)
 	__usermodehelper_set_disable_depth(UMH_FREEZING);
 	thaw_workqueues();
 
+	cpuset_wait_for_hotplug();
+
 	read_lock(&tasklist_lock);
 	for_each_process_thread(g, p) {
 		/* No other threads should have PF_SUSPEND_TASK set */
@@ -215,6 +335,7 @@ void thaw_processes(void)
 	pr_cont("done.\n");
 	trace_suspend_resume(TPS("thaw_processes"), 0, false);
 }
+#endif
 
 void thaw_kernel_threads(void)
 {

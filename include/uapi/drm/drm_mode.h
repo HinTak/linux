@@ -73,6 +73,14 @@
 #define  DRM_MODE_FLAG_3D_TOP_AND_BOTTOM	(7<<14)
 #define  DRM_MODE_FLAG_3D_SIDE_BY_SIDE_HALF	(8<<14)
 
+#ifdef CONFIG_BD_CACHE_ENABLED
+/*
+ * Even though drm_modes are equal, this flag makes kernel call set_mode().
+ * The Crtc resettings is needed when CSC changes or ColorDepth changes in AV Tizen.
+ * This flag shouldn't be saved.
+ */
+#define  DRM_MODE_FLAG_FORCE_MODE_CHANGE (1<<31)
+#endif
 
 /* DPMS flags */
 /* bit compatible with the xorg definitions. */
@@ -145,6 +153,11 @@ struct drm_mode_crtc {
 #define DRM_MODE_PRESENT_TOP_FIELD	(1<<0)
 #define DRM_MODE_PRESENT_BOTTOM_FIELD	(1<<1)
 
+/* ADDED FOR PLANE FLAG HANDLE */
+#define DRM_MODE_PLANE_DEFAULT   (1 << 0)  /* Default setting : Both Dest/Src Used */
+#define DRM_MODE_PLANE_REUSE_PREV_DST  (1 << 1)  /* SET Source Value (src_x/y/w/h) , USE Prev Dest only  */
+#define DRM_MODE_PLANE_REUSE_PREV_SRC   (1 << 2)  /* SET Dest Value (crct_x/y/w/h) , USE Prev Src only  */
+#define DRM_MODE_PLANE_IGNORE_DISPLAY   (1 << 3)  /* Do not display if this flag is set  */
 /* Planes blend with or override other bits on the CRTC */
 struct drm_mode_set_plane {
 	__u32 plane_id;
@@ -172,6 +185,15 @@ struct drm_mode_get_plane {
 
 	__u32 count_format_types;
 	__u64 format_type_ptr;
+
+	/* plane info for user to get */
+	/* Signed dest location allows it to be partially off screen */
+	__s32 crtc_x, crtc_y;
+	__u32 crtc_w, crtc_h;
+
+	/* Source values are 16.16 fixed point */
+	__u32 src_x, src_y;
+	__u32 src_h, src_w;
 };
 
 struct drm_mode_get_plane_res {

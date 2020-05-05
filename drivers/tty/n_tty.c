@@ -51,7 +51,18 @@
 #include <linux/module.h>
 #include <linux/ratelimit.h>
 #include <linux/vmalloc.h>
+#ifdef CONFIG_KDEBUGD
+#include <kdebugd/kdebugd.h>
 
+#ifdef CONFIG_KDEBUGD_LIFE_TEST
+#include <kdbg_key_test_player.h>
+#endif
+
+#endif
+
+#ifdef CONFIG_T2D_DEBUGD
+#include <t2ddebugd/t2ddebugd.h>
+#endif
 
 /* number of characters left in xmit buffer before select has we have room */
 #define WAKEUP_CHARS 256
@@ -85,6 +96,35 @@
 # define n_tty_trace(f, args...)	trace_printk(f, ##args)
 #else
 # define n_tty_trace(f, args...)
+#endif
+
+#ifdef CONFIG_PRETTY_SHELL
+
+#include <linux/console.h>
+
+/* In case of pretty mode only session members can write the output */
+#define PRETTY_CHAR         0x10 /**< Toggle pretty mode,  Ctrl+p */
+#define PRETTY_CHAR_DISABLE 0x06 /**< Disable pretty mode, Ctrl+f */
+#define PRETTY_PRESS_MS     250  /**< Interval between double 'p' */
+
+enum tty_pretty_mode {
+	TTY_PRETTY_DISABLED  = 0,
+	TTY_PRETTY_USERLAND,
+	TTY_PRETTY_PRINTK,
+};
+
+/* TTY pretty mode structure */
+unsigned char tty_pretty_mode;  /*< 0 - disabled, 1 - userspace, 2 - driver */
+unsigned long tty_pretty_ms;    /*< previous key, to detect double press */
+EXPORT_SYMBOL(tty_pretty_mode);
+
+/* TTY pretty mode enable */
+unsigned char tty_pretty_en = 1; /* 0 - disable, 1 - enable */
+extern int console_portnum;
+#endif
+
+#ifdef CONFIG_SERIAL_INPUT_MANIPULATION
+	void set_enable_string(char *val);
 #endif
 
 struct n_tty_data {
@@ -153,6 +193,39 @@ static inline unsigned char *echo_buf_addr(struct n_tty_data *ldata, size_t i)
 	return &ldata->echo_buf[i & (N_TTY_BUF_SIZE - 1)];
 }
 
+#ifdef CONFIG_SERIAL_INPUT_MANIPULATION
+
+#define MAX_STRING_SIZE 10
+static unsigned char enable_serial[MAX_STRING_SIZE];
+static unsigned char disable_serial[MAX_STRING_SIZE];
+
+static size_t enable_string_size;
+static size_t disable_string_size;
+
+static size_t enable_index;
+static size_t disable_index;
+
+#define SERIAL_INPUT_DISABLE 0
+#define SERIAL_INPUT_ENABLE 1
+
+#ifdef CONFIG_SERIAL_INPUT_DEFAULT_SETUP_ENABLE
+static int serial_enable = SERIAL_INPUT_ENABLE;
+#else
+static int serial_enable = SERIAL_INPUT_DISABLE;
+#endif
+
+struct tty_struct *INPUT_tty;
+#endif
+
+#ifdef CONFIG_SERIAL_INPUT_ENABLE_ONLY_NUMBER
+#define MAX_ARRAY 19
+int allow_char[] = { 48, 49, 50, 51, 52, 53, 54, 55, 56, 57 /* 0~9 */,
+					65, 66, 67, 68, 69, 70 /* A~F */,
+					32 /*space*/,
+					13 /*enter*/,
+					8  /*backspace*/ };
+#endif
+
 static inline int tty_put_user(struct tty_struct *tty, unsigned char x,
 			       unsigned char __user *ptr)
 {
@@ -172,6 +245,47 @@ static inline int tty_copy_to_user(struct tty_struct *tty,
 	tty_audit_add_data(tty, to, n, ldata->icanon);
 	return copy_to_user(to, from, n);
 }
+
+
+#ifdef CONFIG_PRETTY_SHELL
+static inline int
+n_tty_receive_pretty(const unsigned char *c)
+{
+	/* Pretty mode toggle */
+	if (*c == PRETTY_CHAR) {
+		unsigned long now = jiffies_to_msecs(jiffies);
+
+		if (!tty_pretty_mode) {
+			tty_pretty_ms   = now;
+			tty_pretty_mode = TTY_PRETTY_USERLAND;
+			printk(KERN_ALERT "tty_pretty_mode is TTY_PRETTY_USERLAND(1)\n");
+		}
+		else if (tty_pretty_ms < now &&
+				now - tty_pretty_ms <= PRETTY_PRESS_MS) {
+			tty_pretty_ms   = 0;
+			printk(KERN_ALERT "tty_pretty_mode is TTY_PRETTY_PRINTK(2)\n"); // before setting tty_pretty_mode, should print message.
+			console_flush_messages();
+			tty_pretty_mode = TTY_PRETTY_PRINTK;
+		} else {
+			tty_pretty_ms   = 0;
+			tty_pretty_mode = TTY_PRETTY_DISABLED;
+			printk(KERN_ALERT "tty_pretty_mode is TTY_PRETTY_DISABLED(0)\n");
+		}
+
+		return 1;
+	}
+	/* Disable pretty mode, back to normal */
+	else if (*c == PRETTY_CHAR_DISABLE) {
+		tty_pretty_ms   = 0;
+		tty_pretty_mode = TTY_PRETTY_DISABLED;
+
+		printk(KERN_ALERT "tty_pretty_mode is TTY_PRETTY_DISABLED(0)\n");
+		return 1;
+	}
+
+	return 0;
+}
+#endif
 
 /**
  *	n_tty_kick_worker - start input worker (if required)
@@ -258,16 +372,13 @@ static void n_tty_check_throttle(struct tty_struct *tty)
 
 static void n_tty_check_unthrottle(struct tty_struct *tty)
 {
-	if (tty->driver->type == TTY_DRIVER_TYPE_PTY &&
-	    tty->link->ldisc->ops->write_wakeup == n_tty_write_wakeup) {
+	if (tty->driver->type == TTY_DRIVER_TYPE_PTY) {
 		if (chars_in_buffer(tty) > TTY_THRESHOLD_UNTHROTTLE)
 			return;
 		if (!tty->count)
 			return;
 		n_tty_kick_worker(tty);
-		n_tty_write_wakeup(tty->link);
-		if (waitqueue_active(&tty->link->write_wait))
-			wake_up_interruptible_poll(&tty->link->write_wait, POLLOUT);
+		tty_wakeup(tty->link);
 		return;
 	}
 
@@ -343,8 +454,7 @@ static void n_tty_packet_mode_flush(struct tty_struct *tty)
 		spin_lock_irqsave(&tty->ctrl_lock, flags);
 		tty->ctrl_status |= TIOCPKT_FLUSHREAD;
 		spin_unlock_irqrestore(&tty->ctrl_lock, flags);
-		if (waitqueue_active(&tty->link->read_wait))
-			wake_up_interruptible(&tty->link->read_wait);
+		wake_up_interruptible(&tty->link->read_wait);
 	}
 }
 
@@ -371,28 +481,6 @@ static void n_tty_flush_buffer(struct tty_struct *tty)
 	if (tty->link)
 		n_tty_packet_mode_flush(tty);
 	up_write(&tty->termios_rwsem);
-}
-
-/**
- *	n_tty_chars_in_buffer	-	report available bytes
- *	@tty: tty device
- *
- *	Report the number of characters buffered to be delivered to user
- *	at this instant in time.
- *
- *	Locking: exclusive termios_rwsem
- */
-
-static ssize_t n_tty_chars_in_buffer(struct tty_struct *tty)
-{
-	ssize_t n;
-
-	WARN_ONCE(1, "%s is deprecated and scheduled for removal.", __func__);
-
-	down_write(&tty->termios_rwsem);
-	n = chars_in_buffer(tty);
-	up_write(&tty->termios_rwsem);
-	return n;
 }
 
 /**
@@ -1257,6 +1345,353 @@ n_tty_receive_signal_char(struct tty_struct *tty, int signal, unsigned char c)
 	return;
 }
 
+#ifdef CONFIG_KDEBUGD
+/* kdebugd handling code */
+
+char kdbg_buf[DEBUG_MAX_RAW_CHARS] = "";
+
+static char sched_serial[MAX_STRING_SIZE] = "";
+
+static inline int check_debug_mode(struct tty_struct *tty, unsigned char c)
+{
+	debugd_event_t event;
+	int ret = 0;
+	static size_t sched_serial_idx;
+	static unsigned char prev_ch;
+	static unsigned int history_idx;
+	char input_buf[2]; /* Not required, can actually be done with char c */
+	char *ptr = NULL;
+
+#ifdef CONFIG_KDEBUGD_LIFE_TEST
+	int event_val;
+#endif
+
+	if (tty != INPUT_tty)
+		return ret;
+
+#ifdef CONFIG_KDEBUGD_BG
+	if (!kdebugd_running || kdbg_mode) {
+#else
+	if (!kdebugd_running) {
+#endif
+		if (c == sched_serial[sched_serial_idx]) {
+
+			sched_serial_idx++;
+			/* printk(KERN_EMERG "[SP Kernel Debugger] "); */
+			/* printk("%d-th ENABLE Magic serial input match!\n" */
+			/*         ,sched_serial_idx); */
+			if (sched_serial_idx == strlen(sched_serial)) {
+#ifdef CONFIG_KDEBUGD_BG
+				if (!kdbg_mode) {
+#endif
+				printk(KERN_EMERG "[SP Kernel Debugger] ");
+				printk("Enable Debug Mode!\n");
+				kdebugd_start();
+				kdebugd_running = 1;
+#ifdef CONFIG_KDEBUGD_BG
+				} else {
+					printk("Kdebugd already running in Background !!!\n");
+					ret = 1;
+				}
+#endif
+			}
+
+		} else
+			sched_serial_idx = 0;
+
+		return ret;
+	}
+
+	/* Now, kdebugd is running */
+
+	ret = 1;
+#ifdef CONFIG_KDEBUGD_BG
+	if (kdbg_mode == 1)
+		return 0;
+#endif
+
+	switch (c) {
+	case 0xd: /* \n */
+		/* Check on kdebugd TAB feature */
+		kdbg_enter_action();
+
+		/* remove leading and trailing whitespaces */
+		ptr = strstrip(kdbg_buf);
+
+		/* IMP: Special case for those tasks whose name
+		 * ends with a space, e.g. "[BT]Compositor ".
+		 * Re-insert space at the end of task name */
+		kdbg_enter_special_action();
+
+		/* KdebugD life Test */
+#ifdef CONFIG_KDEBUGD_LIFE_TEST
+		event_val = simple_strtoul(ptr, NULL, 0);
+		if (unlikely(g_player.capture &&
+				event_val == KDBG_MENU_KEY_TEST_PLAYER)) {
+			PRINT_KD("\n");
+			PRINT_KD("########Capturing Key Test Player Log File Stopped temporarily########\n");
+			g_player.capture = 0;
+		}
+#endif
+
+		/* copy kdbg_buf to event */
+		strncpy(event.input_string, ptr, sizeof(event.input_string) - 1);
+		event.input_string[sizeof(event.input_string) - 1] = '\0';
+
+#ifdef CONFIG_KDEBUGD_LIFE_TEST
+		if (unlikely(g_player.capture))
+			kdbg_capture_history(event.input_string,
+						sizeof(event.input_string));
+#endif
+
+		queue_add_event(&kdebugd_queue, &event);
+
+		/* Fix Me:
+		   Actually, history_idx need to be set at everyevent_tail modifying code.
+		   Now, We just set history_idx as event_tail plus 2..
+		 */
+		history_idx = kdebugd_queue.event_tail + 2;
+
+		kdbg_buf[0] = '\0';
+
+		break;
+
+		/* When arrow key is pressed, the serial driver sends below character sequently. */
+		/* e.g.
+		   0x1b  => 0x5b => 0x41(up arrow)
+		   0x1b  => 0x5b => 0x42(down arrow)
+		 */
+	case 0x1b: /* Special Key */
+		prev_ch = c;
+		break;
+	case 0x5b: /* Special Key */
+		if (prev_ch == 0x1b)
+			prev_ch = c; /* Handle Up arrow and Down arrow keys */
+		else {  /* Handle '[' key */
+			prev_ch = 0;
+			input_buf[0] = c;
+			if (strlen(kdbg_buf) + 1 < DEBUG_MAX_RAW_CHARS) {
+				strncat(kdbg_buf, input_buf, 1);
+			} else {
+				printk("\n[ALERT]Can't enter more input than %d size..", DEBUG_MAX_RAW_CHARS - 1);
+			}
+			printk("%c", c);
+		}
+		break;
+
+	case 0x41: /* Up arrow */
+		if (prev_ch == 0x5b && history_idx > 0) { /* Special Key */
+			history_idx--;
+			printk("\n%s #%d> %s", sched_serial, history_idx, kdebugd_queue.events[history_idx].input_string);
+			snprintf(kdbg_buf, DEBUG_MAX_RAW_CHARS, "%s", kdebugd_queue.events[history_idx].input_string);
+			prev_ch = c;
+		} else { /* Handle 'A' */
+			input_buf[0] = c;
+			if (strlen(kdbg_buf) + 1 < DEBUG_MAX_RAW_CHARS) {
+				strncat(kdbg_buf, input_buf, 1);
+			} else {
+				printk("\n[ALERT]Can't enter more input than %d size..", DEBUG_MAX_RAW_CHARS - 1);
+			}
+			printk("%c", c);
+		}
+		break;
+
+	case 0x42: /* Down arrow */
+		if (prev_ch == 0x5b && history_idx <= kdebugd_queue.event_tail) { /* Special Key */
+			printk("\n%s #%d> %s", sched_serial, history_idx, kdebugd_queue.events[history_idx].input_string);
+			snprintf(kdbg_buf, DEBUG_MAX_RAW_CHARS, "%s", kdebugd_queue.events[history_idx].input_string);
+			history_idx++;
+			prev_ch = c;
+		} else { /* Handle 'B' */
+			input_buf[0] = c;
+			if (strlen(kdbg_buf) + 1 < DEBUG_MAX_RAW_CHARS) {
+				strncat(kdbg_buf, input_buf, 1);
+			} else {
+				printk("\n[ALERT]Can't enter more input than %d size..", DEBUG_MAX_RAW_CHARS - 1);
+			}
+			printk("%c", c);
+		}
+		break;
+
+	case 0x8: /* Backspace */
+	case 0x7F: /* Backspace */
+		if (strlen(kdbg_buf) > 0) {
+			kdbg_buf[strlen(kdbg_buf) - 1] = '\0';
+			/* print backspace, space, backspace to remove current character */
+			printk("%c %c", c, c);
+		}
+		break;
+
+	case 0x9: /* Tabsbspace to event */
+		/* Handle kdebugd tab action */
+		kdbg_tab_action();
+		break;
+
+	default:
+		input_buf[0] = c;
+		if (strlen(kdbg_buf) + 1 < DEBUG_MAX_RAW_CHARS) {
+			strncat(kdbg_buf, input_buf, 1);
+		} else {
+			printk("\n[ALERT]Can't enter more input than %d size..", DEBUG_MAX_RAW_CHARS - 1);
+		}
+		tty_put_char(tty, c);
+		break;
+
+	}
+	return ret;
+}
+#endif
+
+
+#ifdef CONFIG_T2D_DEBUGD
+/* kdebugd handling code */
+
+char t2d_dbg_buf[T2DDEBUGD_MAX_RAW_CHARS] = "";
+
+char t2d_sched_serial[MAX_STRING_SIZE] = "";
+
+static inline int t2d_check_debug_mode(struct tty_struct *tty, unsigned char c)
+{
+	tdebugd_event_t event;
+	int ret = 0;
+	static size_t t2d_sched_serial_idx;
+	static unsigned char prev_ch;
+	static unsigned int history_idx;
+	char t2d_input_buf[2]; /* Not required, can actually be done with char c */
+	char *ptr = NULL;
+
+	if (tty != INPUT_tty)
+		return ret;
+
+	if (!t2ddebugd_running) {
+#ifndef CONFIG_SERIAL_INPUT_ENABLE_ONLY_NUMBER
+		if (c == t2d_sched_serial[t2d_sched_serial_idx]) {
+
+			t2d_sched_serial_idx++;
+			/* printk(KERN_EMERG "[SP Kernel Debugger] "); */
+			/* printk("%d-th ENABLE Magic serial input match!\n" */
+			/*         ,t2d_sched_serial_idx); */
+			if (t2d_sched_serial_idx == strlen(t2d_sched_serial)) {
+				printk(KERN_EMERG "[T2D Kernel Debugger] ");
+				printk("Enable Debug Mode!\n");
+				t2ddebugd_start();
+				t2ddebugd_running = 1;
+			}
+
+		} else
+			t2d_sched_serial_idx = 0;
+#endif
+		return ret;
+	}
+
+	/* Now, kdebugd is running */
+
+	ret = 1;
+
+	switch (c) {
+	case 0xd: /* \n */
+
+		/* remove leading and trailing whitespaces */
+		ptr = strstrip(t2d_dbg_buf);
+
+		/* copy t2d_dbg_buf to event */
+		strncpy(event.input_string, ptr, sizeof(event.input_string) - 1);
+		event.input_string[sizeof(event.input_string) - 1] = '\0';
+
+		t2d_queue_add_event(&t2ddebugd_queue, &event);
+
+		/* Fix Me:
+		   Actually, history_idx need to be set at everyevent_tail modifying code.
+		   Now, We just set history_idx as event_tail plus 2..
+		 */
+		history_idx = t2ddebugd_queue.event_tail + 2;
+
+		t2d_dbg_buf[0] = '\0';
+
+		break;
+
+		/* When arrow key is pressed, the serial driver sends below character sequently. */
+		/* e.g.
+		   0x1b  => 0x5b => 0x41(up arrow)
+		   0x1b  => 0x5b => 0x42(down arrow)
+		 */
+	case 0x1b: /* Special Key */
+		prev_ch = c;
+		break;
+	case 0x5b: /* Special Key */
+		if (prev_ch == 0x1b)
+			prev_ch = c; /* Handle Up arrow and Down arrow keys */
+		else {  /* Handle '[' key */
+			prev_ch = 0;
+			t2d_input_buf[0] = c;
+			if (strlen(t2d_dbg_buf) + 1 < T2DDEBUGD_MAX_CHARS) {
+				strncat(t2d_dbg_buf, t2d_input_buf, 1);
+			} else {
+				printk("\n[ALERT]Can't enter more input than %d size..", T2DDEBUGD_MAX_CHARS - 1);
+			}
+			printk("%c", c);
+		}
+		break;
+
+	case 0x41: /* Up arrow */
+		if (prev_ch == 0x5b && history_idx > 0) { /* Special Key */
+			history_idx--;
+			printk("\n%s #%d> %s", t2d_sched_serial, history_idx, t2ddebugd_queue.events[history_idx].input_string);
+			snprintf(t2d_dbg_buf, T2DDEBUGD_MAX_CHARS, "%s", t2ddebugd_queue.events[history_idx].input_string);
+			prev_ch = c;
+		} else { /* Handle 'A' */
+			t2d_input_buf[0] = c;
+			if (strlen(t2d_dbg_buf) + 1 < T2DDEBUGD_MAX_CHARS) {
+				strncat(t2d_dbg_buf, t2d_input_buf, 1);
+			} else {
+				printk("\n[ALERT]Can't enter more input than %d size..", T2DDEBUGD_MAX_CHARS - 1);
+			}
+			printk("%c", c);
+		}
+		break;
+
+	case 0x42: /* Down arrow */
+		if (prev_ch == 0x5b && history_idx <= t2ddebugd_queue.event_tail) { /* Special Key */
+			printk("\n%s #%d> %s", t2d_sched_serial, history_idx, t2ddebugd_queue.events[history_idx].input_string);
+			snprintf(t2d_dbg_buf, T2DDEBUGD_MAX_CHARS, "%s", t2ddebugd_queue.events[history_idx].input_string);
+			history_idx++;
+			prev_ch = c;
+		} else { /* Handle 'B' */
+			t2d_input_buf[0] = c;
+			if (strlen(t2d_dbg_buf) + 1 < T2DDEBUGD_MAX_CHARS) {
+				strncat(t2d_dbg_buf, t2d_input_buf, 1);
+			} else {
+				printk("\n[ALERT]Can't enter more input than %d size..", T2DDEBUGD_MAX_CHARS - 1);
+			}
+			printk("%c", c);
+		}
+		break;
+
+	case 0x8: /* Backspace */
+	case 0x7F: /* Backspace */
+		if (strlen(t2d_dbg_buf) > 0) {
+			t2d_dbg_buf[strlen(t2d_dbg_buf) - 1] = '\0';
+			/* print backspace, space, backspace to remove current character */
+			printk("%c %c", c, c);
+		}
+		break;
+
+	default:
+		t2d_input_buf[0] = c;
+		if (strlen(t2d_dbg_buf) + 1 < T2DDEBUGD_MAX_CHARS) {
+			strncat(t2d_dbg_buf, t2d_input_buf, 1);
+		} else {
+			printk("\n[ALERT]Can't enter more input than %d size..", T2DDEBUGD_MAX_CHARS - 1);
+		}
+		tty_put_char(tty, c);
+		break;
+
+	}
+	return ret;
+}
+#endif
+
+
 /**
  *	n_tty_receive_char	-	perform processing
  *	@tty: terminal device
@@ -1383,8 +1818,7 @@ handle_newline:
 			put_tty_queue(c, ldata);
 			smp_store_release(&ldata->canon_head, ldata->read_head);
 			kill_fasync(&tty->fasync, SIGIO, POLL_IN);
-			if (waitqueue_active(&tty->read_wait))
-				wake_up_interruptible_poll(&tty->read_wait, POLLIN);
+			wake_up_interruptible_poll(&tty->read_wait, POLLIN);
 			return 0;
 		}
 	}
@@ -1442,6 +1876,89 @@ static inline void
 n_tty_receive_char_fast(struct tty_struct *tty, unsigned char c)
 {
 	struct n_tty_data *ldata = tty->disc_data;
+
+#ifdef CONFIG_SERIAL_INPUT_ENABLE_ONLY_NUMBER
+   int check, i;
+#endif
+
+#ifdef CONFIG_SERIAL_INPUT_MANIPULATION
+	if (tty == INPUT_tty) {
+		/* skip enable check if serial_enable == 1 */
+		if (serial_enable == SERIAL_INPUT_ENABLE)
+			goto enable_check_skip;
+
+		/* for debug enable */
+		if (c == enable_serial[enable_index]) {
+			enable_index++;
+#ifdef CONFIG_SERIAL_INPUT_ENABLE_HELP_MSG
+			pr_alert("\n");
+			pr_alert("[SERIAL INPUT MANAGE] %d-th ENABLE Magic serial input match!\n",
+				enable_index);
+#endif
+			if (enable_index == enable_string_size) {
+				serial_enable = SERIAL_INPUT_ENABLE;
+				disable_index = 0;
+
+#ifdef CONFIG_SERIAL_INPUT_ENABLE_HELP_MSG
+				pr_alert("\n");
+				pr_alert("[SERIAL INPUT MANAGE] serial input ENABLE!!!!!\n");
+#endif
+			}
+			return;
+		} else
+			enable_index = 0;
+
+enable_check_skip:
+		/* skip disable check if serial_enable == 0 */
+		if (serial_enable == SERIAL_INPUT_DISABLE)
+			return;
+
+		/* for debug disable */
+		if (c == disable_serial[disable_index]) {
+			disable_index++;
+
+#ifdef CONFIG_SERIAL_INPUT_ENABLE_HELP_MSG
+			pr_alert("\n");
+			pr_alert("[SERIAL INPUT MANAGE] %d-th DISABLE Magic serial input match!\n",
+				disable_index);
+#endif
+			if (disable_index == disable_string_size) {
+				serial_enable = SERIAL_INPUT_DISABLE;
+				enable_index = 0;
+
+#ifdef CONFIG_SERIAL_INPUT_ENABLE_HELP_MSG
+				pr_alert("\n");
+				pr_alert("[SERIAL INPUT MANAGE] serial input DISABLE!!!!!\n");
+#endif
+				return;
+			}
+		} else
+			disable_index = 0;
+
+#ifdef CONFIG_SERIAL_INPUT_ENABLE_ONLY_NUMBER
+		/* additional checking 0~9, space, enter, backspace,
+			SPTEAM 2010-02-07 */
+#ifdef CONFIG_FORCE_EXEC_SHELL_N_SERIAL
+                if(0)
+#else
+                if(1)
+#endif
+		{
+			check = i = 0;
+			while (i < MAX_ARRAY) {
+				if (allow_char[i] == c) {
+					check = 1;
+					break;
+				}
+				i++;
+			}
+
+			if (!check)
+				return;
+		}
+#endif
+	}
+#endif
 
 	if (tty->stopped && !tty->flow_stopped && I_IXON(tty) && I_IXANY(tty)) {
 		start_tty(tty);
@@ -1616,6 +2133,15 @@ n_tty_receive_buf_fast(struct tty_struct *tty, const unsigned char *cp,
 			flag = *fp++;
 		if (likely(flag == TTY_NORMAL)) {
 			unsigned char c = *cp++;
+#ifdef CONFIG_KDEBUGD
+			if (check_debug_mode(tty, c))
+				continue;
+#endif
+
+#ifdef CONFIG_T2D_DEBUGD
+			if (t2d_check_debug_mode(tty, c))
+				continue;
+#endif
 
 			if (!test_bit(c, ldata->char_map))
 				n_tty_receive_char_fast(tty, c);
@@ -1652,6 +2178,11 @@ static void __receive_buf(struct tty_struct *tty, const unsigned char *cp,
 			count--;
 		}
 
+#ifdef CONFIG_PRETTY_SHELL
+		if(tty_pretty_en && n_tty_receive_pretty(cp))
+			count = 0;
+#endif
+
 		if (!preops && !I_PARMRK(tty))
 			n_tty_receive_buf_fast(tty, cp, fp, count);
 		else
@@ -1670,8 +2201,7 @@ static void __receive_buf(struct tty_struct *tty, const unsigned char *cp,
 
 	if ((read_cnt(ldata) >= ldata->minimum_to_wake) || L_EXTPROC(tty)) {
 		kill_fasync(&tty->fasync, SIGIO, POLL_IN);
-		if (waitqueue_active(&tty->read_wait))
-			wake_up_interruptible_poll(&tty->read_wait, POLLIN);
+		wake_up_interruptible_poll(&tty->read_wait, POLLIN);
 	}
 }
 
@@ -1714,6 +2244,9 @@ n_tty_receive_buf_common(struct tty_struct *tty, const unsigned char *cp,
 {
 	struct n_tty_data *ldata = tty->disc_data;
 	int room, n, rcvd = 0, overflow;
+
+	if (!ldata)
+		return 0;
 
 	down_read(&tty->termios_rwsem);
 
@@ -1868,6 +2401,10 @@ static void n_tty_set_termios(struct tty_struct *tty, struct ktermios *old)
 			set_bit(QUIT_CHAR(tty), ldata->char_map);
 			set_bit(SUSP_CHAR(tty), ldata->char_map);
 		}
+#ifdef CONFIG_PRETTY_SHELL
+		set_bit(PRETTY_CHAR,         ldata->char_map);
+		set_bit(PRETTY_CHAR_DISABLE, ldata->char_map);
+#endif
 		clear_bit(__DISABLED_CHAR, ldata->char_map);
 		ldata->raw = 0;
 		ldata->real_raw = 0;
@@ -1875,8 +2412,12 @@ static void n_tty_set_termios(struct tty_struct *tty, struct ktermios *old)
 		ldata->raw = 1;
 		if ((I_IGNBRK(tty) || (!I_BRKINT(tty) && !I_PARMRK(tty))) &&
 		    (I_IGNPAR(tty) || !I_INPCK(tty)) &&
-		    (tty->driver->flags & TTY_DRIVER_REAL_RAW))
+		    (tty->driver->flags & TTY_DRIVER_REAL_RAW)) {
 			ldata->real_raw = 1;
+#ifdef CONFIG_PRETTY_SHELL
+			tty_pretty_mode = TTY_PRETTY_DISABLED;
+#endif
+		}
 		else
 			ldata->real_raw = 0;
 	}
@@ -1890,10 +2431,8 @@ static void n_tty_set_termios(struct tty_struct *tty, struct ktermios *old)
 	}
 
 	/* The termios change make the tty ready for I/O */
-	if (waitqueue_active(&tty->write_wait))
-		wake_up_interruptible(&tty->write_wait);
-	if (waitqueue_active(&tty->read_wait))
-		wake_up_interruptible(&tty->read_wait);
+	wake_up_interruptible(&tty->write_wait);
+	wake_up_interruptible(&tty->read_wait);
 }
 
 /**
@@ -1916,6 +2455,18 @@ static void n_tty_close(struct tty_struct *tty)
 	vfree(ldata);
 	tty->disc_data = NULL;
 }
+
+#ifdef CONFIG_SERIAL_INPUT_MANIPULATION
+static int initial_setting;
+void set_enable_string(char *val)
+{
+	if (initial_setting == 0) {
+		memset(enable_serial, 0x00, MAX_STRING_SIZE);
+		snprintf(enable_serial, MAX_STRING_SIZE, "%s", val);
+		initial_setting =  1;
+	}
+}
+#endif
 
 /**
  *	n_tty_open		-	open an ldisc
@@ -1954,6 +2505,25 @@ static int n_tty_open(struct tty_struct *tty)
 	n_tty_set_termios(tty, NULL);
 	tty_unthrottle(tty);
 
+#ifdef CONFIG_SERIAL_INPUT_MANIPULATION
+	/* For internal verification without bsp patches. ltr we will disable the same */
+	/*set_enable_string("20102011"); */
+	if (tty == INPUT_tty) {
+		memset(disable_serial, 0x00, MAX_STRING_SIZE);
+		snprintf(disable_serial, MAX_STRING_SIZE, "%s",
+			CONFIG_SERIAL_INPUT_DISABLE_STRING);
+		enable_string_size = strlen(enable_serial);
+		disable_string_size = strlen(disable_serial);
+
+#ifdef KDEBUGD_STRING
+		snprintf(sched_serial, MAX_STRING_SIZE, "%s", KDEBUGD_STRING);
+#endif
+#ifdef CONFIG_T2D_DEBUGD
+		snprintf(t2d_sched_serial, MAX_STRING_SIZE, "%s", T2DDEBUGD_STRING);
+#endif
+
+	}
+#endif
 	return 0;
 err:
 	return -ENOMEM;
@@ -2289,8 +2859,14 @@ static ssize_t n_tty_read(struct tty_struct *tty, struct file *file,
 			}
 			up_read(&tty->termios_rwsem);
 
+#ifdef CONFIG_UART_BROADCAST
+			tty_broadcast_add(tty);
+#endif
 			timeout = wait_woken(&wait, TASK_INTERRUPTIBLE,
 					     timeout);
+#ifdef CONFIG_UART_BROADCAST
+			tty_broadcast_del(tty);
+#endif
 
 			down_read(&tty->termios_rwsem);
 			continue;
@@ -2383,6 +2959,13 @@ static ssize_t n_tty_write(struct tty_struct *tty, struct file *file,
 		if (retval)
 			return retval;
 	}
+
+#ifdef CONFIG_PRETTY_SHELL
+	/* In case of 'pretty mode' only session owner can write to tty,
+	   so just ignore the buffer */
+	if (unlikely(tty_pretty_mode && task_session(current) != tty->session && tty->index == console_portnum))
+		return nr;
+#endif
 
 	down_read(&tty->termios_rwsem);
 
@@ -2518,6 +3101,11 @@ static unsigned long inq_canon(struct n_tty_data *ldata)
 	return nr;
 }
 
+
+#ifdef CONFIG_PRETTY_SHELL
+#define PRETTYEN	0x54A0
+#endif
+
 static int n_tty_ioctl(struct tty_struct *tty, struct file *file,
 		       unsigned int cmd, unsigned long arg)
 {
@@ -2535,6 +3123,18 @@ static int n_tty_ioctl(struct tty_struct *tty, struct file *file,
 			retval = read_cnt(ldata);
 		up_write(&tty->termios_rwsem);
 		return put_user(retval, (unsigned int __user *) arg);
+#ifdef CONFIG_PRETTY_SHELL
+	case PRETTYEN:
+		if (arg == 1) {
+			printk(KERN_ALERT "TTY_PRETTY_CTRL_ENABLE\n");
+			tty_pretty_en = 1;
+		} else if (arg == 0) {
+			printk(KERN_ALERT "TTY_PRETTY_CTRL_DISABLE\n");
+			tty_pretty_en = 0;
+			tty_pretty_mode = TTY_PRETTY_DISABLED;
+		}
+		return 0;
+#endif
 	default:
 		return n_tty_ioctl_helper(tty, file, cmd, arg);
 	}
@@ -2558,7 +3158,6 @@ struct tty_ldisc_ops tty_ldisc_N_TTY = {
 	.open            = n_tty_open,
 	.close           = n_tty_close,
 	.flush_buffer    = n_tty_flush_buffer,
-	.chars_in_buffer = n_tty_chars_in_buffer,
 	.read            = n_tty_read,
 	.write           = n_tty_write,
 	.ioctl           = n_tty_ioctl,

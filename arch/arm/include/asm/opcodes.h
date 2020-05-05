@@ -11,7 +11,11 @@
 
 #ifndef __ASSEMBLY__
 #include <linux/linkage.h>
+#ifdef __cplusplus
+asmlinkage unsigned int arm_check_condition(u32 opcode, u32 psr);
+#else
 extern asmlinkage unsigned int arm_check_condition(u32 opcode, u32 psr);
+#endif
 #endif
 
 #define ARM_OPCODE_CONDTEST_FAIL   0

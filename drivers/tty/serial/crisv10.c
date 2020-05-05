@@ -3023,7 +3023,7 @@ static int rs_raw_write(struct tty_struct *tty,
 
 	local_save_flags(flags);
 	DFLOW(DEBUG_LOG(info->line, "write count %i ", count));
-	DFLOW(DEBUG_LOG(info->line, "ldisc %i\n", tty->ldisc.chars_in_buffer(tty)));
+	DFLOW(DEBUG_LOG(info->line, "ldisc\n"));
 
 
 	/* The local_irq_disable/restore_flags pairs below are needed
@@ -3218,10 +3218,9 @@ rs_throttle(struct tty_struct * tty)
 #ifdef SERIAL_DEBUG_THROTTLE
 	char	buf[64];
 
-	printk("throttle %s: %lu....\n", tty_name(tty, buf),
-	       (unsigned long)tty->ldisc.chars_in_buffer(tty));
+	printk("throttle %s ....\n", tty_name(tty, buf));
 #endif
-	DFLOW(DEBUG_LOG(info->line,"rs_throttle %lu\n", tty->ldisc.chars_in_buffer(tty)));
+	DFLOW(DEBUG_LOG(info->line, "rs_throttle\n"));
 
 	/* Do RTS before XOFF since XOFF might take some time */
 	if (tty->termios.c_cflag & CRTSCTS) {
@@ -3240,11 +3239,10 @@ rs_unthrottle(struct tty_struct * tty)
 #ifdef SERIAL_DEBUG_THROTTLE
 	char	buf[64];
 
-	printk("unthrottle %s: %lu....\n", tty_name(tty, buf),
-	       (unsigned long)tty->ldisc.chars_in_buffer(tty));
+	printk("unthrottle %s ....\n", tty_name(tty, buf));
 #endif
-	DFLOW(DEBUG_LOG(info->line,"rs_unthrottle ldisc %d\n", tty->ldisc.chars_in_buffer(tty)));
-	DFLOW(DEBUG_LOG(info->line,"rs_unthrottle flip.count: %i\n", tty->flip.count));
+	DFLOW(DEBUG_LOG(info->line, "rs_unthrottle ldisc\n"));
+	DFLOW(DEBUG_LOG(info->line, "rs_unthrottle flip.count: %i\n", tty->flip.count));
 	/* Do RTS before XOFF since XOFF might take some time */
 	if (tty->termios.c_cflag & CRTSCTS) {
 		/* Assert RTS line  */

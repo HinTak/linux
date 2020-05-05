@@ -39,9 +39,12 @@
 #include <drm/drm_fourcc.h>
 #include <drm/drm_modeset_lock.h>
 #include <drm/drm_atomic.h>
+/* use drm_tztv_helper */
+#include <drm/drm_tztv_helper.h>
 
 #include "drm_crtc_internal.h"
 #include "drm_internal.h"
+
 
 static struct drm_framebuffer *
 internal_framebuffer_create(struct drm_device *dev,
@@ -1184,6 +1187,16 @@ int drm_universal_plane_init(struct drm_device *dev, struct drm_plane *plane,
 	drm_object_attach_property(&plane->base,
 				   config->plane_type_property,
 				   plane->type);
+				   
+#ifdef USE_DRM_TZTV_HELPER	 /* Tizen TV DRM */	
+	drm_object_attach_property(&plane->base,
+				   config->tztv_plane_mute_sync,
+				   2);
+
+	drm_object_attach_property(&plane->base,
+				   config->tztv_force_mute_sync,
+				   0);
+#endif /*USE_DRM_TZTV_HELPER*/
 
 	if (drm_core_check_feature(dev, DRIVER_ATOMIC)) {
 		drm_object_attach_property(&plane->base, config->prop_fb_id, 0);
@@ -1362,6 +1375,18 @@ static int drm_mode_create_standard_properties(struct drm_device *dev)
 	if (!prop)
 		return -ENOMEM;
 	dev->mode_config.plane_type_property = prop;
+	
+#ifdef USE_DRM_TZTV_HELPER	 /* Tizen TV DRM */
+	prop = drm_property_create_range(dev, 0, "PLANE_MUTE_SYNC", 0, UINT_MAX);
+	if (!prop)
+		return -ENOMEM;
+	dev->mode_config.tztv_plane_mute_sync  = prop;
+
+	prop = drm_property_create_range(dev, 0, "FORCE_MUTE_SYNC", 0, UINT_MAX);
+	if (!prop)
+		return -ENOMEM;
+	dev->mode_config.tztv_force_mute_sync = prop;
+#endif /*USE_DRM_TZTV_HELPER*/	
 
 	prop = drm_property_create_range(dev, DRM_MODE_PROP_ATOMIC,
 			"SRC_X", 0, UINT_MAX);
@@ -2411,6 +2436,17 @@ int drm_mode_getplane(struct drm_device *dev, void *data,
 	}
 	plane_resp->count_format_types = plane->format_count;
 
+	/* pass plane info for user to get */
+	plane_resp->crtc_x = plane->crtc_x;
+	plane_resp->crtc_y = plane->crtc_y;
+	plane_resp->crtc_w = plane->crtc_w;
+	plane_resp->crtc_h = plane->crtc_h;
+	
+	plane_resp->src_x = plane->src_x;
+	plane_resp->src_y = plane->src_y;
+	plane_resp->src_w = plane->src_w;
+	plane_resp->src_h = plane->src_h;
+	/* PASS THE PLANE INFO TO USER */
 	return 0;
 }
 
@@ -2435,6 +2471,170 @@ int drm_plane_check_pixel_format(const struct drm_plane *plane, u32 format)
 	return -EINVAL;
 }
 
+/**
+ * drm_mode_check_plane_flag - Check Plane Flag and Update values
+ * @plane: struct drm_plane*
+ * @data: struct drm_mode_set_plane *
+ *
+ * Set plane SRC & DEST Based on Flag passed by user.
+ */
+void drm_mode_check_plane_flag(struct drm_plane *plane, struct drm_crtc *crtc,
+				int32_t *crtc_x, int32_t *crtc_y,
+				uint32_t *crtc_w, uint32_t *crtc_h,
+				/* src_{x,y,w,h} values are 16.16 fixed point */
+				uint32_t *src_x, uint32_t *src_y,
+				uint32_t *src_w, uint32_t *src_h,
+				uint32_t flags)
+{
+	if (DRM_MODE_PLANE_REUSE_PREV_SRC == (flags & DRM_MODE_PLANE_REUSE_PREV_SRC)) {
+		/* APPLY OLD SRC VALUE */
+		*src_x = plane->src_x;
+		*src_y = plane->src_y;
+		*src_w = plane->src_w;
+		*src_h = plane->src_h;
+	} 
+	if (DRM_MODE_PLANE_REUSE_PREV_DST == (flags & DRM_MODE_PLANE_REUSE_PREV_DST)) {
+		/* APPLY OLD DEST VALUE */
+		*crtc_x = plane->crtc_x;
+		*crtc_y = plane->crtc_y;
+		*crtc_w = plane->crtc_w;
+		*crtc_h = plane->crtc_h;
+	}
+
+	if (crtc != NULL) {
+		if (DRM_MODE_PLANE_IGNORE_DISPLAY == (flags & DRM_MODE_PLANE_IGNORE_DISPLAY))
+			crtc->mode.private_flags |= DRM_MODE_PLANE_IGNORE_DISPLAY;
+		else
+			crtc->mode.private_flags &= ~DRM_MODE_PLANE_IGNORE_DISPLAY;
+	}
+
+}
+#ifdef CONFIG_BD_CACHE_ENABLED
+#define ENABLE_VIDEO_COORDINATE_CONVERSION
+#define ENABLE_AUTOSYNC_BTW_VIDEO_AND_CRTC
+#endif
+
+#ifdef ENABLE_VIDEO_COORDINATE_CONVERSION
+#define DEFAULT_CRTC_W_SIZE	1920
+#define DEFAULT_CRTC_H_SIZE	1080
+#define DRM_PROP_PLANE_TYPE_STR "plane_type"
+#define DRM_PROP_DP_OUT_PATH_STR "dp_out_path"
+
+/* plane type */
+enum sdp_drm_plane_type {
+	DRM_SDP_PLANE_OSDP,     ///<osdp plane
+	DRM_SDP_PLANE_GP,       ///<graphic plane
+	DRM_SDP_PLANE_SGP,      ///<sgp plane
+	DRM_SDP_PLANE_CURSOR1,  ///<cursor1 plane
+	DRM_SDP_PLANE_CURSOR2,  ///<cursor2 plane
+	DRM_SDP_PLANE_DP_MAIN,  ///<dp main plane
+	DRM_SDP_PLANE_DP_SUB,   ///<dp sub plane
+	DRM_SDP_PLANE_DP_SUB2,  ///<dp sub2 plane
+	DRM_SDP_PLANE_DP_BG,    ///<dp backgroud plane
+	DRM_SDP_PLANE_MAX       ///<max of enum
+};
+
+enum sdp_drm_dp_out {
+	DRM_SDP_WINDOW,		    ///<screen plane
+	DRM_SDP_ENCODING,	    ///<encoding path - encoder inst. is 0
+	DRM_SDP_SCART_OUT_CVBS,	///<scart out - CVBS
+	DRM_SDP_SCART_OUT_BT656,///<scart out - BT656
+	DRM_SDP_ENCODING_1,     ///<encoding path - encoder inst. is 1
+	DRM_SDP_SCL_OUT_MODE,  //<plane is not diplayed. just for getting scl out data
+	DRM_SDP_PQ_WIN_MODE,   ///< plane is displayed. even if it's a subplane, but all pq is accessed
+	DRM_SDP_OUT_MAX         ///<max of enum
+};
+
+static int __is_video_plane(struct drm_plane *plane)
+{
+	struct drm_object_properties *properties = &plane->properties;
+	unsigned int i;
+	int ret = 0;
+	
+
+	for (i = 0; i < properties->count; i++) {
+		if (!strncmp(properties->properties[i]->name,DRM_PROP_PLANE_TYPE_STR, sizeof(DRM_PROP_PLANE_TYPE_STR)))
+		{
+			DRM_DEBUG_KMS("-----------> Found a %s plane (%lld)\n", (properties->values[i] == DRM_SDP_PLANE_DP_MAIN || properties->values[i] == DRM_SDP_PLANE_DP_SUB)?"VIDEO":"GFX", properties->values[i]);
+			break;			
+		}
+	}
+
+	return (properties->values[i] == DRM_SDP_PLANE_DP_MAIN || properties->values[i] == DRM_SDP_PLANE_DP_SUB)?1:0;
+}
+
+static int __is_encoder_out(struct drm_plane *plane)
+{
+	struct drm_object_properties *properties = &plane->properties;
+	unsigned int i;
+	int ret = 0;	
+
+	for (i = 0; i < properties->count; i++) {
+		if (!strncmp(properties->properties[i]->name,DRM_PROP_DP_OUT_PATH_STR, sizeof(DRM_PROP_DP_OUT_PATH_STR)))
+		{
+			DRM_DEBUG_KMS("-----------> %s Out (%lld)\n", (properties->values[i] == DRM_SDP_ENCODING || properties->values[i] == DRM_SDP_ENCODING_1)?"ENCODER":"WINDOW", properties->values[i]);
+			break;
+		}
+	}
+
+	return (properties->values[i] == DRM_SDP_ENCODING || properties->values[i] == DRM_SDP_ENCODING_1)?1:0;
+}
+
+static int __transform_coordinate(struct drm_crtc *crtc, 
+					int32_t crtc_x, int32_t crtc_y, 
+			       uint32_t crtc_w, uint32_t crtc_h,
+					int32_t* new_crtc_x, int32_t* new_crtc_y, 
+			       uint32_t* new_crtc_w, uint32_t* new_crtc_h)
+{
+	int32_t crtcW, crtcH;
+	crtcW = crtc->mode.hdisplay;
+	crtcH = crtc->mode.vdisplay;
+
+	if (DEFAULT_CRTC_W_SIZE == crtcW && DEFAULT_CRTC_H_SIZE == crtcH)
+	{
+		*new_crtc_x = crtc_x;
+		*new_crtc_y = crtc_y;
+		*new_crtc_w = crtc_w;
+		*new_crtc_h = crtc_h;
+	}
+	else
+	{
+		*new_crtc_x = (crtc_x * crtcW)/DEFAULT_CRTC_W_SIZE;
+		*new_crtc_y = (crtc_y * crtcH)/DEFAULT_CRTC_H_SIZE;
+		*new_crtc_w = (crtc_w * crtcW)/DEFAULT_CRTC_W_SIZE;
+		*new_crtc_h = (crtc_h * crtcH)/DEFAULT_CRTC_H_SIZE;
+
+		if (*new_crtc_x + *new_crtc_w > crtcW)
+		{
+			*new_crtc_x = 0;
+			*new_crtc_w = crtcW;
+		}
+		if (*new_crtc_y + *new_crtc_h > crtcH)
+		{
+			*new_crtc_y = 0;
+			*new_crtc_h = crtcH;
+		}
+		DRM_DEBUG_KMS("(%d, %d, %d, %d) ----> (%d, %d, %d, %d)\n", crtc_x, crtc_y, crtc_w, crtc_h,
+				*new_crtc_x, *new_crtc_y, *new_crtc_w, *new_crtc_h);
+	}
+	return 0;	
+}
+
+static void __check_coordinate(struct drm_plane *plane, struct drm_crtc *crtc, 
+					int32_t crtc_x, int32_t crtc_y, 
+			       uint32_t crtc_w, uint32_t crtc_h,
+					int32_t* new_crtc_x, int32_t* new_crtc_y, 
+			       uint32_t* new_crtc_w, uint32_t* new_crtc_h)
+{
+	if (__is_video_plane(plane) && !__is_encoder_out(plane))
+	{
+		__transform_coordinate(crtc, crtc_x, crtc_y, crtc_w, crtc_h, 
+								new_crtc_x, new_crtc_y, new_crtc_w, new_crtc_h);
+	}
+	return;
+}
+#endif
+
 /*
  * setplane_internal - setplane handler for internal callers
  *
@@ -2451,10 +2651,26 @@ static int __setplane_internal(struct drm_plane *plane,
 			       uint32_t crtc_w, uint32_t crtc_h,
 			       /* src_{x,y,w,h} values are 16.16 fixed point */
 			       uint32_t src_x, uint32_t src_y,
-			       uint32_t src_w, uint32_t src_h)
+			       uint32_t src_w, uint32_t src_h,
+			       uint32_t flags)
 {
 	int ret = 0;
 	unsigned int fb_width, fb_height;
+	
+#ifdef ENABLE_VIDEO_COORDINATE_CONVERSION
+	/* Save original x, y, w, h based on FHD plane(1920x1080). */
+	int32_t org_crtc_x, org_crtc_y, org_crtc_h,	org_crtc_w;
+#endif
+
+	/* CHECK SET PLANE FLAG */
+	drm_mode_check_plane_flag(plane, crtc, &crtc_x, &crtc_y, &crtc_w, &crtc_h, &src_x, &src_y, &src_w, &src_h, flags);
+	
+#ifdef ENABLE_VIDEO_COORDINATE_CONVERSION
+	org_crtc_x = crtc_x;
+	org_crtc_y = crtc_y;
+	org_crtc_h = crtc_h;
+	org_crtc_w = crtc_w;
+#endif
 
 	/* No fb means shut it down */
 	if (!fb) {
@@ -2512,8 +2728,12 @@ static int __setplane_internal(struct drm_plane *plane,
 		ret = -ENOSPC;
 		goto out;
 	}
-
+#ifdef ENABLE_VIDEO_COORDINATE_CONVERSION
+	/* get new cordinates based on real crtc size */
+	__check_coordinate(plane, crtc, org_crtc_x, org_crtc_y, org_crtc_w, org_crtc_h, &crtc_x, &crtc_y, &crtc_w, &crtc_h);
+#endif
 	plane->old_fb = plane->fb;
+	/* END CHECK */
 	ret = plane->funcs->update_plane(plane, crtc, fb,
 					 crtc_x, crtc_y, crtc_w, crtc_h,
 					 src_x, src_y, src_w, src_h);
@@ -2524,6 +2744,25 @@ static int __setplane_internal(struct drm_plane *plane,
 	} else {
 		plane->old_fb = NULL;
 	}
+#ifdef ENABLE_VIDEO_COORDINATE_CONVERSION
+	/* save plane info for user to get */
+	plane->crtc_x = org_crtc_x;
+	plane->crtc_y = org_crtc_y;
+	plane->crtc_w = org_crtc_w;
+	plane->crtc_h = org_crtc_h;
+#else
+	/* save plane info for user to get */
+	plane->crtc_x = crtc_x;
+	plane->crtc_y = crtc_y;
+	plane->crtc_w = crtc_w;
+	plane->crtc_h = crtc_h;
+#endif
+
+	plane->src_x = src_x;
+	plane->src_y = src_y;
+	plane->src_w = src_w;
+	plane->src_h = src_h;
+	/* SET THE PLANE INFO FOR  USER */
 
 out:
 	if (fb)
@@ -2542,18 +2781,85 @@ static int setplane_internal(struct drm_plane *plane,
 			     uint32_t crtc_w, uint32_t crtc_h,
 			     /* src_{x,y,w,h} values are 16.16 fixed point */
 			     uint32_t src_x, uint32_t src_y,
-			     uint32_t src_w, uint32_t src_h)
+			     uint32_t src_w, uint32_t src_h,
+			     uint32_t flags)
 {
 	int ret;
 
 	drm_modeset_lock_all(plane->dev);
+	mutex_lock(&plane->dev->mode_config.setplane_lock);
 	ret = __setplane_internal(plane, crtc, fb,
 				  crtc_x, crtc_y, crtc_w, crtc_h,
-				  src_x, src_y, src_w, src_h);
+				  src_x, src_y, src_w, src_h, flags);
+	mutex_unlock(&plane->dev->mode_config.setplane_lock);
 	drm_modeset_unlock_all(plane->dev);
 
 	return ret;
 }
+
+/*
+ * __setplane_internal_nolock - setplane handler for internal callers without modeset locks
+ *
+ * Note that we assume an extra reference has already been taken on fb.  If the
+ * update fails, this reference will be dropped before return; if it succeeds,
+ * the previous framebuffer (if any) will be unreferenced instead.
+ *
+ * src_{x,y,w,h} are provided in 16.16 fixed point format
+ */
+static int __setplane_internal_nolock(struct drm_plane *plane,
+			       struct drm_crtc *crtc,
+			       struct drm_framebuffer *fb,
+			       int32_t crtc_x, int32_t crtc_y,
+			       uint32_t crtc_w, uint32_t crtc_h,
+			       /* src_{x,y,w,h} values are 16.16 fixed point */
+			       uint32_t src_x, uint32_t src_y,
+			       uint32_t src_w, uint32_t src_h,
+			       uint32_t flags)
+{
+	int ret;
+	mutex_lock(&plane->dev->mode_config.setplane_lock);
+	ret = __setplane_internal(plane, crtc, fb,
+				  crtc_x, crtc_y, crtc_w, crtc_h,
+				  src_x, src_y, src_w, src_h, flags);
+	mutex_unlock(&plane->dev->mode_config.setplane_lock);
+	return ret;
+}
+
+#ifdef ENABLE_AUTOSYNC_BTW_VIDEO_AND_CRTC
+/* 
+ * should update all video planes' coordinate when crtc size is changed.
+ */
+static void __update_video_plane(struct drm_crtc *crtc)
+{
+	struct drm_device *dev = crtc->dev;
+	struct drm_mode_config *config = &dev->mode_config;
+	struct drm_plane *plane;
+	struct drm_mode_set_plane plane_req;
+
+	list_for_each_entry(plane, &dev->mode_config.plane_list, head)
+	{
+		if (plane->fb != NULL && __is_video_plane(plane) && !__is_encoder_out(plane))
+		{
+			/* Make refcounting symmetric with the lookup path. */
+			drm_framebuffer_reference(plane->fb);
+			
+			/* APPLY OLD SRC&DEST VALUE */
+			plane_req.flags = DRM_MODE_PLANE_REUSE_PREV_SRC|DRM_MODE_PLANE_REUSE_PREV_DST;
+
+			/*
+			 * setplane_internal will take care of deref'ing either the old or new
+			 * framebuffer depending on success.
+			 */	
+			__setplane_internal(plane, crtc, plane->fb,
+						 plane_req.crtc_x, plane_req.crtc_y,
+						 plane_req.crtc_w, plane_req.crtc_h,
+						 plane_req.src_x, plane_req.src_y,
+						 plane_req.src_w, plane_req.src_h, plane_req.flags);						 
+			printk(KERN_CRIT"@@@ Video plane Refreshed @@@ \n");
+		}
+	}
+}
+#endif
 
 /**
  * drm_mode_setplane - configure a plane's configuration
@@ -2605,16 +2911,24 @@ int drm_mode_setplane(struct drm_device *dev, void *data,
 			return -ENOENT;
 		}
 	}
-
 	/*
 	 * setplane_internal will take care of deref'ing either the old or new
 	 * framebuffer depending on success.
 	 */
-	return setplane_internal(plane, crtc, fb,
-				 plane_req->crtc_x, plane_req->crtc_y,
-				 plane_req->crtc_w, plane_req->crtc_h,
-				 plane_req->src_x, plane_req->src_y,
-				 plane_req->src_w, plane_req->src_h);
+	if (DRM_MODE_PLANE_REUSE_PREV_SRC == (plane_req->flags & DRM_MODE_PLANE_REUSE_PREV_SRC) &&
+		DRM_MODE_PLANE_REUSE_PREV_DST == (plane_req->flags & DRM_MODE_PLANE_REUSE_PREV_DST))
+		return __setplane_internal_nolock(plane, crtc, fb,
+					 plane_req->crtc_x, plane_req->crtc_y,
+					 plane_req->crtc_w, plane_req->crtc_h,
+					 plane_req->src_x, plane_req->src_y,
+					 plane_req->src_w, plane_req->src_h, plane_req->flags);
+	else
+		return setplane_internal(plane, crtc, fb,
+					 plane_req->crtc_x, plane_req->crtc_y,
+					 plane_req->crtc_w, plane_req->crtc_h,
+					 plane_req->src_x, plane_req->src_y,
+					 plane_req->src_w, plane_req->src_h, plane_req->flags);
+	
 }
 
 /**
@@ -2705,6 +3019,7 @@ int drm_crtc_check_viewport(const struct drm_crtc *crtc,
 	if (crtc->invert_dimensions)
 		swap(hdisplay, vdisplay);
 
+#ifndef CONFIG_BD_CACHE_ENABLED
 	if (hdisplay > fb->width ||
 	    vdisplay > fb->height ||
 	    x > fb->width - hdisplay ||
@@ -2714,6 +3029,7 @@ int drm_crtc_check_viewport(const struct drm_crtc *crtc,
 			      crtc->invert_dimensions ? " (inverted)" : "");
 		return -ENOSPC;
 	}
+#endif
 
 	return 0;
 }
@@ -2745,6 +3061,11 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data,
 	uint32_t __user *set_connectors_ptr;
 	int ret;
 	int i;
+
+#ifdef ENABLE_AUTOSYNC_BTW_VIDEO_AND_CRTC
+	uint32_t org_crtc_h;
+	uint32_t org_crtc_v;	
+#endif
 
 	if (!drm_core_check_feature(dev, DRIVER_MODESET))
 		return -EINVAL;
@@ -2883,6 +3204,10 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data,
 		}
 	}
 
+#ifdef ENABLE_AUTOSYNC_BTW_VIDEO_AND_CRTC
+	org_crtc_h = crtc->mode.hdisplay;
+	org_crtc_v = crtc->mode.vdisplay;
+#endif
 	set.crtc = crtc;
 	set.x = crtc_req->x;
 	set.y = crtc_req->y;
@@ -2891,6 +3216,13 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data,
 	set.num_connectors = crtc_req->count_connectors;
 	set.fb = fb;
 	ret = drm_mode_set_config_internal(&set);
+
+#ifdef ENABLE_AUTOSYNC_BTW_VIDEO_AND_CRTC
+	if (ret == 0 && (org_crtc_h != mode->hdisplay || org_crtc_v != mode->vdisplay))
+	{
+		__update_video_plane(crtc);
+	}
+#endif
 
 out:
 	if (fb)
@@ -2984,7 +3316,7 @@ static int drm_mode_cursor_universal(struct drm_crtc *crtc,
 	 */
 	ret = __setplane_internal(crtc->cursor, crtc, fb,
 				crtc_x, crtc_y, crtc_w, crtc_h,
-				0, 0, src_w, src_h);
+				0, 0, src_w, src_h, 0);
 
 	/* Update successful; save new cursor position, if necessary */
 	if (ret == 0 && req->flags & DRM_MODE_CURSOR_MOVE) {
@@ -4571,11 +4903,23 @@ int drm_mode_plane_set_obj_prop(struct drm_plane *plane,
 {
 	int ret = -EINVAL;
 	struct drm_mode_object *obj = &plane->base;
+#ifdef USE_DRM_TZTV_HELPER	 /* Tizen TV DRM */
+	/* Current Property is tztv_xx prop or not and its set */
+	int is_tztv_prop_set = -EINVAL;
+#endif /*USE_DRM_TZTV_HELPER*/
 
 	if (plane->funcs->set_property)
 		ret = plane->funcs->set_property(plane, property, value);
 	if (!ret)
 		drm_object_property_set_value(obj, property, value);
+
+#ifdef USE_DRM_TZTV_HELPER	 /* Tizen TV DRM */
+	/* is_tztv_prop_set = 0 : Property is tztv_xxx & handled , Otherwise ignore */
+	is_tztv_prop_set = drm_tztv_plane_set_obj_prop(plane, property, value);
+	if(!is_tztv_prop_set) {
+		ret = is_tztv_prop_set;
+	}
+#endif /*USE_DRM_TZTV_HELPER*/
 
 	return ret;
 }
@@ -4653,6 +4997,9 @@ int drm_mode_obj_set_property_ioctl(struct drm_device *dev, void *data,
 	struct drm_property *property;
 	int i, ret = -EINVAL;
 	struct drm_mode_object *ref;
+#ifdef USE_DRM_TZTV_HELPER	 /* Tizen TV DRM */
+	int is_prop_type_plane = 0;
+#endif /*USE_DRM_TZTV_HELPER*/
 
 	if (!drm_core_check_feature(dev, DRIVER_MODESET))
 		return -EINVAL;
@@ -4696,6 +5043,9 @@ int drm_mode_obj_set_property_ioctl(struct drm_device *dev, void *data,
 	case DRM_MODE_OBJECT_PLANE:
 		ret = drm_mode_plane_set_obj_prop(obj_to_plane(arg_obj),
 						  property, arg->value);
+#ifdef USE_DRM_TZTV_HELPER	 
+		is_prop_type_plane = 1;
+#endif /*USE_DRM_TZTV_HELPER*/
 		break;
 	}
 
@@ -4703,6 +5053,16 @@ int drm_mode_obj_set_property_ioctl(struct drm_device *dev, void *data,
 
 out:
 	drm_modeset_unlock_all(dev);
+#ifdef USE_DRM_TZTV_HELPER	 /* Tizen TV DRM */
+	/* Trigger driver ioctl for tztv property 
+	* if only Plane Type or else ignore
+	* As Driver takes Modeset lock so done later
+	*/
+	if (is_prop_type_plane && !ret) {
+		drm_tztv_prop_mute_sync_set_to_chipdriver(obj_to_plane(arg_obj), 
+							property, arg->value);
+	}
+#endif /*USE_DRM_TZTV_HELPER*/
 	return ret;
 }
 
@@ -5430,6 +5790,7 @@ void drm_mode_config_init(struct drm_device *dev)
 	drm_modeset_lock_init(&dev->mode_config.connection_mutex);
 	mutex_init(&dev->mode_config.idr_mutex);
 	mutex_init(&dev->mode_config.fb_lock);
+	mutex_init(&dev->mode_config.setplane_lock);
 	INIT_LIST_HEAD(&dev->mode_config.fb_list);
 	INIT_LIST_HEAD(&dev->mode_config.crtc_list);
 	INIT_LIST_HEAD(&dev->mode_config.connector_list);

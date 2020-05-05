@@ -185,7 +185,7 @@ size_t ksize(const void *);
  * (PAGE_SIZE*2).  Larger requests are passed to the page allocator.
  */
 #define KMALLOC_SHIFT_HIGH	(PAGE_SHIFT + 1)
-#define KMALLOC_SHIFT_MAX	(MAX_ORDER + PAGE_SHIFT)
+#define KMALLOC_SHIFT_MAX	(MAX_ORDER + PAGE_SHIFT - 1)
 #ifndef KMALLOC_SHIFT_LOW
 #define KMALLOC_SHIFT_LOW	3
 #endif
@@ -198,7 +198,7 @@ size_t ksize(const void *);
  * be allocated from the same page.
  */
 #define KMALLOC_SHIFT_HIGH	PAGE_SHIFT
-#define KMALLOC_SHIFT_MAX	30
+#define KMALLOC_SHIFT_MAX	(MAX_ORDER + PAGE_SHIFT - 1)
 #ifndef KMALLOC_SHIFT_LOW
 #define KMALLOC_SHIFT_LOW	3
 #endif
@@ -596,5 +596,17 @@ static inline void *kzalloc_node(size_t size, gfp_t flags, int node)
 
 unsigned int kmem_cache_size(struct kmem_cache *s);
 void __init kmem_cache_init_late(void);
+
+#ifdef CONFIG_KDML
+/* notrace functions for alloc/free to avoid tracepoints */
+extern void *kmem_cache_alloc_notrace(struct kmem_cache *cachep, gfp_t flags);
+extern void kmem_cache_free_notrace(struct kmem_cache *, void *);
+#endif
+
+#ifdef CONFIG_SLABINFO
+void print_slabinfo_oom(void);
+#else
+static inline void print_slabinfo_oom(void) { }
+#endif
 
 #endif	/* _LINUX_SLAB_H */

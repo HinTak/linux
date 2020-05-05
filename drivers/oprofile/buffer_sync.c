@@ -38,6 +38,11 @@
 #include "cpu_buffer.h"
 #include "buffer_sync.h"
 
+#ifdef CONFIG_ADVANCE_OPROFILE
+#include "oprof.h"
+#include <kdebugd/kdebugd.h>
+#endif /* CONFIG_ADVANCE_OPROFILE */
+
 static LIST_HEAD(dying_tasks);
 static LIST_HEAD(dead_tasks);
 static cpumask_var_t marked_cpus;
@@ -445,6 +450,18 @@ static void process_task_mortuary(void)
 	spin_unlock_irqrestore(&task_mortuary, flags);
 
 	list_for_each_entry_safe(task, ttask, &local_dead_tasks, tasks) {
+
+#ifdef CONFIG_ADVANCE_OPROFILE
+	if (oprofile_started) {
+			/*Create the linked list while the task are getting killed.
+			This creation is done at the time when the task is about to
+			die and not at the processing time of raw data. This is
+			because at the processing time, some threads/processes
+			might be cleaned up and doesn't have any task_struct for them.*/
+
+			aop_create_dead_list(task);
+	}
+#endif /* CONFIG_ADVANCE_OPROFILE */
 		list_del(&task->tasks);
 		free_task(task);
 	}

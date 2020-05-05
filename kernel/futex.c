@@ -66,8 +66,17 @@
 #include <linux/bootmem.h>
 
 #include <asm/futex.h>
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+#include <kdbg_elf_sym_api.h>
+#include <kdbg-trace.h>
+#include <linux/mmu_context.h>
+#endif
 
 #include "locking/rtmutex_common.h"
+#ifdef CONFIG_KDEBUGD_FUTEX
+#include <linux/jiffies.h>
+#include <kdebugd/kdebugd.h>
+#endif
 
 /*
  * READ this before attempting to hack on futexes!
@@ -235,6 +244,11 @@ struct futex_q {
 	struct rt_mutex_waiter *rt_waiter;
 	union futex_key *requeue_pi_key;
 	u32 bitset;
+#ifdef CONFIG_KDEBUGD_FUTEX
+	/* timestamp to be filled at time of futex_wait.
+	 * this shall be used to calculate the wait time */
+	u32 timestamp;
+#endif
 };
 
 static const struct futex_q futex_q_init = {
@@ -257,6 +271,112 @@ struct futex_hash_bucket {
 static unsigned long __read_mostly futex_hashsize;
 
 static struct futex_hash_bucket *futex_queues;
+
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+int is_pthread_mutex_lock(struct task_struct *tsk)
+{
+	struct pt_regs *regs;
+	unsigned long pc, lr, sp;
+	struct mm_struct *tsk_mm;
+	int ret = 0, retval = 0;
+	struct aop_symbol_info symbol_info;
+	char *sym_name = NULL, *lib_name = NULL;
+	unsigned int start_addr = 0;
+
+	get_task_struct(tsk);
+
+	tsk_mm = get_task_mm(tsk);
+	if (!tsk_mm) {
+		goto put_tsk_struct;
+	}
+	use_mm(tsk_mm);
+
+	task_lock(tsk);
+	regs = task_pt_regs(tsk);
+	pc = instruction_pointer(regs);
+	sp = regs->ARM_sp;
+	task_unlock(tsk);
+
+	sym_name = kzalloc(KDBG_ELF_SYM_NAME_LENGTH_MAX, GFP_KERNEL);
+	if (!sym_name)
+		goto exit_free;
+	sym_name[0] = '\0';
+
+	lib_name = kzalloc(KDBG_ELF_SYM_MAX_SO_LIB_PATH_LEN, GFP_KERNEL);
+	if (!lib_name)
+		goto exit_free;
+	lib_name[0] = '\0';
+
+	symbol_info.pfunc_name = sym_name;
+	symbol_info.start_addr = 0;
+#ifdef CONFIG_DWARF_MODULE
+	symbol_info.df_info_flag = 0;
+	symbol_info.pdf_info = NULL;
+#endif /* CONFIG_DWARF_MODULE */
+
+	ret = kdbg_elf_get_symbol_and_lib_by_mm(tsk_mm,
+			pc, lib_name, &symbol_info,
+			&start_addr);
+
+	if(ret && !strncmp(sym_name,"__lll_lock_wait",15)) {
+		/* If pc lies in "__lll_lock_wait" function then check the last called function using lr. It should be 'pthread_mutex_lock'*/
+		copy_from_user(&lr, (void *)(sp + 8), 4);
+
+		ret = kdbg_elf_get_symbol_and_lib_by_mm(tsk_mm,
+				lr, lib_name, &symbol_info,
+				&start_addr);
+
+		if(ret && !strncmp(sym_name,"__GI___pthread_mutex_lock",25)) 
+			retval = 1;		/*futex_wait has been called from pthread_mutex_lock function only*/
+	}
+exit_free:
+	if (sym_name)
+		kfree(sym_name);
+	if (lib_name)
+		kfree(lib_name);
+	unuse_mm(tsk_mm);
+	mmput(tsk_mm);
+put_tsk_struct:
+	put_task_struct(tsk);
+	return retval;
+}
+int is_futex_wait(int pid)
+{
+	int i;
+	int ret = -1;
+	struct futex_hash_bucket *hb;
+	struct futex_q *this, *next;
+	struct plist_head *head;
+	pid_t owner_pid = 0;
+	void __user *owner_pid_addr;
+	u32 __user *uaddr;
+
+	for (i = 0; i < futex_hashsize; i++) {
+		hb = &futex_queues[i];
+		spin_lock(&hb->lock);
+		head = &hb->chain;
+		plist_for_each_entry_safe(this, next, head, list) {
+			if(this->task->pid == pid) {
+				spin_unlock(&hb->lock);
+				if(is_pthread_mutex_lock(this->task)) {
+					uaddr = (u32 __user *)(this->key.private.address + this->key.both.offset);
+					/* __owner field is present after 8 bytes of __lock field inside pthread_mutex_t structure*/
+					owner_pid_addr = uaddr + 2;		/*copy address of owner field if pthread_mutex_lock case*/
+					/*pthread_mutex_lock case. So extract the owner pid*/
+					copy_from_user(&owner_pid, owner_pid_addr, 4);
+					return owner_pid;
+				}
+				else
+					return 0;
+			}
+		}
+		spin_unlock(&hb->lock);
+		this = NULL;
+	}
+	return ret;
+}
+EXPORT_SYMBOL(is_futex_wait);
+#endif
 
 static inline void futex_get_mm(union futex_key *key)
 {
@@ -313,6 +433,71 @@ static struct futex_hash_bucket *hash_futex(union futex_key *key)
 			  key->both.offset);
 	return &futex_queues[hash & (futex_hashsize - 1)];
 }
+
+#ifdef CONFIG_KDEBUGD_FUTEX
+#ifdef DBG_FUTEX_LIST
+#define dprintk printk
+#else
+#define dprintk(...) do {} while (0)
+#endif
+
+/* fill the waiter_array with thread info of threads waiting
+ * - for time more than wait_msec
+ * - with max limit as max_waiters
+ */
+int read_hash_queue(struct futex_waiter *waiter_array, const int max_waiters, int wait_msec)
+{
+	int i = 0;
+	struct futex_hash_bucket *hb = NULL;
+	struct futex_q *this = NULL, *next = NULL;
+	struct plist_head *head = NULL;
+	unsigned int current_time;
+	unsigned int wait_time = 0;
+	int index = 0;
+
+	if ((wait_msec < 0) || (max_waiters <= 0) || !(waiter_array)) {
+		printk(KERN_ERR "Incorrect arguments to read_hash_queue\n");
+		dprintk("wait time: %d, max_waiters: %d, waiter_array: %p\n",
+				wait_msec, max_waiters, waiter_array);
+		return 0;
+	}
+
+	for (i = 0; i < futex_hashsize; i++) {
+		hb = &futex_queues[i];
+		spin_lock(&hb->lock);
+		head = &hb->chain;
+
+		plist_for_each_entry_safe(this, next, head, list) {
+			current_time = (u32)jiffies;
+			if (this->task) {
+				dprintk("curr: %x, ts: %x\n",
+						current_time, this->timestamp);
+				wait_time = jiffies_to_msecs(current_time - this->timestamp);
+				if (wait_time >= wait_msec) {
+					dprintk("[HASH INDEX: %d], tid: %x [%s],wait_time: %x\n",
+							i, this->task->pid, this->task->comm, wait_time);
+					waiter_array[index].hash_key = i;
+					waiter_array[index].wait_msec = wait_time;
+					waiter_array[index].task = this->task;
+					index++;
+
+					if (index >= max_waiters) {
+						printk(KERN_NOTICE "#### Futex List:: More waiters present. Increase the size!!!!!\n");
+						break;
+					}
+				}
+			} else {
+				printk(KERN_ERR "#### NULL (%3d)\n", i);
+			}
+		}
+		spin_unlock(&hb->lock);
+		if (index >= max_waiters)
+			break;
+
+	}
+	return index;
+}
+#endif /* CONFIG_KDEBUGD_FUTEX */
 
 /*
  * Return 1 if two futex_keys are equal, 0 otherwise.
@@ -1088,6 +1273,38 @@ static void __unqueue_futex(struct futex_q *q)
 	hb_waiters_dec(hb);
 }
 
+#ifdef CONFIG_KDEBUGD_FUTEX
+extern int kdbg_futex_dbg_pid;
+extern int kdbg_futex_dbg_start;
+extern int kdbg_futex_config_min_wait_msec;
+
+void kdbg_futex_check_task(struct futex_q *q)
+{
+	struct task_struct *p = q->task;
+	unsigned int wait_jiffies;
+	unsigned int wait_time_msec;
+
+	if (!kdbg_futex_dbg_start ||
+			(kdbg_futex_dbg_pid != p->pid))
+		return;
+
+	wait_jiffies = jiffies - q->timestamp;
+	wait_time_msec = jiffies_to_msecs(wait_jiffies);
+
+	dprintk("Target pid: %d, current pid: %d\n",
+			kdbg_futex_dbg_pid, p->pid);
+	dprintk("waited for %u msec\n", wait_time_msec);
+
+	/* if condition is met */
+	if (wait_time_msec > kdbg_futex_config_min_wait_msec) {
+		printk(KERN_NOTICE "Lock latency: %u msec\n", wait_time_msec);
+		show_user_backtrace_pid_wr(p->pid, 0, 1);
+	}
+
+	dprintk("####### Waking task: %s(%d)\n", p->comm, p->pid);
+}
+#endif
+
 /*
  * The hash bucket lock must be held when this is called.
  * Afterwards, the futex_q must not be accessed.
@@ -1157,10 +1374,20 @@ static int wake_futex_pi(u32 __user *uaddr, u32 uval, struct futex_q *this)
 	 */
 	newval = FUTEX_WAITERS | task_pid_vnr(new_owner);
 
-	if (cmpxchg_futex_value_locked(&curval, uaddr, uval, newval))
+	if (cmpxchg_futex_value_locked(&curval, uaddr, uval, newval)) {
 		ret = -EFAULT;
-	else if (curval != uval)
-		ret = -EINVAL;
+	} else if (curval != uval) {
+		/*
+		 * If a unconditional UNLOCK_PI operation (user space did not
+		 * try the TID->0 transition) raced with a waiter setting the
+		 * FUTEX_WAITERS flag between get_user() and locking the hash
+		 * bucket lock, retry the operation.
+		 */
+		if ((FUTEX_TID_MASK & curval) == uval)
+			ret = -EAGAIN;
+		else
+			ret = -EINVAL;
+	}
 	if (ret) {
 		raw_spin_unlock(&pi_state->pi_mutex.wait_lock);
 		return ret;
@@ -1800,6 +2027,9 @@ static inline void queue_me(struct futex_q *q, struct futex_hash_bucket *hb)
 	plist_node_init(&q->list, prio);
 	plist_add(&q->list, &hb->chain);
 	q->task = current;
+#ifdef CONFIG_KDEBUGD_FUTEX
+	q->timestamp = (u32)jiffies;
+#endif
 	spin_unlock(&hb->lock);
 }
 
@@ -2199,6 +2429,11 @@ retry:
 
 	/* If we were woken (and unqueued), we succeeded, whatever. */
 	ret = 0;
+
+#ifdef CONFIG_KDEBUGD_FUTEX
+	/* the futex is woken here... */
+	kdbg_futex_check_task(&q);
+#endif
 	/* unqueue_me() drops q.key ref */
 	if (!unqueue_me(&q))
 		goto out;
@@ -2321,6 +2556,12 @@ retry_private:
 	 */
 	if (!trylock) {
 		ret = rt_mutex_timed_futex_lock(&q.pi_state->pi_mutex, to);
+#ifdef CONFIG_KDEBUGD_FUTEX
+		/* this is non-atomic,
+		 * if trylock, we anyway return immediately
+		 */
+		kdbg_futex_check_task(&q);
+#endif
 	} else {
 		ret = rt_mutex_trylock(&q.pi_state->pi_mutex);
 		/* Fixup the trylock return value: */
@@ -2419,6 +2660,15 @@ retry:
 		 */
 		if (ret == -EFAULT)
 			goto pi_faulted;
+		/*
+		 * A unconditional UNLOCK_PI op raced against a waiter
+		 * setting the FUTEX_WAITERS bit. Try again.
+		 */
+		if (ret == -EAGAIN) {
+			spin_unlock(&hb->lock);
+			put_futex_key(&key);
+			goto retry;
+		}
 		goto out_unlock;
 	}
 
@@ -2548,7 +2798,6 @@ static int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
 {
 	struct hrtimer_sleeper timeout, *to = NULL;
 	struct rt_mutex_waiter rt_waiter;
-	struct rt_mutex *pi_mutex = NULL;
 	struct futex_hash_bucket *hb;
 	union futex_key key2 = FUTEX_KEY_INIT;
 	struct futex_q q = futex_q_init;
@@ -2632,9 +2881,18 @@ static int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
 		if (q.pi_state && (q.pi_state->owner != current)) {
 			spin_lock(q.lock_ptr);
 			ret = fixup_pi_state_owner(uaddr2, &q, current);
+			if (ret && rt_mutex_owner(&q.pi_state->pi_mutex) == current)
+				rt_mutex_unlock(&q.pi_state->pi_mutex);
+			/*
+			 * Drop the reference to the pi state which
+			 * the requeue_pi() code acquired for us.
+			 */
+			free_pi_state(q.pi_state);
 			spin_unlock(q.lock_ptr);
 		}
 	} else {
+		struct rt_mutex *pi_mutex;
+
 		/*
 		 * We have been woken up by futex_unlock_pi(), a timeout, or a
 		 * signal.  futex_unlock_pi() will not destroy the lock_ptr nor
@@ -2658,18 +2916,19 @@ static int futex_wait_requeue_pi(u32 __user *uaddr, unsigned int flags,
 		if (res)
 			ret = (res < 0) ? res : 0;
 
+		/*
+		 * If fixup_pi_state_owner() faulted and was unable to handle
+		 * the fault, unlock the rt_mutex and return the fault to
+		 * userspace.
+		 */
+		if (ret && rt_mutex_owner(pi_mutex) == current)
+			rt_mutex_unlock(pi_mutex);
+
 		/* Unqueue and drop the lock. */
 		unqueue_me_pi(&q);
 	}
 
-	/*
-	 * If fixup_pi_state_owner() faulted and was unable to handle the
-	 * fault, unlock the rt_mutex and return the fault to userspace.
-	 */
-	if (ret == -EFAULT) {
-		if (pi_mutex && rt_mutex_owner(pi_mutex) == current)
-			rt_mutex_unlock(pi_mutex);
-	} else if (ret == -EINTR) {
+	if (ret == -EINTR) {
 		/*
 		 * We've already been requeued, but cannot restart by calling
 		 * futex_lock_pi() directly. We could restart this syscall, but
@@ -3050,4 +3309,4 @@ static int __init futex_init(void)
 
 	return 0;
 }
-__initcall(futex_init);
+core_initcall(futex_init);

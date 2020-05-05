@@ -181,18 +181,20 @@ static inline bool kmem_cache_has_cpu_partial(struct kmem_cache *s)
 #ifdef CONFIG_SMP
 static struct notifier_block slab_notifier;
 #endif
-
+#ifdef CONFIG_KASAN
+#define MAX_TRACE 16
+#endif
 /*
  * Tracking user of a slab.
  */
-#define TRACK_ADDRS_COUNT 16
+#define TRACK_ADDRS_COUNT 8
 struct track {
 	unsigned long addr;	/* Called from address */
 #ifdef CONFIG_STACKTRACE
 	unsigned long addrs[TRACK_ADDRS_COUNT];	/* Called from address */
 #endif
-	int cpu;		/* Was running on cpu */
-	int pid;		/* Pid context */
+	unsigned int pid:22;		/* Pid context */
+	unsigned int cpu:10;		/* Was running on cpu */
 	unsigned long when;	/* When did the operation occur */
 };
 
@@ -352,8 +354,8 @@ static inline void set_page_slub_counters(struct page *page, unsigned long count
 	tmp.counters = counters_new;
 	/*
 	 * page->counters can cover frozen/inuse/objects as well
-	 * as page->_count.  If we assign to ->counters directly
-	 * we run the risk of losing updates to page->_count, so
+	 * as page->_refcount.  If we assign to ->counters directly
+	 * we run the risk of losing updates to page->_refcount, so
 	 * be careful and only assign to the fields we need.
 	 */
 	page->frozen  = tmp.frozen;
@@ -507,6 +509,24 @@ static struct track *get_track(struct kmem_cache *s, void *object,
 
 	return p + alloc;
 }
+
+#ifdef CONFIG_KASAN
+void kasan_get_track(struct kmem_cache *cache, void *object, int  alloc,
+		struct stack_trace *trace){
+	int i;
+	struct track *t = get_track(cache, object, alloc);
+
+	if (!t->addr)
+		return;
+
+	for (i = 1; i < MAX_TRACE; i++)
+		if (t->addrs[i])
+			trace->entries[trace->nr_entries++] =
+				t->addrs[i];
+		else
+			break;
+}
+#endif
 
 static void set_track(struct kmem_cache *s, void *object,
 			enum track_item alloc, unsigned long addr)
@@ -1474,7 +1494,9 @@ static void __free_slab(struct kmem_cache *s, struct page *page)
 		-pages);
 
 	__ClearPageSlabPfmemalloc(page);
+#ifndef CONFIG_KDML
 	__ClearPageSlab(page);
+#endif
 
 	page_mapcount_reset(page);
 	if (current->reclaim_state)
@@ -2526,6 +2548,17 @@ void *kmem_cache_alloc(struct kmem_cache *s, gfp_t gfpflags)
 }
 EXPORT_SYMBOL(kmem_cache_alloc);
 
+#ifdef CONFIG_KDML
+/* we need to create a seperate function as other functions are inline */
+void *kmem_cache_alloc_notrace(struct kmem_cache *s, gfp_t gfpflags)
+{
+	void *ret = slab_alloc(s, gfpflags, _RET_IP_);
+	return ret;
+}
+EXPORT_SYMBOL(kmem_cache_alloc_notrace);
+#endif
+
+
 #ifdef CONFIG_TRACING
 void *kmem_cache_alloc_trace(struct kmem_cache *s, gfp_t gfpflags, size_t size)
 {
@@ -2745,10 +2778,31 @@ void kmem_cache_free(struct kmem_cache *s, void *x)
 	s = cache_from_obj(s, x);
 	if (!s)
 		return;
+#ifdef CONFIG_KDML
+	/*
+	 * Required in summary mode.
+	 * We need to use the object to find its size
+	 * If first freed, it won't be available
+	 */
+	trace_kmem_cache_free(_RET_IP_, x);
+	slab_free(s, virt_to_head_page(x), x, _RET_IP_);
+#else
 	slab_free(s, virt_to_head_page(x), x, _RET_IP_);
 	trace_kmem_cache_free(_RET_IP_, x);
+#endif
 }
 EXPORT_SYMBOL(kmem_cache_free);
+
+#ifdef CONFIG_KDML
+void kmem_cache_free_notrace(struct kmem_cache *s, void *x)
+{
+	s = cache_from_obj(s, x);
+	if (!s)
+		return;
+	slab_free(s, virt_to_head_page(x), x, _RET_IP_);
+}
+EXPORT_SYMBOL(kmem_cache_free_notrace);
+#endif
 
 /*
  * Object placement in a slab is made very easy because we always start at
@@ -3410,7 +3464,22 @@ void kfree(const void *x)
 
 	page = virt_to_head_page(x);
 	if (unlikely(!PageSlab(page))) {
-		BUG_ON(!PageCompound(page));
+		if (!PageCompound(page)) {
+			pr_crit("Before BUG ON: Kfree failure : Page Address : 0x%p\n",
+					page_address(page));
+			pr_crit("Page Flags: %lu\n", page->flags);
+#ifndef CONFIG_VD_RELEASE
+			if (page_mapping(page) &&
+					page->mapping->host &&
+					page->mapping->host->i_sb &&
+					page->mapping->host->i_sb->s_type &&
+					page->mapping->host->i_sb->s_type->name)
+				pr_crit("Page Address Mapping ->  Host Inode ->"
+						"Super Block -> File System Type ->Name %s\n",
+						page->mapping->host->i_sb->s_type->name);
+#endif
+			BUG_ON(1);
+		}
 		kfree_hook(x);
 		__free_kmem_pages(page, compound_order(page));
 		return;

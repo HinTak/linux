@@ -128,6 +128,8 @@ out:
 
 int pm_prepare_console(void)
 {
+	console_forbid_async_printk();
+
 	if (!pm_vt_switch())
 		return 0;
 
@@ -141,6 +143,8 @@ int pm_prepare_console(void)
 
 void pm_restore_console(void)
 {
+	console_permit_async_printk();
+
 	if (!pm_vt_switch())
 		return;
 

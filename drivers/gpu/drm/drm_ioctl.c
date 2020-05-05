@@ -30,9 +30,12 @@
 
 #include <drm/drmP.h>
 #include <drm/drm_core.h>
+#include <drm/drm_tztv_helper.h>
+
 #include "drm_legacy.h"
 #include "drm_internal.h"
 #include "drm_crtc_internal.h"
+
 
 #include <linux/pci.h>
 #include <linux/export.h>
@@ -507,9 +510,12 @@ static int drm_ioctl_permit(u32 flags, struct drm_file *file_priv)
 		return -EACCES;
 
 	/* MASTER is only for master or control clients */
+	/* Allow Multiple Master : refer kernel 3.10 drm_ioctl function*/
+	/*
 	if (unlikely((flags & DRM_MASTER) && !file_priv->is_master &&
 		     !drm_is_control_client(file_priv)))
 		return -EACCES;
+	*/
 
 	/* Control clients must be explicitly allowed */
 	if (unlikely(!(flags & DRM_CONTROL_ALLOW) &&
@@ -605,13 +611,14 @@ static const struct drm_ioctl_desc drm_ioctls[] = {
 	DRM_IOCTL_DEF(DRM_IOCTL_UPDATE_DRAW, drm_noop, DRM_AUTH|DRM_MASTER|DRM_ROOT_ONLY),
 
 	DRM_IOCTL_DEF(DRM_IOCTL_GEM_CLOSE, drm_gem_close_ioctl, DRM_UNLOCKED|DRM_RENDER_ALLOW),
-	DRM_IOCTL_DEF(DRM_IOCTL_GEM_FLINK, drm_gem_flink_ioctl, DRM_AUTH|DRM_UNLOCKED),
+	DRM_IOCTL_DEF(DRM_IOCTL_GEM_FLINK, drm_gem_flink_ioctl, /*DRM_AUTH|*/DRM_UNLOCKED),
 	DRM_IOCTL_DEF(DRM_IOCTL_GEM_OPEN, drm_gem_open_ioctl, DRM_AUTH|DRM_UNLOCKED),
 
 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_GETRESOURCES, drm_mode_getresources, DRM_CONTROL_ALLOW|DRM_UNLOCKED),
 
-	DRM_IOCTL_DEF(DRM_IOCTL_PRIME_HANDLE_TO_FD, drm_prime_handle_to_fd_ioctl, DRM_AUTH|DRM_UNLOCKED|DRM_RENDER_ALLOW),
-	DRM_IOCTL_DEF(DRM_IOCTL_PRIME_FD_TO_HANDLE, drm_prime_fd_to_handle_ioctl, DRM_AUTH|DRM_UNLOCKED|DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF(DRM_IOCTL_PRIME_HANDLE_TO_FD, drm_prime_handle_to_fd_ioctl, /*DRM_AUTH|*/DRM_UNLOCKED|DRM_RENDER_ALLOW),
+	/* Disable DRM authentication Flag Refer 3.10 drm_drv.c*/
+	DRM_IOCTL_DEF(DRM_IOCTL_PRIME_FD_TO_HANDLE, drm_prime_fd_to_handle_ioctl, /*DRM_AUTH|*/DRM_UNLOCKED|DRM_RENDER_ALLOW), 
 
 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_GETPLANERESOURCES, drm_mode_getplane_res, DRM_CONTROL_ALLOW|DRM_UNLOCKED),
 	DRM_IOCTL_DEF(DRM_IOCTL_MODE_GETCRTC, drm_mode_getcrtc, DRM_CONTROL_ALLOW|DRM_UNLOCKED),
@@ -666,6 +673,9 @@ long drm_ioctl(struct file *filp,
 	drm_ioctl_t *func;
 	unsigned int nr = DRM_IOCTL_NR(cmd);
 	int retcode = -EINVAL;
+#ifdef USE_DRM_TZTV_HELPER	 /* Tizen TV DRM */
+	int need_driver_func_call = -EINVAL;
+#endif /*USE_DRM_TZTV_HELPER*/
 	char stack_kdata[128];
 	char *kdata = NULL;
 	unsigned int usize, asize, drv_size;
@@ -733,14 +743,24 @@ long drm_ioctl(struct file *filp,
 	} else if (cmd & IOC_OUT) {
 		memset(kdata, 0, usize);
 	}
+#ifdef USE_DRM_TZTV_HELPER	 /* Tizen TV DRM */
+	need_driver_func_call = drm_tztv_ioctl_hook(nr, dev, kdata, file_priv);
+	
+	if(!need_driver_func_call) {
+			retcode = 0;
+	} else {
+#endif /*USE_DRM_TZTV_HELPER*/
 
-	if (ioctl->flags & DRM_UNLOCKED)
-		retcode = func(dev, kdata, file_priv);
-	else {
-		mutex_lock(&drm_global_mutex);
-		retcode = func(dev, kdata, file_priv);
-		mutex_unlock(&drm_global_mutex);
+		if (ioctl->flags & DRM_UNLOCKED)
+			retcode = func(dev, kdata, file_priv);
+		else {
+			mutex_lock(&drm_global_mutex);
+			retcode = func(dev, kdata, file_priv);
+			mutex_unlock(&drm_global_mutex);
+		}
+#ifdef USE_DRM_TZTV_HELPER	 /* Tizen TV DRM */		
 	}
+#endif /*USE_DRM_TZTV_HELPER*/
 
 	if (cmd & IOC_OUT) {
 		if (copy_to_user((void __user *)arg, kdata,

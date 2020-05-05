@@ -43,6 +43,11 @@
 #include <linux/slab.h>
 #include <linux/compat.h>
 
+#ifdef CONFIG_KDEBUGD_COUNTER_MONITOR
+#include <kdebugd/sec_topthread.h> /*This header file is for topthread info*/
+#include <kdebugd/sec_cpuusage.h> /*This header file is for cpuusage info*/
+#endif
+
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
 #include <asm/div64.h>
@@ -1389,6 +1394,9 @@ unsigned long get_next_timer_interrupt(unsigned long now)
 void update_process_times(int user_tick)
 {
 	struct task_struct *p = current;
+#ifdef CONFIG_KDEBUGD_COUNTER_MONITOR
+	int cpu = smp_processor_id();
+#endif
 
 	/* Note: this timer irq context must be accounted for as well. */
 	account_process_tick(p, user_tick);
@@ -1400,6 +1408,10 @@ void update_process_times(int user_tick)
 #endif
 	scheduler_tick();
 	run_posix_cpu_timers(p);
+
+#ifdef CONFIG_KDEBUGD_COUNTER_MONITOR
+	sec_topthread_timer_interrupt_handler (cpu);
+#endif
 }
 
 /*

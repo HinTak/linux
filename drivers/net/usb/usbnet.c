@@ -46,6 +46,16 @@
 #include <linux/kernel.h>
 #include <linux/pm_runtime.h>
 
+#ifdef SAMSUNG_USBNET_HYPERUART_IFNAME
+#include <linux/fs.h>
+#include <asm/segment.h>
+#include <asm/uaccess.h>
+#include <linux/buffer_head.h>
+
+#define HUART_IPADDR_FILE      "/opt/etc/HyperUART_IP_Addr"
+#define HUART_IP_MAX_LEN       2
+#endif
+
 #define DRIVER_VERSION		"22-Aug-2005"
 
 
@@ -458,6 +468,172 @@ EXPORT_SYMBOL_GPL(usbnet_defer_kevent);
 
 static void rx_complete (struct urb *urb);
 
+#ifdef SAMSUNG_HYPERUART_PREALLOC_SUPPORT
+static int prealloc_skb_max = 200;
+
+#define HUARTPOOL_SKB_MAX	350
+#define POOL_NAME		"pam"	/* pre allocated mem */
+#define NAME_MAX_LEN		4
+
+#define BUF_SIZE_6K		(1024 * 6)
+
+static DEFINE_SPINLOCK(hyperuart_prealloc_lock);
+
+struct prealloc_mem {
+	void *ptr;
+	bool in_use;
+};
+
+enum prealloc_pool_index {
+	POOL_INDEX_6K,
+	POOL_INDEX_MAX
+};
+
+struct sk_buff * prealloc_pool_increase(enum prealloc_pool_index pool);
+
+/* prealloc buffer has to be initialized as early as possible
+ * which is done in usbnet_init(). Due to this limitation we
+ * can not make this buffer as part of net_device structure,
+ * because net_device is created in usbnet_probe() when usb
+ * dongle is actually attached.
+ */
+static struct prealloc_mem prealloc_buf[POOL_INDEX_MAX][HUARTPOOL_SKB_MAX];
+static int pool_init_ok_6k;
+int prealloc_pool_init(enum prealloc_pool_index pool);
+void prealloc_pool_free(enum prealloc_pool_index pool);
+
+unsigned char prealloc_size2pool(unsigned int size)
+{
+	return POOL_INDEX_6K;
+#if 0
+	unsigned char pool;
+
+	switch (size) {
+	case BUF_SIZE_2K:
+		pool = POOL_INDEX_2K;
+		break;
+	default:
+		printk(KERN_ERR "%s: buffer length %u not supported\n",
+			__func__, size);
+		pool = 0xFF;
+		break;
+	}
+
+	return pool;
+#endif
+}
+
+size_t prealloc_pool2size(unsigned char pool)
+{
+	return BUF_SIZE_6K;
+#if 0
+	size_t size;
+
+	switch (pool) {
+	case POOL_INDEX_2K:
+		size = BUF_SIZE_2K;
+		break;
+	default:
+		printk(KERN_ERR "%s: pool %u not supported\n", __func__,
+				(unsigned int)pool);
+		size = 0;
+		break;
+	}
+	return size;
+#endif	
+}
+
+void prealloc_assign_id(struct sk_buff *skb, unsigned char pool, unsigned short id)
+{
+	struct skb_data *entry = NULL;
+	unsigned int len;
+
+	entry = (struct skb_data *) skb->cb;
+
+	len = strnlen(POOL_NAME, NAME_MAX_LEN);
+	strncpy(entry->skb_src, POOL_NAME, len + 1);
+	entry->prealloc_pool_id = pool;
+	entry->prealloc_buf_id = id;
+}
+
+static struct sk_buff *usbnet_prealloc_skb_ip_align(struct net_device *dev,
+			unsigned int size)
+{
+	struct sk_buff *skb = NULL;
+	struct skb_shared_info *shinfo;
+	bool prealloc = 0;
+	bool pfmemalloc;
+	unsigned char pool;
+	unsigned short id;
+	unsigned long lockflags;
+	int dataref;
+
+	pool = prealloc_size2pool(size);
+	if (pool >= POOL_INDEX_MAX)
+		return NULL;
+
+	spin_lock_irqsave(&hyperuart_prealloc_lock, lockflags);
+	for (id = 0; id < prealloc_skb_max; id++) {
+		if (prealloc_buf[pool][id].in_use == 0) {
+			skb =  prealloc_buf[pool][id].ptr;
+		    	dataref = atomic_read(&skb_shinfo(skb)->dataref);
+			if (skb->cloned && dataref > 1)
+				continue;
+
+			prealloc_buf[pool][id].in_use = 1;
+			prealloc = 1;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&hyperuart_prealloc_lock, lockflags);
+
+	if (!prealloc) {
+		skb = prealloc_pool_increase(POOL_INDEX_6K);		
+		if (NULL == skb)
+		{
+			if (net_ratelimit())
+				netdev_err(dev, "pool %u limit %d exceeds\n",
+					(unsigned int) pool, prealloc_skb_max);
+			return NULL;
+		}
+	}
+
+	/* initialize again */
+	pfmemalloc = skb->pfmemalloc;
+	shinfo = skb_shinfo(skb);
+	memset(skb, 0, offsetof(struct sk_buff, tail));
+	prealloc_assign_id(skb, pool, id);
+	skb->pfmemalloc = pfmemalloc;
+	skb->len = 0;
+	skb->data = skb->head;
+	skb_reset_tail_pointer(skb);
+	atomic_set(&skb->users, 1);
+	skb->dev = dev;
+	atomic_set(&shinfo->dataref, 1);
+	netdev_dbg(dev, "prealloc(Alloc) pool=%u, id=%u\n",
+		(unsigned int)pool, (unsigned int)id);
+	return skb;
+}
+
+void usbnet_prealloc_free(struct net_device *dev, struct sk_buff *skb)
+{
+	unsigned char pool;
+	unsigned short id;
+	unsigned long lockflags = 0;
+	struct skb_data *entry = (struct skb_data *) skb->cb;
+
+	pool = entry->prealloc_pool_id;
+	id = entry->prealloc_buf_id;
+
+	spin_lock_irqsave(&hyperuart_prealloc_lock, lockflags);
+	prealloc_buf[pool][id].in_use = 0;
+	spin_unlock_irqrestore(&hyperuart_prealloc_lock, lockflags);
+	
+	netdev_dbg(dev, "prealloc(Free)  pool=%u, id=%u\n",
+		(unsigned int)pool, (unsigned int)id);
+}
+#endif
+
 static int rx_submit (struct usbnet *dev, struct urb *urb, gfp_t flags)
 {
 	struct sk_buff		*skb;
@@ -465,6 +641,9 @@ static int rx_submit (struct usbnet *dev, struct urb *urb, gfp_t flags)
 	int			retval = 0;
 	unsigned long		lockflags;
 	size_t			size = dev->rx_urb_size;
+#ifdef SAMSUNG_HYPERUART_PREALLOC_SUPPORT
+	const char		*name = dev->intf->dev.driver->name;
+#endif
 
 	/* prevent rx skb allocation when error ratio is high */
 	if (test_bit(EVENT_RX_KILL, &dev->flags)) {
@@ -472,7 +651,14 @@ static int rx_submit (struct usbnet *dev, struct urb *urb, gfp_t flags)
 		return -ENOLINK;
 	}
 
+#ifdef SAMSUNG_HYPERUART_PREALLOC_SUPPORT
+	if (pool_init_ok_6k && (!strcmp(name, "asix") || (!strcmp(name, "ax88179_178a"))))
+		skb = usbnet_prealloc_skb_ip_align(dev->net, size);
+	else
+		skb = __netdev_alloc_skb_ip_align(dev->net, size, flags);
+#else
 	skb = __netdev_alloc_skb_ip_align(dev->net, size, flags);
+#endif
 	if (!skb) {
 		netif_dbg(dev, rx_err, dev->net, "no rx skb\n");
 		usbnet_defer_kevent (dev, EVENT_RX_MEMORY);
@@ -522,7 +708,14 @@ static int rx_submit (struct usbnet *dev, struct urb *urb, gfp_t flags)
 	}
 	spin_unlock_irqrestore (&dev->rxq.lock, lockflags);
 	if (retval) {
+#ifdef SAMSUNG_HYPERUART_PREALLOC_SUPPORT
+		if (!strcmp(entry->skb_src, POOL_NAME))
+			usbnet_prealloc_free(dev->net, skb);
+		else
+			dev_kfree_skb_any(skb);
+#else
 		dev_kfree_skb_any (skb);
+#endif
 		usb_free_urb (urb);
 	}
 	return retval;
@@ -1465,7 +1658,14 @@ static void usbnet_bh (unsigned long param)
 			kfree(entry->urb->sg);
 		case rx_cleanup:
 			usb_free_urb (entry->urb);
+#ifdef SAMSUNG_HYPERUART_PREALLOC_SUPPORT
+			if (!strcmp(entry->skb_src, POOL_NAME))
+				usbnet_prealloc_free(dev->net, skb);
+			else
+				dev_kfree_skb(skb);
+#else
 			dev_kfree_skb (skb);
+#endif
 			continue;
 		default:
 			netdev_dbg(dev->net, "bogus skb state %d\n", entry->state);
@@ -1545,7 +1745,7 @@ void usbnet_disconnect (struct usb_interface *intf)
 	usb_kill_urb(dev->interrupt);
 	usb_free_urb(dev->interrupt);
 	kfree(dev->padding_pkt);
-
+	
 	free_netdev(net);
 }
 EXPORT_SYMBOL_GPL(usbnet_disconnect);
@@ -1584,6 +1784,12 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 	int				status;
 	const char			*name;
 	struct usb_driver 	*driver = to_usb_driver(udev->dev.driver);
+#ifdef SAMSUNG_USBNET_HYPERUART_IFNAME
+	struct file *f;
+	char buf[HUART_IP_MAX_LEN];
+	int len;
+	mm_segment_t fs;
+#endif
 
 	/* usbnet already took usb runtime pm, so have to enable the feature
 	 * for usb interface, otherwise usb_autopm_get_interface may return
@@ -1667,8 +1873,39 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 		// can rename the link if it knows better.
 		if ((dev->driver_info->flags & FLAG_ETHER) != 0 &&
 		    ((dev->driver_info->flags & FLAG_POINTTOPOINT) == 0 ||
-		     (net->dev_addr [0] & 0x02) == 0))
+		     (net->dev_addr [0] & 0x02) == 0)) {
+#ifdef SAMSUNG_USBNET_HYPERUART_IFNAME
+			/* net->name is having enough memory of 16 bytes
+			 * no chance of buffer overflow. using strcpy
+			 * instead of strncpy to keep consistency.
+			 */
+			if (!strcmp(name, "ax88179_178a")
+					|| !strcmp(name, "asix")) {
+				f = filp_open(HUART_IPADDR_FILE, O_RDONLY, 0);
+				if(IS_ERR(f) || (f == NULL)) {
+					printk(KERN_ERR
+						"HyperUART file open err!!\n");
+					goto out3;
+				}
+				fs = get_fs();
+				set_fs(get_ds());
+				vfs_read(f, buf, 1, &f->f_pos);
+				set_fs(fs);
+
+				/* hyperUART is disabled, do not set huart */
+				if(buf[0] == '0') {
+					len = strnlen("eth%d", IFNAMSIZ);
+					strncpy (net->name, "eth%d", IFNAMSIZ);
+				} else {
+					len = strnlen("huart%d", IFNAMSIZ);
+					strncpy (net->name, "huart%d", IFNAMSIZ);
+				}
+				filp_close(f,NULL);
+					
+                       } else
+#endif
 			strcpy (net->name, "eth%d");
+		}
 		/* WLAN devices should always be named "wlan%d" */
 		if ((dev->driver_info->flags & FLAG_WLAN) != 0)
 			strcpy(net->name, "wlan%d");
@@ -1806,6 +2043,9 @@ int usbnet_resume (struct usb_interface *intf)
 	struct sk_buff          *skb;
 	struct urb              *res;
 	int                     retval;
+#ifdef SAMSUNG_HYPERUART_PREALLOC_SUPPORT
+	struct skb_data		*entry;
+#endif
 
 	if (!--dev->suspend_count) {
 		/* resume interrupt URB if it was previously submitted */
@@ -1817,7 +2057,15 @@ int usbnet_resume (struct usb_interface *intf)
 			skb = (struct sk_buff *)res->context;
 			retval = usb_submit_urb(res, GFP_ATOMIC);
 			if (retval < 0) {
+#ifdef SAMSUNG_HYPERUART_PREALLOC_SUPPORT
+                               entry = (struct skb_data *) skb->cb;
+                               if (!strcmp(entry->skb_src, POOL_NAME))
+                                       usbnet_prealloc_free(dev->net, skb);
+                               else
+                                       dev_kfree_skb_any(skb);
+#else
 				dev_kfree_skb_any(skb);
+#endif
 				kfree(res->sg);
 				usb_free_urb(res);
 				usb_autopm_put_interface_async(dev->intf);
@@ -2087,19 +2335,163 @@ fail:
 EXPORT_SYMBOL_GPL(usbnet_write_cmd_async);
 /*-------------------------------------------------------------------------*/
 
+#ifdef SAMSUNG_HYPERUART_PREALLOC_SUPPORT
+
+struct sk_buff * prealloc_pool_increase(enum prealloc_pool_index pool)
+{
+	size_t size;
+	unsigned short id;
+	unsigned long lockflags;
+	struct sk_buff *skb = NULL;
+
+	spin_lock_irqsave(&hyperuart_prealloc_lock, lockflags);
+	if(prealloc_skb_max >= HUARTPOOL_SKB_MAX)
+	{
+		spin_unlock_irqrestore(&hyperuart_prealloc_lock, lockflags);
+		printk(KERN_EMERG "prealloc_pool_increase: HUARTPOOL_SKB_MAX Limit exceed\n");
+		return NULL;
+	}
+	spin_unlock_irqrestore(&hyperuart_prealloc_lock, lockflags);
+
+	size = prealloc_pool2size(pool);
+	size = size + NET_IP_ALIGN;
+	skb = dev_alloc_skb(size);
+	if (NULL == skb) {
+		printk(KERN_EMERG "prealloc_pool_increase: dev_alloc_skb Failed\n");
+		return NULL;
+	}
+
+	spin_lock_irqsave(&hyperuart_prealloc_lock, lockflags);
+	id = prealloc_skb_max;
+	prealloc_assign_id(skb, pool, id);
+	prealloc_buf[pool][id].ptr = skb;
+	prealloc_buf[pool][id].in_use = 1;
+	++prealloc_skb_max;
+	spin_unlock_irqrestore(&hyperuart_prealloc_lock, lockflags);
+
+	printk(KERN_EMERG "prealloc_skb_max = %d \n", prealloc_skb_max);
+	return skb;
+}
+
+int prealloc_pool_init(enum prealloc_pool_index pool)
+{
+
+	size_t size;
+	unsigned short id;
+	struct sk_buff *skb = NULL;
+	
+	size = prealloc_pool2size(pool);
+	size = size + NET_IP_ALIGN;
+	for (id = 0; id < prealloc_skb_max; id++) {
+		skb = dev_alloc_skb(size);
+		if (NULL == skb) {
+			printk(KERN_ERR "%s: Error!! pool=%u, id=%u\n",
+				__func__, (unsigned int)pool,
+				(unsigned int)id);
+
+			goto fail_out;
+		}
+		if (NET_IP_ALIGN && skb)
+			skb_reserve(skb, NET_IP_ALIGN);
+
+		prealloc_assign_id(skb, pool, id);
+		prealloc_buf[pool][id].ptr = skb;
+		prealloc_buf[pool][id].in_use = 0;
+	}
+	printk(KERN_ERR "%s: pool %d: size=%zu, total buf=%u\n",
+		 __func__, (unsigned int)pool, size, prealloc_skb_max);
+	
+	if(pool == POOL_INDEX_6K)
+		pool_init_ok_6k = 1;
+	else
+		printk(KERN_INFO "Wrong poll\n");
+
+	return 0;
+
+fail_out:
+	while(id) {
+		--id;
+		skb = prealloc_buf[pool][id].ptr;
+		dev_kfree_skb(skb);
+		prealloc_buf[pool][id].ptr = 0;
+		prealloc_buf[pool][id].in_use = 0;	
+	}
+	
+	return -ENOMEM;
+
+}
+
+void prealloc_pool_free(enum prealloc_pool_index pool)
+{
+	unsigned short id;
+	struct sk_buff *skb = NULL;
+
+	for (id = 0; id < prealloc_skb_max; id++) {
+		prealloc_buf[pool][id].in_use = 0;
+		skb = prealloc_buf[pool][id].ptr;
+		dev_kfree_skb(skb);
+	}
+	if(pool == POOL_INDEX_6K)
+		pool_init_ok_6k = 0;
+	else
+		printk(KERN_INFO "Wrong poll\n");
+
+}	
+#endif
+
 static int __init usbnet_init(void)
 {
+
+#if defined(SAMSUNG_USBNET_HYPERUART_IFNAME ) && defined(SAMSUNG_HYPERUART_PREALLOC_SUPPORT)
+	int status;
+	struct file *f;
+	char buf[HUART_IP_MAX_LEN];
+	mm_segment_t fs;
+#endif
+
 	/* Compiler should optimize this out. */
 	BUILD_BUG_ON(
 		FIELD_SIZEOF(struct sk_buff, cb) < sizeof(struct skb_data));
 
 	eth_random_addr(node_id);
+	
+#ifdef SAMSUNG_USBNET_HYPERUART_IFNAME
+#ifdef SAMSUNG_HYPERUART_PREALLOC_SUPPORT
+	f = filp_open(HUART_IPADDR_FILE, O_RDONLY, 0);
+	if(IS_ERR(f) || (f == NULL)) 
+	{
+		printk(KERN_ERR " SRI-D HyperUART file open err!!\n");
+		goto nohuart;
+	}
+	fs = get_fs();
+	set_fs(get_ds());
+	vfs_read(f, buf, 1, &f->f_pos);
+	set_fs(fs);
+	filp_close(f,NULL);
+	
+	if(buf[0] != '0')
+	{
+		printk(KERN_ERR "[%s] SRI-D HyperUART, buf[0] = %c\n",__func__,buf[0]);
+		status = prealloc_pool_init(POOL_INDEX_6K);
+		if(status < 0)
+			printk(KERN_ERR "Hyper UART for USB2.0/USB3.0 can't be used because of no memory!!\n");
+	}
+nohuart:
+#endif /*SAMSUNG_HYPERUART_PREALLOC_SUPPORT*/
+#else
+	printk(KERN_ERR "[%s] SRI-D Prealloc Pool is not created due to #define changes..\n",__func__);
+#endif /*SAMSUNG_USBNET_HYPERUART_IFNAME*/
 	return 0;
 }
 module_init(usbnet_init);
 
+
 static void __exit usbnet_exit(void)
 {
+#ifdef SAMSUNG_HYPERUART_PREALLOC_SUPPORT
+	if(pool_init_ok_6k)
+		prealloc_pool_free(POOL_INDEX_6K);
+#endif
 }
 module_exit(usbnet_exit);
 

@@ -451,7 +451,7 @@ int blk_integrity_register(struct gendisk *disk, struct blk_integrity *template)
 	} else
 		bi->name = bi_unsupported_name;
 
-	disk->queue->backing_dev_info.capabilities |= BDI_CAP_STABLE_WRITES;
+	disk->queue->backing_dev_info->capabilities |= BDI_CAP_STABLE_WRITES;
 
 	return 0;
 }
@@ -471,7 +471,7 @@ void blk_integrity_unregister(struct gendisk *disk)
 	if (!disk || !disk->integrity)
 		return;
 
-	disk->queue->backing_dev_info.capabilities &= ~BDI_CAP_STABLE_WRITES;
+	disk->queue->backing_dev_info->capabilities &= ~BDI_CAP_STABLE_WRITES;
 
 	bi = disk->integrity;
 

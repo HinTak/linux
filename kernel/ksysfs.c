@@ -125,6 +125,29 @@ static ssize_t kexec_crash_size_store(struct kobject *kobj,
 }
 KERNEL_ATTR_RW(kexec_crash_size);
 
+#ifdef CONFIG_KEXEC_CSYSTEM
+static ssize_t vmcoreinfo_store(struct kobject *kobj,
+				   struct kobj_attribute *attr,
+				   const char *buf, size_t count)
+{
+	char symbol[64];
+
+	if (count > sizeof(symbol))  {
+		pr_warn("Max 64 character is allowed per write to vmcoreinfo\n");
+		return -EINVAL;
+	}
+
+	strncpy(symbol, buf, count);
+	symbol[count] = 0;
+
+	vmcoreinfo_append_str("USER(%s)\n", symbol);
+
+	pr_warn("kexec: Write to vmcoreinfo \"USER(%s)\"\n", symbol);
+
+	return count;
+}
+#endif
+
 static ssize_t vmcoreinfo_show(struct kobject *kobj,
 			       struct kobj_attribute *attr, char *buf)
 {
@@ -132,7 +155,11 @@ static ssize_t vmcoreinfo_show(struct kobject *kobj,
 		       paddr_vmcoreinfo_note(),
 		       (unsigned int)sizeof(vmcoreinfo_note));
 }
+#ifdef CONFIG_KEXEC_CSYSTEM
+KERNEL_ATTR_RW(vmcoreinfo);
+#else
 KERNEL_ATTR_RO(vmcoreinfo);
+#endif
 
 #endif /* CONFIG_KEXEC */
 
@@ -144,7 +171,11 @@ static ssize_t fscaps_show(struct kobject *kobj,
 }
 KERNEL_ATTR_RO(fscaps);
 
+#ifdef CONFIG_FASTBOOT_RCU
+int rcu_expedited = 1;
+#else
 int rcu_expedited;
+#endif
 static ssize_t rcu_expedited_show(struct kobject *kobj,
 				  struct kobj_attribute *attr, char *buf)
 {

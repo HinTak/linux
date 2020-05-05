@@ -2590,6 +2590,14 @@ early_enable_events(struct trace_array *tr, bool disable_first)
 	}
 }
 
+#ifdef CONFIG_EARLY_TRACING
+/*
+ * This is a hacky attempt to collect some early tracing messages
+ * and when ftrace is available - dump everything to it.
+ */
+extern void dump_early_events(void);
+#endif
+
 static __init int event_trace_enable(void)
 {
 	struct trace_array *tr = top_trace_array();
@@ -2622,6 +2630,11 @@ static __init int event_trace_enable(void)
 	register_event_cmds();
 
 	register_trigger_cmds();
+
+#ifdef CONFIG_EARLY_TRACING
+        /* Dump all early events to ring buffer and switch to ftrace */
+        dump_early_events();
+#endif
 
 	return 0;
 }
@@ -2941,3 +2954,8 @@ static __init int event_trace_self_tests_init(void)
 late_initcall(event_trace_self_tests_init);
 
 #endif
+
+#ifdef CONFIG_KDEBUGD_FTRACE
+/* Let kdebugd have access to static functions in this file */
+#include "../kdebugd/trace/kdbg_ftrace_events_helper.c"
+#endif /* CONFIG_KDEBUGD_FTRACE */

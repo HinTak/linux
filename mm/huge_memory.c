@@ -950,7 +950,7 @@ static void get_user_huge_page(struct page *page)
 	if (IS_ENABLED(CONFIG_DEBUG_PAGEALLOC)) {
 		struct page *endpage = page + HPAGE_PMD_NR;
 
-		atomic_add(HPAGE_PMD_NR, &page->_count);
+		page_ref_add(page, HPAGE_PMD_NR);
 		while (++page < endpage)
 			get_huge_page_tail(page);
 	} else {
@@ -1656,9 +1656,9 @@ static void __split_huge_page_refcount(struct page *page,
 		tail_count += page_mapcount(page_tail);
 		/* check for overflow */
 		BUG_ON(tail_count < 0);
-		BUG_ON(atomic_read(&page_tail->_count) != 0);
+		BUG_ON(page_ref_count(page_tail) != 0);
 		/*
-		 * tail_page->_count is zero and not changing from
+		 * tail_page->_refcount is zero and not changing from
 		 * under us. But get_page_unless_zero() may be running
 		 * from under us on the tail_page. If we used
 		 * atomic_set() below instead of atomic_add(), we
@@ -1670,8 +1670,7 @@ static void __split_huge_page_refcount(struct page *page,
 		 * atomic_set() here would be safe on all archs (and
 		 * not only on x86), it's safer to use atomic_add().
 		 */
-		atomic_add(page_mapcount(page) + page_mapcount(page_tail) + 1,
-			   &page_tail->_count);
+		page_ref_add(page_tail, page_mapcount(page) + page_mapcount(page_tail) + 1);
 
 		/* after clearing PageTail the gup refcount can be released */
 		smp_mb__after_atomic();
@@ -1723,8 +1722,8 @@ static void __split_huge_page_refcount(struct page *page,
 
 		lru_add_page_tail(page, page_tail, lruvec, list);
 	}
-	atomic_sub(tail_count, &page->_count);
-	BUG_ON(atomic_read(&page->_count) <= 0);
+	page_ref_sub(page, tail_count);
+	BUG_ON(page_ref_count(page) <= 0);
 
 	__mod_zone_page_state(zone, NR_ANON_TRANSPARENT_HUGEPAGES, -1);
 

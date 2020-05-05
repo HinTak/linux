@@ -11,6 +11,7 @@
 #include <linux/mempolicy.h>
 #include <linux/rmap.h>
 #include <linux/swap.h>
+#include <linux/mm_inline.h>
 #include <linux/swapops.h>
 #include <linux/mmu_notifier.h>
 
@@ -113,6 +114,59 @@ static void release_task_mempolicy(struct proc_maps_private *priv)
 {
 }
 #endif
+
+/* return 0 if addr belongs to `name'-d ELF */
+int find_match_elf_name(struct task_struct *t, char *name, unsigned long addr)
+{
+
+	struct vm_area_struct *vma, *gate_vma;
+	struct file *file;
+	struct mm_struct *mm;
+	
+	int ret = -ENOENT;
+	mm = get_task_mm(t);
+	if (!mm)
+		return -EINVAL;
+
+	if (!down_read_trylock(&mm->mmap_sem)) {
+		pr_alert("down_read_trylock() failed. Can't compare maps info\n");
+		mmput(mm);
+		return -EINVAL;
+	}
+
+
+	gate_vma = get_gate_vma(mm);
+	vma = mm->mmap;
+	if (!vma)
+		vma = gate_vma;
+
+	while (vma) {
+		if ((addr > vma->vm_start) && (addr < vma->vm_end)) {
+			file = vma->vm_file;
+
+			if (file) {
+				/* if might be very unlikely but still */
+				spin_lock(&file->f_path.dentry->d_lock);
+				ret = !strstr(file->f_path.dentry->d_name.name,
+						name);
+				spin_unlock(&file->f_path.dentry->d_lock);
+				/* note the inverted strstr() return value */
+				if (ret == 0)
+					break;
+			}
+		}
+		if (vma->vm_next)
+			vma = vma->vm_next;
+		else if (vma == gate_vma)
+			vma = NULL;
+		else
+			vma = gate_vma;
+	}
+
+	up_read(&current->mm->mmap_sem);
+	mmput(mm);
+	return ret;
+}
 
 static void vma_stop(struct proc_maps_private *priv)
 {
@@ -246,23 +300,26 @@ static int do_maps_open(struct inode *inode, struct file *file,
 				sizeof(struct proc_maps_private));
 }
 
-static pid_t pid_of_stack(struct proc_maps_private *priv,
+static struct task_struct *taskpid_of_stack(struct proc_maps_private *priv,
 				struct vm_area_struct *vma, bool is_pid)
 {
 	struct inode *inode = priv->inode;
 	struct task_struct *task;
-	pid_t ret = 0;
 
 	rcu_read_lock();
 	task = pid_task(proc_pid(inode), PIDTYPE_PID);
 	if (task) {
 		task = task_of_stack(task, vma, is_pid);
-		if (task)
-			ret = task_pid_nr_ns(task, inode->i_sb->s_fs_info);
+		if (task) {
+			get_task_struct(task);
+			rcu_read_unlock();
+			/*ret = task_pid_nr_ns(task, inode->i_sb->s_fs_info);*/
+			return task;
+		}
 	}
 	rcu_read_unlock();
 
-	return ret;
+	return NULL;
 }
 
 static void
@@ -287,11 +344,7 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma, int is_pid)
 
 	/* We don't show the stack guard page in /proc/maps */
 	start = vma->vm_start;
-	if (stack_guard_page_start(vma, start))
-		start += PAGE_SIZE;
 	end = vma->vm_end;
-	if (stack_guard_page_end(vma, end))
-		end -= PAGE_SIZE;
 
 	seq_setwidth(m, 25 + sizeof(void *) * 6 - 1);
 	seq_printf(m, "%08lx-%08lx %c%c%c%c %08llx %02x:%02x %lu ",
@@ -322,7 +375,7 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma, int is_pid)
 
 	name = arch_vma_name(vma);
 	if (!name) {
-		pid_t tid;
+		struct task_struct *t;
 
 		if (!mm) {
 			name = "[vdso]";
@@ -335,8 +388,8 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma, int is_pid)
 			goto done;
 		}
 
-		tid = pid_of_stack(priv, vma, is_pid);
-		if (tid != 0) {
+		t = taskpid_of_stack(priv, vma, is_pid);
+		if (t != NULL) {
 			/*
 			 * Thread stack in /proc/PID/task/TID/maps or
 			 * the main process stack.
@@ -347,8 +400,10 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma, int is_pid)
 			} else {
 				/* Thread stack in /proc/PID/maps */
 				seq_pad(m, ' ');
-				seq_printf(m, "[stack:%d]", tid);
+				seq_printf(m, "[tstack: %s: %d]", t->comm,
+						t->pid);
 			}
+			put_task_struct(t);
 		}
 	}
 
@@ -414,6 +469,114 @@ const struct file_operations proc_tid_maps_operations = {
 	.llseek		= seq_lseek,
 	.release	= proc_map_release,
 };
+
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+void show_pid_maps(struct task_struct *task)
+{
+	struct task_struct *t;
+	struct mm_struct *mm;
+	struct vm_area_struct *vma, *gate_vma;
+	struct file *file;
+	struct pt_regs *regs;
+	unsigned long long pgoff = 0;
+	unsigned long ino = 0;
+	dev_t dev = 0;
+	int tpid = 0;
+	char path_buf[256];
+
+	pr_alert("-----------------------------------------------------------\n");
+	pr_alert("* dump maps on pid (%d - %s)\n", task->pid, task->comm);
+	pr_alert("-----------------------------------------------------------\n");
+
+	if (!down_read_trylock(&task->mm->mmap_sem)) {
+		pr_alert("down_read_trylock() failed... do not dump pid maps info\n");
+		return;
+	}
+
+	gate_vma = get_gate_vma(task->mm);
+
+	vma = task->mm->mmap;
+	regs = task_pt_regs(task);
+	if (!vma)
+		vma = gate_vma;
+
+	while (vma) {
+		file = vma->vm_file;
+		if (file) {
+			struct inode *inode = file_inode(file);
+
+			dev = inode->i_sb->s_dev;
+			ino = inode->i_ino;
+			pgoff = ((unsigned long long)vma->vm_pgoff) << PAGE_SHIFT;
+		} else {
+			dev = 0;
+			ino = 0;
+			pgoff = 0;
+		}
+
+		pr_alert("%08lx-%08lx %c%c%c%c %08llx %02x:%02x %-10lu ",
+			vma->vm_start,
+			vma->vm_end,
+			vma->vm_flags & VM_READ ? 'r' : '-',
+			vma->vm_flags & VM_WRITE ? 'w' : '-',
+			vma->vm_flags & VM_EXEC ? 'x' : '-',
+			vma->vm_flags & VM_MAYSHARE ? 's' : 'p',
+			pgoff,
+			MAJOR(dev), MINOR(dev), ino);
+
+		if (file) {
+			char *p = d_path(&(file->f_path), path_buf, 256);
+
+			if (!IS_ERR(p))
+				pr_cont("%s", p);
+		} else {
+			const char *name = arch_vma_name(vma);
+
+			mm = vma->vm_mm;
+			tpid = 0;
+			if (!name) {
+				if (mm) {
+					if (vma->vm_start <= mm->brk &&
+							vma->vm_end >= mm->start_brk) {
+						name = "[heap]";
+					} else if (vma->vm_start <= mm->start_stack &&
+							vma->vm_end >= mm->start_stack) {
+						name = "[stack]";
+					} else {
+						t = task;
+						do {
+							if (vma->vm_start <= t->user_ssp &&
+									vma->vm_end >= t->user_ssp){
+								tpid = t->pid;
+								name = t->comm;
+								break;
+							}
+						} while_each_thread(task, t);
+					}
+				} else {
+					name = "[vdso]";
+				}
+			}
+			if (name) {
+				if (tpid)
+					pr_cont("[tstack: %s: %d]", name, tpid);
+				else
+					pr_cont("%s", name);
+			}
+		}
+		pr_cont("\n");
+
+		if (vma->vm_next)
+			vma = vma->vm_next;
+		else if (vma == gate_vma)
+			vma = NULL;
+		else
+			vma = gate_vma;
+	}
+	up_read(&task->mm->mmap_sem);
+	pr_alert("-----------------------------------------------------------\n\n");
+}
+#endif
 
 /*
  * Proportional Set Size(PSS): my share of RSS.
@@ -526,8 +689,13 @@ static void smaps_pmd_entry(pmd_t *pmd, unsigned long addr,
 }
 #endif
 
+#ifdef CONFIG_VD_MEMINFO
+int smaps_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
+		    struct mm_walk *walk)
+#else
 static int smaps_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
 			   struct mm_walk *walk)
+#endif
 {
 	struct vm_area_struct *vma = walk->vma;
 	pte_t *pte;
@@ -550,7 +718,9 @@ static int smaps_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
 	for (; addr != end; pte++, addr += PAGE_SIZE)
 		smaps_pte_entry(pte, addr, walk);
 	pte_unmap_unlock(pte - 1, ptl);
-	cond_resched();
+	if (!preempt_count())
+		cond_resched();
+
 	return 0;
 }
 
@@ -620,7 +790,7 @@ static int show_smap(struct seq_file *m, void *v, int is_pid)
 		.private = &mss,
 	};
 
-	memset(&mss, 0, sizeof mss);
+	memset(&mss, 0, sizeof(mss));
 	/* mmap_sem is held in m_start */
 	walk_page_vma(vma, &smaps_walk);
 
@@ -789,6 +959,233 @@ static inline void clear_soft_dirty_pmd(struct vm_area_struct *vma,
 }
 #endif
 
+
+#ifdef CONFIG_MEMSTAT_INFO
+
+struct smap_mem {
+	unsigned long total;
+	unsigned long vmag[VMAG_CNT];
+};
+
+#define K(x) ((x) << (PAGE_SHIFT-10))
+
+static void show_memstat_vd_memps(struct seq_file *m,
+	 struct vm_area_struct *vma, int idx, struct mem_size_stats mss,
+	 struct task_struct *task)
+{
+
+	unsigned long  dev_rss = 0, dev_pss = 0;
+	bool is_name = false;
+	const char *name = NULL;
+	char path_buf[32];
+	char *buf = NULL;
+	struct task_struct *t;
+	unsigned long start, end;
+
+	start = vma->vm_start;
+	end = vma->vm_end;
+	if (vma->vm_ops && vma->vm_ops->name) {
+		name = vma->vm_ops->name(vma);
+		goto done;
+	}
+	name = arch_vma_name(vma);
+	if (name)
+		goto done;
+
+	if (vma->vm_file) {
+		buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
+		if (!buf)
+			return;
+
+		name = d_path(&(vma->vm_file->f_path), buf, PAGE_SIZE);
+		if (!IS_ERR(name)) {
+			if (!strncmp(name, "/dev/", 5)) {
+				dev_rss = mss.resident >> 10;
+				dev_pss = (unsigned long)
+					(mss.pss >> (10 + PSS_SHIFT));
+			}
+			goto done;
+		}
+	}
+	if (vma->vm_mm) {
+		if (vma->vm_start <= vma->vm_mm->brk &&
+			vma->vm_end >= vma->vm_mm->start_brk) {
+			name = "heap";
+		} else if (vma->vm_start <= vma->vm_mm->start_stack &&
+			vma->vm_end >= vma->vm_mm->start_stack) {
+			name = "stack";
+		} else {
+			rcu_read_lock();
+			get_task_struct(task);
+			for_each_thread(task, t) {
+				get_task_struct(t);
+				if (vma->vm_start <= t->user_ssp &&
+					vma->vm_end >= t->user_ssp){
+					sprintf(path_buf, "tstack:%s:%d",
+						t->comm, t->pid);
+					name = path_buf;
+					put_task_struct(t);
+					break;
+				}
+				put_task_struct(t);
+			}
+			put_task_struct(task);
+			rcu_read_unlock();
+	/*this is an anonymous mapping as obtained via mmap*/
+			if (!name)
+				name = "anon_mmap";
+		}
+	} else {
+	/*The virtual dynamically linked shared object.*/
+		name = "vdso";
+	}
+
+done:
+	if (!vma->vm_prev) {
+		seq_printf(m, "MaxRSS: %lu\n",
+			K(get_max_total_rss(vma->vm_mm)));
+	}
+	if (idx == VMAG_CODE || idx == VMAG_LIBCODE)
+		seq_printf(m, "%8lx - %8lx %8lu %8d %8lu %8d %8lu %8lu %8lu"
+		" %8lu %8lu [%s]\n", start, end, mss.shared_clean  >> 10, 0,
+		mss.private_clean >> 10, 0, mss.resident >> 10,
+		(unsigned long)(mss.pss >> (10 + PSS_SHIFT)), dev_rss, dev_pss,
+		 mss.swap >> 10, name);
+	else
+		seq_printf(m, "%8lx - %8lx %8d %8lu %8d %8lu %8lu %8lu %8lu"
+			" %8lu %8lu [%s]\n", start, end, 0,
+			(mss.shared_clean+mss.shared_dirty) >> 10, 0,
+			(mss.private_clean+mss.private_dirty) >> 10,
+			mss.resident >> 10,
+			(unsigned long)(mss.pss >> (10 + PSS_SHIFT)),
+			dev_rss, dev_pss, mss.swap >> 10, name);
+
+	kfree(buf);
+
+}
+
+static int show_memstat(struct seq_file *m, void *v)
+{
+	struct proc_maps_private *priv = m->private;
+	struct task_struct *task = priv->task;
+	struct vm_area_struct *vma = v;
+	struct mem_size_stats mss;
+	struct mm_walk smaps_walk = {
+		.pmd_entry = smaps_pte_range,
+		.private = &mss,
+	};
+
+	int idx = 0;
+	static struct smap_mem vmem;
+	static struct smap_mem rss;
+	static struct smap_mem pss;
+	static struct smap_mem shared;
+	static struct smap_mem private;
+	static struct smap_mem swap;
+
+	if (!vma || !vma->vm_mm)
+		return 0;
+
+	smaps_walk.mm = vma->vm_mm;
+
+	memset(&mss, 0, sizeof(mss));
+	if (vma->vm_mm && !is_vm_hugetlb_page(vma))
+		walk_page_range(vma->vm_start, vma->vm_end, &smaps_walk);
+
+/*	show_map_vma(m, vma); */
+
+	vmem.total    += (vma->vm_end - vma->vm_start) >> 10;
+	rss.total     += mss.resident >> 10;
+	pss.total     += (unsigned long)(mss.pss >> (10 + PSS_SHIFT));
+	shared.total  += (mss.shared_clean + mss.shared_dirty) >> 10;
+	private.total += (mss.private_clean + mss.private_dirty) >> 10;
+	swap.total    += mss.swap >> 10;
+
+	idx = get_group_idx(vma);
+	vmem.vmag[idx]    += (vma->vm_end - vma->vm_start) >> 10;
+	rss.vmag[idx]     += mss.resident >> 10;
+	pss.vmag[idx]     += (unsigned long)(mss.pss >> (10 + PSS_SHIFT));
+	shared.vmag[idx]  += (mss.shared_clean + mss.shared_dirty) >> 10;
+	private.vmag[idx] += (mss.private_clean + mss.private_dirty) >> 10;
+	swap.vmag[idx]    += mss.swap >> 10;
+
+	/*Following code will be executed only for vd_memps tool
+	* and provide with per VM memory information
+	* for the process in following format:
+	* start - end SCode Sdata PCode Pdata RSS PSS DeviceRSS DevicePSS Name
+	*/
+	if (!strncmp(current->comm, "vd_memps",9))
+		show_memstat_vd_memps(m, vma, idx, mss, task);
+
+	if (m->count < m->size)  /* vma is copied successfully */
+		m->version = (vma != get_gate_vma(task->mm)) ? vma->vm_start : 0;
+
+	if (!vma->vm_next) { /* latest vma sequence */
+		seq_printf(m,
+				" =========================================================================\n"
+				"                VMSize    Rss  Rss_max  Shared  Private    Pss   Swap\n"
+				"  Process Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+				"     Code Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+				"     Data Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+				"  LibCode Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+				"  LibData Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+				" Heap-BRK Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+				"    Stack Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n"
+				"    Other Cur: %7lu %6lu   %6lu  %6lu   %6lu %6lu %6lu (kB)\n",
+				vmem.total, rss.total,
+				K(get_max_total_rss(vma->vm_mm)),
+				shared.total, private.total, pss.total, swap.total,
+				vmem.vmag[0], rss.vmag[0],
+				K(get_max_rss(vma->vm_mm, 0)), shared.vmag[0],
+				private.vmag[0], pss.vmag[0], swap.vmag[0],
+				vmem.vmag[1], rss.vmag[1],
+				K(get_max_rss(vma->vm_mm, 1)), shared.vmag[1],
+				private.vmag[1], pss.vmag[1], swap.vmag[1],
+				vmem.vmag[2], rss.vmag[2],
+				K(get_max_rss(vma->vm_mm, 2)), shared.vmag[2],
+				private.vmag[2], pss.vmag[2], swap.vmag[2],
+				vmem.vmag[3], rss.vmag[3],
+				K(get_max_rss(vma->vm_mm, 3)), shared.vmag[3],
+				private.vmag[3], pss.vmag[3], swap.vmag[3],
+				vmem.vmag[4], rss.vmag[4],
+				K(get_max_rss(vma->vm_mm, 4)), shared.vmag[4],
+				private.vmag[4], pss.vmag[4], swap.vmag[4],
+				vmem.vmag[5], rss.vmag[5],
+				K(get_max_rss(vma->vm_mm, 5)), shared.vmag[5],
+				private.vmag[5], pss.vmag[5], swap.vmag[5],
+				vmem.vmag[6], rss.vmag[6],
+				K(get_max_rss(vma->vm_mm, 6)), shared.vmag[6],
+				private.vmag[6], pss.vmag[6], swap.vmag[6]
+			);
+		memset(&vmem    , 0, sizeof(struct smap_mem));
+		memset(&rss     , 0, sizeof(struct smap_mem));
+		memset(&shared  , 0, sizeof(struct smap_mem));
+		memset(&private , 0, sizeof(struct smap_mem));
+		memset(&pss     , 0, sizeof(struct smap_mem));
+		memset(&swap    , 0, sizeof(struct smap_mem));
+	}
+	return 0;
+}
+
+static const struct seq_operations proc_pid_memstat_op = {
+	.start	= m_start,
+	.next	= m_next,
+	.stop	= m_stop,
+	.show	= show_memstat
+};
+
+static int memstat_open(struct inode *inode, struct file *file)
+{
+	return do_maps_open(inode, file, &proc_pid_memstat_op);
+}
+
+const struct file_operations proc_pid_memstat_operations = {
+	.open	= memstat_open,
+	.read	= seq_read,
+	.llseek	= seq_lseek,
+	.release = seq_release_private,
+};
+#endif /* CONFIG_MEMSTAT_INFO ends */
 static int clear_refs_pte_range(pmd_t *pmd, unsigned long addr,
 				unsigned long end, struct mm_walk *walk)
 {
@@ -1341,6 +1738,294 @@ const struct file_operations proc_pagemap_operations = {
 };
 #endif /* CONFIG_PROC_PAGE_MONITOR */
 
+
+/*
+ * Forced PID reclaim flags
+ */
+enum reclaim_type {
+	RECLAIM_FILE = 1,
+	RECLAIM_ANON,
+	RECLAIM_ALL,
+};
+
+enum reclaim_ret_type {
+	RECLAIM_RET_OK	= 0,
+	RECLAIM_RET_SKIP_ON_RQ,
+	RECLAIM_RET_SKIP_SIGNAL_PENDDING,
+	RECLAIM_RET_OVER_MAX_COUNT,
+	RECLAIM_RET_KSWAPD_RUN,
+};
+
+struct reclaim_stat {
+	struct vm_area_struct *vma;
+	unsigned long vm_start;
+	int reclaim_max_page;
+	int reclaimed_page;
+	int ret;
+};
+
+struct usr_reclaim_stat {
+	int type;
+	unsigned long vm_start;
+    int reclaim_max_page;
+    int reclaimed_page;
+	int ret;
+};
+
+#define INFINITY	0x0FFFFFFF
+
+static int reclaim_pte_range(pmd_t *pmd,
+			unsigned long addr,
+			unsigned long end,
+			struct mm_walk *walk)
+{
+	struct mm_struct *mm = walk->mm;
+	struct reclaim_stat *rs = walk->private;
+	struct vm_area_struct *vma = rs->vma;
+	pte_t *orig_pte, *pte, ptent;
+	spinlock_t *ptl;
+	struct page *page;
+	LIST_HEAD(page_list);
+	int isolated = 0;
+
+	split_huge_page_pmd(vma, addr, pmd);
+	if (pmd_trans_unstable(pmd))
+		return 0;
+
+	orig_pte = pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
+	for (; addr != end; pte++, addr += PAGE_SIZE) {
+		ptent = *pte;
+
+		if (!pte_present(ptent))
+			continue;
+
+		page = vm_normal_page(vma, addr, ptent);
+		if (!page)
+			continue;
+
+		/* Can't reclaim shared pages */
+		if (page_mapcount(page) != 1)
+			continue;
+
+		if (PageTransCompound(page)) {
+			get_page(page);
+			if (!trylock_page(page)) {
+				put_page(page);
+				goto out;
+			}
+			pte_unmap_unlock(orig_pte, ptl);
+
+			if (split_huge_page(page)) {
+				unlock_page(page);
+				put_page(page);
+				orig_pte = pte_offset_map_lock(mm, pmd,
+								addr, &ptl);
+				goto out;
+			}
+			put_page(page);
+			unlock_page(page);
+			pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
+			pte--;
+			addr -= PAGE_SIZE;
+			continue;
+		}
+
+		VM_BUG_ON_PAGE(PageTransCompound(page), page);
+
+		/*
+		 * Try to remove that page from its LRU list and put it in
+		 * forced reclaim list.
+		 */
+		if (isolate_lru_page(page))
+			continue;
+
+		list_add(&page->lru, &page_list);
+		inc_zone_page_state(page, NR_ISOLATED_ANON +
+					page_is_file_cache(page));
+		isolated++;
+
+		/*
+		 * Reschedule every SWAP_CLUSTER_MAX pages.
+		 */
+		if (isolated >= SWAP_CLUSTER_MAX) {
+			pte_unmap_unlock(orig_pte, ptl);
+			rs->reclaimed_page += reclaim_pages_from_list(&page_list);
+			isolated = 0;
+			
+			// if the page count of relcaim is over than max page count
+			if (rs->reclaimed_page >= rs->reclaim_max_page)	{
+				rs->ret = RECLAIM_RET_OVER_MAX_COUNT;
+				goto out_without_unlock;
+			}
+
+			cond_resched();
+			orig_pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
+		}
+	}
+
+out:
+	pte_unmap_unlock(orig_pte, ptl);
+	reclaim_pages_from_list(&page_list);
+
+out_without_unlock:
+	cond_resched();
+	return 0;
+}
+
+void do_task_reclaim(struct task_struct *task, int max_page, enum reclaim_type type,
+					unsigned long scan_vm_start, struct reclaim_stat *ret)
+{
+	struct reclaim_stat rs;
+	struct mm_struct *mm;
+	struct vm_area_struct *vma;
+
+	mm = get_task_mm(task);
+	if (mm) {
+		struct mm_walk reclaim_walk = {
+			.pmd_entry = reclaim_pte_range,
+			.mm = mm,
+		};
+
+		rs.ret = 0;
+		rs.reclaim_max_page = max_page;
+		rs.reclaimed_page = 0;
+		rs.vm_start = 0;
+		down_read(&mm->mmap_sem);
+		for (vma = mm->mmap; vma; vma = vma->vm_next) {
+			rs.vma = vma;
+			rs.ret = 0;
+			rs.vm_start = vma->vm_start;
+			reclaim_walk.private = &rs;
+
+			// scan from vm start address to be requested by argument
+			if (vma->vm_start < scan_vm_start)
+				continue;
+
+			/* bail out */
+			if (signal_pending(task)) {
+				rs.ret = RECLAIM_RET_SKIP_SIGNAL_PENDDING;
+				break;
+			}
+
+			if (task->on_rq) {
+				rs.ret = RECLAIM_RET_SKIP_ON_RQ;
+				break;
+			}
+
+			if (is_vm_hugetlb_page(vma))
+				continue;
+
+			if (!vma_is_anonymous(vma) && !(type & RECLAIM_FILE))
+				continue;
+
+			if (vma_is_anonymous(vma) && !(type & RECLAIM_ANON))
+				continue;
+
+			walk_page_range(vma->vm_start,
+					vma->vm_end,
+					&reclaim_walk);
+
+			if (rs.ret != RECLAIM_RET_OK)
+				break;
+		}
+	
+		if (!vma)
+			rs.vm_start = 0;
+
+		flush_tlb_mm(mm);
+		up_read(&mm->mmap_sem);
+		mmput(mm);
+
+		if (ret)
+			memcpy(ret, &rs, sizeof(struct reclaim_stat));
+	}
+}
+
+static ssize_t proc_reclaim_write(struct file *file,
+				const char __user *buf,
+				size_t count,
+				loff_t *ppos)
+{
+	struct task_struct *task;
+	char buffer[PROC_NUMBUF];
+	int itype;
+	int rv;
+	enum reclaim_type type;
+
+	memset(buffer, 0, sizeof(buffer));
+	if (count > sizeof(buffer) - 1)
+		count = sizeof(buffer) - 1;
+
+	if (copy_from_user(buffer, buf, count))
+		return -EFAULT;
+
+	rv = kstrtoint(strstrip(buffer), 10, &itype);
+	if (rv < 0)
+		return rv;
+
+	type = (enum reclaim_type)itype;
+	if (type < RECLAIM_FILE || type > RECLAIM_ALL)
+		return -EINVAL;
+
+	task = get_proc_task(file->f_path.dentry->d_inode);
+	if (!task)
+		return -ESRCH;
+
+	if (task->on_rq)
+		goto out;
+
+	do_task_reclaim(task, INFINITY, type, 0, NULL);
+
+out:
+	put_task_struct(task);
+	return count;
+}
+
+static long ioctl_reclaim_write(struct file *file, unsigned int cmd, unsigned long arg)
+{
+	struct reclaim_stat rs;
+	struct usr_reclaim_stat urs;
+	struct task_struct *task;
+	enum reclaim_type type;
+
+	void __user *ubuf = (void __user *)arg;
+
+	if(copy_from_user(&urs, ubuf, sizeof(struct usr_reclaim_stat)))
+		return -EFAULT;
+
+	type = (enum reclaim_type)urs.type;
+	if (type < RECLAIM_FILE || type > RECLAIM_ALL)
+		return -EINVAL;
+
+	task = get_proc_task(file->f_path.dentry->d_inode);
+	if (!task)
+		return -ESRCH;
+
+	if (task->on_rq) {
+		urs.ret = RECLAIM_RET_SKIP_ON_RQ;
+		goto out;
+	}
+
+	do_task_reclaim(task, urs.reclaim_max_page, type, urs.vm_start, &rs);
+
+	urs.ret = rs.ret;
+	urs.vm_start = rs.vm_start;
+	urs.reclaimed_page = rs.reclaimed_page;
+out:
+	put_task_struct(task);
+
+	if (copy_to_user(ubuf, &urs, sizeof(struct usr_reclaim_stat)))
+        return -EFAULT;
+
+	return 0;
+}
+
+const struct file_operations proc_reclaim_operations = {
+	.write		= proc_reclaim_write,
+	.unlocked_ioctl = ioctl_reclaim_write,
+	.llseek		= noop_llseek,
+};
+
 #ifdef CONFIG_NUMA
 
 struct numa_maps {
@@ -1513,8 +2198,8 @@ static int show_numa_map(struct seq_file *m, void *v, int is_pid)
 	} else if (vma->vm_start <= mm->brk && vma->vm_end >= mm->start_brk) {
 		seq_puts(m, " heap");
 	} else {
-		pid_t tid = pid_of_stack(proc_priv, vma, is_pid);
-		if (tid != 0) {
+		struct task_struct *t = taskpid_of_stack(proc_priv, vma, is_pid);
+		if (t != NULL) {
 			/*
 			 * Thread stack in /proc/PID/task/TID/maps or
 			 * the main process stack.
@@ -1523,7 +2208,9 @@ static int show_numa_map(struct seq_file *m, void *v, int is_pid)
 			    vma->vm_end >= mm->start_stack))
 				seq_puts(m, " stack");
 			else
-				seq_printf(m, " stack:%d", tid);
+				seq_printf(m, " stack:%d", t->pid);
+
+			put_task_struct(t);
 		}
 	}
 

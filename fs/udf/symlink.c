@@ -29,6 +29,8 @@
 #include <linux/pagemap.h>
 #include "udf_i.h"
 
+void udf_release_data(struct buffer_head *bh);
+
 static int udf_pc_to_char(struct super_block *sb, unsigned char *from,
 			  int fromlen, unsigned char *to, int tolen)
 {
@@ -132,7 +134,7 @@ static int udf_symlink_filler(struct file *file, struct page *page)
 	}
 
 	err = udf_pc_to_char(inode->i_sb, symlink, inode->i_size, p, PAGE_SIZE);
-	brelse(bh);
+	udf_release_data(bh);
 	if (err)
 		goto out_unlock_inode;
 

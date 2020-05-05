@@ -49,6 +49,10 @@
 #include <asm/traps.h>
 #include <asm/unwind.h>
 
+#ifdef CONFIG_TASK_STATE_BACKTRACE
+#include <kdebugd/kdebugd.h>
+#endif
+
 /* Dummy functions to avoid linker complaints */
 void __aeabi_unwind_cpp_pr0(void)
 {
@@ -498,6 +502,13 @@ void unwind_backtrace(struct pt_regs *regs, struct task_struct *tsk)
 		frame.lr = 0;
 		frame.pc = thread_saved_pc(tsk);
 	}
+
+#ifdef CONFIG_TASK_STATE_BACKTRACE
+       kdbg_unwind_mem_stack_kernel("Stack: ", frame.sp,
+		THREAD_SIZE + (unsigned long)task_stack_page(tsk));
+
+       printk("Call Trace:\n");
+#endif
 
 	while (1) {
 		int urc;

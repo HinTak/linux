@@ -26,6 +26,9 @@
 #include <linux/smpboot.h>
 #include <linux/tick.h>
 #include <linux/irq.h>
+#ifdef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
+#include <linux/irqflags.h>
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/irq.h>
@@ -114,7 +117,11 @@ void __local_bh_disable_ip(unsigned long ip, unsigned int cnt)
 		trace_softirqs_off(ip);
 	raw_local_irq_restore(flags);
 
+#ifndef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
 	if (preempt_count() == cnt) {
+#else
+	if (check_preempt_trace() && preempt_count() == cnt) {
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
 #ifdef CONFIG_DEBUG_PREEMPT
 		current->preempt_disable_ip = get_parent_ip(CALLER_ADDR1);
 #endif

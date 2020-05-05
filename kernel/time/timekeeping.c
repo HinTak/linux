@@ -27,6 +27,13 @@
 #include "tick-internal.h"
 #include "ntp_internal.h"
 #include "timekeeping_internal.h"
+#ifdef CONFIG_KDEBUGD_FTRACE
+#include "kdbg_util.h"
+#include <trace/kdbg_ftrace_helper.h>
+#include <trace/kdbg-ftrace.h>
+#endif /* CONFIG_KDEBUGD_FTRACE */
+
+
 
 #define TK_CLEAR_NTP		(1 << 0)
 #define TK_MIRROR		(1 << 1)
@@ -316,12 +323,54 @@ static inline s64 timekeeping_get_ns(struct tk_read_base *tkr)
 
 	delta = timekeeping_get_delta(tkr);
 
-	nsec = delta * tkr->mult + tkr->xtime_nsec;
-	nsec >>= tkr->shift;
+	nsec = (delta * tkr->mult + tkr->xtime_nsec) >> tkr->shift;
 
 	/* If arch requires, add in get_arch_timeoffset() */
 	return nsec + arch_gettimeoffset();
 }
+
+#ifdef CONFIG_KDEBUGD_FTRACE
+/* kdbg_ftrace_timekeeping_get_ns_raw
+   + * function to get the raw nanoseconds value.
+   + */
+s64 notrace kdbg_ftrace_timekeeping_get_ns_raw(void)
+{
+	if (fconf.trace_timestamp_nsec_status) {
+		cycle_t cycle_now, cycle_delta;
+		struct timekeeper *tk = &tk_core.timekeeper;
+		struct tk_read_base *tkr = &(tk->tkr_raw);
+		struct clocksource *clock = tk->tkr_raw.clock;
+
+		u64 num, max = ULLONG_MAX;
+		s64 nsec = 0;
+		u32 mult = clock->mult;
+		u32 shift = clock->shift;
+		/* read clocksource: */
+		cycle_now = tkr->read(tkr->clock);
+
+		/* calculate the delta since the last update_wall_time: */
+		cycle_delta = clocksource_delta(cycle_now, tkr->cycle_last,
+				tkr->mask);
+
+		/*
+		 * "cycle_delta * mutl" may cause 64 bits overflow, if the
+		 * suspended time is too long. In that case we need do the
+		 * 64 bits math carefully
+		 */
+		do_div(max, mult);
+		if (cycle_delta > max) {
+			num = div64_u64(cycle_delta, max);
+			nsec = (((u64) max * mult) >> shift) * num;
+			cycle_delta -= num * max;
+		}
+		nsec += ((u64) cycle_delta * mult) >> shift;
+
+		/* If arch requires, add in gettimeoffset() */
+		return nsec + arch_gettimeoffset();
+	} else
+		return 0;
+}
+#endif /* CONFIG_KDEBUGD_FTRACE */
 
 /**
  * update_fast_timekeeper - Update the fast and NMI safe monotonic timekeeper.
@@ -910,10 +959,44 @@ int do_settimeofday64(const struct timespec64 *ts)
 {
 	struct timekeeper *tk = &tk_core.timekeeper;
 	struct timespec64 ts_delta, xt;
+	struct timeval cur_tv = {0};
+	struct timespec64 cur_ts = {0};
 	unsigned long flags;
 
 	if (!timespec64_valid_strict(ts))
 		return -EINVAL;
+
+	/* get the current timeval and calculate corresponding timespec*/
+	do_gettimeofday(&cur_tv);
+	cur_ts.tv_sec = cur_tv.tv_sec;
+	cur_ts.tv_nsec = cur_tv.tv_usec * NSEC_PER_USEC;
+
+	/*
+	* In Tizen platform, do_settimeofday is allowed for task 'net-config'.
+	* only when the time passed is bigger than current time.
+	*/
+	if ((strncmp(current->comm, "net-config", TASK_COMM_LEN))
+			&& (strncmp(current->comm, "vd-net-config", TASK_COMM_LEN))
+			&& (strncmp(current->comm, "ep-boot-manager", TASK_COMM_LEN))) {
+		/* Failure case when current process is *NOT* 'net-config' */
+		printk("\n");
+		printk("\033[31mERROR : do_settimeofday was called by - %s -\033[0m\n", current->comm);
+		printk("\033[31m  do_settimeofday can make potential hang problem ..\033[0m\n");
+		printk("\033[31m  You can't use this dangerous function on embedded system.\033[0m\n");
+		return -EFAULT;
+	} else {
+		if (timespec64_compare(ts, &cur_ts) < 0) {
+			/* Failure case when pass timeval less that current time */
+			printk("\n");
+			printk("\033[31mERROR : do_settimeofday was called by - %s -\033[0m\n", current->comm);
+			printk("\033[31m  %s have to pass timeval[%lld] bigger than current time[%lld].\033[0m\n",
+				current->comm, (long long int)ts->tv_sec, (long long int)cur_ts.tv_sec);
+			return -EFAULT;
+		} else {
+			printk("\033[32m ** do_settimeofday called by :[%s] pid:[%d] (UTC)timeval:[Current:%lld Pass:%lld]** \033[0m\n",
+				current->comm, current->pid, (long long int)cur_ts.tv_sec, (long long int)ts->tv_sec);
+		}
+	}
 
 	raw_spin_lock_irqsave(&timekeeper_lock, flags);
 	write_seqcount_begin(&tk_core.seq);
@@ -1615,7 +1698,7 @@ static __always_inline void timekeeping_freqadjust(struct timekeeper *tk,
 	negative = (tick_error < 0);
 
 	/* Sort out the magnitude of the correction */
-	tick_error = abs(tick_error);
+	tick_error = abs64(tick_error);
 	for (adj = 0; tick_error > interval; adj++)
 		tick_error >>= 1;
 

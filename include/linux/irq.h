@@ -870,4 +870,13 @@ static inline u32 irq_reg_readl(struct irq_chip_generic *gc,
 		return readl(gc->reg_base + reg_offset);
 }
 
+#ifdef CONFIG_PRESERVE_IRQ_AFFINITY
+void backup_irq_affinity(unsigned int irq, const struct cpumask *mask);
+void local_restore_irq_affinities(void);
+#else
+static inline void backup_irq_affinity(unsigned int irq, const struct cpumask *mask) { }
+static inline void local_restore_irq_affinities(void) { }
+#endif
+
+
 #endif /* _LINUX_IRQ_H */

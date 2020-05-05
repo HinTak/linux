@@ -23,9 +23,22 @@
 #include <linux/sysrq.h>
 #include <linux/init.h>
 #include <linux/nmi.h>
+#include <linux/console.h>
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+void show_kernel_patch_version(void);
+#endif
+
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+#endif
 
 #define PANIC_TIMER_STEP 100
 #define PANIC_BLINK_SPD 18
+
+#ifdef CONFIG_CORESIGHT_DUMP_TMC
+extern void coresight_save_tmc_buffer(void);
+#endif
 
 int panic_on_oops = CONFIG_PANIC_ON_OOPS_VALUE;
 static unsigned long tainted_mask;
@@ -60,6 +73,11 @@ void __weak panic_smp_self_stop(void)
 		cpu_relax();
 }
 
+#ifdef CONFIG_PRETTY_SHELL
+/* TTY pretty mode, defined in n_tty.c */
+extern unsigned char tty_pretty_mode;
+#endif
+
 /**
  *	panic - halt the system
  *	@fmt: The text string to print
@@ -75,6 +93,20 @@ void panic(const char *fmt, ...)
 	va_list args;
 	long i, i_next = 0;
 	int state = 0;
+
+#ifdef CONFIG_CORESIGHT_DUMP_TMC
+	coresight_save_tmc_buffer();
+#endif
+
+#ifdef CONFIG_PRETTY_SHELL
+	/* Disable pretty shell. If crash happened, we want to see the log */
+	tty_pretty_mode = 0;
+#endif
+
+#ifdef CONFIG_DTVLOGD
+	/* Synchronously flush the messages remaining in dlog buffer */
+	do_dtvlog(5, NULL, 0);
+#endif
 
 	/*
 	 * Disable local interrupts. This will prevent panic_smp_self_stop
@@ -107,8 +139,12 @@ void panic(const char *fmt, ...)
 	/*
 	 * Avoid nested stack-dumping if a panic occurs during oops processing
 	 */
-	if (!test_taint(TAINT_DIE) && oops_in_progress <= 1)
+	if (!test_taint(TAINT_DIE) && oops_in_progress <= 1) {
+#ifdef CONFIG_VDLP_VERSION_INFO
+		show_kernel_patch_version();
+#endif
 		dump_stack();
+	}
 #endif
 
 	/*
@@ -131,10 +167,16 @@ void panic(const char *fmt, ...)
 	 * Run any panic handlers, including those that might need to
 	 * add information to the kmsg dump output.
 	 */
-	atomic_notifier_call_chain(&panic_notifier_list, 0, buf);
+	if (!strcmp(buf, "Out of memory and couldn't recover lowmem by kill processes...\n"))
+		atomic_notifier_call_chain(&panic_notifier_list, WRITE_RAW_KLOG_TYPE_OOM_PANIC, buf);
+	else if (!strcmp(buf, "Critical CMA Alloc failure and couldn't recover system..."))
+		atomic_notifier_call_chain(&panic_notifier_list, WRITE_RAW_KLOG_TYPE_CMA_ALLOC_FAIL, buf);
+	else
+		atomic_notifier_call_chain(&panic_notifier_list, WRITE_RAW_KLOG_TYPE_PANIC, buf);
 
 	kmsg_dump(KMSG_DUMP_PANIC);
 
+#ifndef CONFIG_KEXEC_CSYSTEM
 	/*
 	 * If you doubt kdump always works fine in any situation,
 	 * "crash_kexec_post_notifiers" offers you a chance to run
@@ -143,8 +185,31 @@ void panic(const char *fmt, ...)
 	 * more unstable, it can increase risks of the kdump failure too.
 	 */
 	crash_kexec(NULL);
+#endif
 
 	bust_spinlocks(0);
+
+	/*
+	 * We may have ended up stopping the CPU holding the lock (in
+	 * smp_send_stop()) while still having some valuable data in the console
+	 * buffer.  Try to acquire the lock then release it regardless of the
+	 * result.  The release will also print the buffers out.  Locks debug
+	 * should be disabled to avoid reporting bad unlock balance when
+	 * panic() is not being callled from OOPS.
+	 */
+	debug_locks_off();
+	console_flush_on_panic();
+
+#ifdef CONFIG_KEXEC_CSYSTEM
+	/*
+	 * If you doubt kdump always works fine in any situation,
+	 * "crash_kexec_post_notifiers" offers you a chance to run
+	 * panic_notifiers and dumping kmsg before kdump.
+	 * Note: since some panic_notifiers can make crashed kernel
+	 * more unstable, it can increase risks of the kdump failure too.
+	 */
+	crash_kexec(NULL);
+#endif
 
 	if (!panic_blink)
 		panic_blink = no_blink;
@@ -262,8 +327,10 @@ const char *print_tainted(void)
 		s = buf + sprintf(buf, "Tainted: ");
 		for (i = 0; i < ARRAY_SIZE(tnts); i++) {
 			const struct tnt *t = &tnts[i];
-			*s++ = test_bit(t->bit, &tainted_mask) ?
+			char c = test_bit(t->bit, &tainted_mask) ?
 					t->true : t->false;
+			if (c != ' ')
+				*s++ = c;
 		}
 		*s = 0;
 	} else

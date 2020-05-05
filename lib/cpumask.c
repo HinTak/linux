@@ -23,6 +23,19 @@ int cpumask_next_and(int n, const struct cpumask *src1p,
 }
 EXPORT_SYMBOL(cpumask_next_and);
 
+#ifdef CONFIG_VD_GIC_SET_AFFINITY
+int cpumask_last_and(int n, const struct cpumask *src1p,
+		     const struct cpumask *src2p)
+{
+	struct cpumask mask;
+
+	if (likely(cpumask_and(&mask, src1p, src2p)))
+		return (int)cpumask_prev(n, &mask);
+	return n;
+}
+EXPORT_SYMBOL(cpumask_last_and);
+
+#endif
 /**
  * cpumask_any_but - return a "random" in a cpumask, but not this one.
  * @mask: the cpumask to search

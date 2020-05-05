@@ -2,7 +2,12 @@
 #define _ASM_FIXMAP_H
 
 #define FIXADDR_START		0xffc00000UL
+#ifdef CONFIG_DTVLOGD
+#define FIXADDR_END		(0xfff00000UL - PAGE_SIZE)
+#define DTVLOGD_BUFFER_VIRTUAL_ADDRESS (FIXADDR_END)
+#else
 #define FIXADDR_END		0xfff00000UL
+#endif
 #define FIXADDR_TOP		(FIXADDR_END - PAGE_SIZE)
 
 #include <asm/kmap_types.h>

@@ -4,6 +4,31 @@
 
 comment "MMC/SD/SDIO Host Controller Drivers"
 
+config SDP_MMC
+	depends on ARCH_SDP
+	tristate "SDP MMC/SD Controller"
+	default y
+	help
+	  This selects support for the MMC Host Controller on
+	  Samsung DTV SoCs.
+
+config SDP_MMC_64BIT_ADDR
+	bool "Using IDMAC 64bit address"
+	default y if (ARCH_SDP1404 || ARCH_SDP1406 || ARCH_SDP1501 || ARCH_SDP1600 || ARCH_SDP1601)
+	depends on SDP_MMC
+
+config SDP_MMC_DMA
+	bool "Using Internal DMA Controler"
+	default y
+	depends on SDP_MMC
+
+	config SDP_MMC_USE_PRE_DEFINED_XFER
+	bool "Use Pre-defined data xfer(CMD23)"
+	default n
+	depends on SDP_MMC
+	help
+	  No: Open-ended xfer, Yes: Pre-defined xfer
+
 config MMC_ARMMMCI
 	tristate "ARM AMBA Multimedia Card Interface support"
 	depends on ARM_AMBA
@@ -178,6 +203,74 @@ config MMC_SDHCI_ESDHC_IMX
 	  If you have a controller with this interface, say Y or M here.
 
 	  If unsure, say N.
+
+config MMC_SDHCI_NVT
+	tristate "NVT Multimedia Card Interface support"
+	depends on ARCH_NVT_V7
+	depends on MMC_SDHCI_PLTFM
+	select MMC_SDHCI_IO_ACCESSORS
+	help
+	  This selects the Secure Digital Host Controller Interface (SDHCI)
+	  support present in Novatek SOCs. The controller supports
+	  SD/MMC devices.
+
+	  If you have a controller with this interface, say Y or M here.
+
+	  If unsure, say N.
+
+config MMC_SDHCI_NVT_HS200
+	bool "NVT MMC controller HS200 mode"
+	depends on MMC_SDHCI_NVT
+	help
+	  This asks Novatek's mmc controller to enable HS200 speed mode for eMMC
+
+config MMC_SDHCI_NVT_HS400
+	bool "NVT MMC controller HS400 mode"
+	depends on MMC_SDHCI_NVT_HS200
+	help
+	  This asks Novatek's mmc controller to enable HS400 speed mode for eMMC
+
+config MMC_SDHCI_NVT_HS400_RDQS_TUNING
+	bool "NVT MMC controller HS400 RDQS tuning"
+	depends on MMC_SDHCI_NVT_HS400
+	help
+	  This asks Novatek's mmc controller to enable HS400  RDQS tuning for eMMC
+
+config NVT_MMC_IO
+	bool "NVT EMMC IO DRIVING"
+	depends on MMC_SDHCI_NVT
+	help
+	  This asks Novatek's mmc controller to set IO driving
+
+config MMC_SDHCI_NVT_PIO_MODE
+	bool "NVT data R/W by CPU, not ADMA"
+	depends on MMC_SDHCI_NVT
+	help
+	  This asks Novatek's mmc controller use CPU to read/write data.
+
+config MMC_SDHCI_NVT_OPEN_ENDED_RW
+	bool "use open-ended RW in NVT mmc controller"
+	depends on MMC_SDHCI_NVT
+	help
+	  This enables AUTO CMD12 to stop multiple read/write, default is using predefined command.
+
+config MMC_SDHCI_NVT_ENABLE_DEV_CACHE
+	bool "enable emmc device's cache mode with Novatek's controller"
+	depends on MMC_SDHCI_NVT
+	help
+	  This enables emmc's device cache mode.
+
+config NVT_MMC_CLKGATE
+	bool "enable emmc host layer clkgate for novatek mmc contorlller"
+	depends on MMC_SDHCI_NVT
+	help
+	  This enables emmc's host clk gating for novatek sdhci.
+
+config NVT_HS200_LOW_FREQ_RESET
+	bool "enable emmc low frequency reset for novatek mmc contorller"
+	depends on MMC_SDHCI_NVT
+	help
+	  This is the HS200 setup flow for novatek 668/656  sdhci.
 
 config MMC_SDHCI_DOVE
 	tristate "SDHCI support on Marvell's Dove SoC"

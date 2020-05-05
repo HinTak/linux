@@ -33,7 +33,18 @@ struct nsproxy {
 	struct mnt_namespace *mnt_ns;
 	struct pid_namespace *pid_ns_for_children;
 	struct net 	     *net_ns;
+#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+	uint 				type;
+#endif
 };
+
+#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+#define NS_TYPE_DEFAULT 0x00
+#define NS_TYPE_ISOLATE	0x01
+#define NS_TYPE_SECURE	 0x02
+#define NS_TYPE_HYBRID 0x03
+#endif
+
 extern struct nsproxy init_nsproxy;
 
 /*

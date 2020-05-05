@@ -182,6 +182,13 @@ extern struct task_group root_task_group;
 # define INIT_KASAN(tsk)
 #endif
 
+#ifdef CONFIG_VDFS4_TRACE
+#define INIT_VDFS_TRACE_REP_IDX(tsk)					\
+	.vt_rep_idx = 0,
+#else
+#define INIT_VDFS_TRACE_REP_IDX(tsk)
+#endif
+
 /*
  *  INIT_TASK is used to set up the first task table, touch at
  * your own risk!. Base=0, limit=0x1fffff (=2MB)
@@ -258,6 +265,7 @@ extern struct task_group root_task_group;
 	INIT_VTIME(tsk)							\
 	INIT_NUMA_BALANCING(tsk)					\
 	INIT_KASAN(tsk)							\
+	INIT_VDFS_TRACE_REP_IDX(tsk)					\
 }
 
 

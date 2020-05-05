@@ -84,7 +84,7 @@ void dump_page_badflags(struct page *page, const char *reason,
 		unsigned long badflags)
 {
 	pr_emerg("page:%p count:%d mapcount:%d mapping:%p index:%#lx\n",
-		  page, atomic_read(&page->_count), page_mapcount(page),
+		  page, page_ref_count(page), page_mapcount(page),
 		  page->mapping, page->index);
 	BUILD_BUG_ON(ARRAY_SIZE(pageflag_names) != __NR_PAGEFLAGS);
 	dump_flags(page->flags, pageflag_names, ARRAY_SIZE(pageflag_names));
@@ -95,6 +95,15 @@ void dump_page_badflags(struct page *page, const char *reason,
 		dump_flags(page->flags & badflags,
 				pageflag_names, ARRAY_SIZE(pageflag_names));
 	}
+#ifndef CONFIG_VD_RELEASE
+	if (page->mapping &&
+			page->mapping->host &&
+			page->mapping->host->i_sb &&
+			page->mapping->host->i_sb->s_type &&
+			page->mapping->host->i_sb->s_type->name)
+		pr_alert("File System Type -> Name %s\n",
+				page->mapping->host->i_sb->s_type->name);
+#endif
 #ifdef CONFIG_MEMCG
 	if (page->mem_cgroup)
 		pr_alert("page->mem_cgroup:%p\n", page->mem_cgroup);

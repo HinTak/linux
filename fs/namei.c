@@ -40,6 +40,11 @@
 #include "internal.h"
 #include "mount.h"
 
+// The following header file is included to support secure container.
+// About the modification, contact to jason77.lee@samsung.com
+#include <linux/sf_security.h>
+
+
 /* [Feb-1997 T. Schoebel-Theuer]
  * Fundamental changes in the pathname lookup mechanisms (namei)
  * were necessary because of omirr.  The reason is that omirr needs
@@ -504,6 +509,24 @@ struct nameidata {
 	struct file	*base;
 	char *saved_names[MAX_NESTED_LINKS + 1];
 };
+
+/**
+ * path_connected - Verify that a path->dentry is below path->mnt.mnt_root
+ * @path: nameidate to verify
+ *
+ * Rename can sometimes move a file or directory outside of a bind
+ * mount, path_connected allows those cases to be detected.
+ */
+static bool path_connected(const struct path *path)
+{
+	struct vfsmount *mnt = path->mnt;
+
+	/* Only bind mounts can have disconnected paths */
+	if (mnt->mnt_root == mnt->mnt_sb->s_root)
+		return true;
+
+	return is_subdir(path->dentry, mnt->mnt_root);
+}
 
 /*
  * Path walking has 2 modes, rcu-walk and ref-walk (see
@@ -1194,6 +1217,8 @@ static int follow_dotdot_rcu(struct nameidata *nd)
 				goto failed;
 			nd->path.dentry = parent;
 			nd->seq = seq;
+			if (unlikely(!path_connected(&nd->path)))
+				goto failed;
 			break;
 		}
 		if (!follow_up_rcu(&nd->path))
@@ -1290,7 +1315,7 @@ static void follow_mount(struct path *path)
 	}
 }
 
-static void follow_dotdot(struct nameidata *nd)
+static int follow_dotdot(struct nameidata *nd)
 {
 	if (!nd->root.mnt)
 		set_root(nd);
@@ -1306,6 +1331,10 @@ static void follow_dotdot(struct nameidata *nd)
 			/* rare case of legitimate dget_parent()... */
 			nd->path.dentry = dget_parent(nd->path.dentry);
 			dput(old);
+			if (unlikely(!path_connected(&nd->path))) {
+				path_put(&nd->path);
+				return -ENOENT;
+			}
 			break;
 		}
 		if (!follow_up(&nd->path))
@@ -1313,6 +1342,7 @@ static void follow_dotdot(struct nameidata *nd)
 	}
 	follow_mount(&nd->path);
 	nd->inode = nd->path.dentry->d_inode;
+	return 0;
 }
 
 /*
@@ -1541,7 +1571,7 @@ static inline int handle_dots(struct nameidata *nd, int type)
 			if (follow_dotdot_rcu(nd))
 				return -ECHILD;
 		} else
-			follow_dotdot(nd);
+			return follow_dotdot(nd);
 	}
 	return 0;
 }
@@ -1590,10 +1620,10 @@ static inline int walk_component(struct nameidata *nd, struct path *path,
 		if (err < 0)
 			goto out_err;
 
-		inode = path->dentry->d_inode;
 		err = -ENOENT;
 		if (d_is_negative(path->dentry))
 			goto out_path_put;
+		inode = path->dentry->d_inode;
 	}
 
 	if (should_follow_link(path->dentry, follow)) {
@@ -2090,8 +2120,17 @@ int kern_path(const char *name, unsigned int flags, struct path *path)
 	if (!IS_ERR(filename)) {
 		res = filename_lookup(AT_FDCWD, filename, flags, &nd);
 		putname(filename);
-		if (!res)
+		// sfd commented out the below line to support secure container.
+		// About the modification, contact to jason77.lee@samsung.com
+		// 
+		// if (!res)
+		// 	*path = nd.path;
+		// 
+		// SfdPathFilter function call added.
+		if (!res) {
 			*path = nd.path;
+			res = SfdPathFilter(name, path, "kern_path");
+		}
 	}
 	return res;
 }
@@ -2211,7 +2250,19 @@ int user_path_at_empty(int dfd, const char __user *name, unsigned flags,
 int user_path_at(int dfd, const char __user *name, unsigned flags,
 		 struct path *path)
 {
-	return user_path_at_empty(dfd, name, flags, path, NULL);
+	// sfd commented out the below line to support secure container.
+	// About the modification, contact to jason77.lee@samsung.com
+	// return user_path_at_empty(dfd, name, flags, path, NULL);
+	// 
+	// SfdPathFilter function call added.
+	int res = user_path_at_empty(dfd, name, flags, path, NULL);
+
+	if( 0 == res )
+	{
+		res = SfdPathFilter(name, path, "user_path_at");
+	}
+
+	return res;
 }
 EXPORT_SYMBOL(user_path_at);
 
@@ -2290,7 +2341,7 @@ mountpoint_last(struct nameidata *nd, struct path *path)
 	if (unlikely(nd->last_type != LAST_NORM)) {
 		error = handle_dots(nd, nd->last_type);
 		if (error)
-			goto out;
+			return error;
 		dentry = dget(nd->path.dentry);
 		goto done;
 	}
@@ -2435,6 +2486,10 @@ int __check_sticky(struct inode *dir, struct inode *inode)
 }
 EXPORT_SYMBOL(__check_sticky);
 
+#ifdef CONFIG_NOTIFY_FILE_WRITE
+void notify_write_access(struct super_block *sb, struct dentry *dentry);
+#endif
+
 /*
  *	Check whether we can remove a link victim from directory dir, check
  *  whether the type of victim is right.
@@ -2462,6 +2517,10 @@ static int may_delete(struct inode *dir, struct dentry *victim, bool isdir)
 	if (d_is_negative(victim))
 		return -ENOENT;
 	BUG_ON(!inode);
+
+#ifdef CONFIG_NOTIFY_FILE_WRITE
+	notify_write_access(inode->i_sb, victim);
+#endif
 
 	BUG_ON(victim->d_parent->d_inode != dir);
 	audit_inode_child(dir, victim, AUDIT_TYPE_CHILD_DELETE);
@@ -2499,6 +2558,10 @@ static int may_delete(struct inode *dir, struct dentry *victim, bool isdir)
  */
 static inline int may_create(struct inode *dir, struct dentry *child)
 {
+#ifdef CONFIG_NOTIFY_FILE_WRITE
+	notify_write_access(dir->i_sb, child);
+#endif
+
 	audit_inode_child(dir, child, AUDIT_TYPE_CHILD_CREATE);
 	if (child->d_inode)
 		return -EEXIST;
@@ -3049,6 +3112,7 @@ retry_lookup:
 		path_to_nameidata(path, nd);
 		goto out;
 	}
+	inode = path->dentry->d_inode;
 finish_lookup:
 	/* we _can_ be in RCU mode here */
 	if (should_follow_link(path->dentry, !symlink_ok)) {
@@ -3123,6 +3187,10 @@ opened:
 			goto exit_fput;
 	}
 out:
+	if (unlikely(error > 0)) {
+		WARN_ON(1);
+		error = -EINVAL;
+	}
 	if (got_write)
 		mnt_drop_write(nd->path.mnt);
 	path_put(&save_parent);
@@ -4117,11 +4185,11 @@ int vfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 {
 	int error;
 	bool is_dir = d_is_dir(old_dentry);
-	const unsigned char *old_name;
 	struct inode *source = old_dentry->d_inode;
 	struct inode *target = new_dentry->d_inode;
 	bool new_is_dir = false;
 	unsigned max_links = new_dir->i_sb->s_max_links;
+	struct name_snapshot old_name;
 
 	if (source == target)
 		return 0;
@@ -4171,7 +4239,7 @@ int vfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 	if (error)
 		return error;
 
-	old_name = fsnotify_oldname_init(old_dentry->d_name.name);
+	take_dentry_name_snapshot(&old_name, old_dentry);
 	dget(new_dentry);
 	if (!is_dir || (flags & RENAME_EXCHANGE))
 		lock_two_nondirectories(source, target);
@@ -4232,14 +4300,14 @@ out:
 		mutex_unlock(&target->i_mutex);
 	dput(new_dentry);
 	if (!error) {
-		fsnotify_move(old_dir, new_dir, old_name, is_dir,
+		fsnotify_move(old_dir, new_dir, old_name.name, is_dir,
 			      !(flags & RENAME_EXCHANGE) ? target : NULL, old_dentry);
 		if (flags & RENAME_EXCHANGE) {
 			fsnotify_move(new_dir, old_dir, old_dentry->d_name.name,
 				      new_is_dir, NULL, new_dentry);
 		}
 	}
-	fsnotify_oldname_free(old_name);
+	release_dentry_name_snapshot(&old_name);
 
 	return error;
 }

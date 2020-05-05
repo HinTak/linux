@@ -177,16 +177,18 @@ struct rmap_item {
 		};
 	};
 };
-
+#ifdef CONFIG_KSM_ZERO_PAGE_MERGE_ONLY
+#define ZERO_MERGE_FLAG        0x300   /* is listed from zero candidates */
+#else
 #define SEQNR_MASK	0x0ff	/* low bits of unstable tree seqnr */
 #define UNSTABLE_FLAG	0x100	/* is a node of the unstable tree */
 #define STABLE_FLAG	0x200	/* is listed from the stable tree */
-
 /* The stable and unstable tree heads */
 static struct rb_root one_stable_tree[1] = { RB_ROOT };
 static struct rb_root one_unstable_tree[1] = { RB_ROOT };
 static struct rb_root *root_stable_tree = one_stable_tree;
 static struct rb_root *root_unstable_tree = one_unstable_tree;
+#endif
 
 /* Recently migrated nodes of stable tree, pending proper placement */
 static LIST_HEAD(migrate_nodes);
@@ -221,7 +223,7 @@ static unsigned long ksm_rmap_items;
 static unsigned int ksm_thread_pages_to_scan = 100;
 
 /* Milliseconds ksmd should sleep between batches */
-static unsigned int ksm_thread_sleep_millisecs = 20;
+static unsigned int ksm_thread_sleep_millisecs = 1000;
 
 #ifdef CONFIG_NUMA
 /* Zeroed when merging across nodes is not allowed */
@@ -236,7 +238,11 @@ static int ksm_nr_node_ids = 1;
 #define KSM_RUN_MERGE	1
 #define KSM_RUN_UNMERGE	2
 #define KSM_RUN_OFFLINE	4
+#ifdef CONFIG_KSM_DEFAULT_ON
+static unsigned long ksm_run = KSM_RUN_MERGE;
+#else
 static unsigned long ksm_run = KSM_RUN_STOP;
+#endif
 static void wait_while_offlining(void);
 
 static DECLARE_WAIT_QUEUE_HEAD(ksm_thread_wait);
@@ -283,7 +289,8 @@ static inline struct rmap_item *alloc_rmap_item(void)
 {
 	struct rmap_item *rmap_item;
 
-	rmap_item = kmem_cache_zalloc(rmap_item_cache, GFP_KERNEL);
+	rmap_item = kmem_cache_zalloc(rmap_item_cache, GFP_KERNEL |
+			    __GFP_NORETRY | __GFP_NOWARN);
 	if (rmap_item)
 		ksm_rmap_items++;
 	return rmap_item;
@@ -408,6 +415,7 @@ static int break_ksm(struct vm_area_struct *vma, unsigned long addr)
 	return (ret & VM_FAULT_OOM) ? -ENOMEM : 0;
 }
 
+#ifndef CONFIG_KSM_ZERO_PAGE_MERGE_ONLY
 static struct vm_area_struct *find_mergeable_vma(struct mm_struct *mm,
 		unsigned long addr)
 {
@@ -440,6 +448,7 @@ static void break_cow(struct rmap_item *rmap_item)
 		break_ksm(vma, addr);
 	up_read(&mm->mmap_sem);
 }
+#endif
 
 static struct page *page_trans_compound_anon(struct page *page)
 {
@@ -455,6 +464,7 @@ static struct page *page_trans_compound_anon(struct page *page)
 	return NULL;
 }
 
+#ifndef CONFIG_KSM_ZERO_PAGE_MERGE_ONLY
 static struct page *get_mergeable_page(struct rmap_item *rmap_item)
 {
 	struct mm_struct *mm = rmap_item->mm;
@@ -480,6 +490,7 @@ out:		page = NULL;
 	up_read(&mm->mmap_sem);
 	return page;
 }
+#endif
 
 /*
  * This helper is used for getting right index into array of tree roots.
@@ -492,6 +503,7 @@ static inline int get_kpfn_nid(unsigned long kpfn)
 	return ksm_merge_across_nodes ? 0 : NUMA(pfn_to_nid(kpfn));
 }
 
+#ifndef CONFIG_KSM_ZERO_PAGE_MERGE_ONLY
 static void remove_node_from_stable_tree(struct stable_node *stable_node)
 {
 	struct rmap_item *rmap_item;
@@ -513,6 +525,7 @@ static void remove_node_from_stable_tree(struct stable_node *stable_node)
 			 root_stable_tree + NUMA(stable_node->nid));
 	free_stable_node(stable_node);
 }
+#endif
 
 /*
  * get_ksm_page: checks if the page indicated by the stable node
@@ -533,6 +546,7 @@ static void remove_node_from_stable_tree(struct stable_node *stable_node)
  * a page to put something that might look like our key in page->mapping.
  * is on its way to being freed; but it is an anomaly to bear in mind.
  */
+#ifndef CONFIG_KSM_ZERO_PAGE_MERGE_ONLY
 static struct page *get_ksm_page(struct stable_node *stable_node, bool lock_it)
 {
 	struct page *page;
@@ -558,7 +572,7 @@ again:
 	 * We cannot do anything with the page while its refcount is 0.
 	 * Usually 0 means free, or tail of a higher-order page: in which
 	 * case this node is no longer referenced, and should be freed;
-	 * however, it might mean that the page is under page_freeze_refs().
+	 * however, it might mean that the page is under page_ref_freeze().
 	 * The __remove_mapping() case is easy, again the node is now stale;
 	 * but if page is swapcache in migrate_page_move_mapping(), it might
 	 * still be our page, in which case it's essential to keep the node.
@@ -605,11 +619,20 @@ stale:
 	remove_node_from_stable_tree(stable_node);
 	return NULL;
 }
-
+#endif
 /*
  * Removing rmap_item from stable or unstable tree.
  * This function will clean the information from the stable/unstable tree.
  */
+#ifdef CONFIG_KSM_ZERO_PAGE_MERGE_ONLY
+static void remove_rmap_item_from_tree(struct rmap_item *rmap_item)
+{
+	if (rmap_item->address & ZERO_MERGE_FLAG) {
+		rmap_item->address &= PAGE_MASK;
+		ksm_pages_sharing--;
+	}
+}
+#else
 static void remove_rmap_item_from_tree(struct rmap_item *rmap_item)
 {
 	if (rmap_item->address & STABLE_FLAG) {
@@ -653,6 +676,7 @@ static void remove_rmap_item_from_tree(struct rmap_item *rmap_item)
 out:
 	cond_resched();		/* we're called from many long loops */
 }
+#endif
 
 static void remove_trailing_rmap_items(struct mm_slot *mm_slot,
 				       struct rmap_item **rmap_list)
@@ -696,6 +720,7 @@ static int unmerge_ksm_pages(struct vm_area_struct *vma,
 }
 
 #ifdef CONFIG_SYSFS
+#ifndef CONFIG_KSM_ZERO_PAGE_MERGE_ONLY
 /*
  * Only called through the sysfs control interface:
  */
@@ -823,8 +848,16 @@ error:
 	spin_unlock(&ksm_mmlist_lock);
 	return err;
 }
+#else
+static int unmerge_and_remove_all_rmap_items(void)
+{
+	/* Not implemented for kzm */
+	return 0;
+}
+#endif /* CONFIG_KSM_ZERO_PAGE_MERGE_ONLY */
 #endif /* CONFIG_SYSFS */
 
+#ifndef CONFIG_KSM_ZERO_PAGE_MERGE_ONLY
 static u32 calc_checksum(struct page *page)
 {
 	u32 checksum;
@@ -833,6 +866,7 @@ static u32 calc_checksum(struct page *page)
 	kunmap_atomic(addr);
 	return checksum;
 }
+#endif
 
 static int memcmp_pages(struct page *page1, struct page *page2)
 {
@@ -955,9 +989,12 @@ static int replace_page(struct vm_area_struct *vma, struct page *page,
 		pte_unmap_unlock(ptep, ptl);
 		goto out_mn;
 	}
-
 	get_page(kpage);
 	page_add_anon_rmap(kpage, vma, addr);
+	dec_rss_counter(vma, 1); /*VD_SP*/
+#ifdef CONFIG_KSM_ZERO_PAGE_MERGE_ONLY
+	add_mm_counter(mm, MM_ANONPAGES, -1);
+#endif
 
 	flush_cache_page(vma, addr, pte_pfn(*ptep));
 	ptep_clear_flush_notify(vma, addr, ptep);
@@ -1003,6 +1040,7 @@ static int page_trans_compound_anon_split(struct page *page)
 	return ret;
 }
 
+#ifndef CONFIG_KSM_ZERO_PAGE_MERGE_ONLY
 /*
  * try_to_merge_one_page - take two pages and merge them into one
  * @vma: the vma that holds the pte pointing to page
@@ -1503,7 +1541,7 @@ static void cmp_and_merge_page(struct page *page, struct rmap_item *rmap_item)
 		}
 	}
 }
-
+#endif
 static struct rmap_item *get_next_rmap_item(struct mm_slot *mm_slot,
 					    struct rmap_item **rmap_list,
 					    unsigned long addr)
@@ -1538,7 +1576,9 @@ static struct rmap_item *scan_get_next_rmap_item(struct page **page)
 	struct mm_slot *slot;
 	struct vm_area_struct *vma;
 	struct rmap_item *rmap_item;
+#ifndef CONFIG_KSM_ZERO_PAGE_MERGE_ONLY
 	int nid;
+#endif
 
 	if (list_empty(&ksm_mm_head.mm_list))
 		return NULL;
@@ -1563,6 +1603,7 @@ static struct rmap_item *scan_get_next_rmap_item(struct page **page)
 		 * those moved out to the migrate_nodes list can accumulate:
 		 * so prune them once before each full scan.
 		 */
+#ifndef CONFIG_KSM_ZERO_PAGE_MERGE_ONLY
 		if (!ksm_merge_across_nodes) {
 			struct stable_node *stable_node;
 			struct list_head *this, *next;
@@ -1580,6 +1621,7 @@ static struct rmap_item *scan_get_next_rmap_item(struct page **page)
 
 		for (nid = 0; nid < ksm_nr_node_ids; nid++)
 			root_unstable_tree[nid] = RB_ROOT;
+#endif
 
 		spin_lock(&ksm_mmlist_lock);
 		slot = list_entry(slot->mm_list.next, struct mm_slot, mm_list);
@@ -1621,7 +1663,11 @@ next_mm:
 				continue;
 			}
 			if (PageAnon(*page) ||
+#ifndef CONFIG_KSM_ZERO_PAGE_MERGE_ONLY
 			    page_trans_compound_anon(*page)) {
+#else
+			page_trans_compound_anon(*page) || PageKzm(*page)) {
+#endif
 				flush_anon_page(vma, *page, ksm_scan.address);
 				flush_dcache_page(*page);
 				rmap_item = get_next_rmap_item(slot,
@@ -1686,6 +1732,136 @@ next_mm:
 	return NULL;
 }
 
+#ifdef CONFIG_KSM_ZERO_PAGE_MERGE_ONLY
+
+static bool page_is_zero(struct page *page)
+{
+	unsigned long *addr;
+	int i;
+
+	addr = kmap_atomic(page);
+	for (i = 0; i < PAGE_SIZE/sizeof(unsigned long); i++) {
+		if (addr[i] != 0) {
+			kunmap_atomic(addr);
+			return false;
+		}
+	}
+	kunmap_atomic(addr);
+	return true;
+}
+
+/*
+ * try_to_merge_zero_page - page and zero page and merge them into one
+ * @vma: the vma that holds the pte pointing to page
+ * @page: the PageAnon page that we want to replace with zero_page
+ *
+ * This function returns 0 if the pages were merged, -EFAULT otherwise.
+ */
+static int try_to_merge_zero_page(struct vm_area_struct *vma,
+		struct page *page)
+{
+	pte_t orig_pte = __pte(0);
+	int err = -EFAULT;
+
+	if (page == ZERO_PAGE(0))                       /* ksm page forked */
+		return 0;
+
+	if (!(vma->vm_flags & VM_MERGEABLE))
+		goto out;
+	if (PageTransCompound(page) && page_trans_compound_anon_split(page))
+		goto out;
+	BUG_ON(PageTransCompound(page));
+	if (!PageAnon(page))
+		goto out;
+
+	/*
+	 * We need the page lock to read a stable PageSwapCache in
+	 * write_protect_page().  We use trylock_page() instead of
+	 * lock_page() because we don't want to wait here - we
+	 * prefer to continue scanning and merging different pages,
+	 * then come back to this page when it is unlocked.
+	 */
+	if (!trylock_page(page))
+		goto out;
+	/*
+	 * If this anonymous page is mapped only here, its pte may need
+	 * to be write-protected.  If it's mapped elsewhere, all of its
+	 * ptes are necessarily already write-protected.  But in either
+	 * case, we need to lock and check page_count is not raised.
+	 */
+	if (write_protect_page(vma, page, &orig_pte) == 0) {
+		if (page_is_zero(page))
+			err = replace_page(vma, page, ZERO_PAGE(0), orig_pte);
+	}
+
+	if ((vma->vm_flags & VM_LOCKED) && !err)
+		munlock_vma_page(page);
+
+	unlock_page(page);
+out:
+	return err;
+}
+
+/*
+   + * try_to_merge_with_zero_page - merge with ZERO_PAGE(0).
+   + * This function returns 0 if the pages were merged, -EFAULT otherwise.
+   + */
+static int try_to_merge_with_zero_page(struct rmap_item *rmap_item,
+		struct page *page)
+{
+	struct mm_struct *mm = rmap_item->mm;
+	struct vm_area_struct *vma;
+	int err = -EFAULT;
+
+	down_read(&mm->mmap_sem);
+	if (ksm_test_exit(mm))
+		goto out;
+	vma = find_vma(mm, rmap_item->address);
+	if (!vma || vma->vm_start > rmap_item->address)
+		goto out;
+
+	err = try_to_merge_zero_page(vma, page);
+	if (err)
+		goto out;
+
+	/* Must get reference to anon_vma while still holding mmap_sem */
+	rmap_item->anon_vma = vma->anon_vma;
+	get_anon_vma(vma->anon_vma);
+out:
+	up_read(&mm->mmap_sem);
+	return err;
+}
+
+
+/*
+ * cmp_and_merge_page - first see if page can be merged into the stable tree;
+ * if not, compare checksum to previous and if it's the same, see if page can
+ * be inserted into the unstable tree, or merged with a page already there and
+ * both transferred to the stable tree.
+ *
+ * @page: the page that we are searching identical page to.
+ * @rmap_item: the reverse mapping into the virtual address of this page
+ */
+
+static void cmp_and_merge_page(struct page *page, struct rmap_item *rmap_item)
+{
+	int err = 0;
+
+	if ((rmap_item->address & ZERO_MERGE_FLAG) && page != ZERO_PAGE(0)) {
+		ksm_pages_sharing--;
+		rmap_item->address &= PAGE_MASK;
+	}
+
+	if (page != ZERO_PAGE(0) && page_is_zero(page)) {
+		err = try_to_merge_with_zero_page(rmap_item, page);
+		if (!err) {
+			ksm_pages_sharing++;
+			rmap_item->address |= ZERO_MERGE_FLAG;
+		}
+	}
+}
+#endif
+
 /**
  * ksm_do_scan  - the ksm scanner main worker function.
  * @scan_npages - number of pages we want to scan before we return.
@@ -1715,6 +1891,10 @@ static int ksm_scan_thread(void *nothing)
 	set_freezable();
 	set_user_nice(current, 5);
 
+#ifdef CONFIG_KSM_DEFER_RUN
+	schedule_timeout_interruptible(CONFIG_KSM_DEFER_RUN_DELAY * HZ);
+	pr_info("KSM has been started\n");
+#endif
 	while (!kthread_should_stop()) {
 		mutex_lock(&ksm_thread_mutex);
 		wait_while_offlining();
@@ -1734,6 +1914,23 @@ static int ksm_scan_thread(void *nothing)
 	}
 	return 0;
 }
+
+#ifdef CONFIG_KSM_KERNEL_MADVISE
+void ksm_set_vm_mergeable_if_possible(unsigned long *vm_flags)
+{
+	if (*vm_flags & (VM_MERGEABLE | VM_SHARED | VM_MAYSHARE
+			| VM_PFNMAP | VM_IO | VM_DONTEXPAND
+			| VM_HUGETLB
+			| VM_MIXEDMAP))
+	return;         /* just ignore the advice */
+
+#ifdef VM_SAO
+	if (*vm_flags & VM_SAO)
+		return;
+#endif
+	*vm_flags |= VM_MERGEABLE;
+}
+#endif
 
 int ksm_madvise(struct vm_area_struct *vma, unsigned long start,
 		unsigned long end, int advice, unsigned long *vm_flags)

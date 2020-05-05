@@ -48,6 +48,10 @@
 struct page *empty_zero_page;
 EXPORT_SYMBOL(empty_zero_page);
 
+#if defined(CONFIG_SPARSE_LOWMEM_EXT_MAP) & defined(CONFIG_ARM_LPAE) & defined(CONFIG_ARM_CPU_SUSPEND) 
+void *suspend_save_sp;
+#endif
+
 /*
  * The pmd table for the upper-most set of pages.
  */
@@ -1148,12 +1152,105 @@ void __init sanity_check_meminfo(void)
 
 	memblock_set_current_limit(memblock_limit);
 }
+#ifdef CONFIG_SPARSE_LOWMEM_EXT_MAP
+unsigned int __read_mostly lowmem_ext_initialized;
+static void __init build_lowmem_conv_tbl(void)
+{ 
+	unsigned long* vtbl = &memblock.virt_table[0];
+	phys_addr_t* ptbl = &memblock.phys_table[0];
+	unsigned long addr, local_off, idx;
 
+	//! Establish virt_tbl & phys_tbl for fast conversion
+	for (addr = PAGE_OFFSET; addr < (unsigned long)vmalloc_min; addr += PAGETBL_SIZE) {
+		/* Establish address table based on physical */
+		local_off = PAGETBL_IDX(addr - PAGE_OFFSET);	
+		ptbl[local_off] = __pa_ext(addr);
+		idx = PAGETBL_IDX(__pa_ext(addr) - PHYS_OFFSET);  
+		vtbl[idx] = addr;
+
+		if (__pa(addr) != ptbl[local_off] ||
+			__va(ptbl[local_off]) != (void*)addr)
+			pr_err("[Error] Create ADDR tbl virt 0x%lx -> [voff:%lu]"
+				" = phys:0x%llx -[poff:%lu]-> vaddr:0x%p\n",
+				vtbl[idx], local_off, __pa(addr), idx, __va(__pa(vtbl[idx])));
+	} 
+
+
+	if (arm_lowmem_limit !=  __pa((vmalloc_min-1))+1) {
+		pr_err("[error][critical] arm_lowmem_limit :%pa != vmalloc_limit:%llx\n",
+				&arm_lowmem_limit, (u64)__pa(vmalloc_min - 1) + 1);
+		BUG_ON(1);
+	}
+}
+
+static void __init memblock_merge_with_dma(void) 
+{
+	struct memblock_region *reg;
+	for_each_memblock(dmamem, reg) 
+		memblock_reserve_puremem(reg->base, reg->size);
+}
+
+static void __init adjust_lowmem_with_dma(void)
+{
+	phys_addr_t vmalloc_limit = __pa_ext(vmalloc_min - 1) + 1;
+	struct memblock_region *reg;
+
+	/* Start to calculate lowmem size without CMA reserved.*/
+	pr_notice("%s arm_lowmem_limit:%pa vmalloc_limit%pa\n",
+			__func__, &arm_lowmem_limit, &vmalloc_limit);
+
+	for_each_memblock(puremem, reg) {
+		phys_addr_t block_start = reg->base;
+		phys_addr_t block_end = reg->base + reg->size;
+		phys_addr_t size_limit = reg->base + reg->size;
+
+		if (block_start < vmalloc_limit)
+			size_limit = vmalloc_limit - block_start;
+		else /* highmem block */ 
+			break;
+
+#ifndef CONFIG_SPARSE_LOWMEM_EXT_LPAE
+		if (block_start >> 32 > 0)
+			break;
+#endif
+
+		/* 
+		 * if current memblock size doesn't set aligned as PAGETBL_SIZE(4MB)
+		 * despite it's not end of memblock, Stop to extend mapping. 
+		 */
+		if (!IS_ALIGNED((reg->size), PAGETBL_SIZE)) {
+			pr_err("[error][critical] lowmem ext mapping disable"
+					" due to align(%pa-%pa) issue!\n",
+					&block_start, &block_end);
+			memblock_merge_with_dma();
+			return;
+		}
+
+		if (block_end > arm_lowmem_limit) {
+			if (reg->size > size_limit)
+				arm_lowmem_limit = vmalloc_limit;
+			else
+				arm_lowmem_limit = block_end;
+		}	
+	}
+
+	lowmem_ext_initialized = 1;
+
+	build_lowmem_conv_tbl();
+
+	high_memory = __va(arm_lowmem_limit - 1) + 1;
+
+	memblock_set_current_limit(arm_lowmem_limit);
+
+}
+
+#else 
+static inline void __init adjust_lowmem_with_dma(void) { }
+#endif
 static inline void prepare_page_table(void)
 {
 	unsigned long addr;
 	phys_addr_t end;
-
 	/*
 	 * Clear out all the mappings below the kernel image.
 	 */
@@ -1170,7 +1267,11 @@ static inline void prepare_page_table(void)
 	/*
 	 * Find the end of the first block of lowmem.
 	 */
+#ifdef CONFIG_SPARSE_LOWMEM_EXT_MAP
+	end = memblock.puremem.regions[0].base + memblock.puremem.regions[0].size;
+#else
 	end = memblock.memory.regions[0].base + memblock.memory.regions[0].size;
+#endif
 	if (end >= arm_lowmem_limit)
 		end = arm_lowmem_limit;
 
@@ -1178,7 +1279,7 @@ static inline void prepare_page_table(void)
 	 * Clear out all the kernel space mappings, except for the first
 	 * memory bank, up to the vmalloc region.
 	 */
-	for (addr = __phys_to_virt(end);
+	for (addr = __phys_to_virt(end - 1) + 1;
 	     addr < VMALLOC_START; addr += PMD_SIZE)
 		pmd_clear(pmd_off_k(addr));
 }
@@ -1333,7 +1434,11 @@ static void __init map_lowmem(void)
 	phys_addr_t kernel_x_end = round_up(__pa(__init_end), SECTION_SIZE);
 
 	/* Map all the lowmem memory banks. */
+#ifdef CONFIG_SPARSE_LOWMEM_EXT_MAP
+	for_each_memblock(puremem, reg) {
+#else
 	for_each_memblock(memory, reg) {
+#endif
 		phys_addr_t start = reg->base;
 		phys_addr_t end = start + reg->size;
 		struct map_desc map;
@@ -1507,7 +1612,6 @@ void __init early_paging_init(const struct machine_desc *mdesc,
 }
 
 #endif
-
 /*
  * paging_init() sets up the page tables, initialises the zone memory
  * maps, and sets up the zero page, bad page and bad page tables.
@@ -1515,6 +1619,7 @@ void __init early_paging_init(const struct machine_desc *mdesc,
 void __init paging_init(const struct machine_desc *mdesc)
 {
 	void *zero_page;
+	adjust_lowmem_with_dma();
 
 	build_mem_type_table();
 	prepare_page_table();
@@ -1532,5 +1637,20 @@ void __init paging_init(const struct machine_desc *mdesc)
 	bootmem_init();
 
 	empty_zero_page = virt_to_page(zero_page);
+#if defined(CONFIG_SPARSE_LOWMEM_EXT_MAP) & defined(CONFIG_ARM_LPAE) & defined(CONFIG_ARM_CPU_SUSPEND) 
+	/* 
+	 * the page, which is for assigning sleep_save_sp and idmap_pgd, should be allocated within 32-bit 
+	 * physical address if lowmem is mapped up to 33bit size. 
+	 * If the address size over 32-bit for sleep_save_sp and idmap_pgd, resuming after suspend
+	 * will make invalid loading with MMU off because sleep_save_sp has 32-bit size, which can not 
+	 * assign 33-bit address
+	 */
+	suspend_save_sp = __va(memblock_alloc_range(PAGE_SIZE,
+				0, PHYS_OFFSET, (arm_lowmem_limit >> 32) > 0 ?
+				0xFFFFFFFFULL : arm_lowmem_limit ));
+
+	memset(suspend_save_sp, 0, PAGE_SIZE);
+	__flush_dcache_page(NULL, virt_to_page(suspend_save_sp));
+#endif
 	__flush_dcache_page(NULL, empty_zero_page);
 }

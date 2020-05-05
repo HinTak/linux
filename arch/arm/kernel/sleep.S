@@ -141,8 +141,15 @@ ARM_BE8(setend be)			@ ensure we are in BE mode
 	ldr	r2, [r0]
 	add	r0, r0, r2
 	ldr	r0, [r0, #SLEEP_SAVE_SP_PHYS]
+#if !defined(CONFIG_ARM_LPAE) || !defined(CONFIG_SPARSE_LOWMEM_EXT_MAP) 
+	/*
+	 * kernel stack could be assigned 33 bit phys addr by slab if lowmem mapped up to 33bit.
+	 * this doesn't execute asm that load stack pointer from 
+	 * sleep_save_sp.save_ptr_stash_phys. instead of it
+	 * load phys pgd, stack, resume fn from sleep_save_sp.save_ptr_stash_phys.
+	 */
 	ldr	r0, [r0, r1, lsl #2]
-
+#endif
 	@ load phys pgd, stack, resume fn
   ARM(	ldmia	r0!, {r1, sp, pc}	)
 THUMB(	ldmia	r0!, {r1, r2, r3}	)

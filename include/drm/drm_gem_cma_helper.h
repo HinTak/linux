@@ -4,6 +4,8 @@
 #include <drm/drmP.h>
 #include <drm/drm_gem.h>
 
+#define __FIXED_SLOT_PATCH_
+
 /**
  * struct drm_gem_cma_object - GEM object backed by CMA memory allocations
  * @base: base GEM object
@@ -18,6 +20,10 @@ struct drm_gem_cma_object {
 
 	/* For objects with DMA memory allocated by GEM CMA */
 	void *vaddr;
+#ifdef __FIXED_SLOT_PATCH_
+	unsigned int slot_index;
+	unsigned int num_slots;
+#endif
 };
 
 static inline struct drm_gem_cma_object *

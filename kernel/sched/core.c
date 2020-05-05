@@ -1,3 +1,7 @@
+#ifdef CONFIG_DT10_PROFILER
+#include	"DT_core.h"	
+/* For DynamicTracer-TestPoint */
+#endif
 /*
  *  kernel/sched/core.c
  *
@@ -75,6 +79,10 @@
 #include <linux/context_tracking.h>
 #include <linux/compiler.h>
 
+#ifdef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
+#include <linux/irqflags.h>
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
+
 #include <asm/switch_to.h>
 #include <asm/tlb.h>
 #include <asm/irq_regs.h>
@@ -87,8 +95,19 @@
 #include "../workqueue_internal.h"
 #include "../smpboot.h"
 
+#ifdef CONFIG_KDEBUGD
+#include <kdebugd/kdebugd.h>
+#include <kdebugd/sec_topthread.h>
+#include <linux/sort.h>     /* For sort() */
+#endif
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/sched.h>
+
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+void show_kernel_patch_version(void);
+#endif
 
 void start_bandwidth_timer(struct hrtimer *period_timer, ktime_t period)
 {
@@ -1672,6 +1691,28 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	success = 1; /* we're going to change ->state */
 	cpu = task_cpu(p);
 
+	/*
+	 * Ensure we load p->on_rq _after_ p->state, otherwise it would
+	 * be possible to, falsely, observe p->on_rq == 0 and get stuck
+	 * in smp_cond_load_acquire() below.
+	 *
+	 * sched_ttwu_pending()                 try_to_wake_up()
+	 *   [S] p->on_rq = 1;                  [L] P->state
+	 *       UNLOCK rq->lock  -----.
+	 *                              \
+	 *				 +---   RMB
+	 * schedule()                   /
+	 *       LOCK rq->lock    -----'
+	 *       UNLOCK rq->lock
+	 *
+	 * [task p]
+	 *   [S] p->state = UNINTERRUPTIBLE     [L] p->on_rq
+	 *
+	 * Pairs with the UNLOCK+LOCK on rq->lock from the
+	 * last wakeup of our task and the schedule that got our task
+	 * current.
+	 */
+	smp_rmb();
 	if (p->on_rq && ttwu_remote(p, wake_flags))
 		goto stat;
 
@@ -2217,11 +2258,11 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 	 * If a task dies, then it sets TASK_DEAD in tsk->state and calls
 	 * schedule one last time. The schedule call will never return, and
 	 * the scheduled task must drop that reference.
-	 * The test for TASK_DEAD must occur while the runqueue locks are
-	 * still held, otherwise prev could be scheduled on another cpu, die
-	 * there before we look at prev->state, and then the reference would
-	 * be dropped twice.
-	 *		Manfred Spraul <manfred@colorfullife.com>
+	 *
+	 * We must observe prev->state before clearing prev->on_cpu (in
+	 * finish_lock_switch), otherwise a concurrent wakeup can get prev
+	 * running on another CPU and we could rave with its RUNNING -> DEAD
+	 * transition, resulting in a double drop.
 	 */
 	prev_state = prev->state;
 	vtime_task_switch(prev);
@@ -2333,6 +2374,9 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	spin_release(&rq->lock.dep_map, 1, _THIS_IP_);
 
 	context_tracking_task_switch(prev, next);
+#ifdef CONFIG_DT10_PROFILER
+	__DtTestPointKernelInfo( __DtFunc_context_switch, __DtStep_0, next );
+#endif
 	/* Here we just switch the register state and the stack. */
 	switch_to(prev, next, prev);
 	barrier();
@@ -2566,7 +2610,11 @@ void preempt_count_add(int val)
 	DEBUG_LOCKS_WARN_ON((preempt_count() & PREEMPT_MASK) >=
 				PREEMPT_MASK - 10);
 #endif
+#ifndef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
 	if (preempt_count() == val) {
+#else
+	if (check_preempt_trace() && preempt_count() == val) {
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
 		unsigned long ip = get_parent_ip(CALLER_ADDR1);
 #ifdef CONFIG_DEBUG_PREEMPT
 		current->preempt_disable_ip = ip;
@@ -2593,7 +2641,11 @@ void preempt_count_sub(int val)
 		return;
 #endif
 
+#ifndef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
 	if (preempt_count() == val)
+#else
+	if (check_preempt_trace() && preempt_count() == val)
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
 		trace_preempt_on(CALLER_ADDR0, get_parent_ip(CALLER_ADDR1));
 	__preempt_count_sub(val);
 }
@@ -2612,6 +2664,9 @@ static noinline void __schedule_bug(struct task_struct *prev)
 
 	printk(KERN_ERR "BUG: scheduling while atomic: %s/%d/0x%08x\n",
 		prev->comm, prev->pid, preempt_count());
+#ifdef CONFIG_VDLP_VERSION_INFO
+	show_kernel_patch_version();
+#endif
 
 	debug_show_held_locks(prev);
 	print_modules();
@@ -2688,6 +2743,46 @@ again:
 
 	BUG(); /* the idle class will always have a runnable task */
 }
+
+#ifndef CONFIG_SMP
+#ifdef CONFIG_MEMORY_VALIDATOR
+
+static inline void memory_value_watcher(struct task_struct *prev)
+{
+	if (prev && kdbg_mem_watcher.watching && kdbg_mem_watcher.tgid == prev->tgid) {
+		mm_segment_t fs;
+		unsigned int buffer;
+
+		fs = get_fs();
+		set_fs(KERNEL_DS);
+
+		if (!access_ok(VERIFY_READ, (unsigned long *)kdbg_mem_watcher.u_addr,
+					sizeof(unsigned long *))) {
+			set_fs(fs);
+			return;
+		}
+		__get_user(buffer, (unsigned long *)kdbg_mem_watcher.u_addr);
+		set_fs(fs);
+
+		if (kdbg_mem_watcher.buff != buffer) {
+
+			kdbg_mem_watcher.watching = 0;
+
+			printk("==============================================================================\n");
+			printk(" Memory Corruption DETECTED.........!!!!!!!!!!!!!!!!!!\n");
+			printk("==============================================================================\n");
+			printk(" Original : PID:%d value:0x%08x (addr:0x%08x)\n", kdbg_mem_watcher.pid, kdbg_mem_watcher.buff, kdbg_mem_watcher.u_addr);
+			printk(" NOW      : PID:%d value:0x%08x \n" , prev->pid, buffer);
+			printk("          : PID:%d PC:0x%08x\n" , prev->pid, (unsigned)KSTK_EIP(prev));
+			printk("------------------------------------------------------------------------------\n");
+			printk("Caution: The PC value could get invalid-value.\n");
+			printk("         So don't trust that value :)\n");
+			printk("==============================================================================\n");
+		}
+	}
+}
+#endif
+#endif /*CONFIG_SMP*/
 
 /*
  * __schedule() is the main scheduler function.
@@ -2794,7 +2889,22 @@ static void __sched __schedule(void)
 		rq->nr_switches++;
 		rq->curr = next;
 		++*switch_count;
-
+#ifdef CONFIG_KDEBUGD_COUNTER_MONITOR
+		per_cpu(sec_topthread_ctx_cnt, cpu)++;
+#endif
+		/* For kdebugd - schedule history logger */
+#if defined(CONFIG_KDEBUGD_MISC)
+#if defined(CONFIG_SCHED_HISTORY)
+		if (next->mm) /* for excepting kernel thread */
+			schedule_history(next, cpu);
+#endif
+#ifndef CONFIG_SMP
+#ifdef CONFIG_MEMORY_VALIDATOR
+		/* For meory Value Watcher*/
+		memory_value_watcher(prev);
+#endif
+#endif /*CONFIG_SMP*/
+#endif
 		rq = context_switch(rq, prev, next); /* unlocks the rq */
 		cpu = cpu_of(rq);
 	} else
@@ -4225,7 +4335,7 @@ SYSCALL_DEFINE0(sched_yield)
 
 int __sched _cond_resched(void)
 {
-	if (should_resched()) {
+	if (should_resched(0)) {
 		preempt_schedule_common();
 		return 1;
 	}
@@ -4243,7 +4353,7 @@ EXPORT_SYMBOL(_cond_resched);
  */
 int __cond_resched_lock(spinlock_t *lock)
 {
-	int resched = should_resched();
+	int resched = should_resched(PREEMPT_LOCK_OFFSET);
 	int ret = 0;
 
 	lockdep_assert_held(lock);
@@ -4265,7 +4375,7 @@ int __sched __cond_resched_softirq(void)
 {
 	BUG_ON(!in_softirq());
 
-	if (should_resched()) {
+	if (should_resched(SOFTIRQ_DISABLE_OFFSET)) {
 		local_bh_enable();
 		preempt_schedule_common();
 		local_bh_disable();
@@ -4516,8 +4626,8 @@ void sched_show_task(struct task_struct *p)
 
 	if (state)
 		state = __ffs(state) + 1;
-	printk(KERN_INFO "%-15.15s %c", p->comm,
-		state < sizeof(stat_nam) - 1 ? stat_nam[state] : '?');
+	pr_err("%-15.15s %c", p->comm, 
+			state < sizeof(TASK_STATE_TO_CHAR_STR) - 1 ? stat_nam[state] : '?');
 #if BITS_PER_LONG == 32
 	if (state == TASK_RUNNING)
 		printk(KERN_CONT " running  ");
@@ -4538,13 +4648,19 @@ void sched_show_task(struct task_struct *p)
 		ppid = task_pid_nr(rcu_dereference(p->real_parent));
 	rcu_read_unlock();
 	printk(KERN_CONT "%5lu %5d %6d 0x%08lx\n", free,
-		task_pid_nr(p), ppid,
-		(unsigned long)task_thread_info(p)->flags);
+			task_pid_nr(p), ppid,
+			(unsigned long)task_thread_info(p)->flags);
 
 	print_worker_info(KERN_INFO, p);
 	show_stack(p, NULL);
 }
 
+#ifdef CONFIG_TASK_STATE_BACKTRACE
+void wrap_show_task(struct task_struct *tsk)
+{
+	sched_show_task(tsk);
+}
+#endif
 void show_state_filter(unsigned long state_filter)
 {
 	struct task_struct *g, *p;
@@ -4554,8 +4670,9 @@ void show_state_filter(unsigned long state_filter)
 		"  task                PC stack   pid father\n");
 #else
 	printk(KERN_INFO
-		"  task                        PC stack   pid father\n");
+			"  task                        PC stack   pid father\n");
 #endif
+
 	rcu_read_lock();
 	for_each_process_thread(g, p) {
 		/*
@@ -6977,17 +7094,16 @@ static int cpuset_cpu_active(struct notifier_block *nfb, unsigned long action,
 		 * operation in the resume sequence, just build a single sched
 		 * domain, ignoring cpusets.
 		 */
-		num_cpus_frozen--;
-		if (likely(num_cpus_frozen)) {
-			partition_sched_domains(1, NULL, NULL);
+		partition_sched_domains(1, NULL, NULL);
+		if (--num_cpus_frozen)
 			break;
-		}
 
 		/*
 		 * This is the last CPU online operation. So fall through and
 		 * restore the original sched domains by considering the
 		 * cpuset configurations.
 		 */
+		cpuset_force_rebuild();
 
 	case CPU_ONLINE:
 		cpuset_update_active_cpus(true);
@@ -7317,6 +7433,9 @@ void ___might_sleep(const char *file, int line, int preempt_offset)
 		"in_atomic(): %d, irqs_disabled(): %d, pid: %d, name: %s\n",
 			in_atomic(), irqs_disabled(),
 			current->pid, current->comm);
+#ifdef CONFIG_VDLP_VERSION_INFO
+	show_kernel_patch_version();
+#endif
 
 	if (task_stack_end_corrupted(current))
 		printk(KERN_EMERG "Thread overran stack, or stack corrupted\n");

@@ -3,6 +3,7 @@
 
 #include <linux/types.h>
 #include <linux/stacktrace.h>
+#include <linux/stackdepot.h>
 
 struct pglist_data;
 struct page_ext_operations {
@@ -26,6 +27,10 @@ enum page_ext_flags {
 	PAGE_EXT_DEBUG_POISON,		/* Page is poisoned */
 	PAGE_EXT_DEBUG_GUARD,
 	PAGE_EXT_OWNER,
+	PAGE_EXT_FALLBACK,
+#ifdef CONFIG_CMA_DEBUG_REFTRACE
+	PAGE_EXT_MIGRATE_FAIL,
+#endif
 };
 
 /*
@@ -38,10 +43,10 @@ enum page_ext_flags {
 struct page_ext {
 	unsigned long flags;
 #ifdef CONFIG_PAGE_OWNER
-	unsigned int order;
+	unsigned int order:10;
+	unsigned int pid:22;
 	gfp_t gfp_mask;
-	unsigned int nr_entries;
-	unsigned long trace_entries[8];
+	depot_stack_handle_t handle;
 #endif
 };
 

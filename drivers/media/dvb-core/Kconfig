@@ -27,3 +27,32 @@ config DVB_DYNAMIC_MINORS
 	  will be required to manage the device nodes.
 
 	  If you are unsure about this, say N here.
+
+config DVB_USE_SHARED_LLBUF_ON_DEMUX
+	bool "DVB Shared Linked list buffer"
+	depends on DVB_CORE
+	default n
+	help
+	  If you say Y here, the DVB subsystem will use shared linked list
+	  buffer instead of legacy ring buffer to make effective use
+	  of memory resources and to avoid data being deleted.
+
+	  If you are unsure about this, say N here.
+
+config DVB_HCAS
+	bool "DVB HCAS"
+	depends on DVB_CORE
+	default n
+	help
+	  If you say Y here, the DVB subsystem will use HybridCAS.
+	  
+	  If you are unsure about this, say N here.
+
+config DVB_ATSC30DMX
+	bool "DVB ATSC30 DMX"
+	depends on DVB_CORE
+	default n
+	help
+	  If you say Y here, the DVB subsystem will use demux for ATSC3.0.
+	  
+	  If you are unsure about this, say N here.

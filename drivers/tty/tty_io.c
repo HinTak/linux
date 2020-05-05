@@ -103,6 +103,12 @@
 #include <linux/selection.h>
 
 #include <linux/kmod.h>
+#ifdef CONFIG_KDEBUGD
+#include <kdebugd/kdebugd.h>
+#endif
+#ifdef CONFIG_T2D_DEBUGD
+#include <t2ddebugd/t2ddebugd.h>
+#endif
 #include <linux/nsproxy.h>
 
 #undef TTY_DEBUG_HANGUP
@@ -118,7 +124,8 @@ struct ktermios tty_std_termios = {	/* for the benefit of tty drivers  */
 		   ECHOCTL | ECHOKE | IEXTEN,
 	.c_cc = INIT_C_CC,
 	.c_ispeed = 38400,
-	.c_ospeed = 38400
+	.c_ospeed = 38400,
+	/* .c_line = N_TTY, */
 };
 
 EXPORT_SYMBOL(tty_std_termios);
@@ -154,6 +161,14 @@ static int __tty_fasync(int fd, struct file *filp, int on);
 static int tty_fasync(int fd, struct file *filp, int on);
 static void release_tty(struct tty_struct *tty, int idx);
 
+#ifdef CONFIG_SERIAL_INPUT_MANIPULATION
+extern struct tty_struct *INPUT_tty;
+extern int console_portnum;
+#endif
+#ifdef CONFIG_T2D_DEBUGD
+extern struct tty_struct *T2DINPUT_tty;
+#endif
+
 /**
  *	free_tty_struct		-	free a disused tty
  *	@tty: tty struct to free
@@ -167,7 +182,17 @@ void free_tty_struct(struct tty_struct *tty)
 {
 	if (!tty)
 		return;
+	tty_ldisc_deinit(tty);
 	put_device(tty->dev);
+#ifdef CONFIG_SERIAL_INPUT_MANIPULATION
+	if (tty == INPUT_tty) {
+#ifdef CONFIG_SERIAL_INPUT_ENABLE_HELP_MSG
+	         pr_alert("[SERIAL INPUT MANAGE] Managed tty_struct(.name:%s) is freed !!!\n",
+		             tty->name);
+#endif
+	         INPUT_tty = NULL;
+	}
+#endif
 	kfree(tty->write_buf);
 	tty->magic = 0xDEADDEAD;
 	kfree(tty);
@@ -714,7 +739,7 @@ static void __tty_hangup(struct tty_struct *tty, int exit_session)
 	while (refs--)
 		tty_kref_put(tty);
 
-	tty_ldisc_hangup(tty);
+	tty_ldisc_hangup(tty, cons_filp != NULL);
 
 	spin_lock_irq(&tty->ctrl_lock);
 	clear_bit(TTY_THROTTLED, &tty->flags);
@@ -739,10 +764,9 @@ static void __tty_hangup(struct tty_struct *tty, int exit_session)
 	} else if (tty->ops->hangup)
 		tty->ops->hangup(tty);
 	/*
-	 * We don't want to have driver/ldisc interactions beyond
-	 * the ones we did here. The driver layer expects no
-	 * calls after ->hangup() from the ldisc side. However we
-	 * can't yet guarantee all that.
+	 * We don't want to have driver/ldisc interactions beyond the ones
+	 * we did here. The driver layer expects no calls after ->hangup()
+	 * from the ldisc side, which is now guaranteed.
 	 */
 	set_bit(TTY_HUPPED, &tty->flags);
 	tty_unlock(tty);
@@ -986,6 +1010,10 @@ void __stop_tty(struct tty_struct *tty)
 void stop_tty(struct tty_struct *tty)
 {
 	unsigned long flags;
+#ifdef CONFIG_BLOCK_STOP_TTY
+        printk (KERN_ALERT "[SELP:%s:%d] stop_tty() is blocked!!\n", __FILE__, __LINE__);
+        return;
+#endif
 
 	spin_lock_irqsave(&tty->flow_lock, flags);
 	__stop_tty(tty);
@@ -1070,6 +1098,8 @@ static ssize_t tty_read(struct file *file, char __user *buf, size_t count,
 	/* We want to wait for the line discipline to sort out in this
 	   situation */
 	ld = tty_ldisc_ref_wait(tty);
+	if (!ld)
+		return hung_up_tty_read(file, buf, count, ppos);
 	if (ld->ops->read)
 		i = ld->ops->read(tty, file, buf, count);
 	else
@@ -1112,6 +1142,9 @@ static inline ssize_t do_tty_write(
 {
 	ssize_t ret, written = 0;
 	unsigned int chunk;
+#if defined(CONFIG_KDEBUGD) || defined(CONFIG_T2D_DEBUGD)
+	int kdbg_print = 1;
+#endif
 
 	ret = tty_write_lock(tty, file->f_flags & O_NDELAY);
 	if (ret < 0)
@@ -1161,10 +1194,46 @@ static inline ssize_t do_tty_write(
 		size_t size = count;
 		if (size > chunk)
 			size = chunk;
+#if defined(CONFIG_KDEBUGD) || defined(CONFIG_T2D_DEBUGD)
+#ifdef CONFIG_KDEBUGD
+#ifdef CONFIG_KDEBUGD_BG
+		if (kdebugd_running && tty->index == console_portnum && !kdbg_mode)
+			kdbg_print = 0;
+#ifdef CONFIG_KDEBUGD_PRINT_ONOFF
+		else
+			kdbg_print = kdbg_print_enable();
+#endif
+#else /* CONFIG_KDEBUGD_BG */
+		if (kdebugd_running && tty->index == console_portnum)
+			kdbg_print = 0;
+#ifdef CONFIG_KDEBUGD_PRINT_ONOFF
+		else
+			kdbg_print = kdbg_print_enable();
+#endif
+#endif /* CONFIG_KDEBUGD_BG */
+#endif /* CONFIG_KDEBUGD */
+
+#ifdef CONFIG_T2D_DEBUGD
+		if (t2ddebugd_running && tty->index == console_portnum)
+			kdbg_print = 0;
+#endif
+		/* [Kdebugd]:Print only when task's pid matches
+		 * from kdebugd's dynamic print list */
+		if (kdbg_print) {
+			ret = -EFAULT;
+			if (copy_from_user(tty->write_buf, buf, size))
+				break;
+			ret = write(tty, file, tty->write_buf, size);
+		} else
+			ret = size;
+
+#else
+
 		ret = -EFAULT;
 		if (copy_from_user(tty->write_buf, buf, size))
 			break;
 		ret = write(tty, file, tty->write_buf, size);
+#endif
 		if (ret <= 0)
 			break;
 		written += ret;
@@ -1247,6 +1316,8 @@ static ssize_t tty_write(struct file *file, const char __user *buf,
 		printk(KERN_ERR "tty driver %s lacks a write_room method.\n",
 			tty->driver->name);
 	ld = tty_ldisc_ref_wait(tty);
+	if (!ld)
+		return hung_up_tty_write(file, buf, count, ppos);
 	if (!ld->ops->write)
 		ret = -EIO;
 	else
@@ -1388,9 +1459,10 @@ int tty_init_termios(struct tty_struct *tty)
 	else {
 		/* Check for lazy saved data */
 		tp = tty->driver->termios[idx];
-		if (tp != NULL)
+		if (tp != NULL) {
 			tty->termios = *tp;
-		else
+			tty->termios.c_line  = tty->driver->init_termios.c_line;
+		} else
 			tty->termios = tty->driver->init_termios;
 	}
 	/* Compatibility until drivers always set this */
@@ -1475,7 +1547,8 @@ static int tty_reopen(struct tty_struct *tty)
 
 	tty->count++;
 
-	WARN_ON(!tty->ldisc);
+	if (!tty->ldisc)
+		return tty_ldisc_reinit(tty, tty->termios.c_line);
 
 	return 0;
 }
@@ -1529,7 +1602,7 @@ struct tty_struct *tty_init_dev(struct tty_driver *driver, int idx)
 	tty_lock(tty);
 	retval = tty_driver_install_tty(driver, tty);
 	if (retval < 0)
-		goto err_deinit_tty;
+		goto err_free_tty;
 
 	if (!tty->port)
 		tty->port = driver->ports[idx];
@@ -1551,9 +1624,8 @@ struct tty_struct *tty_init_dev(struct tty_driver *driver, int idx)
 	/* Return the tty locked so that it cannot vanish under the caller */
 	return tty;
 
-err_deinit_tty:
+err_free_tty:
 	tty_unlock(tty);
-	deinitialize_tty_struct(tty);
 	free_tty_struct(tty);
 err_module_put:
 	module_put(driver->owner);
@@ -2184,6 +2256,8 @@ static unsigned int tty_poll(struct file *filp, poll_table *wait)
 		return 0;
 
 	ld = tty_ldisc_ref_wait(tty);
+	if (!ld)
+		return hung_up_tty_poll(filp, wait);
 	if (ld->ops->poll)
 		ret = ld->ops->poll(tty, filp, wait);
 	tty_ldisc_deref(ld);
@@ -2273,6 +2347,8 @@ static int tiocsti(struct tty_struct *tty, char __user *p)
 		return -EFAULT;
 	tty_audit_tiocsti(tty, ch);
 	ld = tty_ldisc_ref_wait(tty);
+	if (!ld)
+		return -EIO;
 	ld->ops->receive_buf(tty, &ch, &mbz, 1);
 	tty_ldisc_deref(ld);
 	return 0;
@@ -2631,13 +2707,13 @@ static int tiocgsid(struct tty_struct *tty, struct tty_struct *real_tty, pid_t _
 
 static int tiocsetd(struct tty_struct *tty, int __user *p)
 {
-	int ldisc;
+	int disc;
 	int ret;
 
-	if (get_user(ldisc, p))
+	if (get_user(disc, p))
 		return -EFAULT;
 
-	ret = tty_set_ldisc(tty, ldisc);
+	ret = tty_set_ldisc(tty, disc);
 
 	return ret;
 }
@@ -2934,6 +3010,8 @@ long tty_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			return retval;
 	}
 	ld = tty_ldisc_ref_wait(tty);
+	if (!ld)
+		return hung_up_tty_ioctl(file, cmd, arg);
 	retval = -EINVAL;
 	if (ld->ops->ioctl) {
 		retval = ld->ops->ioctl(tty, file, cmd, arg);
@@ -2962,6 +3040,8 @@ static long tty_compat_ioctl(struct file *file, unsigned int cmd,
 	}
 
 	ld = tty_ldisc_ref_wait(tty);
+	if (!ld)
+		return hung_up_tty_compat_ioctl(file, cmd, arg);
 	if (ld->ops->compat_ioctl)
 		retval = ld->ops->compat_ioctl(tty, file, cmd, arg);
 	else
@@ -3126,20 +3206,6 @@ struct tty_struct *alloc_tty_struct(struct tty_driver *driver, int idx)
 	tty->dev = tty_get_device(tty);
 
 	return tty;
-}
-
-/**
- *	deinitialize_tty_struct
- *	@tty: tty to deinitialize
- *
- *	This subroutine deinitializes a tty structure that has been newly
- *	allocated but tty_release cannot be called on that yet.
- *
- *	Locking: none - tty in question must not be exposed at this point
- */
-void deinitialize_tty_struct(struct tty_struct *tty)
-{
-	tty_ldisc_deinit(tty);
 }
 
 /**

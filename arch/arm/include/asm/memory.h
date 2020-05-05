@@ -39,7 +39,12 @@
  * TASK_SIZE - the maximum size of a user space task.
  * TASK_UNMAPPED_BASE - the lower boundary of the mmap VM area
  */
-#define TASK_SIZE		(UL(CONFIG_PAGE_OFFSET) - UL(SZ_16M))
+#ifdef CONFIG_INC_MODULE_SIZE
+/* Increase module size to (ex: 26M, 28M, 32M) large module debug with KASAN. */
+#define TASK_SIZE	(UL(CONFIG_PAGE_OFFSET) - UL(CONFIG_INC_MODULE_SIZE_MB*1024*1024))
+#else
+#define TASK_SIZE	(UL(CONFIG_PAGE_OFFSET) - UL(SZ_24M))
+#endif
 #define TASK_UNMAPPED_BASE	ALIGN(TASK_SIZE / 3, SZ_16M)
 
 /*
@@ -52,7 +57,11 @@
  * and PAGE_OFFSET - it must be within 32MB of the kernel text.
  */
 #ifndef CONFIG_THUMB2_KERNEL
-#define MODULES_VADDR		(PAGE_OFFSET - SZ_16M)
+#ifdef CONFIG_INC_MODULE_SIZE
+#define MODULES_VADDR	(PAGE_OFFSET - CONFIG_INC_MODULE_SIZE_MB*1024*1024)
+#else
+#define MODULES_VADDR		(PAGE_OFFSET - SZ_24M)
+#endif
 #else
 /* smaller range for Thumb-2 symbols relocation (2^24)*/
 #define MODULES_VADDR		(PAGE_OFFSET - SZ_8M)
@@ -78,10 +87,12 @@
  */
 #define XIP_VIRT_ADDR(physaddr)  (MODULES_VADDR + ((physaddr) & 0x000fffff))
 
+#if !defined(CONFIG_SMP) && !defined(CONFIG_ARM_LPAE)
 /*
  * Allow 16MB-aligned ioremap pages
  */
 #define IOREMAP_MAX_ORDER	24
+#endif
 
 #else /* CONFIG_MMU */
 
@@ -165,8 +176,12 @@
  * PFN 0 == physical address 0.
  */
 #if defined(__virt_to_phys)
+#ifndef PHYS_OFFSET
 #define PHYS_OFFSET	PLAT_PHYS_OFFSET
+#endif
+#ifndef PHYS_PFN_OFFSET
 #define PHYS_PFN_OFFSET	((unsigned long)(PHYS_OFFSET >> PAGE_SHIFT))
+#endif
 
 #define virt_to_pfn(kaddr) (__pa(kaddr) >> PAGE_SHIFT)
 
@@ -292,6 +307,10 @@ static inline void *phys_to_virt(phys_addr_t x)
 #define __pa(x)			__virt_to_phys((unsigned long)(x))
 #define __va(x)			((void *)__phys_to_virt((phys_addr_t)(x)))
 #define pfn_to_kaddr(pfn)	__va((pfn) << PAGE_SHIFT)
+#ifdef CONFIG_SPARSE_LOWMEM_EXT_MAP
+#define __pa_ext(x)			__virt_to_phys_ext((unsigned long)(x))
+#define __va_ext(x)			((void *)__phys_to_virt_ext((phys_addr_t)(x)))
+#endif
 
 extern phys_addr_t (*arch_virt_to_idmap)(unsigned long x);
 

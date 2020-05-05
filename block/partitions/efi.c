@@ -293,7 +293,7 @@ static gpt_entry *alloc_read_gpt_entries(struct parsed_partitions *state,
 	if (!gpt)
 		return NULL;
 
-	count = le32_to_cpu(gpt->num_partition_entries) *
+	count = (size_t)le32_to_cpu(gpt->num_partition_entries) *
                 le32_to_cpu(gpt->sizeof_partition_entry);
 	if (!count)
 		return NULL;
@@ -352,7 +352,7 @@ static int is_gpt_valid(struct parsed_partitions *state, u64 lba,
 			gpt_header **gpt, gpt_entry **ptes)
 {
 	u32 crc, origcrc;
-	u64 lastlba;
+	u64 lastlba, pt_size;
 
 	if (!ptes)
 		return 0;
@@ -434,13 +434,20 @@ static int is_gpt_valid(struct parsed_partitions *state, u64 lba,
 		goto fail;
 	}
 
+	/* Sanity check partition table size */
+	pt_size = (u64)le32_to_cpu((*gpt)->num_partition_entries) *
+		le32_to_cpu((*gpt)->sizeof_partition_entry);
+	if (pt_size > KMALLOC_MAX_SIZE) {
+		pr_debug("GUID Partition Table is too large: %llu > %lu bytes\n",
+			 (unsigned long long)pt_size, KMALLOC_MAX_SIZE);
+		goto fail;
+	}
+
 	if (!(*ptes = alloc_read_gpt_entries(state, *gpt)))
 		goto fail;
 
 	/* Check the GUID Partition Entry Array CRC */
-	crc = efi_crc32((const unsigned char *) (*ptes),
-			le32_to_cpu((*gpt)->num_partition_entries) *
-			le32_to_cpu((*gpt)->sizeof_partition_entry));
+	crc = efi_crc32((const unsigned char *) (*ptes), pt_size);
 
 	if (crc != le32_to_cpu((*gpt)->partition_entry_array_crc32)) {
 		pr_debug("GUID Partitition Entry Array CRC check failed.\n");
@@ -572,6 +579,12 @@ compare_gpts(gpt_header *pgpt, gpt_header *agpt, u64 lastlba)
 }
 
 /**
+ *	Because Primary GPT is used in normal case and in order to get
+ *	minor performance improvement, We skip Alternative GPT access.
+ */
+#define SKIP_ALTERNATE_GPT_ACCESS
+
+/**
  * find_valid_gpt() - Search disk for valid GPT headers and PTEs
  * @state: disk parsed partitions
  * @gpt: GPT header ptr, filled on return.
@@ -621,18 +634,22 @@ static int find_valid_gpt(struct parsed_partitions *state, gpt_header **gpt,
 
 	good_pgpt = is_gpt_valid(state, GPT_PRIMARY_PARTITION_TABLE_LBA,
 				 &pgpt, &pptes);
+#if !defined(SKIP_ALTERNATE_GPT_ACCESS)
         if (good_pgpt)
 		good_agpt = is_gpt_valid(state,
 					 le64_to_cpu(pgpt->alternate_lba),
 					 &agpt, &aptes);
         if (!good_agpt && force_gpt)
                 good_agpt = is_gpt_valid(state, lastlba, &agpt, &aptes);
+#endif
 
         /* The obviously unsuccessful case */
         if (!good_pgpt && !good_agpt)
                 goto fail;
 
+#if !defined(SKIP_ALTERNATE_GPT_ACCESS)
         compare_gpts(pgpt, agpt, lastlba);
+#endif
 
         /* The good cases */
         if (good_pgpt) {
@@ -640,8 +657,10 @@ static int find_valid_gpt(struct parsed_partitions *state, gpt_header **gpt,
                 *ptes = pptes;
                 kfree(agpt);
                 kfree(aptes);
+#if !defined(SKIP_ALTERNATE_GPT_ACCESS)
 		if (!good_agpt)
                         pr_warn("Alternate GPT is invalid, using primary GPT.\n");
+#endif
                 return 1;
         }
         else if (good_agpt) {

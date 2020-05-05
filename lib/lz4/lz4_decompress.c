@@ -177,6 +177,9 @@ static int lz4_uncompress_unknownoutputsize(const char *source, char *dest,
 	BYTE *op = (BYTE *) dest;
 	BYTE * const oend = op + maxoutputsize;
 	BYTE *cpy;
+#ifndef CONFIG_VD_RELEASE
+	int i, j, index;
+#endif
 
 	/* Main Loop */
 	while (ip < iend) {
@@ -191,8 +194,11 @@ static int lz4_uncompress_unknownoutputsize(const char *source, char *dest,
 			int s = 255;
 			while ((ip < iend) && (s == 255)) {
 				s = *ip++;
-				if (unlikely(length > (size_t)(length + s)))
+				if (unlikely(length > (size_t)(length + s))) {
+					pr_err("Invalid literal length(RUN_MASK) : length = %d s = %d\n",
+							length, s);
 					goto _output_error;
+				}
 				length += s;
 			}
 		}
@@ -201,15 +207,19 @@ static int lz4_uncompress_unknownoutputsize(const char *source, char *dest,
 		if ((cpy > oend - COPYLENGTH) ||
 			(ip + length > iend - COPYLENGTH)) {
 
-			if (cpy > oend)
+			if (cpy > oend) {
+				pr_err("Writes beyond buffer\n");
 				goto _output_error;/* writes beyond buffer */
+			}
 
-			if (ip + length != iend)
+			if (ip + length != iend) {
+				pr_err("Input buffer is not consumed\n");
 				goto _output_error;/*
 						    * Error: LZ4 format requires
 						    * to consume all input
 						    * at this stage
 						    */
+			}
 			memcpy(op, ip, length);
 			op += length;
 			break;/* Necessarily EOF, due to parsing restrictions */
@@ -221,20 +231,24 @@ static int lz4_uncompress_unknownoutputsize(const char *source, char *dest,
 		/* get offset */
 		LZ4_READ_LITTLEENDIAN_16(ref, cpy, ip);
 		ip += 2;
-		if (ref < (BYTE * const) dest)
+		if (ref < (BYTE * const) dest) {
+			pr_err("Offset creates reference outside of destination buffer\n");
 			goto _output_error;
 			/*
 			 * Error : offset creates reference
 			 * outside of destination buffer
 			 */
-
+		}
 		/* get matchlength */
 		length = (token & ML_MASK);
 		if (length == ML_MASK) {
 			while (ip < iend) {
 				int s = *ip++;
-				if (unlikely(length > (size_t)(length + s)))
+				if (unlikely(length > (size_t)(length + s))) {
+					pr_err("Invalid literal length (ML_MASK) : length = %d s = %d\n",
+							length, s);
 					goto _output_error;
+				}
 				length += s;
 				if (s == 255)
 					continue;
@@ -264,8 +278,10 @@ static int lz4_uncompress_unknownoutputsize(const char *source, char *dest,
 		}
 		cpy = op + length - (STEPSIZE-4);
 		if (cpy > oend - COPYLENGTH) {
-			if (cpy > oend)
+			if (cpy > oend) {
+				pr_err("Write outside of buf\n");
 				goto _output_error; /* write outside of buf */
+			}
 
 			LZ4_SECURECOPY(ref, op, (oend - COPYLENGTH));
 			while (op < cpy)
@@ -275,8 +291,10 @@ static int lz4_uncompress_unknownoutputsize(const char *source, char *dest,
 			 * Check EOF (should never happen, since last 5 bytes
 			 * are supposed to be literals)
 			 */
-			if (op == oend)
+			if (op == oend) {
+				pr_err("Check EOF failed\n");
 				goto _output_error;
+			}
 			continue;
 		}
 		LZ4_SECURECOPY(ref, op, cpy);
@@ -287,6 +305,25 @@ static int lz4_uncompress_unknownoutputsize(const char *source, char *dest,
 
 	/* write overflow error detected */
 _output_error:
+#ifndef CONFIG_VD_RELEASE
+	index = ip - (const BYTE *) source - 1;
+
+	pr_cont("[ ");
+	for (i = 0; i <= index; i++) {
+		pr_cont("%x ", source[i]);
+		if ((i + 1) % 30 == 0)
+			pr_cont("\n");
+	}
+
+	pr_cont(" ] <==\n");
+	for (j = 0; (j + i) < isize; j++) {
+		pr_cont("%x ", source[i + j]);
+		if ((j + 1) % 30 == 0)
+			pr_cont("\n");
+	}
+
+	pr_cont("\n");
+#endif
 	return -1;
 }
 

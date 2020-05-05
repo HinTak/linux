@@ -486,6 +486,15 @@ config USB_SWITCH_FSA9480
 	  stereo and mono audio, video, microphone and UART data to use
 	  a common connector port.
 
+config SLP_LOWMEM_NOTIFY
+	bool "Driver for SLP Low Memory Notification"
+	default y
+	help
+	  Provide interface to register for low memory notifications.
+	  It is required to provide low memory notifications to
+	  user space and
+	  it is dependent on mm module.
+
 config LATTICE_ECP3_CONFIG
 	tristate "Lattice ECP3 FPGA bitstream configuration via SPI"
 	depends on SPI && SYSFS
@@ -528,4 +537,5 @@ source "drivers/misc/mic/Kconfig"
 source "drivers/misc/genwqe/Kconfig"
 source "drivers/misc/echo/Kconfig"
 source "drivers/misc/cxl/Kconfig"
+source "drivers/misc/micom-msg/Kconfig"
 endmenu

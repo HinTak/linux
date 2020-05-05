@@ -45,6 +45,10 @@
 #include "trace.h"
 #include "trace_output.h"
 
+#if defined(CONFIG_KDEBUGD_FTRACE) && defined(CONFIG_KDEBUGD_FTRACE_USER_BACKTRACE)
+extern void kdbg_save_stack_trace_user(struct stack_trace *trace);
+#endif
+
 /*
  * On boot up, the ring buffer is set to the minimum size, so that
  * we do not waste memory on systems that are not using tracing.
@@ -1962,7 +1966,11 @@ ftrace_trace_userstack(struct ring_buffer *buffer, unsigned long flags, int pc)
 	trace.skip		= 0;
 	trace.entries		= entry->caller;
 
+#if defined(CONFIG_KDEBUGD_FTRACE) && defined(CONFIG_KDEBUGD_FTRACE_USER_BACKTRACE)
+	kdbg_save_stack_trace_user(&trace);
+#else
 	save_stack_trace_user(&trace);
+#endif
 	if (!call_filter_check_discard(call, entry, buffer, event))
 		__buffer_unlock_commit(buffer, event);
 
@@ -5066,9 +5074,10 @@ tracing_mark_write(struct file *filp, const char __user *ubuf,
 	struct ring_buffer *buffer;
 	struct print_entry *entry;
 	unsigned long irq_flags;
+	char buf[256];
 	struct page *pages[2];
 	void *map_page[2];
-	int nr_pages = 1;
+	int nr_pages;
 	ssize_t written;
 	int offset;
 	int size;
@@ -5101,23 +5110,35 @@ tracing_mark_write(struct file *filp, const char __user *ubuf,
 	 */
 	BUILD_BUG_ON(TRACE_BUF_SIZE >= PAGE_SIZE);
 
-	/* check if we cross pages */
-	if ((addr & PAGE_MASK) != ((addr + cnt) & PAGE_MASK))
-		nr_pages = 2;
+	/*
+	 * For small sized traces, we uses local buffer to avoid page mapping
+	 * overhead. It reduces write latency by 50%.
+	 */ 
+	if (likely(cnt < 256)) {
+		if (copy_from_user(buf, ubuf, 256))
+			return -EFAULT;
+		nr_pages = 0;
+	} else {
+		/* check if we cross pages */
+		if ((addr & PAGE_MASK) != ((addr + cnt) & PAGE_MASK))
+			nr_pages = 2;
+		else
+			nr_pages = 1;
 
-	offset = addr & (PAGE_SIZE - 1);
-	addr &= PAGE_MASK;
+		offset = addr & (PAGE_SIZE - 1);
+		addr &= PAGE_MASK;
 
-	ret = get_user_pages_fast(addr, nr_pages, 0, pages);
-	if (ret < nr_pages) {
-		while (--ret >= 0)
-			put_page(pages[ret]);
-		written = -EFAULT;
-		goto out;
+		ret = get_user_pages_fast(addr, nr_pages, 0, pages);
+		if (ret < nr_pages) {
+			while (--ret >= 0)
+				put_page(pages[ret]);
+			written = -EFAULT;
+			goto out;
+		}
+
+		for (i = 0; i < nr_pages; i++)
+			map_page[i] = kmap_atomic(pages[i]);
 	}
-
-	for (i = 0; i < nr_pages; i++)
-		map_page[i] = kmap_atomic(pages[i]);
 
 	local_save_flags(irq_flags);
 	size = sizeof(*entry) + cnt + 2; /* possible \n added */
@@ -5133,12 +5154,19 @@ tracing_mark_write(struct file *filp, const char __user *ubuf,
 	entry = ring_buffer_event_data(event);
 	entry->ip = _THIS_IP_;
 
-	if (nr_pages == 2) {
+	switch (nr_pages) {
+	case 0:
+		memcpy(&entry->buf, buf, cnt);
+		break;
+	case 1:
+		memcpy(&entry->buf, map_page[0] + offset, cnt);
+		break;
+	case 2:
 		len = PAGE_SIZE - offset;
 		memcpy(&entry->buf, map_page[0] + offset, len);
 		memcpy(&entry->buf[len], map_page[1], cnt - len);
-	} else
-		memcpy(&entry->buf, map_page[0] + offset, cnt);
+		break;
+	}
 
 	if (entry->buf[cnt - 1] != '\n') {
 		entry->buf[cnt] = '\n';
@@ -6019,11 +6047,13 @@ ftrace_trace_snapshot_callback(struct ftrace_hash *hash,
 		return ret;
 
  out_reg:
+	ret = alloc_snapshot(&global_trace);
+	if (ret < 0)
+		goto out;
+
 	ret = register_ftrace_function_probe(glob, ops, count);
 
-	if (ret >= 0)
-		alloc_snapshot(&global_trace);
-
+ out:
 	return ret < 0 ? ret : 0;
 }
 
@@ -7200,6 +7230,11 @@ __init static int clear_boot_tracer(void)
 
 	return 0;
 }
+
+#ifdef CONFIG_KDEBUGD_FTRACE
+/* Let kdebugd have access to static functions in this file */
+#include "../kdebugd/trace/kdbg_ftrace_core_helper.c"
+#endif /* CONFIG_KDEBUGD_FTRACE */
 
 fs_initcall(tracer_init_tracefs);
 late_initcall(clear_boot_tracer);

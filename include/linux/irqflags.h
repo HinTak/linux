@@ -86,17 +86,68 @@
  * if !TRACE_IRQFLAGS.
  */
 #ifdef CONFIG_TRACE_IRQFLAGS
+#ifdef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
+extern int kdbg_ftrace_trace_type;
+
+enum {
+	TRACER_IRQS_OFF         = (1 << 1),
+	TRACER_PREEMPT_OFF      = (1 << 2),
+};
+
+#ifdef CONFIG_PREEMPT_TRACER
+static inline int
+check_preempt_trace(void)
+{
+	return kdbg_ftrace_trace_type & TRACER_PREEMPT_OFF;
+}
+#else
+# define check_preempt_trace() (0)
+#endif
+
+#ifdef CONFIG_IRQSOFF_TRACER
+static inline int
+check_irq_trace(void)
+{
+	return kdbg_ftrace_trace_type & TRACER_IRQS_OFF;
+}
+#else
+# define check_irq_trace() (0)
+#endif
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
+
+#ifndef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
 #define local_irq_enable() \
 	do { trace_hardirqs_on(); raw_local_irq_enable(); } while (0)
+#else
+#define local_irq_enable() \
+	do { if (!check_preempt_trace() && check_irq_trace()) trace_hardirqs_on(); raw_local_irq_enable(); } while (0)
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
+
+#ifndef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
 #define local_irq_disable() \
 	do { raw_local_irq_disable(); trace_hardirqs_off(); } while (0)
+#else
+#define local_irq_disable() \
+	do { raw_local_irq_disable(); if (!check_preempt_trace() && check_irq_trace()) trace_hardirqs_off(); } while (0)
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
+
+#ifndef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
 #define local_irq_save(flags)				\
 	do {						\
 		raw_local_irq_save(flags);		\
 		trace_hardirqs_off();			\
 	} while (0)
+#else
+#define local_irq_save(flags)                          \
+	do {                                            \
+		raw_local_irq_save(flags);              \
+		if (!check_preempt_trace() && check_irq_trace())        \
+		trace_hardirqs_off();                   \
+	} while (0)
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
 
 
+#ifndef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
 #define local_irq_restore(flags)			\
 	do {						\
 		if (raw_irqs_disabled_flags(flags)) {	\
@@ -107,12 +158,36 @@
 			raw_local_irq_restore(flags);	\
 		}					\
 	} while (0)
+#else
+#define local_irq_restore(flags)                        \
+	do {                                            \
+		if (raw_irqs_disabled_flags(flags)) {   \
+			raw_local_irq_restore(flags);   \
+			if (!check_preempt_trace() && check_irq_trace())        \
+			trace_hardirqs_off();           \
+		} else {                                \
+			if (!check_preempt_trace() && check_irq_trace())        \
+			trace_hardirqs_on();            \
+			raw_local_irq_restore(flags);   \
+		}                                       \
+	} while (0)
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
 
+
+#ifndef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
 #define safe_halt()				\
 	do {					\
 		trace_hardirqs_on();		\
 		raw_safe_halt();		\
 	} while (0)
+#else
+#define safe_halt()                            \
+	do {                                    \
+		if (!check_preempt_trace() && check_irq_trace())        \
+		trace_hardirqs_on();            \
+		raw_safe_halt();                \
+	} while (0)
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
 
 
 #else /* !CONFIG_TRACE_IRQFLAGS */

@@ -22,6 +22,17 @@
 #include <linux/spinlock.h>
 #include <linux/rcupdate.h>
 #include <linux/workqueue.h>
+#ifdef CONFIG_KDEBUGD
+#include <kdebugd.h>
+#endif
+#ifdef CONFIG_MINCORE_RLIMIT_NOFILE
+#include <linux/mincore.h>
+#include <linux/net.h>
+#include <linux/in.h>
+#include <linux/un.h>
+#include <linux/string.h>
+LIST_HEAD(open_file_task_list);
+#endif
 
 int sysctl_nr_open __read_mostly = 1024*1024;
 int sysctl_nr_open_min = BITS_PER_LONG;
@@ -77,6 +88,15 @@ static void copy_fdtable(struct fdtable *nfdt, struct fdtable *ofdt)
 	memset((char *)(nfdt->open_fds) + cpy, 0, set);
 	memcpy(nfdt->close_on_exec, ofdt->close_on_exec, cpy);
 	memset((char *)(nfdt->close_on_exec) + cpy, 0, set);
+
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+	nfdt->cur_fdn = ofdt->cur_fdn;
+	nfdt->file_fdn = ofdt->file_fdn;
+	nfdt->socket_fdn = ofdt->socket_fdn;
+	nfdt->pipe_fdn = ofdt->pipe_fdn;
+	nfdt->etc_fdn = ofdt->etc_fdn;
+	nfdt->clear_flag = ofdt->clear_flag;
+#endif
 }
 
 static struct fdtable * alloc_fdtable(unsigned int nr)
@@ -113,6 +133,15 @@ static struct fdtable * alloc_fdtable(unsigned int nr)
 	if (!data)
 		goto out_fdt;
 	fdt->fd = data;
+
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+	fdt->cur_fdn = 0;
+	fdt->file_fdn = 0;
+	fdt->socket_fdn = 0;
+	fdt->pipe_fdn = 0;
+	fdt->etc_fdn = 0;
+	fdt->clear_flag = 0;
+#endif
 
 	data = alloc_fdmem(max_t(size_t,
 				 2 * nr / BITS_PER_BYTE, L1_CACHE_BYTES));
@@ -302,6 +331,15 @@ struct files_struct *dup_fd(struct files_struct *oldf, int *errorp)
 	old_fds = old_fdt->fd;
 	new_fds = new_fdt->fd;
 
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+	new_fdt->cur_fdn = old_fdt->cur_fdn;
+	new_fdt->file_fdn = old_fdt->file_fdn;
+	new_fdt->socket_fdn = old_fdt->socket_fdn;
+	new_fdt->pipe_fdn = old_fdt->pipe_fdn;
+	new_fdt->etc_fdn = old_fdt->etc_fdn;
+	new_fdt->clear_flag = old_fdt->clear_flag;
+#endif
+
 	memcpy(new_fdt->open_fds, old_fdt->open_fds, open_files / 8);
 	memcpy(new_fdt->close_on_exec, old_fdt->close_on_exec, open_files / 8);
 
@@ -396,6 +434,15 @@ void put_files_struct(struct files_struct *files)
 	if (atomic_dec_and_test(&files->count)) {
 		struct fdtable *fdt = close_files(files);
 
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+		fdt->cur_fdn = 0;
+		fdt->file_fdn = 0;
+		fdt->socket_fdn = 0;
+		fdt->pipe_fdn = 0;
+		fdt->etc_fdn = 0;
+		fdt->clear_flag = 0;
+#endif
+
 		/* free the arrays if they are not embedded */
 		if (fdt != &files->fdtab)
 			__free_fdtable(fdt);
@@ -435,9 +482,117 @@ struct files_struct init_files = {
 		.fd		= &init_files.fd_array[0],
 		.close_on_exec	= init_files.close_on_exec_init,
 		.open_fds	= init_files.open_fds_init,
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+		.cur_fdn        = 0,
+		.file_fdn       = 0,
+		.socket_fdn     = 0,
+		.pipe_fdn       = 0,
+		.etc_fdn        = 0,
+		.clear_flag     = 0,
+#endif
 	},
 	.file_lock	= __SPIN_LOCK_UNLOCKED(init_files.file_lock),
 };
+
+#ifdef CONFIG_MINCORE_RLIMIT_NOFILE
+#define SOCK_PATH_MAX_LEN 256
+/*
+ * get_sock_info
+ * struct socket  -- socket structure to retrieve the info from.
+ * char sock_buff -- buffer to fill the information in.
+ */
+
+void get_sock_info (struct socket *sock, char sock_buff[]) {
+	struct sockaddr_un addr1;
+	struct sockaddr_in addr2;
+	int sock_len;
+
+	switch (sock->type) {
+	case 1:
+		strncpy(sock_buff, "SOCK_STREAM", 32);
+		break;
+	case 2:
+		strncpy(sock_buff, "SOCK_DGRAM", 32);
+		break;
+	case 3:
+		strncpy(sock_buff, "SOCK_RAW", 32);
+		break;
+	case 4:
+		strncpy(sock_buff, "SOCK_RDM", 32);
+		break;
+	case 5:
+		strncpy(sock_buff, "SOCK_SEQPACKET", 32);
+		break;
+	case 6:
+		strncpy(sock_buff, "SOCK_DCCP", 32);
+		break;
+	case 10:
+		strncpy(sock_buff, "SOCK_PACKET", 32);
+		break;
+	default:
+		strncpy(sock_buff, "UNKNOWN", 32);
+	}
+
+	strncat(sock_buff, " ", 2);
+
+	switch (sock->state) {
+	case 0:
+		strncat(sock_buff, "SS_FREE", 32);
+		break;
+	case 1:
+		strncat(sock_buff, "SS_UNCONNECTED", 32);
+		break;
+	case 2:
+		strncat(sock_buff, "SS_CONNECTING", 32);
+		break;
+	case 3:
+		strncat(sock_buff, "SS_CONNECTED", 32);
+		break;
+	case 4:
+		strncat(sock_buff, "SS_DISCONNECTING", 32);
+		break;
+	default:
+		strncat(sock_buff, "UNKNOWN", 32);
+	}
+
+	if (sock->ops) {
+		int ret;
+
+		if (!strcmp(sock->file->f_path.dentry->d_iname, "UNIX")) {
+			/*
+			 * It's a Unix domain socket,
+			 * lets find its path.
+			 */
+			ret = sock->ops->getname(sock,
+				(struct sockaddr *)&addr1, &sock_len, 0);
+			if (!ret) {
+				strncat(sock_buff, " ", 2);
+				strncat(sock_buff, addr1.sun_path,
+					SOCK_PATH_MAX_LEN);
+			} else {
+				pr_warn("Failed to retrieve socket path.\n");
+			}
+		} else {
+			/*
+			 * It's a internet (TCP/UDP)
+			 * socket, lets find its IP.
+			 */
+			ret = sock->ops->getname(sock,
+				(struct sockaddr *)&addr2, &sock_len, 0);
+			if (!ret) {
+				char sip[64];
+
+				snprintf(sip, sizeof(sip),
+					"%pI4", &addr2.sin_addr.s_addr);
+				strncat(sock_buff, " ", 2);
+				strncat(sock_buff, sip, SOCK_PATH_MAX_LEN);
+			} else {
+				pr_warn("Failed to retrieve socket IP.\n");
+			}
+		}
+	}
+}
+#endif
 
 /*
  * allocate a file descriptor, mark it busy.
@@ -496,9 +651,136 @@ repeat:
 #endif
 
 out:
+
+#ifdef CONFIG_OPEN_FILE_CHECKER
+	if (error == -EMFILE) {
+		unsigned int i;
+
+		pr_emerg("=== [System Arch] File open checker v1.0 ========\n");
+		pr_emerg(" There are Too many open files.\n");
+		pr_emerg(" -- FILE LIST\n");
+
+		for (i = 0; i < fdt->max_fds; i++) {
+			char buf[256];
+			struct file *file;
+			const char *name, *tsk_name;
+			struct task_struct *tsk;
+#ifdef CONFIG_MINCORE_RLIMIT_NOFILE
+			struct socket *sock;
+			int errno;
+#endif
+
+			file = fdt->fd[i];
+			if (!file)
+				continue;
+
+			name = d_path(&file->f_path, buf, sizeof(buf));
+			if (IS_ERR(name))
+				name = "(error)";
+
+#ifdef CONFIG_FD_PID
+			rcu_read_lock();
+			tsk = pid_task(file->f_pid, PIDTYPE_PID);
+			tsk_name = (tsk ? tsk->comm : "task exited");
+#ifdef CONFIG_MINCORE_RLIMIT_NOFILE
+			if ((sock = sockfd_lookup((int)i, &errno))) {
+				char sock_buff[512];
+
+				get_sock_info(sock, sock_buff);
+				pr_emerg("%5d : %s - %s(%d) %s\n",
+					i, name, tsk_name,
+					pid_nr(file->f_pid), sock_buff);
+			} else
+#endif
+			{
+				pr_emerg("%5d : %s - %s(%d)\n",
+					i, name, tsk_name, pid_nr(file->f_pid));
+			}
+
+			rcu_read_unlock();
+#else
+			(void)tsk;
+			(void)tsk_name;
+			pr_emerg("%5d : %s\n", i, name);
+#endif
+		}
+		pr_emerg("================================================\n");
+	}
+#endif /* CONFIG_OPEN_FILE_CHECKER */
+
 	spin_unlock(&files->file_lock);
+
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+	if (error == -EMFILE) {
+		kdbg_fd_overflow(current->pid);
+	}
+#endif
+
+#ifdef CONFIG_MINCORE_RLIMIT_NOFILE
+	if (error == -EMFILE) {
+		struct open_file_task *task_node;
+		struct open_file_task *task_node_other;
+		task_node = kmalloc(sizeof(struct open_file_task),
+				GFP_KERNEL);
+		if (NULL == task_node) {
+			pr_err("Mincore RLIMIT can't alloc mem for tasklist\n");
+			goto done_add;
+		}
+		spin_lock(&file_rlimit_lock);
+		if (!list_empty(&open_file_task_list)) {
+			list_for_each_entry(task_node_other,
+					&open_file_task_list, node) {
+				if (current->tgid == task_node_other->tgid) {
+					spin_unlock(&file_rlimit_lock);
+					kfree(task_node);
+					pr_rlimit("Task already added\n");
+					goto done_add;
+				}
+			}
+		}
+
+		task_node->tgid = current->tgid;
+		list_add_tail(&task_node->node, &open_file_task_list);
+		spin_unlock(&file_rlimit_lock);
+done_add:
+		file_rlimit_dump();
+	}
+
+#endif /* CONFIG_MINCORE_RLIMIT_NOFILE */
+
 	return error;
 }
+
+#ifdef CONFIG_MINCORE_RLIMIT_NOFILE
+struct fdtable *minimal_core_fd_copy(void)
+{
+	unsigned int max_fds = rlimit(RLIMIT_NOFILE) - 1;
+	struct fdtable *new_fdt = NULL;
+	struct fdtable *orig_fdt = NULL;
+	struct files_struct *files = current->files;
+
+	new_fdt = alloc_fdtable(max_fds);
+	if (!new_fdt)
+		return NULL;
+
+	spin_lock(&files->file_lock);
+	orig_fdt = files_fdtable(files);
+	if (NULL == orig_fdt) {
+		__free_fdtable(new_fdt);
+		spin_unlock(&files->file_lock);
+		return NULL;
+	}
+	copy_fdtable(new_fdt, orig_fdt);
+	spin_unlock(&files->file_lock);
+	return new_fdt;
+}
+
+void mincore_free_fdtable(struct fdtable *fdt)
+{
+	__free_fdtable(fdt);
+}
+
+#endif
 
 static int alloc_fd(unsigned start, unsigned flags)
 {
@@ -553,11 +835,53 @@ void __fd_install(struct files_struct *files, unsigned int fd,
 		struct file *file)
 {
 	struct fdtable *fdt;
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+	unsigned int fd_type;
+	unsigned short i_mode;
+	unsigned int cur_fdn;
+	int save_bt_flag = 0;
+#endif
 	spin_lock(&files->file_lock);
 	fdt = files_fdtable(files);
 	BUG_ON(fdt->fd[fd] != NULL);
 	rcu_assign_pointer(fdt->fd[fd], file);
+
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+	fdt->cur_fdn++;
+	cur_fdn = fdt->cur_fdn;
+	i_mode = file->f_path.dentry->d_inode->i_mode;
+
+	if (S_ISREG(i_mode)) {
+		fdt->file_fdn++;
+		fd_type = 1;
+	} else if (S_ISSOCK(i_mode)) {
+		fdt->socket_fdn++;
+		fd_type = 2;
+	} else if (S_ISFIFO(i_mode)) {
+		fdt->pipe_fdn++;
+		fd_type = 3;
+	} else {
+		fdt->etc_fdn++;
+		fd_type = 4;
+	}
+#endif
 	spin_unlock(&files->file_lock);
+
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+	if (cur_fdn > rlimit(RLIMIT_NOFILE) - FD_BT_LIMIT)
+		save_bt_flag |= FD_BT_SAVE_BIT;
+#ifdef CONFIG_KDEBUGD_AGENT_SUPPORT
+	if (!kdbg_get_bt_status(current->tgid))
+		save_bt_flag |= FD_BT_SEND_BIT;
+#endif
+
+	if (save_bt_flag) {
+		if (!fdt->clear_flag)
+			fdt->clear_flag = 1;
+
+		kdbg_fd_save_bt(fd_type, fd, save_bt_flag);
+	}
+#endif
 }
 
 void fd_install(unsigned int fd, struct file *file)
@@ -575,6 +899,13 @@ int __close_fd(struct files_struct *files, unsigned fd)
 	struct file *file;
 	struct fdtable *fdt;
 
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+	int is_regular = 0;
+	struct inode *inode;
+	struct task_struct *p;
+	unsigned short i_mode;
+	unsigned int cur_fdn;
+#endif
 	spin_lock(&files->file_lock);
 	fdt = files_fdtable(files);
 	if (fd >= fdt->max_fds)
@@ -582,10 +913,60 @@ int __close_fd(struct files_struct *files, unsigned fd)
 	file = fdt->fd[fd];
 	if (!file)
 		goto out_unlock;
+
 	rcu_assign_pointer(fdt->fd[fd], NULL);
 	__clear_close_on_exec(fd, fdt);
 	__put_unused_fd(files, fd);
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+	fdt->cur_fdn--;
+	cur_fdn = fdt->cur_fdn;
+	i_mode = file->f_path.dentry->d_inode->i_mode;
+
+	if (S_ISREG(i_mode))
+		fdt->file_fdn--;
+	else if (S_ISSOCK(i_mode))
+		fdt->socket_fdn--;
+	else if (S_ISFIFO(i_mode))
+		fdt->pipe_fdn--;
+	else
+		fdt->etc_fdn--;
+#endif
 	spin_unlock(&files->file_lock);
+
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+	if (fdt->clear_flag && cur_fdn <= rlimit(RLIMIT_NOFILE)-FD_BT_LIMIT) {
+		kdbg_fd_clear(current->pid);
+		fdt->clear_flag = 0;
+	}
+
+	if (kdbg_fd_debug_status()) {
+		/*Taking lock on parent dir to avoid race condition with unlink*/
+		mutex_lock(&file->f_path.dentry->d_parent->d_inode->i_mutex);
+
+		inode = file->f_path.dentry->d_inode;
+		if (inode != NULL)
+			is_regular = S_ISREG(inode->i_mode);
+
+		mutex_unlock(&file->f_path.dentry->d_parent->d_inode->i_mutex);
+		/*
+		   Check if child1 is going to close a regular file opened
+		   by child2 where child1 and child 2 belongs to same parent
+		   of tgid
+		 */
+		if (file->f_pid != task_pid(current) && is_regular) {
+			p = get_pid_task(file->f_pid, PIDTYPE_PID);
+			if (p && (p->tgid == current->tgid)) {
+				PRINT_KD(KERN_ERR "****************************************\n");
+				PRINT_KD(KERN_ERR "file [%s] open_thread [%s] pid[%u] close_thread[%s] pid[%u]\n ",
+						file->f_path.dentry->d_name.name, p->comm,
+						p->pid, current->comm, current->pid);
+				PRINT_KD(KERN_ERR "****************************************\n");
+			}
+			if (p)
+				put_task_struct(p);
+		}
+	}
+#endif
 	return filp_close(file, files);
 
 out_unlock:
@@ -612,16 +993,40 @@ void do_close_on_exec(struct files_struct *files)
 		fdt->close_on_exec[i] = 0;
 		for ( ; set ; fd++, set >>= 1) {
 			struct file *file;
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+			unsigned short i_mode;
+			unsigned int cur_fdn;
+#endif
 			if (!(set & 1))
 				continue;
 			file = fdt->fd[fd];
 			if (!file)
 				continue;
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+			fdt->cur_fdn--;
+			cur_fdn = fdt->cur_fdn;
+			i_mode = file->f_path.dentry->d_inode->i_mode;
+
+			if (S_ISREG(i_mode))
+				fdt->file_fdn--;
+			else if (S_ISSOCK(i_mode))
+				fdt->socket_fdn--;
+			else if (S_ISFIFO(i_mode))
+				fdt->pipe_fdn--;
+			else
+				fdt->etc_fdn--;
+#endif
 			rcu_assign_pointer(fdt->fd[fd], NULL);
 			__put_unused_fd(files, fd);
 			spin_unlock(&files->file_lock);
 			filp_close(file, files);
 			cond_resched();
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+			if (fdt->clear_flag && cur_fdn <= rlimit(RLIMIT_NOFILE)-FD_BT_LIMIT) {
+				kdbg_fd_clear(current->pid);
+				fdt->clear_flag = 0;
+			}
+#endif
 			spin_lock(&files->file_lock);
 		}
 
@@ -753,6 +1158,9 @@ __releases(&files->file_lock)
 {
 	struct file *tofree;
 	struct fdtable *fdt;
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+	unsigned short i_mode;
+#endif
 
 	/*
 	 * We need to detect attempts to do dup2() over allocated but still
@@ -779,6 +1187,33 @@ __releases(&files->file_lock)
 		__set_close_on_exec(fd, fdt);
 	else
 		__clear_close_on_exec(fd, fdt);
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+	i_mode = file->f_path.dentry->d_inode->i_mode;
+
+	if (S_ISREG(i_mode))
+		fdt->file_fdn++;
+	else if (S_ISSOCK(i_mode))
+		fdt->socket_fdn++;
+	else if (S_ISFIFO(i_mode))
+		fdt->pipe_fdn++;
+	else
+		fdt->etc_fdn++;
+
+	if (tofree) {
+		i_mode = tofree->f_path.dentry->d_inode->i_mode;
+
+		if (S_ISREG(i_mode))
+			fdt->file_fdn--;
+		else if (S_ISSOCK(i_mode))
+			fdt->socket_fdn--;
+		else if (S_ISFIFO(i_mode))
+			fdt->pipe_fdn--;
+		else
+			fdt->etc_fdn--;
+	} else {
+		fdt->cur_fdn++;
+	}
+#endif
 	spin_unlock(&files->file_lock);
 
 	if (tofree)

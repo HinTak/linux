@@ -481,4 +481,9 @@ static __init int stack_trace_init(void)
 	return 0;
 }
 
+#ifdef CONFIG_KDEBUGD_FTRACE
+/* Let kdebugd have access to static functions in this file */
+#include "../kdebugd/trace/kdbg_ftrace_stack_helper.c"
+#endif /* CONFIG_KDEBUGD_FTRACE */
+
 device_initcall(stack_trace_init);

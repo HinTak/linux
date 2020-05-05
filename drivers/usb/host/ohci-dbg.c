@@ -9,6 +9,19 @@
 
 /*-------------------------------------------------------------------------*/
 
+//#ifdef DEBUG
+
+#if defined(CONFIG_ARCH_SDP1601) \
+	&& defined(CONFIG_SDP_BUS_ERR_LOGGER) \
+	&& defined(CONFIG_ALLOW_ALL_USER_COREDUMP) /* debug + perf. image */
+#define BUS_LOG_PRINT
+#endif
+
+#ifdef BUS_LOG_PRINT
+extern int sdp_bus_err_logger(void);
+extern int sdp_bus_mon_debug(void);
+#endif
+
 #define edstring(ed_type) ({ char *temp; \
 	switch (ed_type) { \
 	case PIPE_CONTROL:	temp = "ctrl"; break; \
@@ -256,7 +269,7 @@ static void ohci_dump_td (const struct ohci_hcd *ohci, const char *label,
 {
 	u32	tmp = hc32_to_cpup (ohci, &td->hwINFO);
 
-	ohci_dbg (ohci, "%s td %p%s; urb %p index %d; hw next td %08x\n",
+	ohci_err (ohci, "%s td %p%s; urb %p index %d; hw next td %08x\n",
 		label, td,
 		(tmp & TD_DONE) ? " (DONE)" : "",
 		td->urb, td->index,
@@ -277,28 +290,28 @@ static void ohci_dump_td (const struct ohci_hcd *ohci, const char *label,
 		case TD_DP_OUT: pid = "OUT"; break;
 		default: pid = "(bad pid)"; break;
 		}
-		ohci_dbg (ohci, "     info %08x CC=%x %s DI=%d %s %s\n", tmp,
+		ohci_err (ohci, "     info %08x CC=%x %s DI=%d %s %s\n", tmp,
 			TD_CC_GET(tmp), /* EC, */ toggle,
 			(tmp & TD_DI) >> 21, pid,
 			(tmp & TD_R) ? "R" : "");
 		cbp = hc32_to_cpup (ohci, &td->hwCBP);
 		be = hc32_to_cpup (ohci, &td->hwBE);
-		ohci_dbg (ohci, "     cbp %08x be %08x (len %d)\n", cbp, be,
+		ohci_err (ohci, "     cbp %08x be %08x (len %d)\n", cbp, be,
 			cbp ? (be + 1 - cbp) : 0);
 	} else {
 		unsigned	i;
-		ohci_dbg (ohci, "  info %08x CC=%x FC=%d DI=%d SF=%04x\n", tmp,
+		ohci_err (ohci, "  info %08x CC=%x FC=%d DI=%d SF=%04x\n", tmp,
 			TD_CC_GET(tmp),
 			(tmp >> 24) & 0x07,
 			(tmp & TD_DI) >> 21,
 			tmp & 0x0000ffff);
-		ohci_dbg (ohci, "  bp0 %08x be %08x\n",
+		ohci_err (ohci, "  bp0 %08x be %08x\n",
 			hc32_to_cpup (ohci, &td->hwCBP) & ~0x0fff,
 			hc32_to_cpup (ohci, &td->hwBE));
 		for (i = 0; i < MAXPSW; i++) {
 			u16	psw = ohci_hwPSW (ohci, td, i);
 			int	cc = (psw >> 12) & 0x0f;
-			ohci_dbg (ohci, "    psw [%d] = %2x, CC=%x %s=%d\n", i,
+			ohci_err (ohci, "    psw [%d] = %2x, CC=%x %s=%d\n", i,
 				psw, cc,
 				(cc >= 0x0e) ? "OFFSET" : "SIZE",
 				psw & 0x0fff);
@@ -314,7 +327,7 @@ ohci_dump_ed (const struct ohci_hcd *ohci, const char *label,
 	u32	tmp = hc32_to_cpu (ohci, ed->hwINFO);
 	char	*type = "";
 
-	ohci_dbg (ohci, "%s, ed %p state 0x%x type %s; next ed %08x\n",
+	ohci_err (ohci, "%s, ed %p state 0x%x type %s; next ed %08x\n",
 		label,
 		ed, ed->state, edstring (ed->type),
 		hc32_to_cpup (ohci, &ed->hwNextED));
@@ -323,7 +336,7 @@ ohci_dump_ed (const struct ohci_hcd *ohci, const char *label,
 	case ED_IN: type = "-IN"; break;
 	/* else from TDs ... control */
 	}
-	ohci_dbg (ohci,
+	ohci_err (ohci,
 		"  info %08x MAX=%d%s%s%s%s EP=%d%s DEV=%d\n", tmp,
 		0x03ff & (tmp >> 16),
 		(tmp & ED_DEQUEUE) ? " DQ" : "",
@@ -334,7 +347,7 @@ ohci_dump_ed (const struct ohci_hcd *ohci, const char *label,
 		type,
 		0x007f & tmp);
 	tmp = hc32_to_cpup (ohci, &ed->hwHeadP);
-	ohci_dbg (ohci, "  tds: head %08x %s%s tail %08x%s\n",
+	ohci_err (ohci, "  tds: head %08x %s%s tail %08x%s\n",
 		tmp,
 		(tmp & ED_C) ? data1 : data0,
 		(tmp & ED_H) ? " HALT" : "",
@@ -353,6 +366,163 @@ ohci_dump_ed (const struct ohci_hcd *ohci, const char *label,
 		}
 	}
 }
+
+static void ohci_host_dump(struct ohci_hcd *ohci)
+{
+	struct ohci_regs __iomem *regs = ohci->regs;
+	void __iomem *base = &regs->revision;
+
+	struct ed *rm_ed = ohci->ed_rm_list;
+	struct ed *bk_ed = ohci->ed_bulktail;
+	struct ed *ct_ed = ohci->ed_controltail;
+	u32 temp;
+	int i;
+
+	temp = ohci_readl (ohci, &regs->revision) & 0xff;
+	ohci_err (ohci,	"OHCI %d.%d, %s legacy support registers\n",
+		0x03 & (temp >> 4), (temp & 0x0f),
+		(temp & 0x0100) ? "with" : "NO");
+
+	temp = ohci_readl (ohci, &regs->control);
+	ohci_err (ohci,"control 0x%08x\n",temp);
+
+	temp = ohci_readl (ohci, &regs->cmdstatus);
+	ohci_err (ohci,
+		"cmdstatus 0x%05x SOC=%d%s%s%s%s\n", temp,
+		(temp & OHCI_SOC) >> 16,
+		(temp & OHCI_OCR) ? " OCR" : "",
+		(temp & OHCI_BLF) ? " BLF" : "",
+		(temp & OHCI_CLF) ? " CLF" : "",
+		(temp & OHCI_HCR) ? " HCR" : ""
+		);
+
+	ohci_err (ohci, "intrstatus 0x%08x"
+		,ohci_readl (ohci, &regs->intrstatus));
+	ohci_err (ohci, "intrenable 0x%08x"
+		,ohci_readl (ohci, &regs->intrenable));
+	// intrdisable always same as intrenable
+	
+	ohci_err (ohci, "ed_periodcurrent 0x%08x"
+		,ohci_readl (ohci, &regs->ed_periodcurrent));
+	ohci_err (ohci, "ed_controlhead 0x%08x"
+		,ohci_readl (ohci, &regs->ed_controlhead));
+	ohci_err (ohci, "ed_controlcurrent 0x%08x"
+		, ohci_readl (ohci, &regs->ed_controlcurrent));
+
+	ohci_err (ohci, "ed_bulkhead 0x%08x"
+		,ohci_readl (ohci, &regs->ed_bulkhead));
+	ohci_err (ohci, "ed_bulkcurrent 0x%08x"
+		,ohci_readl (ohci, &regs->ed_bulkcurrent));
+
+	ohci_err (ohci, "donehead 0x%08x"
+		,ohci_readl (ohci, &regs->donehead));
+	
+	ohci_err (ohci, "AHB DEBUG 0x98: 0x%08x, 0x9C: 0x%08x"
+		,ohci_readl (ohci, base+0x98),ohci_readl (ohci, base+0x9C));
+
+	ohci_err (ohci, "HcHCCA reg[0x%08x]"
+			,ohci_readl (ohci,&ohci->regs->hcca));
+	ohci_err (ohci, "HcHCCA FmNum[0x%08x]"
+			,(u32)ohci_frame_no(ohci));
+	ohci_err (ohci, "HcFmNumber reg[0x%08x]"
+			,ohci_readl (ohci,&ohci->regs->fmnumber));
+		
+	if( rm_ed ) {
+		ohci_err (ohci, "----- ed_rm_list 0x%p ------",	rm_ed);
+		ohci_dump_ed (ohci,"ed_rm_list",rm_ed,1);
+	}
+	
+	if( bk_ed ){
+		ohci_err (ohci, "----- ed_bulktail 0x%p -----",	bk_ed);
+		ohci_dump_ed (ohci,"ed_bulktail",bk_ed,1);
+	}
+	 
+	if( ct_ed ){
+		ohci_err (ohci, "--- ed_controltail 0x%p ----",	ct_ed);
+		ohci_dump_ed (ohci,"ed_controltail",ct_ed,1);
+	}
+	
+	ohci_err(ohci, "OHCI HOST DUMP.....\n");
+	for(i = 0 ; i < 15 ; i++) {
+		ohci_err(ohci, "0x%02x: 0x%08x 0x%08x 0x%08x 0x%08x"
+			,0x10*i
+			,ohci_readl(ohci, base + 0x10*i)
+			,ohci_readl(ohci, base + 0x10*i +0x4)
+			,ohci_readl(ohci, base + 0x10*i +0x8)
+			,ohci_readl(ohci, base + 0x10*i +0xc));
+	}
+	
+#ifdef BUS_MON_ADDR
+	if(bus_base !=NULL)
+	{
+		ohci_err(ohci,"BUS_MON reg DUMP\n");
+		for(i = 0 ; i < 16 ; i++) {
+			ohci_err(ohci, "0x%02x: 0x%08x 0x%08x 0x%08x 0x%08x"
+				,0x10*i
+				,ohci_readl(ohci, bus_base + 0x10*i)
+				,ohci_readl(ohci, bus_base + 0x10*i +0x4)
+				,ohci_readl(ohci, bus_base + 0x10*i +0x8)
+				,ohci_readl(ohci, bus_base + 0x10*i +0xc));
+		}
+	}
+#endif
+
+#ifdef BUS_LOG_PRINT 
+	sdp_bus_err_logger();
+	sdp_bus_mon_debug();
+#endif
+
+	if( ohci->hcca )  {
+		const int MAX_CHK = 500;
+		const int WAITTIME_OHCI_MSEC = 2;
+		ohci_err (ohci,"HCCA 0x%p[0x%llx]"
+			,ohci->hcca,(u64)ohci->hcca_dma);
+
+		ohci_err(ohci,"[INTS]\n");
+		for( i = 0 ; i < 8 ; i++ ) {
+			ohci_err(ohci,"0x%08x 0x%08x 0x%08x 0x%08x"
+				,ohci->hcca->int_table[i]
+				,ohci->hcca->int_table[i+1]
+				,ohci->hcca->int_table[i+2]
+				,ohci->hcca->int_table[i+3]);
+		}
+
+		ohci_err(ohci,"[HccaFrameNumber][0x%x]",ohci->hcca->frame_no);
+		ohci_err(ohci,"[HccaDoneHead][0x%x]",ohci->hcca->done_head);
+		ohci_err(ohci,"[HcFmNumber Reg][0x%x]"
+			,ohci_readl (ohci,&ohci->regs->fmnumber));
+
+		temp = (u32)ohci_frame_no(ohci);
+		for( i = 0 ; i < MAX_CHK ; i++ ) {
+			if( temp != ((u32)ohci_frame_no(ohci)) )
+				break;
+			
+			if( (i%50) == 0 && i != 0 ) {
+				ohci_err(ohci,":::[0x%x][0x%x]\n"
+				,(u32)ohci_frame_no(ohci)
+				,ohci_readl (ohci,&ohci->regs->fmnumber));
+			}
+			
+			mdelay(WAITTIME_OHCI_MSEC);
+		}
+		
+		ohci_err(ohci,":::::%s Frame No.[0x%X,0x%X,0x%X][%d msec]"
+				,((MAX_CHK == i) ? "No Changed":"Changed")
+				,temp
+				,(u32)ohci_frame_no(ohci)
+				,ohci_readl (ohci,&ohci->regs->fmnumber)
+				,i*WAITTIME_OHCI_MSEC);
+	}
+
+}
+
+//#else
+//static inline void ohci_dump (struct ohci_hcd *controller) {}
+//static inline void host_dump(struct ohci_hcd *ohci){};
+
+//#undef OHCI_VERBOSE_DEBUG
+
+//#endif /* DEBUG */
 
 /*-------------------------------------------------------------------------*/
 

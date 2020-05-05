@@ -434,6 +434,9 @@ receive_buf(struct tty_struct *tty, struct tty_buffer *head, int count)
 	unsigned char *p = char_buf_ptr(head, head->read);
 	char	      *f = NULL;
 
+	if (WARN_ON(!test_bit(TTY_LDISC_OPEN, &tty->flags)))
+		return 0;
+
 	if (~head->flags & TTYB_NORMAL)
 		f = flag_buf_ptr(head, head->read);
 

@@ -12,8 +12,7 @@
 void show_mem(unsigned int filter)
 {
 	pg_data_t *pgdat;
-	unsigned long total = 0, reserved = 0, highmem = 0;
-
+	unsigned long total = 0, reserved = 0, highmem = 0, mem_available = 0;
 	printk("Mem-Info:\n");
 	show_free_areas(filter);
 
@@ -35,14 +34,12 @@ void show_mem(unsigned int filter)
 		}
 		pgdat_resize_unlock(pgdat, &flags);
 	}
-
+	mem_available = si_mem_available();
 	printk("%lu pages RAM\n", total);
 	printk("%lu pages HighMem/MovableOnly\n", highmem);
-#ifdef CONFIG_CMA
-	printk("%lu pages reserved\n", (reserved - totalcma_pages));
-	printk("%lu pages cma reserved\n", totalcma_pages);
-#else
 	printk("%lu pages reserved\n", reserved);
+#ifdef CONFIG_CMA
+	printk("%lu pages cma reserved\n", totalcma_pages);
 #endif
 #ifdef CONFIG_QUICKLIST
 	printk("%lu pages in pagetable cache\n",
@@ -51,4 +48,6 @@ void show_mem(unsigned int filter)
 #ifdef CONFIG_MEMORY_FAILURE
 	printk("%lu pages hwpoisoned\n", atomic_long_read(&num_poisoned_pages));
 #endif
+printk("%lu kB Total MemAvailable for userspace\n",
+	((PAGE_SIZE/1024)*mem_available));
 }

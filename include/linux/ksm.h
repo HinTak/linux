@@ -16,6 +16,16 @@
 struct stable_node;
 struct mem_cgroup;
 
+#ifdef CONFIG_KSM_KERNEL_MADVISE
+void ksm_set_vm_mergeable_if_possible(unsigned long *vm_flags);
+#else
+static inline void ksm_set_vm_mergeable_if_possible(unsigned long *vm_flags)
+{
+
+}
+#endif
+
+
 #ifdef CONFIG_KSM
 int ksm_madvise(struct vm_area_struct *vma, unsigned long start,
 		unsigned long end, int advice, unsigned long *vm_flags);
@@ -63,7 +73,17 @@ struct page *ksm_might_need_to_copy(struct page *page,
 
 int rmap_walk_ksm(struct page *page, struct rmap_walk_control *rwc);
 void ksm_migrate_page(struct page *newpage, struct page *oldpage);
-
+#ifndef CONFIG_KSM_ZERO_PAGE_MERGE_ONLY
+static inline int PageKzm(struct page *page)
+{
+	return 0;
+}
+#else
+static inline int PageKzm(struct page *page)
+{
+	return (page == ZERO_PAGE(0));
+}
+#endif
 #else  /* !CONFIG_KSM */
 
 static inline int ksm_fork(struct mm_struct *mm, struct mm_struct *oldmm)

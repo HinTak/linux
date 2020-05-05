@@ -341,8 +341,29 @@ config KSM
 	  until a program has madvised that an area is MADV_MERGEABLE, and
 	  root has set /sys/kernel/mm/ksm/run to 1 (if CONFIG_SYSFS is set).
 
+config KSM_KERNEL_MADVISE
+       bool "Enable ksm advise from mmap region"
+       depends on KSM
+       help
+	Enable ksm advising VM regions from kernel space. This call advise kernel
+	how to handle paging input/output int the address range beginning at
+	address addr and with size length bytes. I.e. madvise syscall logic is
+	transferred in kernel level. All anonymous mapping would be marked as
+	MADV_MERGEABLE.
+	By default this feature will disable.
+
+config KSM_ZERO_PAGE_MERGE_ONLY
+	bool "Merge only zero pages with ksm"
+	depends on KSM
+	help
+          The zero page is a page full of zeroes and is used to provide userspace
+          with a write-protected initial BSS segment.Enable light-weighted KSM
+          version. Merging only zero pages: this will lead to performance
+          improvment in ksm do_scan thread. This option should be used in systems
+          with big amount of zero pages.
+
 config DEFAULT_MMAP_MIN_ADDR
-        int "Low address space to protect from user allocation"
+	int "Low address space to protect from user allocation"
 	depends on MMU
         default 4096
         help
@@ -534,6 +555,63 @@ config CMA_AREAS
 
 	  If unsure, leave the default value "7".
 
+config CMA_SUPPORT_HIGHMEM
+	bool "Support CMA area allocation from high memory"
+	default n
+	help
+	  Based on CMA area size and alignment CMA area allocation is tried
+	  from high memory area first. If CMA area reservation failed in high
+	  memory, then normal zone is used as fallback for CMA area reservation.
+	  This config enable CMA area reservation from high memory area.
+
+	  Say "y" to support high memory area as first priority for CMA area
+	  reservation. Say "n" to enable CMA area reservervation from normal
+	  zone.
+
+config CMA_DEBUG_REFTRACE
+	bool "Support CMA refcount tracing in logbuffer"
+	depends on CMA_DEBUG
+	default n
+	help
+	  This feature makes tracing inc/dec page->_refcount if page is in CMA range.
+	  This is to print trace log if page ref is increased by someone when cma migration fail.
+
+config PREVENT_ALLOC_BUFFER_IN_CMA
+   bool "Prevent to use CMA region for allocating buffer"
+   depends on CMA
+   default y
+   help
+     This should be enabled to prevent to use CMA region for allocating
+	 buffer memory. Due to ALLOC_CMA_FIRST, buffer cache request is first
+	 satisfied from CMA region. But buffer cache is not movable due to
+	 page alignment with disk block alignment and other related things.
+	 In this case CMA allocation fails if migration of buffer cache in
+	 request cma region fails.
+
+config GCMA
+	bool "Guaranteed Contiguous Memory Allocator (EXPERIMENTAL)"
+	default n
+	select FRONTSWAP
+	select CLEANCACHE
+	select CMA
+	help
+	  A contiguous memory allocator which guarantees success and
+	  predictable latency for allocation request.
+	  It carves out large amount of memory and let them be allocated
+	  to the contiguous memory request while it can be used as backend
+	  for frontswap.
+
+	  This is marked experimental because it is a new feature that
+	  interacts heavily with memory reclaim.
+
+config GCMA_DEFAULT
+	bool "Set GCMA as default CMA facility (EXPERIMENTA)"
+	default n
+	depends on GCMA
+	help
+	  Set older CMA interfaces to work as GCMA rather than CMA without any
+	  client code change.
+
 config MEM_SOFT_DIRTY
 	bool "Track memory changes"
 	depends on CHECKPOINT_RESTORE && HAVE_ARCH_SOFT_DIRTY && PROC_FS
@@ -635,3 +713,31 @@ config MAX_STACK_SIZE_MB
 	  changed to a smaller value in which case that is used.
 
 	  A sane initial value is 80 MB.
+config DO_NOT_FAULT_AROUND_BYTES
+   bool "Enable do fault around bytes mapping"
+   depends on MMU
+   default y
+   help
+     This should be disabled to tries to map few pages around the fault address.
+	 The hope is that the pages will be needed soon and this will lower the number of faults to handle.
+     But, This feature has many controversial issues that concern reclaim and vmpressures on opensource.
+config INC_MODULE_SIZE
+	bool "Support to increase module size. If KASAN is enabled"
+	select MODULES_USE_LONG_CALLS
+        depends on KASAN
+	default y
+	help
+	 This will help to increase module area to if Kernel compilation with
+         CONFIG_KASAN enabled.
+config INC_MODULE_SIZE_MB
+	int "MAX module size (MB)"
+        depends on INC_MODULE_SIZE
+	default 32
+	help
+	 Max module size, it can be SZ_24, SZ_28, SZ_32 etc.
+
+config OOM_PANIC
+	default n
+	bool "Make kernel panic with oom"
+	help
+	 This config enable kernel panic only release mode.

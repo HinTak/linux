@@ -184,16 +184,27 @@ static int ehci_mem_init (struct ehci_hcd *ehci, gfp_t flags)
 	if (!ehci->async) {
 		goto fail;
 	}
-
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 	/* ITD for high speed ISO transfers */
-	ehci->itd_pool = dma_pool_create ("ehci_itd",
+	ehci->itd_pool = dma_pool_create("ehci_itd",
 			ehci_to_hcd(ehci)->self.controller,
-			sizeof (struct ehci_itd),
+			sizeof(struct ehci_itd),
 			32 /* byte alignment (for hw parts) */,
 			4096 /* can't cross 4K */);
 	if (!ehci->itd_pool) {
 		goto fail;
 	}
+#else
+	/* ITD for high speed ISO transfers */
+	ehci->itd_pool = dma_pool_create("ehci_itd",
+			ehci_to_hcd(ehci)->self.controller,
+			sizeof(struct ehci_itd),
+			64 /* byte alignment (for hw parts) */,
+			4096 /* can't cross 4K */);
+	if (!ehci->itd_pool) {
+		goto fail;
+	}
+#endif
 
 	/* SITD for full/low speed split ISO transfers */
 	ehci->sitd_pool = dma_pool_create ("ehci_sitd",

@@ -43,7 +43,7 @@ static ssize_t index_show(struct device *cd,
 {
 	struct video_device *vdev = to_video_device(cd);
 
-	return sprintf(buf, "%i\n", vdev->index);
+	return snprintf(buf, PATH_MAX, "%i\n", vdev->index);
 }
 static DEVICE_ATTR_RO(index);
 
@@ -52,7 +52,7 @@ static ssize_t dev_debug_show(struct device *cd,
 {
 	struct video_device *vdev = to_video_device(cd);
 
-	return sprintf(buf, "%i\n", vdev->dev_debug);
+	return snprintf(buf, PATH_MAX, "%i\n", vdev->dev_debug);
 }
 
 static ssize_t dev_debug_store(struct device *cd, struct device_attribute *attr,
@@ -76,7 +76,7 @@ static ssize_t name_show(struct device *cd,
 {
 	struct video_device *vdev = to_video_device(cd);
 
-	return sprintf(buf, "%.*s\n", (int)sizeof(vdev->name), vdev->name);
+	return snprintf(buf, PATH_MAX, "%.*s\n", (int)sizeof(vdev->name), vdev->name);
 }
 static DEVICE_ATTR_RO(name);
 
@@ -755,6 +755,9 @@ int __video_register_device(struct video_device *vdev, int type, int nr,
 	int minor_offset = 0;
 	int minor_cnt = VIDEO_NUM_DEVICES;
 	const char *name_base;
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+	int nr_ = nr;
+#endif
 
 	/* A minor value of -1 marks this video device as never
 	   having been registered */
@@ -858,6 +861,16 @@ int __video_register_device(struct video_device *vdev, int type, int nr,
 		return -ENFILE;
 	}
 #endif
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+	if (nr_ == CONFIG_USB_VIDEO_TV_CAMERA_MAIN && nr_ != nr) {
+		printk(KERN_ERR "change camera main node %d\n", nr);
+		nr = nr_;
+	}
+	if (nr_ == CONFIG_USB_VIDEO_TV_CAMERA_SUB && nr_ != nr) {
+		printk(KERN_ERR "change camera sub node  %d\n", nr);
+		nr = nr_;
+	}
+#endif
 	vdev->minor = i + minor_offset;
 	vdev->num = nr;
 	devnode_set(vdev);
@@ -893,6 +906,12 @@ int __video_register_device(struct video_device *vdev, int type, int nr,
 	vdev->dev.parent = vdev->dev_parent;
 	dev_set_name(&vdev->dev, "%s%d", name_base, vdev->num);
 	ret = device_register(&vdev->dev);
+
+
+	// rany.kwon@samsung.com: add debug log for v4l2 device mapping
+	printk(KERN_INFO "V4L2 dev map '%s%d' => '%s'\n", name_base, vdev->num, vdev->name);
+
+
 	if (ret < 0) {
 		printk(KERN_ERR "%s: device_register failed\n", __func__);
 		goto cleanup;

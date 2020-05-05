@@ -1,0 +1,45 @@
+/*
+ * Copyright (C) 2014 Samsung Electronics Co.Ltd
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
+/dts-v1/;
+/include/ "sdp1500.dtsi"
+
+/ {
+	model = "Samsung DTV based on SDP1500 FPGA";
+	compatible = "samsung,dtv", "samsung,sdp1500";
+
+	memory {
+		device_type = "memory";
+		reg =  <0x10000000 0x08000000>;
+	};
+
+	chosen {
+		bootargs = "console=hvc0,9600N8 root=/dev/ram0 initrd=0x11000000,8M rootwait earlyprintk fpga debug nosmp user_debug=31";
+	};
+
+	fixed-rate-clocks {
+		fin {
+			compatible = "samsung,sdp-clock-fin";
+			clock-frequency = <80000000>;//PLL3
+		};
+	};
+
+	timer: arch-timer {
+		//clock-frequency = <3000000>;
+	};
+
+	mmc {
+		status = "okay";
+		min-max-clock = <400000 5000000>;
+	};
+
+	serial@00190A00 {
+		status = "okay";
+	};
+};
+

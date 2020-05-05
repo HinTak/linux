@@ -1049,8 +1049,13 @@ void do_page_add_anon_rmap(struct page *page,
 		__mod_zone_page_state(page_zone(page), NR_ANON_PAGES,
 				hpage_nr_pages(page));
 	}
+#ifndef CONFIG_KSM_ZERO_PAGE_MERGE_ONLY
 	if (unlikely(PageKsm(page)))
 		return;
+#else
+	if (unlikely(PageKsm(page)) || unlikely(PageKzm(page)))
+		return;
+#endif
 
 	VM_BUG_ON_PAGE(!PageLocked(page), page);
 	/* address might be in next vma when migration races vma_adjust */
@@ -1263,6 +1268,7 @@ static int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 			}
 			dec_mm_counter(mm, MM_ANONPAGES);
 			inc_mm_counter(mm, MM_SWAPENTS);
+			dec_rss_counter(vma, 1);        /* VD_SP */
 		} else if (IS_ENABLED(CONFIG_MIGRATION)) {
 			/*
 			 * Store the pfn of the page in a special migration
@@ -1282,8 +1288,10 @@ static int try_to_unmap_one(struct page *page, struct vm_area_struct *vma,
 		swp_entry_t entry;
 		entry = make_migration_entry(page, pte_write(pteval));
 		set_pte_at(mm, address, pte, swp_entry_to_pte(entry));
-	} else
+	} else {
 		dec_mm_counter(mm, MM_FILEPAGES);
+		dec_rss_counter(vma, 1);        /* VD_SP */
+	}
 
 	page_remove_rmap(page);
 	page_cache_release(page);

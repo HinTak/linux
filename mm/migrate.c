@@ -37,6 +37,7 @@
 #include <linux/gfp.h>
 #include <linux/balloon_compaction.h>
 #include <linux/mmu_notifier.h>
+#include <linux/page_owner.h>
 
 #include <asm/tlbflush.h>
 
@@ -315,8 +316,14 @@ int migrate_page_move_mapping(struct address_space *mapping,
 
 	if (!mapping) {
 		/* Anonymous page without mapping */
-		if (page_count(page) != expected_count)
+		if (page_count(page) != expected_count) {
+#ifdef CONFIG_CMA_DEBUG
+			if (mode == MIGRATE_SYNC)
+				pr_alert("[cma] Invalid count on anon unmapped page %p = %d expected = %d\n",
+					page, page_count(page), expected_count);
+#endif
 			return -EAGAIN;
+		}
 		return MIGRATEPAGE_SUCCESS;
 	}
 
@@ -329,11 +336,21 @@ int migrate_page_move_mapping(struct address_space *mapping,
 	if (page_count(page) != expected_count ||
 		radix_tree_deref_slot_protected(pslot, &mapping->tree_lock) != page) {
 		spin_unlock_irq(&mapping->tree_lock);
+#ifdef CONFIG_CMA_DEBUG
+		if (mode == MIGRATE_SYNC)
+			pr_alert("[cma] Invalid count on anon mapped page %p = %d, expected %d\n",
+				page, page_count(page), expected_count);
+#endif
 		return -EAGAIN;
 	}
 
-	if (!page_freeze_refs(page, expected_count)) {
+	if (!page_ref_freeze(page, expected_count)) {
 		spin_unlock_irq(&mapping->tree_lock);
+#ifdef CONFIG_CMA_DEBUG
+		if (mode == MIGRATE_SYNC)
+			pr_alert("[cma] page_ref_freeze(%p) = %d expected = %d failed\n",
+				page, page_count(page), expected_count);
+#endif
 		return -EAGAIN;
 	}
 
@@ -346,7 +363,7 @@ int migrate_page_move_mapping(struct address_space *mapping,
 	 */
 	if (mode == MIGRATE_ASYNC && head &&
 			!buffer_migrate_lock_buffers(head, mode)) {
-		page_unfreeze_refs(page, expected_count);
+		page_ref_unfreeze(page, expected_count);
 		spin_unlock_irq(&mapping->tree_lock);
 		return -EAGAIN;
 	}
@@ -367,7 +384,7 @@ int migrate_page_move_mapping(struct address_space *mapping,
 	 * to one less reference.
 	 * We know this isn't the last reference.
 	 */
-	page_unfreeze_refs(page, expected_count - 1);
+	page_ref_unfreeze(page, expected_count - 1);
 
 	/*
 	 * If moved to a different zone then also account
@@ -418,7 +435,7 @@ int migrate_huge_page_move_mapping(struct address_space *mapping,
 		return -EAGAIN;
 	}
 
-	if (!page_freeze_refs(page, expected_count)) {
+	if (!page_ref_freeze(page, expected_count)) {
 		spin_unlock_irq(&mapping->tree_lock);
 		return -EAGAIN;
 	}
@@ -427,7 +444,7 @@ int migrate_huge_page_move_mapping(struct address_space *mapping,
 
 	radix_tree_replace_slot(pslot, newpage);
 
-	page_unfreeze_refs(page, expected_count - 1);
+	page_ref_unfreeze(page, expected_count - 1);
 
 	spin_unlock_irq(&mapping->tree_lock);
 	return MIGRATEPAGE_SUCCESS;
@@ -548,6 +565,8 @@ void migrate_page_copy(struct page *newpage, struct page *page)
 	 */
 	if (PageWriteback(newpage))
 		end_page_writeback(newpage);
+
+	copy_page_owner(page, newpage);
 }
 
 /************************************************************
@@ -676,6 +695,11 @@ static int writeout(struct address_space *mapping, struct page *page)
 		/* unlocked. Relock */
 		lock_page(page);
 
+#ifdef CONFIG_CMA_DEBUG
+	pr_alert("[cma] page:0x%p [ret:%d writeout done] at %s\n",
+		page, rc, __func__);
+#endif
+
 	return (rc < 0) ? -EIO : -EAGAIN;
 }
 
@@ -697,9 +721,15 @@ static int fallback_migrate_page(struct address_space *mapping,
 	 * We must have no buffers or drop them.
 	 */
 	if (page_has_private(page) &&
-	    !try_to_release_page(page, GFP_KERNEL))
+	    !try_to_release_page(page, GFP_KERNEL)) {
+#ifdef CONFIG_CMA_DEBUG
+		if (mode == MIGRATE_SYNC)
+			pr_alert("[cma] page %p pfn %lx page has private and .release:%p",
+				page, page_to_pfn(page),
+				mapping ? mapping->a_ops->releasepage:NULL);
+#endif
 		return -EAGAIN;
-
+	}
 	return migrate_page(mapping, newpage, page, mode);
 }
 
@@ -787,9 +817,25 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 		 * avoid the use of lock_page for direct compaction
 		 * altogether.
 		 */
-		if (current->flags & PF_MEMALLOC)
+		if (current->flags & PF_MEMALLOC) {
+#ifdef CONFIG_CMA_DEBUG
+			if (mode == MIGRATE_SYNC)
+				pr_alert("[cma] Task %p <%s> is in PF_MEMALLOC\n",
+					current, current->comm);
+#endif
 			goto out;
-
+		}
+#ifdef CONFIG_CMA_DEBUG
+		/*
+		 * mode MIGARTE_SYNC is either of CMA migration or sysctl
+		 * compaction handle. But, in case of sysctl is manually,
+		 * compaction handled both of kswapd and
+		 * direct_reclaim is MIGRATE_ASYNC
+		 */
+		if (force && mode == MIGRATE_SYNC)
+			pr_alert("[cma] page locked! waiting for unlocked on anon mapped page %p = %d\n",
+				page, page_count(page));
+#endif
 		lock_page(page);
 	}
 
@@ -806,6 +852,9 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 		}
 		if (!force)
 			goto out_unlock;
+#ifdef CONFIG_CMA_DEBUG
+		pr_alert("Page %p is under writeback!\n", page);
+#endif
 		wait_on_page_writeback(page);
 	}
 	/*
@@ -840,6 +889,15 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 			 * completes
 			 */
 		} else {
+#ifdef CONFIG_CMA_DEBUG
+			static DEFINE_RATELIMIT_STATE(mg_msg_ratelimit,
+					HZ/4, 2);
+			if(__ratelimit(&mg_msg_ratelimit))
+				migrate_failed_page_dump(page,"No anon_vma");
+			else
+				pr_alert("[cma] No anon_vma for page %p [count:%d mapcount:%d mapping:%p]\n", 
+					page, page_ref_count(page), atomic_read(&page->_mapcount), READ_ONCE(page->mapping));
+#endif
 			goto out_unlock;
 		}
 	}
@@ -872,6 +930,11 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 		VM_BUG_ON_PAGE(PageAnon(page), page);
 		if (page_has_private(page)) {
 			try_to_free_buffers(page);
+#ifdef CONFIG_CMA_DEBUG
+			if (mode == MIGRATE_SYNC)
+				pr_alert("[cma] Orphaned FS-private page %p\n",
+					page);
+#endif
 			goto out_unlock;
 		}
 		goto skip_unmap;
@@ -879,14 +942,32 @@ static int __unmap_and_move(struct page *page, struct page *newpage,
 
 	/* Establish migration ptes or remove ptes */
 	if (page_mapped(page)) {
-		try_to_unmap(page,
+		page_was_mapped = try_to_unmap(page,
 			TTU_MIGRATION|TTU_IGNORE_MLOCK|TTU_IGNORE_ACCESS);
+#ifdef CONFIG_CMA_DEBUG
+		if(mode == MIGRATE_SYNC && page_was_mapped) {
+			pr_err("[cma] try_to_unmap() ret = %d page:%p\n",
+					page_was_mapped, page);
+		}
+#endif
 		page_was_mapped = 1;
 	}
 
 skip_unmap:
-	if (!page_mapped(page))
+	if (!page_mapped(page)) {
 		rc = move_to_new_page(newpage, page, page_was_mapped, mode);
+#ifdef CONFIG_CMA_DEBUG
+		if (rc && mode == MIGRATE_SYNC) 
+			pr_alert("[cma] move_to_new_page(%p) returned %d"
+					" anon:%p page_was_mapped:%d\n",
+					page, rc, anon_vma, page_was_mapped);
+#endif
+	}
+#ifdef CONFIG_CMA_DEBUG
+	else if (rc && mode == MIGRATE_SYNC)
+		pr_alert("[cma] Page %p is not mapped, returning %d\n",
+			page, rc);
+#endif
 
 	if (rc && page_was_mapped)
 		remove_migration_ptes(page, page);
@@ -898,6 +979,15 @@ skip_unmap:
 out_unlock:
 	unlock_page(page);
 out:
+    /*
+     * If migration is successful, decrease refcount of the newpage
+     * which will not free the page because new page owner increased
+     * refcounter. As well, if it is LRU page, add the page to LRU
+     * list in here.
+     */
+    if (rc == MIGRATEPAGE_SUCCESS) {
+        putback_lru_page(newpage);
+    }
 	return rc;
 }
 
@@ -929,6 +1019,12 @@ static ICE_noinline int unmap_and_move(new_page_t get_new_page,
 
 	if (page_count(page) == 1) {
 		/* page was freed from under us. So we are done. */
+		ClearPageActive(page);
+		ClearPageUnevictable(page);
+		if (put_new_page)
+			put_new_page(newpage, private);
+		else
+			put_page(newpage);
 		goto out;
 	}
 
@@ -949,7 +1045,6 @@ out:
 		list_del(&page->lru);
 		dec_zone_page_state(page, NR_ISOLATED_ANON +
 				page_is_file_cache(page));
-		putback_lru_page(page);
 	}
 
 	/*
@@ -957,15 +1052,21 @@ out:
 	 * it.  Otherwise, putback_lru_page() will drop the reference grabbed
 	 * during isolation.
 	 */
-	if (rc != MIGRATEPAGE_SUCCESS && put_new_page) {
+	if (rc == MIGRATEPAGE_SUCCESS) {
+		if(likely(page_evictable(page))) 
+			put_page(page);
+		else
+			putback_lru_page(page);
+	} else {
 		ClearPageSwapBacked(newpage);
-		put_new_page(newpage, private);
-	} else if (unlikely(__is_movable_balloon_page(newpage))) {
-		/* drop our reference, page already in the balloon */
-		put_page(newpage);
-	} else
-		putback_lru_page(newpage);
+		if (rc != -EAGAIN) 
+			putback_lru_page(page);
 
+		if (put_new_page)
+			put_new_page(newpage, private);
+		else
+			put_page(newpage);
+	}
 	if (result) {
 		if (rc)
 			*result = rc;
@@ -1129,6 +1230,17 @@ int migrate_pages(struct list_head *from, new_page_t get_new_page,
 				goto out;
 			case -EAGAIN:
 				retry++;
+#if defined(CONFIG_CMA_DEBUG) && defined(CONFIG_PAGE_OWNER)
+				if (reason == MR_CMA && pass == 9) {
+#ifdef CONFIG_CMA_DEBUG_REFTRACE
+					struct page_ext* page_ext;
+					page_ext = lookup_page_ext(page);
+					__set_bit(PAGE_EXT_MIGRATE_FAIL, &page_ext->flags);
+					get_log_from_pfn(page_to_pfn(page));
+#endif
+					migrate_failed_page_dump(page, "migrate failed");
+				}
+#endif
 				break;
 			case MIGRATEPAGE_SUCCESS:
 				nr_succeeded++;

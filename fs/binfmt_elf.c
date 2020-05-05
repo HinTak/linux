@@ -39,6 +39,65 @@
 #include <asm/param.h>
 #include <asm/page.h>
 
+#ifdef CONFIG_BINFMT_ELF_COMP
+/* VDLinux 3.x, based VDLP.4.3.1.x default patch No.10,
+   ultimate coredump v1.0, SP Team 2009-05-13 */
+#include <linux/zlib.h>
+#include <linux/zutil.h>
+#include <linux/vmalloc.h>
+#include <linux/mutex.h>
+#include <linux/spinlock.h>
+#include <linux/crc32.h>
+
+/* Plan: call deflate() with avail_in == *sourcelen,
+   avail_out = *dstlen - 12 and flush == Z_FINISH.
+   If it doesn't manage to finish, call it again with
+   avail_in == 0 and avail_out set to the remaining 12
+   bytes for it to clean up.
+   Q: Is 12 bytes sufficient?
+*/
+#ifndef STREAM_END_SPACE
+#define STREAM_END_SPACE 12
+#endif
+
+/*#define ULTIMATE_COMP_BUF_SIZE  10485760 *//* 10MB */
+#define ULTIMATE_COMP_BUF_SIZE  3145728 /* 3MB */
+
+#ifndef ELF_CORE_MAX_PAGE_NUM
+#define ELF_CORE_MAX_PAGE_NUM   32          /* kmalloc max allocation size 128KB */
+#endif
+
+#define DEBUG_BINFMT_ELF_COMP
+#ifdef DEBUG_BINFMT_ELF_COMP
+/* Ultimage Coredump debug mode */
+#define coredump_debug(fmt, arg...) \
+	pr_alert(fmt, ##arg)
+#else
+#define coredump_debug(fmt, arg...) \
+	do { } while (0)
+#endif
+
+static DEFINE_MUTEX(deflate_mutex);
+static z_stream def_strm;
+
+typedef struct gzip_header {
+	unsigned char id[2];
+	unsigned char cm;
+	unsigned char flag;
+	unsigned char mTime[4];
+	unsigned char xfl;
+	unsigned char os;
+} gzip_header_t;
+
+static int set_gzip_header(struct coredump_params *cprm);
+static int set_gzip_tailer(struct coredump_params *cprm, unsigned long *crc, unsigned long *uncomp_size);
+static int compress_coredump(struct coredump_params *cprm, unsigned char *src, unsigned char *comp_buf,
+			     loff_t src_len, unsigned long *crc, size_t *is_z_finish);
+static int coredump_alloc_workspaces(void);
+static void coredump_free_workspaces(void);
+
+#endif /* end of CONFIG_BINFMT_ELF_COMP */
+
 #ifndef user_long_t
 #define user_long_t long
 #endif
@@ -904,17 +963,60 @@ static int load_elf_binary(struct linux_binprm *bprm)
 		elf_flags = MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE;
 
 		vaddr = elf_ppnt->p_vaddr;
+		/*
+		 * If we are loading ET_EXEC or we have already performed
+		 * the ET_DYN load_addr calculations, proceed normally.
+		 */
 		if (loc->elf_ex.e_type == ET_EXEC || load_addr_set) {
 			elf_flags |= MAP_FIXED;
 		} else if (loc->elf_ex.e_type == ET_DYN) {
-			/* Try and get dynamic programs out of the way of the
-			 * default mmap base, as well as whatever program they
-			 * might try to exec.  This is because the brk will
-			 * follow the loader, and is not movable.  */
-			load_bias = ELF_ET_DYN_BASE - vaddr;
-			if (current->flags & PF_RANDOMIZE)
-				load_bias += arch_mmap_rnd();
-			load_bias = ELF_PAGESTART(load_bias);
+			/*
+			 * This logic is run once for the first LOAD Program
+			 * Header for ET_DYN binaries to calculate the
+			 * randomization (load_bias) for all the LOAD
+			 * Program Headers, and to calculate the entire
+			 * size of the ELF mapping (total_size). (Note that
+			 * load_addr_set is set to true later once the
+			 * initial mapping is performed.)
+			 *
+			 * There are effectively two types of ET_DYN
+			 * binaries: programs (i.e. PIE: ET_DYN with INTERP)
+			 * and loaders (ET_DYN without INTERP, since they
+			 * _are_ the ELF interpreter). The loaders must
+			 * be loaded away from programs since the program
+			 * may otherwise collide with the loader (especially
+			 * for ET_EXEC which does not have a randomized
+			 * position). For example to handle invocations of
+			 * "./ld.so someprog" to test out a new version of
+			 * the loader, the subsequent program that the
+			 * loader loads must avoid the loader itself, so
+			 * they cannot share the same load range. Sufficient
+			 * room for the brk must be allocated with the
+			 * loader as well, since brk must be available with
+			 * the loader.
+			 *
+			 * Therefore, programs are loaded offset from
+			 * ELF_ET_DYN_BASE and loaders are loaded into the
+			 * independently randomized mmap region (0 load_bias
+			 * without MAP_FIXED).
+			 */
+			if (elf_interpreter) {
+				load_bias = ELF_ET_DYN_BASE;
+				if (current->flags & PF_RANDOMIZE)
+					load_bias += arch_mmap_rnd();
+				elf_flags |= MAP_FIXED;
+			} else
+				load_bias = 0;
+
+			/*
+			 * Since load_bias is used for all subsequent loading
+			 * calculations, we must lower it by the first vaddr
+			 * so that the remaining calculations based on the
+			 * ELF vaddrs will be correctly offset. The result
+			 * is then page aligned.
+			 */
+			load_bias = ELF_PAGESTART(load_bias - vaddr);
+
 			total_size = total_mapping_size(elf_phdata,
 							loc->elf_ex.e_phnum);
 			if (!total_size) {
@@ -1082,6 +1184,11 @@ static int load_elf_binary(struct linux_binprm *bprm)
 #endif
 
 	start_thread(regs, elf_entry, bprm->p);
+
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+	current->user_ssp = bprm->p;
+#endif
+
 	retval = 0;
 out:
 	kfree(loc);
@@ -1307,7 +1414,9 @@ static unsigned long vma_dump_size(struct vm_area_struct *vma,
 whole:
 	return vma->vm_end - vma->vm_start;
 }
+#endif
 
+#if defined(CONFIG_ELF_CORE) || defined(CONFIG_MINIMAL_CORE)
 /* An ELF note in memory */
 struct memelfnote
 {
@@ -1328,6 +1437,50 @@ static int notesize(struct memelfnote *en)
 	return sz;
 }
 
+#ifdef CONFIG_BINFMT_ELF_COMP
+static unsigned long memcpy_note(struct memelfnote *men, unsigned char *elf_file_offset)
+{
+	unsigned long note_offset_sz = 0;
+	unsigned char *src_offset = elf_file_offset;
+
+	struct elf_note en;
+
+	if (men->name)
+		en.n_namesz = strlen(men->name) + 1;
+	else {
+		/* NULL string */
+		men->name = "";
+		en.n_namesz = 1;
+	}
+
+	en.n_descsz = men->datasz;
+	en.n_type = men->type;
+
+	memcpy(elf_file_offset, &en, sizeof(en));
+	elf_file_offset += sizeof(en);
+	/* DUMP_WRITE(&en, sizeof(en), foffset); */
+
+	/* DUMP_WRITE(men->name, en.n_namesz, foffset); */
+	memcpy(elf_file_offset, men->name, en.n_namesz);
+	memset(elf_file_offset + en.n_namesz, 0, roundup(en.n_namesz, 4) - en.n_namesz);
+	elf_file_offset += roundup(en.n_namesz, 4);
+
+	/* if (!alignfile(file, foffset))
+		return 0;*/
+
+	/* DUMP_WRITE(men->data, men->datasz, foffset);*/
+	memcpy(elf_file_offset, men->data, roundup(men->datasz, 4));    /* align name sz */
+	elf_file_offset += roundup(men->datasz, 4);
+
+	/*if (!alignfile(file, foffset))
+		return 0;*/
+	note_offset_sz = elf_file_offset - src_offset;
+
+	return note_offset_sz;
+}
+#endif
+
+#if !defined(CONFIG_BINFMT_ELF_COMP) && (!defined(CONFIG_VD_RELEASE) || defined(CONFIG_VD_PERFORMANCE_MODE))
 static int writenote(struct memelfnote *men, struct coredump_params *cprm)
 {
 	struct elf_note en;
@@ -1339,8 +1492,12 @@ static int writenote(struct memelfnote *men, struct coredump_params *cprm)
 	    dump_emit(cprm, men->name, en.n_namesz) && dump_align(cprm, 4) &&
 	    dump_emit(cprm, men->data, men->datasz) && dump_align(cprm, 4);
 }
+#endif /* !defined(CONFIG_BINFMT_ELF_COMP) && (!defined(CONFIG_VD_RELEASE) || defined(CONFIG_VD_PERFORMANCE_MODE)) */
+#endif
 
-static void fill_elf_header(struct elfhdr *elf, int segs,
+/* VDLinux patch for DUMA, int segs -> unsigned segs, 2010-08-31 */
+#if defined(CONFIG_ELF_CORE) || defined(CONFIG_MINIMAL_CORE)
+static void fill_elf_header(struct elfhdr *elf, unsigned int segs,
 			    u16 machine, u32 flags)
 {
 	memset(elf, 0, sizeof(*elf));
@@ -1358,7 +1515,13 @@ static void fill_elf_header(struct elfhdr *elf, int segs,
 	elf->e_flags = flags;
 	elf->e_ehsize = sizeof(struct elfhdr);
 	elf->e_phentsize = sizeof(struct elf_phdr);
-	elf->e_phnum = segs;
+	/* elf->e_phnum = segs; */
+
+	if (segs > 65530) {  /* 2^16=65536, if e_phnum > 2^16, print info msg*/
+		pr_alert("elf->e_phnum fixed 2bytes, orig num : %u\n", segs);
+		elf->e_phnum = 65530;
+	} else
+		elf->e_phnum = segs;
 
 	return;
 }
@@ -1777,6 +1940,7 @@ static int fill_note_info(struct elfhdr *elf, int phdrs,
 	return 1;
 }
 
+#if !defined(CONFIG_BINFMT_ELF_COMP) && (!defined(CONFIG_VD_RELEASE) || defined(CONFIG_VD_PERFORMANCE_MODE))
 static size_t get_note_info_size(struct elf_note_info *info)
 {
 	return info->size;
@@ -1819,6 +1983,7 @@ static int write_note_info(struct elf_note_info *info,
 
 	return 1;
 }
+#endif
 
 static void free_note_info(struct elf_note_info *info)
 {
@@ -2003,6 +2168,7 @@ static int fill_note_info(struct elfhdr *elf, int phdrs,
 	return 1;
 }
 
+#ifndef CONFIG_BINFMT_ELF_COMP
 static size_t get_note_info_size(struct elf_note_info *info)
 {
 	int sz = 0;
@@ -2038,6 +2204,7 @@ static int write_note_info(struct elf_note_info *info,
 
 	return 1;
 }
+#endif
 
 static void free_note_info(struct elf_note_info *info)
 {
@@ -2061,7 +2228,9 @@ static void free_note_info(struct elf_note_info *info)
 }
 
 #endif
+#endif /* CONFIG_ELF_CORE || CONFIG_MINIMAL_CORE */
 
+#ifdef CONFIG_ELF_CORE
 static struct vm_area_struct *first_vma(struct task_struct *tsk,
 					struct vm_area_struct *gate_vma)
 {
@@ -2104,6 +2273,174 @@ static void fill_extnum_info(struct elfhdr *elf, struct elf_shdr *shdr4extnum,
 	shdr4extnum->sh_info = segs;
 }
 
+#ifdef CONFIG_BINFMT_ELF_COMP
+static int set_gzip_header(struct coredump_params *cprm)
+{
+	gzip_header_t gzip_hdr;
+	struct timeval ktv;
+	const char *coredump_filename = "Coredump.gz";
+
+	/* gzip ID */
+	gzip_hdr.id[0] = 0x1f;
+	gzip_hdr.id[1] = 0x8b;
+
+	/* CM - Compressed Method */
+	gzip_hdr.cm = 8;
+
+	/* FLG - flag=8 write original file name */
+	gzip_hdr.flag = 8;
+
+	/* MTime - Modification Time */
+	do_gettimeofday(&ktv);
+	memcpy(gzip_hdr.mTime, &ktv.tv_sec, sizeof(time_t));
+
+	/* XFL - eXtra Flags */
+	gzip_hdr.xfl = 2;
+
+	/* OS - OS Filesystem */
+	gzip_hdr.os = 3;
+
+	/* gzip_header_t write */
+	if (!dump_emit(cprm, &gzip_hdr, sizeof(gzip_header_t))) {
+		pr_alert("gzip header dump_emit() fail\n");
+		return -1;
+	}
+
+	/* write original file name */
+	if (!dump_emit(cprm, coredump_filename, strlen(coredump_filename)+1)) {
+		pr_alert("coredump filenale dump_emit() fail\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int set_gzip_tailer(struct coredump_params *cprm, unsigned long *crc, unsigned long *uncomp_size)
+{
+	*crc = le32_to_cpu((*crc));
+	*uncomp_size = le32_to_cpu((*uncomp_size));
+
+	/* GZIP tailer, CRC32 */
+	coredump_debug("GZIP tailer CRC32 : %lu\n", *crc);
+
+	if (!dump_emit(cprm, crc, sizeof(u32))) {
+		pr_alert("GZIP tailer CRC32, dump_emit() fail\n");
+		return -1;
+	}
+
+	if (!dump_emit(cprm, uncomp_size, sizeof(unsigned long))) {
+		pr_alert("GZIP tailer uncompressed file size, dump_emit() fail\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int compress_coredump(struct coredump_params *cprm, unsigned char *uncomp_src, unsigned char *comp_buf,
+		loff_t uncomp_src_len, unsigned long *crc, size_t *is_z_finish)
+{
+	int ret = 0;
+	unsigned long prev_comp_write_offset = 0, comp_write_offset = 0;
+
+	/** VDLP 4.2.1.x bugfix, return STREAM_END_SPACE error, 2009-09-21 */
+	if (uncomp_src_len <= STREAM_END_SPACE) {
+		pr_alert("Warning uncompressed src length <= STREAM_END_SPACE 12bytes\n");
+		pr_alert("Check uncomp_src_len size : %lld\n", uncomp_src_len);
+		/*return -1;*/
+	}
+
+	def_strm.next_in = uncomp_src;
+	def_strm.total_in = 0;
+
+	def_strm.next_out = comp_buf;
+	def_strm.total_out = 0;
+
+
+	def_strm.avail_out = uncomp_src_len;
+	def_strm.avail_in = uncomp_src_len;
+
+	/* crc32 check, used in GZIP tailer */
+	*crc = gzip_crc32_le(def_strm.next_in, def_strm.avail_in);
+
+	/* if you want to compress debugging step by step
+	   coredump_debug("##### calling deflate with avail_in %u, avail_out %u\n",
+	   def_strm.avail_in, def_strm.avail_out);
+	 */
+	ret = zlib_deflate(&def_strm, Z_PARTIAL_FLUSH);
+
+	/* if you want to compress debugging step by step
+	   coredump_debug("##### deflate returned with avail_in %u, avail_out %u, total_in %ld, total_out %ld\n",
+	   def_strm.avail_in, def_strm.avail_out, def_strm.total_in, def_strm.total_out);
+	 */
+	if (ret != Z_OK) {
+		pr_alert("deflate in loop returned %d\n", ret);
+		zlib_deflateEnd(&def_strm);
+		return -1;
+	}
+
+	/* Ultimate coredump file write */
+	if (!dump_emit(cprm, comp_buf, def_strm.total_out)) {
+		pr_alert("coredump ELF section dump_emit() fail\n");
+		return -1;
+	}
+
+	/* set next page address, if you want to compress debugging step by step
+	   coredump_debug("##### while() def_strm.next_in : %p\n", def_strm.next_in);
+	 */
+
+	/* if you want to compress debugging step by step
+	   coredump_debug("##### while() def_strm.next_out : %p\n", def_strm.next_out);
+	 */
+
+	prev_comp_write_offset = def_strm.total_out;
+
+	/* End of compressed data block, deflate Z_FINISH */
+	if (*is_z_finish) {
+		coredump_debug("(vma->vm_next) == NULL\n");
+		def_strm.next_out = comp_buf;
+		def_strm.avail_out += STREAM_END_SPACE;
+		def_strm.avail_in = 0;
+
+		ret = zlib_deflate(&def_strm, Z_FINISH);
+
+		if (ret != Z_STREAM_END) {
+			pr_alert("final deflate returned %d\n", ret);
+			return -1;
+		}
+
+		comp_write_offset = (def_strm.total_out - prev_comp_write_offset);
+
+		/* Ultimate coredump file write */
+		if (!dump_emit(cprm, comp_buf, comp_write_offset)) {
+			pr_alert("In case Z_FINISH, coredump ELF section dump_emit() fail\n");
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+static int coredump_alloc_workspaces(void)
+{
+	def_strm.workspace = vmalloc(zlib_deflate_workspacesize(MAX_WBITS, MAX_MEM_LEVEL));
+
+	if (!def_strm.workspace) {
+		pr_alert("Failed to allocate %d bytes for deflate workspace\n",
+				zlib_deflate_workspacesize(MAX_WBITS, MAX_MEM_LEVEL));
+		return -ENOMEM;
+	}
+	coredump_debug("Allocated %d bytes for deflate workspace\n",
+				zlib_deflate_workspacesize(MAX_WBITS, MAX_MEM_LEVEL));
+
+	return 0;
+}
+
+static void coredump_free_workspaces(void)
+{
+	vfree(def_strm.workspace);
+}
+#endif
+
 /*
  * Actual dumper
  *
@@ -2113,9 +2450,9 @@ static void fill_extnum_info(struct elfhdr *elf, struct elf_shdr *shdr4extnum,
  */
 static int elf_core_dump(struct coredump_params *cprm)
 {
-	int has_dumped = 0;
+	int has_dumped = 0, i = 0;
 	mm_segment_t fs;
-	int segs, i;
+	unsigned int segs;
 	size_t vma_data_size = 0;
 	struct vm_area_struct *vma, *gate_vma;
 	struct elfhdr *elf = NULL;
@@ -2126,6 +2463,30 @@ static int elf_core_dump(struct coredump_params *cprm)
 	Elf_Half e_phnum;
 	elf_addr_t e_shoff;
 	elf_addr_t *vma_filesz = NULL;
+
+#ifdef CONFIG_BINFMT_ELF_COMP
+	/* Ultimate Coredump var */
+#define CORE_BIG_VMA            0
+#define CORE_SAME_VMA           1
+#define CORE_SMALL_VMA          2
+	int ret_comp_val = 0;
+#ifdef CORE_DUMP_USE_REGSET
+	struct elf_thread_core_info *t;
+	const struct user_regset_view *view = task_user_regset_view(current);
+#else
+	struct list_head *t = NULL;
+#endif
+	size_t aligned_elfhdr_sect_sz = 0, elfhdr_sect_sz = 0;
+	size_t  note_size = 0, aligned_elf_pages_num = 0, last_vma = 0, z_finish = 0;
+	unsigned char *elf_file_buf = NULL, *elf_zero_file_buf = NULL;
+	unsigned char *compressed_buf = NULL, *uncomp_src_buf = NULL;
+	loff_t elf_foffset = 0, aligned_elf_foffset = 0;
+	unsigned long uncomp_coredump_file_size = 0;
+	unsigned long crc32_val = 0;
+	unsigned int user_page_cnt = 0, kernel_page_cnt = 0, zero_page_cnt = 0, vma_cnt = 0, vm_page = 0;
+	unsigned char locked = 0;
+#endif
+	char *corename = (char *)cprm->file->f_path.dentry->d_name.name;
 
 	/*
 	 * We no longer stop all VM operations.
@@ -2141,8 +2502,10 @@ static int elf_core_dump(struct coredump_params *cprm)
   
 	/* alloc memory for large data structures: too large to be on stack */
 	elf = kmalloc(sizeof(*elf), GFP_KERNEL);
-	if (!elf)
+	if (!elf) {
+		pr_alert("[COREDUMP_FAIL|%s] Allocating memory for struct elfhdr failed\n", corename);
 		goto out;
+	}
 	/*
 	 * The number of segs are recored into ELF header as 16bit value.
 	 * Please check DEFAULT_MAX_MAP_COUNT definition when you modify here.
@@ -2166,29 +2529,117 @@ static int elf_core_dump(struct coredump_params *cprm)
 	 * Collect all the non-memory information about the process for the
 	 * notes.  This also sets up the file header.
 	 */
-	if (!fill_note_info(elf, e_phnum, &info, cprm->siginfo, cprm->regs))
+	if (!fill_note_info(elf, e_phnum, &info, cprm->siginfo, cprm->regs)) {
+		pr_alert("[COREDUMP_FAIL|%s] fill_note_info() failed\n", corename);
 		goto cleanup;
-
-	has_dumped = 1;
+	}
 
 	fs = get_fs();
 	set_fs(KERNEL_DS);
 
+#ifdef CONFIG_BINFMT_ELF_COMP
+#ifdef CORE_DUMP_USE_REGSET
+	/* info->size already has the total size of the note sections (including the
+	 * thread sections as per fill_note_info, so no need to compute that. */
+	note_size = info.size;
+#else
+	/*
+	 * calc total size of note sections.
+	 */
+	for (i = 0; i < info.numnote; i++)
+		note_size += notesize(info.notes + i);
+#endif
+
+	/* calc total size of ELF header, program header and note sections. */
+
+	elfhdr_sect_sz += sizeof(struct elfhdr);                /* ELF header */
+	elfhdr_sect_sz += sizeof(struct elf_phdr);              /* Program header for current process */
+	elfhdr_sect_sz += (segs * sizeof(struct elf_phdr));     /* Profram header for all threads of current process */
+	elfhdr_sect_sz += note_size;                            /* Note section for current process */
+#ifndef CORE_DUMP_USE_REGSET
+	elfhdr_sect_sz += info.thread_status_size;                   /* Note section for all threads of current process */
+#endif
+	aligned_elfhdr_sect_sz = roundup(elfhdr_sect_sz, ELF_EXEC_PAGESIZE);    /* aligned 4KB */
+
+	aligned_elf_pages_num = (aligned_elfhdr_sect_sz/ELF_EXEC_PAGESIZE);
+	/** VDLP 4.2.1.x bugfix, Coredump.gz size is 0, 2009-09-12
+	 Because of memory alloc func changed from kmalloc() to vmalloc(), skip elf max page num
+	if (aligned_elf_pages_num > ELF_CORE_MAX_PAGE_NUM) {
+		pr_alert("##### elf hdr, section size > 128KB, pages num : %u\n", aligned_elf_pages_num);
+		goto end_coredump;
+	} else
+	*/
+	coredump_debug(KERN_ALERT "elf aligned pages num : %lu + (3 Coredump guard buffers)\n",
+			(unsigned long int)aligned_elf_pages_num);
+
+	elf_zero_file_buf = (unsigned char *)vmalloc((aligned_elf_pages_num + 4) * ELF_EXEC_PAGESIZE);
+
+	if (!elf_zero_file_buf) {
+		pr_alert("pages num : %lu + (3 Coredump guard buffers), vmalloc fail\n",
+				(unsigned long int)aligned_elf_pages_num);
+		goto end_coredump;
+	}
+
+	memset(elf_zero_file_buf, 0, (aligned_elf_pages_num + 4) * ELF_EXEC_PAGESIZE);
+
+	/*
+	 * Allocaed memory map
+	 +------------------+
+	 |   for Zero page  |
+	 +------------------+
+	 | upper guard buf  |
+	 +------------------+    <= elf_file_buf, start address of file writing
+	 |       . . .      |
+	 |   ELF Coredump   |
+	 |       . . .      |
+	 +------------------+
+	 | lower guard buf  |    <= will be used ELF Coredump after copying ELF section to memory
+	 +------------------+
+	 | lower guard buf  |
+	 +------------------+
+	 */
+
+	/* set upper guard buf */
+	elf_file_buf = elf_zero_file_buf + (ELF_EXEC_PAGESIZE * 2);
+
+	/* 1. copy ELF Header to memory */
+	memcpy(elf_file_buf, elf, sizeof(struct elfhdr));
+	elf_foffset += sizeof(struct elfhdr);
+
+	offset += sizeof(*elf);                         /* ELF header */
+	offset += segs * sizeof(struct elf_phdr);	/* Program headers */
+#else
 	offset += sizeof(*elf);				/* Elf header */
 	offset += segs * sizeof(struct elf_phdr);	/* Program headers */
-
+#endif
 	/* Write notes phdr entry */
 	{
-		size_t sz = get_note_info_size(&info);
+#ifdef CONFIG_BINFMT_ELF_COMP
+		size_t sz = 0;
 
+		sz = note_size;
+
+#ifndef CORE_DUMP_USE_REGSET
+		sz += info.thread_status_size;
+#endif
+#else
+		size_t sz = get_note_info_size(&info);
+#endif
 		sz += elf_coredump_extra_notes_size();
 
 		phdr4note = kmalloc(sizeof(*phdr4note), GFP_KERNEL);
-		if (!phdr4note)
+		if (!phdr4note) {
+			pr_alert("[COREDUMP_FAIL|%s] Allocating memory for struct elf_phdr failed\n",
+					corename);
 			goto end_coredump;
-
+		}
 		fill_elf_note_phdr(phdr4note, sz, offset);
 		offset += sz;
+#ifdef CONFIG_BINFMT_ELF_COMP
+		/* 2. copy ELF Program header to memory */
+		memcpy((elf_file_buf+elf_foffset), phdr4note, sizeof(*phdr4note));
+		elf_foffset += sizeof(struct elf_phdr);
+#endif
 	}
 
 	dataoff = offset = roundup(offset, ELF_EXEC_PAGESIZE);
@@ -2212,18 +2663,26 @@ static int elf_core_dump(struct coredump_params *cprm)
 
 	if (e_phnum == PN_XNUM) {
 		shdr4extnum = kmalloc(sizeof(*shdr4extnum), GFP_KERNEL);
-		if (!shdr4extnum)
+		if (!shdr4extnum) {
+			pr_alert("[COREDUMP_FAIL|%s] Allocating memory for struct elf_shdr failed\n",
+					corename);
 			goto end_coredump;
+		}
 		fill_extnum_info(elf, shdr4extnum, e_shoff, segs);
 	}
 
 	offset = dataoff;
 
-	if (!dump_emit(cprm, elf, sizeof(*elf)))
+#ifndef CONFIG_BINFMT_ELF_COMP
+	if (!dump_emit(cprm, elf, sizeof(*elf))) {
+		pr_alert("[COREDUMP_FAIL|%s] Failed writing elf headers to file\n", corename);
 		goto end_coredump;
-
-	if (!dump_emit(cprm, phdr4note, sizeof(*phdr4note)))
+	}
+	if (!dump_emit(cprm, phdr4note, sizeof(*phdr4note))) {
+		pr_alert("[COREDUMP_FAIL|%s] Failed writing phdr4note to file\n", corename);
 		goto end_coredump;
+	}
+#endif
 
 	/* Write program headers for segments dump */
 	for (i = 0, vma = first_vma(current, gate_vma); vma != NULL;
@@ -2244,55 +2703,346 @@ static int elf_core_dump(struct coredump_params *cprm)
 			phdr.p_flags |= PF_X;
 		phdr.p_align = ELF_EXEC_PAGESIZE;
 
-		if (!dump_emit(cprm, &phdr, sizeof(phdr)))
+#ifdef CONFIG_BINFMT_ELF_COMP
+		/* 3. copy Segment dump Program Header to memory */
+		memcpy((elf_file_buf+elf_foffset), &phdr, sizeof(struct elf_phdr));
+		elf_foffset += sizeof(struct elf_phdr);
+#else
+		if (!dump_emit(cprm, &phdr, sizeof(phdr))) {
+			pr_alert("[COREDUMP_FAIL|%s] Failed writing header to file\n", corename);
 			goto end_coredump;
+		}
+#endif
 	}
 
-	if (!elf_core_write_extra_phdrs(cprm, offset))
+	/* write out the notes section */
+#ifdef CONFIG_BINFMT_ELF_COMP
+#ifdef CORE_DUMP_USE_REGSET
+	/* 4. copy current Notes section to memory */
+	{
+		elf_foffset += memcpy_note(&info.psinfo, (elf_file_buf+elf_foffset));
+		elf_foffset += memcpy_note(&info.signote, (elf_file_buf+elf_foffset));
+		elf_foffset += memcpy_note(&info.auxv, (elf_file_buf+elf_foffset));
+		elf_foffset += memcpy_note(&info.files, (elf_file_buf+elf_foffset));
+	}
+#else
+	/* 4. copy current Notes section to memory */
+	for (i = 0; i < info.numnote; i++) {
+		unsigned long sz = 0;
+		sz = memcpy_note(info.notes + i, (elf_file_buf+elf_foffset));
+		elf_foffset += sz;
+	}
+#endif
+	if (elf_coredump_extra_notes_write(cprm))	/* TODO : Supplement error check
+									messages if implemented in future*/
 		goto end_coredump;
 
- 	/* write out the notes section */
-	if (!write_note_info(&info, cprm))
-		goto end_coredump;
+#ifdef CORE_DUMP_USE_REGSET
+	/* write out the thread status notes section */
+	for (t = info.thread; t != NULL; t = t->next) {
+		unsigned long sz = 0;
+		sz = memcpy_note(&t->notes[0], (elf_file_buf+elf_foffset));
+		elf_foffset += sz;
 
-	if (elf_coredump_extra_notes_write(cprm))
+		for (i = 1; i < view->n; ++i) {
+			if (t->notes[i].name) {
+				sz = memcpy_note(&t->notes[i], (elf_file_buf+elf_foffset));
+				elf_foffset += sz;
+			}
+		}
+	}
+#else
+	/* write out the thread status notes section */
+	list_for_each(t, &info.thread_list) {
+		struct elf_thread_status *tmp =
+			list_entry(t, struct elf_thread_status, list);
+		/* 5. copy to thread Notes section to memory */
+		for (i = 0; i < tmp->num_notes; i++) {
+			unsigned long sz = 0;
+			sz = memcpy_note(&tmp->notes[i], (elf_file_buf+elf_foffset));
+			elf_foffset += sz;
+		}
+	}
+#endif /* CORE_DUMP_USE_REGSET */
+#else
+	if (!write_note_info(&info, cprm)) {
+		pr_alert("[COREDUMP_FAIL|%s] write_note_info() failed\n", corename);
 		goto end_coredump;
+	}
+
+	if (elf_coredump_extra_notes_write(cprm))		/*TODO : Supplement error
+								check messages if implemented in future*/
+		goto end_coredump;
+#endif
 
 	/* Align to page */
-	if (!dump_skip(cprm, dataoff - cprm->written))
+
+#ifdef CONFIG_BINFMT_ELF_COMP
+	aligned_elf_foffset = roundup(elf_foffset, ELF_EXEC_PAGESIZE);  /* aligned 4KB */
+
+	if (aligned_elf_foffset == aligned_elfhdr_sect_sz) {
+		coredump_debug("Not used first lower guard page, elf_foffset : %lld, aligned_elf_foffset : %lld\n",
+				elf_foffset, aligned_elf_foffset);
+	} else {
+		coredump_debug("Used first lower guard page, elf_foffset : %lld, aligned_elf_foffset : %lld\n",
+				elf_foffset, aligned_elf_foffset);
+	}
+
+	if (unlikely(set_gzip_header(cprm) < 0)) {
+		pr_alert("set_gzip_header() return fail\n");
 		goto end_coredump;
+	} else
+		coredump_debug("set_gzip_header() return success\n");
+
+	/* alloc zstrem workspace */
+	mutex_lock(&deflate_mutex);
+	if (unlikely(coredump_alloc_workspaces() < 0)) {
+		pr_alert("coredump_alloc_workspaces() return fail\n");
+		mutex_unlock(&deflate_mutex);
+		goto end_coredump;
+	} else
+		coredump_debug("coredump_alloc_workspaces() return success\n");
+	locked = 1;
+	/* gzip deflate init */
+	if (Z_OK != zlib_deflateInit2(&def_strm, 8, Z_DEFLATED, -MAX_WBITS,
+				      DEF_MEM_LEVEL, Z_DEFAULT_STRATEGY)) {
+		pr_alert("gzip deflateInit failed\n");
+ 		goto end_coredump;
+	}
+
+	/* CRC32 initialize */
+	gzip_crc32_le(NULL, 0);
+
+	/*
+	 * alloc vma memory temp buffer size <= ULTIMATE_COMP_BUF_SIZE, default 512KB
+	+--------------------------+
+	|           . . .          |
+	|   saved vma mem region   |
+	|  (uncomp buf size ??MB)  |
+	|           . . .          |
+	+--------------------------+
+
+	* alloc compressed temp buffer size <= ULTIMATE_COMP_BUF_SIZE+12Bytes
+	+--------------------------+
+	|           . . .          |
+	|  saved compressed data   |
+	|   (comp buf size ??MB)   |
+	|           . . .          |
+	+--------------------------+
+	| STREAM_END_SPACE 12Bytes |
+	+--------------------------+
+	*/
+	compressed_buf = (unsigned char *)vmalloc(ULTIMATE_COMP_BUF_SIZE+STREAM_END_SPACE);
+	uncomp_src_buf = (unsigned char *)vmalloc(ULTIMATE_COMP_BUF_SIZE);
+
+	if (!compressed_buf || !uncomp_src_buf) {
+		pr_alert("binfmt_flat: no memory for read buffer\n");
+		goto end_coredump;
+	}
+	memset(compressed_buf, 0, ULTIMATE_COMP_BUF_SIZE);
+	memset(uncomp_src_buf, 0, ULTIMATE_COMP_BUF_SIZE);
+
+	ret_comp_val = compress_coredump(cprm, (unsigned char *)elf_file_buf, compressed_buf,
+					 aligned_elf_foffset, &crc32_val, &z_finish);
+
+	if (ret_comp_val < 0) {
+		pr_alert("1nd compress_coredump() return fail\n");
+		goto end_coredump;
+	}
+#else
+	if (!dump_skip(cprm, dataoff - cprm->written)) {
+		pr_alert("[COREDUMP_FAIL|%s] dump_seek() failed at line:%d\n", corename, __LINE__);
+		goto end_coredump;
+	}
+#endif
 
 	for (i = 0, vma = first_vma(current, gate_vma); vma != NULL;
 			vma = next_vma(vma, gate_vma)) {
 		unsigned long addr;
 		unsigned long end;
 
+#ifdef CONFIG_BINFMT_ELF_COMP
+		unsigned long vma_size = 0;
+		unsigned long is_buf_full = 0;
+		unsigned long is_buf_full_cnt = 0;
+		unsigned int vma_page_cnt = 0;
+		unsigned int vma_type = 0;
+		unsigned int buf_usage_cnt = 0;
+
+		++vma_cnt;
+#endif
 		end = vma->vm_start + vma_filesz[i++];
+
+#ifdef CONFIG_BINFMT_ELF_COMP
+		if (next_vma(vma, gate_vma) == NULL)     /* gzip Z_FINISH, coredump last step condition */
+			last_vma = 1;
+
+		vma_size = (end - vma->vm_start); /* vma_size */
+
+		if (vma_size == 0) {
+			/*pr_alert("##### vma size is zero, continued...\n");*/
+			continue;
+		}
+
+		if (vma_size < ULTIMATE_COMP_BUF_SIZE)
+			vma_type = CORE_SMALL_VMA;
+		else if ((vma_size % ULTIMATE_COMP_BUF_SIZE) != 0)
+			vma_type = CORE_BIG_VMA;
+		else /* buf_size * n == vma_size */
+			vma_type = CORE_SAME_VMA;
+
+		buf_usage_cnt = vma_size / (ULTIMATE_COMP_BUF_SIZE);
+
+		if (vma_type != CORE_SAME_VMA)
+			buf_usage_cnt++;
+#endif
 
 		for (addr = vma->vm_start; addr < end; addr += PAGE_SIZE) {
 			struct page *page;
+#ifndef CONFIG_BINFMT_ELF_COMP
 			int stop;
+#endif
 
+#ifdef CONFIG_BINFMT_ELF_COMP
+			++vm_page;
+#endif
 			page = get_dump_page(addr);
 			if (page) {
 				void *kaddr = kmap(page);
+#ifdef CONFIG_BINFMT_ELF_COMP
+				++user_page_cnt;
+				/*++kernel_page_cnt;*/
+				memcpy((uncomp_src_buf+(vma_page_cnt * PAGE_SIZE))
+				       , kaddr, PAGE_SIZE);
+				elf_foffset += PAGE_SIZE;
+#else
 				stop = !dump_emit(cprm, kaddr, PAGE_SIZE);
+#endif
 				kunmap(page);
 				page_cache_release(page);
 			} else
+#ifdef CONFIG_BINFMT_ELF_COMP
+				++zero_page_cnt;
+#else
 				stop = !dump_skip(cprm, PAGE_SIZE);
-			if (stop)
+			if (stop) {
+				pr_alert("[COREDUMP_FAIL|%s] dump_seek() failed at line:%d\n", corename, __LINE__);
 				goto end_coredump;
+			}
+#endif
+#ifdef CONFIG_BINFMT_ELF_COMP
+			++vma_page_cnt;
+			is_buf_full = vma_page_cnt * PAGE_SIZE; /* check buf size */
+
+			/* if buf is full, call compress_coredump() */
+			if (is_buf_full >= ULTIMATE_COMP_BUF_SIZE) {
+				++is_buf_full_cnt;
+				pr_alert("default buf is full, cnt : %lu\n", is_buf_full_cnt);
+
+				--buf_usage_cnt;
+				/* Check real finish state  for CORE_SAME_VMA */
+				if (buf_usage_cnt == 0 && last_vma == 1) {
+					if (vma_type != CORE_SAME_VMA)   /* logic error check */
+						pr_alert("coredump logic Bug,"
+						       " vma_type :%d, line : %d\n", vma_type, __LINE__);
+
+					z_finish = 1;
+				}
+
+				ret_comp_val = compress_coredump(cprm, uncomp_src_buf, compressed_buf,
+								 ULTIMATE_COMP_BUF_SIZE, &crc32_val, &z_finish);
+
+				if (ret_comp_val < 0) {
+					pr_alert("2nd compress_coredump() return fail\n");
+					goto end_coredump;
+				}
+
+				vma_page_cnt = 0;   /* uncomp_src_buf full, so reset vma_page_cnt */
+				is_buf_full = 0;
+
+				memset(uncomp_src_buf, 0, ULTIMATE_COMP_BUF_SIZE);
+			}
+#endif
+ 		}
+#ifdef CONFIG_BINFMT_ELF_COMP
+		if (buf_usage_cnt > 1)   /* logic error check */
+			pr_alert("coredump logic Bug, buf_usage_cnt "
+			       ":%d, line : %d\n", buf_usage_cnt, __LINE__);
+		else if (buf_usage_cnt == 1) {
+			if (last_vma == 1)
+				z_finish = 1;
+
+			switch (vma_type) {
+			case CORE_SMALL_VMA:
+				ret_comp_val = compress_coredump(cprm,
+								 uncomp_src_buf,
+								 compressed_buf,
+								 vma_size,
+								 &crc32_val, &z_finish);
+
+				if (ret_comp_val < 0) {
+					pr_alert("3nd compress_coredump() return fail\n");
+					goto end_coredump;
+				}
+
+				break;
+
+			case CORE_BIG_VMA:
+				ret_comp_val = compress_coredump(cprm, uncomp_src_buf, compressed_buf,
+								 vma_size - ULTIMATE_COMP_BUF_SIZE*is_buf_full_cnt,
+								 &crc32_val, &z_finish);
+
+				if (ret_comp_val < 0) {
+					pr_alert("4nd compress_coredump() return fail\n");
+					goto end_coredump;
+				}
+
+				break;
+
+			default: /* logic error check */
+				pr_alert("coredump logic Bug, vma_type :%d, line : %d\n", vma_type, __LINE__);
+				break;
+			}
+		}
+		/* vma mem buffer init */
+		memset(uncomp_src_buf, 0, ULTIMATE_COMP_BUF_SIZE);
+		vma_size = 0;
+		is_buf_full_cnt = 0;
+#endif
+ 	}
+#ifdef CONFIG_BINFMT_ELF_COMP
+	coredump_debug("Process addr space debug Info\n");
+	coredump_debug("vma_cnt : %u\n", vma_cnt);
+	coredump_debug("vm_page : %u\n", vm_page);
+	coredump_debug("user_page_cnt : %u\n", user_page_cnt);
+	coredump_debug("zero_page_cnt : %u\n", zero_page_cnt);
+	coredump_debug("kernel_page_cnt : %u\n", kernel_page_cnt);
+
+	/* gzip deflate end */
+	zlib_deflateEnd(&def_strm);
+
+	/* calc original coredump file size, used in GZIP tailer */
+	uncomp_coredump_file_size = aligned_elf_foffset;
+	uncomp_coredump_file_size += (vm_page * PAGE_SIZE);
+ 
+	coredump_debug("uncomp_coredump_file_size : %lu\n", uncomp_coredump_file_size);
+
+	if (set_gzip_tailer(cprm, &crc32_val, &uncomp_coredump_file_size) < 0)
+		pr_alert("set_gzip_tailer() return fail\n");
+#else
+	if (!elf_core_write_extra_data(cprm))	/*TODO : Supplement error check
+						messages if implemented in future*/
+ 		goto end_coredump;
+ 
+	if (e_phnum == PN_XNUM) {
+		if (!dump_emit(cprm, shdr4extnum, sizeof(*shdr4extnum))) {
+			pr_alert("[COREDUMP_FAIL|%s] Failed writing shdr4extnum to file\n",
+				 corename);
+			goto end_coredump;
 		}
 	}
-
-	if (!elf_core_write_extra_data(cprm))
-		goto end_coredump;
-
-	if (e_phnum == PN_XNUM) {
-		if (!dump_emit(cprm, shdr4extnum, sizeof(*shdr4extnum)))
-			goto end_coredump;
-	}
+#endif
+	has_dumped = 1;
 
 end_coredump:
 	set_fs(fs);
@@ -2303,11 +3053,45 @@ cleanup:
 	kfree(vma_filesz);
 	kfree(phdr4note);
 	kfree(elf);
+#ifdef CONFIG_BINFMT_ELF_COMP
+	/* Ultimate Coredump */
+	vfree(elf_zero_file_buf);
+	vfree(compressed_buf);
+	vfree(uncomp_src_buf);
+	if (locked) {
+		coredump_free_workspaces();
+		mutex_unlock(&deflate_mutex);
+	}
+#endif
 out:
 	return has_dumped;
 }
 
 #endif		/* CONFIG_ELF_CORE */
+
+#if !defined(CONFIG_COMPAT) && defined(CONFIG_MINIMAL_CORE)
+int minmal_core_fill_note(struct elfhdr *elf, int phdrs,
+				struct elf_note_info *info,
+				const siginfo_t *siginfo, struct pt_regs *regs);
+void minimal_core_fill_phdr(struct elf_phdr *phdr, int sz, loff_t offset);
+void minimal_core_free_note(struct elf_note_info *info);
+
+int minmal_core_fill_note(struct elfhdr *elf, int phdrs,
+			struct elf_note_info *info,
+			const siginfo_t *siginfo, struct pt_regs *regs)
+{
+	return fill_note_info(elf, phdrs, info, siginfo, regs);
+}
+void minimal_core_fill_phdr(struct elf_phdr *phdr, int sz, loff_t offset)
+{
+	fill_elf_note_phdr(phdr, sz, offset);
+}
+
+void minimal_core_free_note(struct elf_note_info *info)
+{
+	free_note_info(info);
+}
+#endif
 
 static int __init init_elf_binfmt(void)
 {

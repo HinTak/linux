@@ -181,7 +181,12 @@ obj-$(CONFIG_MFD_HI6421_PMIC)	+= hi6421-pmic-core.o
 obj-$(CONFIG_MFD_DLN2)		+= dln2.o
 obj-$(CONFIG_MFD_RT5033)	+= rt5033.o
 obj-$(CONFIG_MFD_SKY81452)	+= sky81452.o
-
+ifdef CONFIG_SDP_MICOM_MSGBOX
+obj-$(CONFIG_MFD_SDP_MICOM)     += sdp_micom_messagebox.o
+else
+obj-$(CONFIG_MFD_SDP_MICOM)     += sdp_micom_uart.o
+endif
 intel-soc-pmic-objs		:= intel_soc_pmic_core.o intel_soc_pmic_crc.o
 obj-$(CONFIG_INTEL_SOC_PMIC)	+= intel-soc-pmic.o
 obj-$(CONFIG_MFD_MT6397)	+= mt6397-core.o
+

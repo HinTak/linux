@@ -20,6 +20,21 @@
 #include <linux/sched.h>
 #include <linux/ktime.h>
 #include <linux/trace_clock.h>
+#ifdef CONFIG_KDEBUGD_FTRACE
+#include "kdbg_util.h"
+#include <trace/kdbg_ftrace_helper.h>
+#include <trace/kdbg-ftrace.h>
+#endif /* CONFIG_KDEBUGD_FTRACE */
+
+#ifdef CONFIG_USE_HW_CLOCK_FOR_TRACE
+#if defined(CONFIG_SDP_HW_CLOCK)
+#include <mach/sdp_hwclock.h>
+#elif defined(CONFIG_NVT_HW_CLOCK)
+#include <mach/nvt_hwclock.h>
+#elif defined(CONFIG_NVT_CA53_HW_CLOCK)
+#include <mach/nvt_hwclock_ca53.h>
+#endif
+#endif
 
 /*
  * trace_clock_local(): the simplest and least coherent tracing clock.
@@ -31,13 +46,21 @@ u64 notrace trace_clock_local(void)
 {
 	u64 clock;
 
+	preempt_disable_notrace();
+#ifdef CONFIG_USE_HW_CLOCK_FOR_TRACE
+        /* SDP or NVT HW clock, starts ticking from power on of the board */
+        clock = hwclock_ns((uint32_t *)hwclock_get_va());
+#else
 	/*
 	 * sched_clock() is an architecture implemented, fast, scalable,
 	 * lockless clock. It is not guaranteed to be coherent across
 	 * CPUs, nor across CPU idle events.
 	 */
-	preempt_disable_notrace();
 	clock = sched_clock();
+#ifdef CONFIG_KDEBUGD_FTRACE_HR_CLOCK
+	clock += (u64)kdbg_ftrace_timekeeping_get_ns_raw();
+#endif /* CONFIG_KDEBUGD_FTRACE_HR_CLOCK */
+#endif
 	preempt_enable_notrace();
 
 	return clock;

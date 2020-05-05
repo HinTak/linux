@@ -421,7 +421,7 @@ export MAKE AWK GENKSYMS INSTALLKERNEL PERL PYTHON UTS_MACHINE
 export HOSTCXX HOSTCXXFLAGS LDFLAGS_MODULE CHECK CHECKFLAGS
 
 export KBUILD_CPPFLAGS NOSTDINC_FLAGS LINUXINCLUDE OBJCOPYFLAGS LDFLAGS
-export KBUILD_CFLAGS CFLAGS_KERNEL CFLAGS_MODULE CFLAGS_GCOV CFLAGS_KASAN
+export KBUILD_CFLAGS CFLAGS_KERNEL CFLAGS_MODULE CFLAGS_GCOV CFLAGS_KASAN CFLAGS_UBSAN
 export KBUILD_AFLAGS AFLAGS_KERNEL AFLAGS_MODULE
 export KBUILD_AFLAGS_MODULE KBUILD_CFLAGS_MODULE KBUILD_LDFLAGS_MODULE
 export KBUILD_AFLAGS_KERNEL KBUILD_CFLAGS_KERNEL
@@ -614,7 +614,7 @@ KBUILD_CFLAGS	+= $(call cc-option,-fno-delete-null-pointer-checks,)
 ifdef CONFIG_CC_OPTIMIZE_FOR_SIZE
 KBUILD_CFLAGS	+= -Os $(call cc-disable-warning,maybe-uninitialized,)
 else
-KBUILD_CFLAGS	+= -O2
+KBUILD_CFLAGS	+= -O2 $(call cc-disable-warning,maybe-uninitialized,)
 endif
 
 # Tell gcc to never replace conditional load with a non-conditional one
@@ -713,6 +713,8 @@ else
 KBUILD_CFLAGS	+= -g
 endif
 KBUILD_AFLAGS	+= -Wa,-gdwarf-2
+else
+KBUILD_CFLAGS	+= -g
 endif
 ifdef CONFIG_DEBUG_INFO_DWARF4
 KBUILD_CFLAGS	+= $(call cc-option, -gdwarf-4,)
@@ -762,6 +764,17 @@ KBUILD_CFLAGS	+= $(call cc-option,-fno-strict-overflow)
 # conserve stack if available
 KBUILD_CFLAGS   += $(call cc-option,-fconserve-stack)
 
+# disallow warnings
+KBUILD_CFLAGS   += $(call cc-option,-Wno-unused-function)
+KBUILD_CFLAGS   += $(call cc-option,-Wno-unused-variable)
+KBUILD_CFLAGS   += $(call cc-option,-Werror)
+# FIXME:
+# Submit Date: 17-03-22
+#
+# For GCC 6.2.1 toolchain upgrade, 
+# it adjusts error level of indentation to warning level.
+KBUILD_CFLAGS   += $(call cc-option,-Wno-error=misleading-indentation)
+
 # disallow errors like 'EXPORT_GPL(foo);' with missing header
 KBUILD_CFLAGS   += $(call cc-option,-Werror=implicit-int)
 
@@ -782,6 +795,7 @@ endif
 
 include scripts/Makefile.kasan
 include scripts/Makefile.extrawarn
+include scripts/Makefile.ubsan
 
 # Add any arch overrides and user supplied CPPFLAGS, AFLAGS and CFLAGS as the
 # last assignments
@@ -885,6 +899,27 @@ export mod_sign_cmd
 
 ifeq ($(KBUILD_EXTMOD),)
 core-y		+= kernel/ mm/ fs/ ipc/ security/ crypto/ block/
+
+#for kdebugd
+ifdef CONFIG_KDEBUGD
+KDBGINCLUDE     := -Ikernel/kdebugd\
+		-Ikernel/kdebugd/include \
+		-Ikernel/kdebugd/include/kdebugd \
+                -Ikernel/kdebugd/aop \
+                -Ikernel/kdebugd/elf \
+                -Ikernel/kdebugd/elf/dem_src
+
+LINUXINCLUDE    += $(KDBGINCLUDE)
+export LINUXINCLUDE
+endif
+
+#for t2ddebugd
+T2DDBGINCLUDE     := -Ikernel/t2ddebugd\
+		-Ikernel/t2ddebugd/include \
+		-Ikernel/t2ddebugd/include/t2ddebugd
+
+LINUXINCLUDE    += $(T2DDBGINCLUDE)
+export LINUXINCLUDE
 
 vmlinux-dirs	:= $(patsubst %/,%,$(filter %/, $(init-y) $(init-m) \
 		     $(core-y) $(core-m) $(drivers-y) $(drivers-m) \

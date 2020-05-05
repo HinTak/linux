@@ -14,6 +14,8 @@ struct squashfs_page_actor {
 	int	pages;
 	int	length;
 	int	next_page;
+	/* for squashfs debugger */
+	int	k;
 };
 
 static inline struct squashfs_page_actor *squashfs_page_actor_init(void **page,
@@ -60,6 +62,8 @@ struct squashfs_page_actor {
 	int	pages;
 	int	length;
 	int	next_page;
+	/* for squashfs debugger */
+	int	k;
 };
 
 extern struct squashfs_page_actor *squashfs_page_actor_init(void **, int, int);

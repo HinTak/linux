@@ -82,12 +82,26 @@ struct resource crashk_low_res = {
 	.flags = IORESOURCE_BUSY | IORESOURCE_MEM
 };
 
+#ifdef CONFIG_KEXEC_CSYSTEM
+#define kexec_on_die 1
+/*
+ * The VDLP does seperate die and oops by CONFIG_BUSYLOOP_WHILE_OOPS config.
+ * For this reason, kexec on die and kexec on panic should be handled
+ * independently. Becuase This function in only used in die (e.g. oops_end),
+ * it always return 1
+ */
+int kexec_should_crash(struct task_struct *p)
+{
+	return kexec_on_die;
+}
+#else 
 int kexec_should_crash(struct task_struct *p)
 {
 	if (in_interrupt() || !p->pid || is_global_init(p) || panic_on_oops)
 		return 1;
 	return 0;
 }
+#endif
 
 /*
  * When kexec transitions to the new kernel there is a one-to-one
@@ -1471,9 +1485,13 @@ void crash_kexec(struct pt_regs *regs)
 	 */
 	if (mutex_trylock(&kexec_mutex)) {
 		if (kexec_crash_image) {
+#ifdef CONFIG_KEXEC_CSYSTEM
+			struct arm_regs_t fixed_regs;
+			crash_setup_regs(&fixed_regs);
+#else
 			struct pt_regs fixed_regs;
-
 			crash_setup_regs(&fixed_regs, regs);
+#endif
 			crash_save_vmcoreinfo();
 			machine_crash_shutdown(&fixed_regs);
 			machine_kexec(kexec_crash_image);
@@ -1580,6 +1598,27 @@ static void final_note(u32 *buf)
 	memcpy(buf, &note, sizeof(note));
 }
 
+#ifdef CONFIG_KEXEC_CSYSTEM
+void crash_save_cpu(struct arm_regs_t *arm_regs, int cpu)
+{
+	u32 *buf;
+
+	if ((cpu < 0) || (cpu >= nr_cpu_ids))
+		return;
+
+	buf = (u32 *)per_cpu_ptr(crash_notes, cpu);
+	if (!buf)
+		return ;
+	
+	arm_regs->cpu = cpu;
+	arm_regs->pid = current->pid;
+	buf = append_elf_note(buf, KEXEC_CORE_NOTE_NAME, NT_PRSTATUS,
+			      arm_regs, sizeof(*arm_regs));
+	final_note(buf);
+	
+	pr_info("CPU %u register dump completed\n", smp_processor_id());
+}
+#else
 void crash_save_cpu(struct pt_regs *regs, int cpu)
 {
 	struct elf_prstatus prstatus;
@@ -1605,6 +1644,7 @@ void crash_save_cpu(struct pt_regs *regs, int cpu)
 			      &prstatus, sizeof(prstatus));
 	final_note(buf);
 }
+#endif
 
 static int __init crash_notes_memory_init(void)
 {
@@ -1967,7 +2007,7 @@ static int __init crash_save_vmcoreinfo_init(void)
 	VMCOREINFO_STRUCT_SIZE(list_head);
 	VMCOREINFO_SIZE(nodemask_t);
 	VMCOREINFO_OFFSET(page, flags);
-	VMCOREINFO_OFFSET(page, _count);
+	VMCOREINFO_OFFSET(page, _refcount);
 	VMCOREINFO_OFFSET(page, mapping);
 	VMCOREINFO_OFFSET(page, lru);
 	VMCOREINFO_OFFSET(page, _mapcount);

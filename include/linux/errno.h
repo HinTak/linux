@@ -29,4 +29,28 @@
 #define EJUKEBOX	528	/* Request initiated, but will not complete before timeout */
 #define EIOCBQUEUED	529	/* iocb queued, will get completion event */
 
+#define SAMSUNG_HYPERUART_PREALLOC_SUPPORT	/* pre-allocated memory */
+#define SAMSUNG_USBNET_HYPERUART_IFNAME		/* interface name change */
+#define SAMSUNG_HYPERUART_SDB_PUSH_FIX		/* Reduce Rx buffer size */
+
+#define SAMSUNG_PATCH_WITH_USB_HOTPLUG          // patch for usb hotplug
+#define SAMSUNG_PATCH_WITH_USB_HOTPLUG_MREADER  // patch for usb multicard reader
+#define SAMSUNG_PATCH_WITH_USB_ENHANCEMENT      // stable patch for enhanced speed  and compatibility
+#define SAMSUNG_PATCH_WITH_USB_HID_DISCONNECT_BUGFIX                    // patch fixes hid disconnect issues at suspend and manual disconnect time
+#define KKS_DEBUG(f,a...)
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+#define PARALLEL_RESET_RESUME_USER_PORT_DEVICES                //Patch to enable the reset resume of usb devices connected on user port.
+#endif
+#define SAMSUNG_USB_BTWIFI_RESET_WAIT                        //Patch to wait in a loop till WiFi, BTHUB or hub 1-1 ready for port-reset
+#if defined(CONFIG_USB_AMBIENTMODE)				//Ambient Mode CONFIG selected
+#define USB_AMBIENTMODE						//Ambient Mode support
+#endif
+#if defined(CONFIG_ARCH_SDP1406)  //HawkM only
+#define SAMSUNG_PATCH_TASK_AFFINITY_FOR_PREVENT_OHCI_HANG
+#endif
+#define SAMSUNG_PATCH_RMB_WMB_AT_UNLINK                                   //Patch to add rmb and wmb at unlinking of urb
+#if defined(CONFIG_ARCH_SDP1406) || defined(CONFIG_ARCH_SDP1404)
+#define SAMSUNG_USB_FULL_SPEED_BT_MODIFY_GIVEBACK_URB            //Patch to divide some of operations of hcd_giveback_urb to another function and put that function under a lock.
+#endif
+
 #endif

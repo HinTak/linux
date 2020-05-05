@@ -26,6 +26,13 @@ config DEBUG_PINCTRL
 	help
 	  Say Y here to add some extra checks and diagnostics to PINCTRL calls.
 
+config PINCTRL_SDP
+	bool "Samsung SDP SoCs pin controller driver"
+	depends on OF
+	depends on ARCH_SDP
+	select PINMUX
+	select PINCONF
+
 config PINCTRL_ADI2
 	bool "ADI pin controller driver"
 	depends on BLACKFIN

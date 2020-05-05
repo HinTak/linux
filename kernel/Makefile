@@ -11,6 +11,11 @@ obj-y     = fork.o exec_domain.o panic.o \
 	    notifier.o ksysfs.o cred.o reboot.o \
 	    async.o range.o smpboot.o
 
+obj-$(CONFIG_POWER_SAVING_MODE)   += pwsvmode.o
+
+#Add for DTVLOGD
+obj-$(CONFIG_DTVLOGD)   += dtvlogd.o
+
 obj-$(CONFIG_MULTIUSER) += groups.o
 
 ifdef CONFIG_FUNCTION_TRACER
@@ -82,6 +87,10 @@ obj-$(CONFIG_BINFMT_ELF) += elfcore.o
 obj-$(CONFIG_COMPAT_BINFMT_ELF) += elfcore.o
 obj-$(CONFIG_BINFMT_ELF_FDPIC) += elfcore.o
 obj-$(CONFIG_FUNCTION_TRACER) += trace/
+#Add for T2DDEBUGD
+obj-$(CONFIG_T2D_DEBUGD) += t2ddebugd/
+#Add for KDEBUGD
+obj-$(CONFIG_KDEBUGD)   += kdebugd/
 obj-$(CONFIG_TRACING) += trace/
 obj-$(CONFIG_TRACE_CLOCK) += trace/
 obj-$(CONFIG_RING_BUFFER) += trace/

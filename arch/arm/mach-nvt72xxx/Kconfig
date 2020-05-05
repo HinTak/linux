@@ -1,0 +1,101 @@
+choice
+	prompt "Novatek board selection"
+	depends on ARCH_NVT_V7
+	default ARCH_NVT72658
+
+config ARCH_NVT72668
+	bool "Novatek NVT72668 SoC (Cotex A9x4)"
+	select USB_ARCH_HAS_EHCI if USB_SUPPORT
+	help
+	  This option enables support for systems using Cortex processor based
+	  Novatek Cortex A9X4 72668 motherboard,
+	  for example:
+
+	  - Cortex-A9x4
+
+	  You must boot using a Flattened Device Tree in order to use these
+	  platforms. The traditional (ATAGs) boot method is not usable on
+	  these boards with this option.
+
+config ARCH_NVT72658
+	bool "Novatek NVT72658 SoC (Cotex A9x2)"
+	select USB_ARCH_HAS_EHCI if USB_SUPPORT
+	select ARCH_HAS_CPUFREQ
+	select PM_OPP
+	help
+	  This option enables support for systems using Cortex processor based
+	  Novatek Cortex A9x2 72658 motherboard,
+
+config ARCH_NVT72172
+	bool "Novatek NVT72172 SoC (Cotex CA53 aarch32)"
+	select USB_ARCH_HAS_EHCI if USB_SUPPORT
+	help
+	  This option enables support for systems using Cortex processor based
+	  Novatek Cortex CA53 aarch32 linux motherboard,
+
+config ARCH_NVT72673
+	bool "Novatek NVT72673 SoC (Cotex CA53 aarch32)"
+	select USB_ARCH_HAS_EHCI if USB_SUPPORT
+	help
+	  This option enables support for systems using Cortex processor based
+	  Novatek Cortex CA53 aarch32 linux motherboard,
+
+config ARCH_KANTL
+	bool "Novatek KANTL SoC (Cotex A9x2)"
+	select USB_ARCH_HAS_EHCI if USB_SUPPORT
+	select ARCH_HAS_CPUFREQ
+	select PM_OPP
+	help
+	  This option enables support for systems using Cortex processor based
+	  Novatek Cortex A9x2 NT17M motherboard,
+endchoice
+
+config NVT_HW_CLOCK_ENABLE
+	bool "Enable NVT HW clock driver"
+	depends on ARCH_NVT_V7
+	default n
+	help
+		This config enable the option to choose NVT_CA53_HW_CLOCK or NVT_HW_CLOCK
+
+choice
+	prompt "Novatek hw clock driver selection"
+	depends on NVT_HW_CLOCK_ENABLE
+	default NVT_CA53_HW_CLOCK
+
+config NVT_CA53_HW_CLOCK
+    bool "NVT CA53 HW clock driver"
+    depends on PLAT_NOVATEK
+    help
+      NVT HW clock driver
+      Use CA53 CPU physical timer(64bit) to calculate time.
+
+config NVT_HW_CLOCK
+    bool "NVT HW clock driver"
+    depends on PLAT_NOVATEK
+    help
+      NVT HW clock driver
+      Use CPU Global timer(64bit) to calculate time.
+      formula :
+      [(PRESCALER_value+1)x(Load_value+1)] / PERIPH_CLOCK
+
+endchoice
+
+config NVT_HW_CLOCK_TEST
+    bool "Test NVT HW clock"
+    depends on NVT_HW_CLOCK || NVT_CA53_HW_CLOCK
+    help
+      Creat a file node that can test hw clock function
+      EX : cat proc/g_timer
+      Result :
+        1st Get Gtimer time!
+        Gtimer :  time      = xxxxx
+        2nd Get Gtimer time!
+        Gtimer :  time      = xxxxx + 10 sec
+        3rd Get Gtimer time!
+        Gtimer :  time      = xxxxx + 20 sec
+
+config ARCH_PRENT17M
+	bool "Novatek PreNT17M Config"
+	help
+	  This option enables support for PreNT17M platform
+

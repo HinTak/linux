@@ -56,6 +56,20 @@ void __cpu_suspend_save(u32 *ptr, u32 ptrsz, u32 sp, u32 *save_ptr)
 {
 	u32 *ctx = ptr;
 
+#if defined(CONFIG_ARM_LPAE) & defined(CONFIG_SPARSE_LOWMEM_EXT_MAP)
+	/* 
+	 * if lowmem is mapped up to 33bit, kernel stack could be set 33bit.
+	 * it makes invalid address deference based on phys addr due to MMU off.
+	 * To resolve this issue to assign restricted 32 bit memory on save_ptr
+	 * in cpu_suspend_alloc_sp() as well as store data in sleep_save_sp allocated.
+	 * instead of stack.
+	 */
+	*save_ptr++ = virt_to_phys(idmap_pgd);
+	*save_ptr++ = sp;
+	*save_ptr++ = virt_to_phys(cpu_do_resume);
+
+	cpu_do_suspend(save_ptr);
+#else
 	*save_ptr = virt_to_phys(ptr);
 
 	/* This must correspond to the LDM in cpu_resume() assembly */
@@ -64,7 +78,7 @@ void __cpu_suspend_save(u32 *ptr, u32 ptrsz, u32 sp, u32 *save_ptr)
 	*ptr++ = virt_to_phys(cpu_do_resume);
 
 	cpu_do_suspend(ptr);
-
+#endif
 	flush_cache_louis();
 
 	/*
@@ -86,14 +100,34 @@ void __cpu_suspend_save(u32 *ptr, u32 ptrsz, u32 sp, u32 *save_ptr)
 
 extern struct sleep_save_sp sleep_save_sp;
 
+#if defined(CONFIG_ARM_LPAE) & defined(CONFIG_SPARSE_LOWMEM_EXT_MAP)
+extern void *suspend_save_sp;
+#endif
 static int cpu_suspend_alloc_sp(void)
 {
 	void *ctx_ptr;
+#if defined(CONFIG_ARM_LPAE) & defined(CONFIG_SPARSE_LOWMEM_EXT_MAP)
+	/* ctx_ptr is used for suspend/resume.
+	 * This address must be allocated in range of 32bit phys.
+	 * when resume load resume fn, idmap_pgd, sp 
+	 * from sleep_save_sp based on phys due to MMU off.
+	 */
+	if (mpidr_hash_size()*sizeof(u32) <= PAGE_SIZE - PTRS_PER_PGD * sizeof(pgd_t)) {
+		ctx_ptr =(void*)((char*)suspend_save_sp + (unsigned long)(PTRS_PER_PGD * sizeof(pgd_t)));
+		goto out;
+	} 		
+	pr_err("[Critical Error] %s size:%d bigger than %lu\n",
+			__func__, mpidr_hash_size()*sizeof(u32),
+			(PAGE_SIZE - PTRS_PER_PGD * sizeof(pgd_t)));
+#endif
 	/* ctx_ptr is an array of physical addresses */
 	ctx_ptr = kcalloc(mpidr_hash_size(), sizeof(u32), GFP_KERNEL);
 
 	if (WARN_ON(!ctx_ptr))
 		return -ENOMEM;
+#if defined(CONFIG_ARM_LPAE) & defined(CONFIG_SPARSE_LOWMEM_EXT_MAP)
+out:
+#endif
 	sleep_save_sp.save_ptr_stash = ctx_ptr;
 	sleep_save_sp.save_ptr_stash_phys = virt_to_phys(ctx_ptr);
 	sync_cache_w(&sleep_save_sp);

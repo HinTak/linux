@@ -28,4 +28,21 @@ config SPI_FSL_QUADSPI
 	  This enables support for the Quad SPI controller in master mode.
 	  We only connect the NOR to this controller now.
 
+config SDP_MICOM_MEMIF
+	tristate "SDP Micom MEMIF driver(access micom serial flash)"
+	depends on ARCH_SDP1601 && SDP_MICOM_CONTROLLER
+	default y
+	help
+	  This enables support for accessing micom serial flash by MEMIF.
+
+config SDP_MICOM_MEMIF_USE_COSTOM_ERASE
+	bool "Use custom erase logic"
+	depends on SDP_MICOM_MEMIF
+	default y
+
+config SDP_MICOM_MEMIF_DISABLE_MTD_NODE
+	bool "Disable making MTD Device node"
+	depends on SDP_MICOM_MEMIF
+	default y
+
 endif # MTD_SPI_NOR

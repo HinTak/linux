@@ -27,6 +27,14 @@ struct fdtable {
 	unsigned long *close_on_exec;
 	unsigned long *open_fds;
 	struct rcu_head rcu;
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+	unsigned int cur_fdn;
+	unsigned int file_fdn;
+	unsigned int socket_fdn;
+	unsigned int pipe_fdn;
+	unsigned int etc_fdn;
+	unsigned int clear_flag;
+#endif
 };
 
 static inline bool close_on_exec(int fd, const struct fdtable *fdt)

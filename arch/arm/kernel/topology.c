@@ -106,7 +106,7 @@ static void __init parse_dt_topology(void)
 		/* too early to use cpu->of_node */
 		cn = of_get_cpu_node(cpu, NULL);
 		if (!cn) {
-			pr_err("missing device node for CPU %d\n", cpu);
+			pr_info("missing device node for CPU %d\n", cpu);
 			continue;
 		}
 
@@ -119,7 +119,7 @@ static void __init parse_dt_topology(void)
 
 		rate = of_get_property(cn, "clock-frequency", &len);
 		if (!rate || len != 4) {
-			pr_err("%s missing clock-frequency property\n",
+			pr_info("%s missing clock-frequency property\n",
 				cn->full_name);
 			continue;
 		}

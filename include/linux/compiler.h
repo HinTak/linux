@@ -57,7 +57,11 @@ extern void __chk_io_ptr(const volatile void __iomem *);
 #ifdef CC_USING_HOTPATCH
 #define notrace __attribute__((hotpatch(0,0)))
 #else
+#ifdef __cplusplus
+#define notrace
+#else
 #define notrace __attribute__((no_instrument_function))
+#endif
 #endif
 
 /* Intel compiler defines __GNUC__. So we will overwrite implementations
@@ -97,6 +101,19 @@ struct ftrace_branch_data {
 	};
 };
 
+#ifdef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
+#define TRACER_BRANCH (1<<3)
+extern int kdbg_ftrace_br_tracer;
+
+static inline int
+check_branch_tracer(void)
+{
+	return kdbg_ftrace_br_tracer & TRACER_BRANCH;
+}
+#else
+# define check_branch_tracer() (0)
+#endif /*CONFIG_KDEBUGD_FTRACE_OPTIMIZATION*/
+
 /*
  * Note: DISABLE_BRANCH_PROFILING can be used by special lowlevel code
  * to disable branch tracing on a per file basis.
@@ -128,12 +145,21 @@ void ftrace_likely_update(struct ftrace_branch_data *f, int val, int expect);
  * value is always the same.  This idea is taken from a similar patch
  * written by Daniel Walker.
  */
+#ifndef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
 # ifndef likely
 #  define likely(x)	(__builtin_constant_p(x) ? !!(x) : __branch_check__(x, 1))
 # endif
 # ifndef unlikely
 #  define unlikely(x)	(__builtin_constant_p(x) ? !!(x) : __branch_check__(x, 0))
 # endif
+#else
+# ifndef likely
+#  define likely(x)     (__builtin_constant_p(x) ? !!(x) : check_branch_tracer() ? __branch_check__(x, 1) : __builtin_expect(!!(x), 1))
+# endif
+# ifndef unlikely
+#  define unlikely(x)   (__builtin_constant_p(x) ? !!(x) : check_branch_tracer() ?  __branch_check__(x, 0) : __builtin_expect(!!(x), 0))
+# endif
+#endif
 
 #ifdef CONFIG_PROFILE_ALL_BRANCHES
 /*

@@ -603,16 +603,16 @@ static int __remove_mapping(struct address_space *mapping, struct page *page,
 	 *
 	 * Reversing the order of the tests ensures such a situation cannot
 	 * escape unnoticed. The smp_rmb is needed to ensure the page->flags
-	 * load is not satisfied before that of page->_count.
+	 * load is not satisfied before that of page->_refcount.
 	 *
 	 * Note that if SetPageDirty is always performed via set_page_dirty,
 	 * and thus under tree_lock, then this ordering is not required.
 	 */
-	if (!page_freeze_refs(page, 2))
+	if (!page_ref_freeze(page, 2))
 		goto cannot_free;
-	/* note: atomic_cmpxchg in page_freeze_refs provides the smp_rmb */
+	/* note: atomic_cmpxchg in page_ref_freeze provides the smp_rmb */
 	if (unlikely(PageDirty(page))) {
-		page_unfreeze_refs(page, 2);
+		page_ref_unfreeze(page, 2);
 		goto cannot_free;
 	}
 
@@ -668,7 +668,7 @@ int remove_mapping(struct address_space *mapping, struct page *page)
 		 * drops the pagecache ref for us without requiring another
 		 * atomic operation.
 		 */
-		page_unfreeze_refs(page, 1);
+		page_ref_unfreeze(page, 1);
 		return 1;
 	}
 	return 0;
@@ -749,6 +749,7 @@ redo:
 enum page_references {
 	PAGEREF_RECLAIM,
 	PAGEREF_RECLAIM_CLEAN,
+	PAGEREF_FORCE_RECLAIM,
 	PAGEREF_KEEP,
 	PAGEREF_ACTIVATE,
 };
@@ -837,6 +838,12 @@ static void page_check_dirty_writeback(struct page *page,
 		mapping->a_ops->is_dirty_writeback(page, dirty, writeback);
 }
 
+enum shrink_page_list_type {
+	FORCED_RECLAIM_TYPE_NONE,
+	FORCED_RECLAIM_TYPE_FILE,
+	FORCED_RECLAIM_TYPE_ANON,
+};
+
 /*
  * shrink_page_list() returns the number of reclaimed pages
  */
@@ -849,7 +856,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 				      unsigned long *ret_nr_congested,
 				      unsigned long *ret_nr_writeback,
 				      unsigned long *ret_nr_immediate,
-				      bool force_reclaim)
+				      int force_reclaim_type)
 {
 	LIST_HEAD(ret_pages);
 	LIST_HEAD(free_pages);
@@ -869,7 +876,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		int may_enter_fs;
 		enum page_references references = PAGEREF_RECLAIM_CLEAN;
 		bool dirty, writeback;
-
+		
 		cond_resched();
 
 		page = lru_to_page(page_list);
@@ -878,6 +885,10 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 		if (!trylock_page(page))
 			goto keep;
 
+		if (force_reclaim_type == FORCED_RECLAIM_TYPE_ANON) {
+			references = PAGEREF_FORCE_RECLAIM;
+			zone = page_zone(page);
+		}
 		VM_BUG_ON_PAGE(PageActive(page), page);
 		VM_BUG_ON_PAGE(page_zone(page) != zone, page);
 
@@ -987,7 +998,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			}
 		}
 
-		if (!force_reclaim)
+		if (force_reclaim_type == FORCED_RECLAIM_TYPE_NONE)
 			references = page_check_references(page, sc);
 
 		switch (references) {
@@ -997,6 +1008,7 @@ static unsigned long shrink_page_list(struct list_head *page_list,
 			goto keep_locked;
 		case PAGEREF_RECLAIM:
 		case PAGEREF_RECLAIM_CLEAN:
+		case PAGEREF_FORCE_RECLAIM:
 			; /* try to reclaim the page below */
 		}
 
@@ -1147,6 +1159,12 @@ free_it:
 		 * appear not as the counts should be low
 		 */
 		list_add(&page->lru, &free_pages);
+		/*
+		 * FORCED_RECLAIM_TYPE_ANON pages [enforced per-process reclaim] may be from
+		 * different zones, use page's zone.
+		 */
+		if (force_reclaim_type == FORCED_RECLAIM_TYPE_ANON)
+			dec_zone_page_state(page, NR_ISOLATED_ANON + page_is_file_cache(page));
 		continue;
 
 cull_mlocked:
@@ -1206,10 +1224,47 @@ unsigned long reclaim_clean_pages_from_list(struct zone *zone,
 
 	ret = shrink_page_list(&clean_pages, zone, &sc,
 			TTU_UNMAP|TTU_IGNORE_ACCESS,
-			&dummy1, &dummy2, &dummy3, &dummy4, &dummy5, true);
+			&dummy1, &dummy2, &dummy3, &dummy4, &dummy5,
+			FORCED_RECLAIM_TYPE_FILE);
 	list_splice(&clean_pages, page_list);
 	mod_zone_page_state(zone, NR_ISOLATED_FILE, -ret);
 	return ret;
+}
+
+unsigned long reclaim_pages_from_list(struct list_head *page_list)
+{
+	struct scan_control sc = {
+		.gfp_mask = GFP_KERNEL,
+		.priority = DEF_PRIORITY,
+		.may_writepage = 1,
+		.may_unmap = 1,
+		.may_swap = 1,
+	};
+
+	unsigned long nr_reclaimed, dummy1, dummy2, dummy3, dummy4, dummy5;
+	struct page *page;
+
+	list_for_each_entry(page, page_list, lru)
+		ClearPageActive(page);
+
+	/*
+	 * We don't have any specific zone here, so pass NULL.
+	 */
+	nr_reclaimed = shrink_page_list(page_list, NULL, &sc,
+					TTU_UNMAP|TTU_IGNORE_ACCESS,
+					&dummy1, &dummy2, &dummy3,
+					&dummy4, &dummy5,
+					FORCED_RECLAIM_TYPE_ANON);
+
+	while (!list_empty(page_list)) {
+		page = lru_to_page(page_list);
+		list_del(&page->lru);
+		dec_zone_page_state(page, NR_ISOLATED_ANON +
+				page_is_file_cache(page));
+		putback_lru_page(page);
+	}
+
+	return nr_reclaimed;
 }
 
 /*
@@ -1338,6 +1393,7 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 			continue;
 
 		default:
+			dump_page(page, "Invalid page on LRU list");
 			BUG();
 		}
 	}
@@ -1523,9 +1579,15 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 	int file = is_file_lru(lru);
 	struct zone *zone = lruvec_zone(lruvec);
 	struct zone_reclaim_stat *reclaim_stat = &lruvec->reclaim_stat;
+	bool stalled = false;
 
 	while (unlikely(too_many_isolated(zone, file, sc))) {
-		congestion_wait(BLK_RW_ASYNC, HZ/10);
+		if (stalled)
+			return 0;
+
+		/* wait a bit for the reclaimer. */
+		schedule_timeout_interruptible(HZ/10);
+		stalled = true;
 
 		/* We are about to die and free our memory. Return now. */
 		if (fatal_signal_pending(current))
@@ -1562,7 +1624,7 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 	nr_reclaimed = shrink_page_list(&page_list, zone, sc, TTU_UNMAP,
 				&nr_dirty, &nr_unqueued_dirty, &nr_congested,
 				&nr_writeback, &nr_immediate,
-				false);
+				FORCED_RECLAIM_TYPE_NONE);
 
 	spin_lock_irq(&zone->lru_lock);
 
@@ -1665,7 +1727,7 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
  * It is safe to rely on PG_active against the non-LRU pages in here because
  * nobody will play with that bit on a non-LRU page.
  *
- * The downside is that we have to touch page->_count against each page.
+ * The downside is that we have to touch page->_refcount against each page.
  * But we had to alter page->flags anyway.
  */
 
@@ -2470,7 +2532,7 @@ static bool shrink_zones(struct zonelist *zonelist, struct scan_control *sc)
 		sc->gfp_mask |= __GFP_HIGHMEM;
 
 	for_each_zone_zonelist_nodemask(zone, z, zonelist,
-					requested_highidx, sc->nodemask) {
+					gfp_zone(sc->gfp_mask), sc->nodemask) {
 		enum zone_type classzone_idx;
 
 		if (!populated_zone(zone))

@@ -21,6 +21,9 @@
 
 #include <asm/psci.h>
 #include <asm/smp_plat.h>
+#include <asm/cacheflush.h>
+#include <asm/cp15.h>
+#include <asm/io.h>
 
 /*
  * psci_smp assumes that the following is true about PSCI:
@@ -84,6 +87,52 @@ int __ref psci_cpu_kill(unsigned int cpu)
 	for (i = 0; i < 10; i++) {
 		err = psci_ops.affinity_info(cpu_logical_map(cpu), 0);
 		if (err == PSCI_0_2_AFFINITY_LEVEL_OFF) {
+#ifdef CONFIG_ARCH_SDP1601
+			u32 val;
+			const int wfi_check_max = 10000000;
+			int wfi_check_count = 0;
+			void __iomem *sdp_bootram_power;
+
+			pr_info("SDP PSCI CPU%d killing...\n", cpu);
+
+			sdp_bootram_power = ioremap(0x00400000, 0x400); 
+			while(!(readl(sdp_bootram_power) & (1 << (cpu + 24))) && (++wfi_check_count < wfi_check_max));//wait for CPU wfi
+			val = readl(sdp_bootram_power + 0x0C);
+			val &= (~(1 << (cpu + 4)));
+			writel(val, sdp_bootram_power + 0x0C);
+
+			if(wfi_check_count >= wfi_check_max) {
+				void __iomem *gicbase = NULL;
+
+				pr_err("SDP PSCI forced killing CPU%d, cnt %d\n", cpu, wfi_check_count);
+
+				pr_err("SDP PSCI CPU%d PowerCont Reg 0x%08x\n", cpu, readl(sdp_bootram_power + 0x10 + (cpu * 4)));
+
+				pr_err("DUMP IRQ Status Reg\n");
+				print_hex_dump(KERN_ERR, "IRQStatus ", DUMP_PREFIX_ADDRESS, 16, 4,
+					sdp_bootram_power+0x90, 0x20, false);
+
+				gicbase = ioremap(0x00431000, 0x1000);
+				if(gicbase) {
+					pr_err("DUMP GIC Set-Enable Reg\n");
+					print_hex_dump(KERN_ERR, "ICDISER ", DUMP_PREFIX_ADDRESS, 16, 4, gicbase+0x100, 0x20, false);
+					pr_err("DUMP GIC Set-Pening Reg\n");
+					print_hex_dump(KERN_ERR, "ICDISPR ", DUMP_PREFIX_ADDRESS, 16, 4, gicbase+0x200, 0x20, false);
+					pr_err("DUMP GIC Processor Target Reg\n");
+					print_hex_dump(KERN_ERR, "ICDIPTR ", DUMP_PREFIX_ADDRESS, 16, 4, gicbase+0x800, 0x100, false);
+
+					iounmap(gicbase);
+				} else {
+					pr_err("ioremap(0x00431000, 0x1000) return NULL\n");
+				}
+			}
+
+			iounmap(sdp_bootram_power);
+
+			if(wfi_check_count > 0) {
+				pr_info("SDP PSCI CPU%d killed. check count %d\n", cpu, wfi_check_count);
+			}
+#endif
 			pr_info("CPU%d killed.\n", cpu);
 			return 1;
 		}

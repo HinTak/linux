@@ -13,6 +13,9 @@
 #include <linux/uaccess.h>
 #include <linux/module.h>
 #include <linux/ftrace.h>
+#ifdef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
+#include <linux/irqflags.h>
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
 
 #include "trace.h"
 
@@ -23,12 +26,17 @@ static DEFINE_PER_CPU(int, tracing_cpu);
 
 static DEFINE_RAW_SPINLOCK(max_trace_lock);
 
+#ifndef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
 enum {
 	TRACER_IRQS_OFF		= (1 << 1),
 	TRACER_PREEMPT_OFF	= (1 << 2),
 };
 
 static int trace_type __read_mostly;
+#else
+int kdbg_ftrace_trace_type __read_mostly;
+EXPORT_SYMBOL(kdbg_ftrace_trace_type);
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
 
 static int save_flags;
 static bool function_enabled;
@@ -40,7 +48,11 @@ static int start_irqsoff_tracer(struct trace_array *tr, int graph);
 static inline int
 preempt_trace(void)
 {
+#ifndef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
 	return ((trace_type & TRACER_PREEMPT_OFF) && preempt_count());
+#else
+	return preempt_count();
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
 }
 #else
 # define preempt_trace() (0)
@@ -50,8 +62,12 @@ preempt_trace(void)
 static inline int
 irq_trace(void)
 {
+#ifndef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
 	return ((trace_type & TRACER_IRQS_OFF) &&
 		irqs_disabled());
+#else
+	return irqs_disabled();
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
 }
 #else
 # define irq_trace() (0)
@@ -652,7 +668,11 @@ static void irqsoff_tracer_stop(struct trace_array *tr)
 #ifdef CONFIG_IRQSOFF_TRACER
 static int irqsoff_tracer_init(struct trace_array *tr)
 {
+#ifndef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
 	trace_type = TRACER_IRQS_OFF;
+#else
+	kdbg_ftrace_trace_type = TRACER_IRQS_OFF;
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
 
 	return __irqsoff_tracer_init(tr);
 }
@@ -685,7 +705,11 @@ static struct tracer irqsoff_tracer __read_mostly =
 #ifdef CONFIG_PREEMPT_TRACER
 static int preemptoff_tracer_init(struct trace_array *tr)
 {
+#ifndef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
 	trace_type = TRACER_PREEMPT_OFF;
+#else
+	kdbg_ftrace_trace_type = TRACER_PREEMPT_OFF;
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
 
 	return __irqsoff_tracer_init(tr);
 }
@@ -721,7 +745,11 @@ static struct tracer preemptoff_tracer __read_mostly =
 
 static int preemptirqsoff_tracer_init(struct trace_array *tr)
 {
+#ifndef CONFIG_KDEBUGD_FTRACE_OPTIMIZATION
 	trace_type = TRACER_IRQS_OFF | TRACER_PREEMPT_OFF;
+#else
+	kdbg_ftrace_trace_type = TRACER_IRQS_OFF | TRACER_PREEMPT_OFF;
+#endif /* CONFIG_KDEBUGD_FTRACE_OPTIMIZATION */
 
 	return __irqsoff_tracer_init(tr);
 }

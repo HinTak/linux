@@ -24,6 +24,10 @@
 #include <trace/events/kmem.h>
 
 #include "slab.h"
+#ifdef CONFIG_KDML
+#include "kdml/kdml_packet.h"
+#include "kdml/kdml.h"
+#endif
 
 enum slab_state slab_state;
 LIST_HEAD(slab_caches);
@@ -921,6 +925,8 @@ EXPORT_SYMBOL(kmalloc_order_trace);
 #define SLABINFO_RIGHTS S_IRUSR
 #endif
 
+extern int seq_printk(struct seq_file *m, const char *f, ...);
+
 static void print_slabinfo_header(struct seq_file *m)
 {
 	/*
@@ -928,20 +934,20 @@ static void print_slabinfo_header(struct seq_file *m)
 	 * without _too_ many complaints.
 	 */
 #ifdef CONFIG_DEBUG_SLAB
-	seq_puts(m, "slabinfo - version: 2.1 (statistics)\n");
+	seq_printk(m, "slabinfo - version: 2.1 (statistics)\n");
 #else
-	seq_puts(m, "slabinfo - version: 2.1\n");
+	seq_printk(m, "slabinfo - version: 2.1\n");
 #endif
-	seq_puts(m, "# name            <active_objs> <num_objs> <objsize> "
+	seq_printk(m, "# name            <active_objs> <num_objs> <objsize> "
 		 "<objperslab> <pagesperslab>");
-	seq_puts(m, " : tunables <limit> <batchcount> <sharedfactor>");
-	seq_puts(m, " : slabdata <active_slabs> <num_slabs> <sharedavail>");
+	seq_printk(m, " : tunables <limit> <batchcount> <sharedfactor>");
+	seq_printk(m, " : slabdata <active_slabs> <num_slabs> <sharedavail>");
 #ifdef CONFIG_DEBUG_SLAB
-	seq_puts(m, " : globalstat <listallocs> <maxobjs> <grown> <reaped> "
+	seq_printk(m, " : globalstat <listallocs> <maxobjs> <grown> <reaped> "
 		 "<error> <maxfreeable> <nodeallocs> <remotefrees> <alienoverflow>");
-	seq_puts(m, " : cpustat <allochit> <allocmiss> <freehit> <freemiss>");
+	seq_printk(m, " : cpustat <allochit> <allocmiss> <freehit> <freemiss>");
 #endif
-	seq_putc(m, '\n');
+	seq_printk(m, "\n");
 }
 
 void *slab_start(struct seq_file *m, loff_t *pos)
@@ -990,16 +996,16 @@ static void cache_show(struct kmem_cache *s, struct seq_file *m)
 
 	memcg_accumulate_slabinfo(s, &sinfo);
 
-	seq_printf(m, "%-17s %6lu %6lu %6u %4u %4d",
+	seq_printk(m, "%-17s %6lu %6lu %6u %4u %4d",
 		   cache_name(s), sinfo.active_objs, sinfo.num_objs, s->size,
 		   sinfo.objects_per_slab, (1 << sinfo.cache_order));
 
-	seq_printf(m, " : tunables %4u %4u %4u",
+	seq_printk(m, " : tunables %4u %4u %4u",
 		   sinfo.limit, sinfo.batchcount, sinfo.shared);
-	seq_printf(m, " : slabdata %6lu %6lu %6lu",
+	seq_printk(m, " : slabdata %6lu %6lu %6lu",
 		   sinfo.active_slabs, sinfo.num_slabs, sinfo.shared_avail);
 	slabinfo_show_stats(m, s);
-	seq_putc(m, '\n');
+	seq_printk(m, "\n");
 }
 
 static int slab_show(struct seq_file *m, void *p)
@@ -1011,6 +1017,23 @@ static int slab_show(struct seq_file *m, void *p)
 	if (is_root_cache(s))
 		cache_show(s, m);
 	return 0;
+}
+
+void print_slabinfo_oom(void)
+{
+	struct kmem_cache *s;
+
+	print_slabinfo_header(NULL);
+
+	if (mutex_trylock(&slab_mutex)) {
+		list_for_each_entry(s, &slab_caches, list) {
+			cache_show(s, NULL);
+		}
+		mutex_unlock(&slab_mutex);
+	} else {
+		pr_info("Unable to print slabinfo report because of "
+				"slab_mutex contention\n");
+	}
 }
 
 #ifdef CONFIG_MEMCG_KMEM
@@ -1067,6 +1090,47 @@ static int __init slab_proc_init(void)
 	return 0;
 }
 module_init(slab_proc_init);
+
+#ifdef CONFIG_KDML
+int kdml_get_cache_list(struct kdml_slab_info_line *slabinfo_arr,
+		const int count, int *result)
+{
+	struct kmem_cache *s = NULL;
+	int i = 0;
+
+	mutex_lock(&slab_mutex);
+
+	list_for_each_entry(s, &slab_caches, list) {
+		struct slabinfo sinfo;
+
+		if (i == count)
+			break;
+
+		/* parse the list and print */
+		if (!is_root_cache(s))
+			continue;
+
+		memset(&sinfo, 0, sizeof(sinfo));
+		get_slabinfo(s, &sinfo);
+
+		memcg_accumulate_slabinfo(s, &sinfo);
+		/* fill the kdml_slab_info_line struct */
+		slabinfo_arr[i].active_objs = sinfo.active_objs;
+		slabinfo_arr[i].num_objs = sinfo.num_objs;
+		slabinfo_arr[i].obj_size = s->size;
+		slabinfo_arr[i].objs_per_slab = sinfo.objects_per_slab;
+		slabinfo_arr[i].cache_order = sinfo.cache_order;
+		slabinfo_arr[i].num_slabs = sinfo.num_slabs;
+		strncpy(slabinfo_arr[i].name, cache_name(s), MAX_CACHE_NAME_LEN - 1);
+		slabinfo_arr[i].name[MAX_CACHE_NAME_LEN - 1] = '\0';
+		i++;
+	}
+	mutex_unlock(&slab_mutex);
+	*result = i;
+	return 0;
+}
+#endif
+
 #endif /* CONFIG_SLABINFO */
 
 static __always_inline void *__do_krealloc(const void *p, size_t new_size,

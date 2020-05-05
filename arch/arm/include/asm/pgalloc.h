@@ -43,6 +43,10 @@ static inline void pud_populate(struct mm_struct *mm, pud_t *pud, pmd_t *pmd)
 	set_pud(pud, __pud(__pa(pmd) | PMD_TYPE_TABLE));
 }
 
+#if defined(CONFIG_ARM_CPU_SUSPEND) & defined(CONFIG_SPARSE_LOWMEM_EXT_MAP)
+pgd_t *suspend_pgd_alloc(struct mm_struct *mm, void* ptr);
+#endif
+
 #else	/* !CONFIG_ARM_LPAE */
 
 /*

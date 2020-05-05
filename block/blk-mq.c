@@ -1908,6 +1908,10 @@ struct request_queue *blk_mq_init_queue(struct blk_mq_tag_set *set)
 {
 	struct request_queue *uninit_q, *q;
 
+	pr_err("Block MQ support disabled due to latency in resume part"
+		" contact VD linux team for more details\n");
+	return ERR_PTR(-EOPNOTSUPP);
+
 	uninit_q = blk_alloc_queue_node(GFP_KERNEL, set->numa_node);
 	if (!uninit_q)
 		return ERR_PTR(-ENOMEM);
@@ -1927,6 +1931,11 @@ struct request_queue *blk_mq_init_allocated_queue(struct blk_mq_tag_set *set,
 	struct blk_mq_ctx __percpu *ctx;
 	unsigned int *map;
 	int i;
+
+
+        pr_err("Block MQ support disabled due to latency in resume part"
+                " contact VD linux team for more details\n");
+        return ERR_PTR(-EOPNOTSUPP);
 
 	ctx = alloc_percpu(struct blk_mq_ctx);
 	if (!ctx)
@@ -2283,4 +2292,4 @@ static int __init blk_mq_init(void)
 
 	return 0;
 }
-subsys_initcall(blk_mq_init);
+//subsys_initcall(blk_mq_init);

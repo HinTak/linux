@@ -5965,3 +5965,8 @@ void ftrace_graph_exit_task(struct task_struct *t)
 	kfree(ret_stack);
 }
 #endif
+
+#ifdef CONFIG_KDEBUGD_FTRACE
+/* Let kdebugd have access to static functions in this file */
+#include "../kdebugd/trace/kdbg_ftrace_dyn_helper.c"
+#endif /* CONFIG_KDEBUGD_FTRACE */

@@ -13,7 +13,7 @@
     GNU General Public License for more details.			     */
 /* ------------------------------------------------------------------------- */
 
-/* With some changes from Kyösti Mälkki <kmalkki@cc.hut.fi>.
+/* With some changes from Kyosti Malkki <kmalkki@cc.hut.fi>.
    All SMBus-related things are written by Frodo Looijaard <frodol@dds.nl>
    SMBus 2.0 support by Mark Studebaker <mdsxyz123@yahoo.com> and
    Jean Delvare <jdelvare@suse.de>
@@ -777,7 +777,8 @@ static int i2c_check_client_addr_validity(const struct i2c_client *client)
 			return -EINVAL;
 	} else {
 		/* 7-bit address, reject the general call address */
-		if (client->addr == 0x00 || client->addr > 0x7f)
+	//	if (client->addr == 0x00 || client->addr > 0x7f)
+		if (client->addr > 0x7f)	/* INX TCON 0x00 SOC141008*/
 			return -EINVAL;
 	}
 	return 0;
@@ -799,6 +800,9 @@ static int i2c_check_addr_validity(unsigned short addr)
 	 *  0x78-0x7b  10-bit slave addressing
 	 *  0x7c-0x7f  Reserved for future purposes
 	 */
+	if(addr == 0x00)	/* INX TCON 0x00 SOC141008*/
+		return 0;
+
 	if (addr < 0x08 || addr > 0x77)
 		return -EINVAL;
 	return 0;
@@ -1301,7 +1305,7 @@ static struct i2c_client *of_i2c_register_device(struct i2c_adapter *adap,
 	return result;
 }
 
-static void of_i2c_register_devices(struct i2c_adapter *adap)
+void of_i2c_register_devices(struct i2c_adapter *adap)
 {
 	struct device_node *node;
 
@@ -1314,6 +1318,8 @@ static void of_i2c_register_devices(struct i2c_adapter *adap)
 	for_each_available_child_of_node(adap->dev.of_node, node)
 		of_i2c_register_device(adap, node);
 }
+EXPORT_SYMBOL(of_i2c_register_devices);
+
 
 static int of_dev_node_match(struct device *dev, void *data)
 {

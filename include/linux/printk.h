@@ -37,7 +37,11 @@ static inline const char *printk_skip_level(const char *buffer)
 #define CONSOLE_LOGLEVEL_SILENT  0 /* Mum's the word */
 #define CONSOLE_LOGLEVEL_MIN	 1 /* Minimum loglevel we let people use */
 #define CONSOLE_LOGLEVEL_QUIET	 4 /* Shhh ..., when booted with "quiet" */
+#ifndef CONFIG_VD_DEFAULT_LOGLEVEL
 #define CONSOLE_LOGLEVEL_DEFAULT 7 /* anything MORE serious than KERN_DEBUG */
+#else
+#define CONSOLE_LOGLEVEL_DEFAULT 5 /* VD default loglevel */
+#endif
 #define CONSOLE_LOGLEVEL_DEBUG	10 /* issue debug messages */
 #define CONSOLE_LOGLEVEL_MOTORMOUTH 15	/* You can't shut this one up */
 
@@ -55,8 +59,27 @@ static inline void console_silent(void)
 
 static inline void console_verbose(void)
 {
+/* VDLinux, if console_loglevel is 0, this func do not work,
+       so skip the check routine, 2010-10-21
+
 	if (console_loglevel)
 		console_loglevel = CONSOLE_LOGLEVEL_MOTORMOUTH;
+*/
+	console_loglevel = CONSOLE_LOGLEVEL_MOTORMOUTH;
+}
+
+static inline void console_default(void)
+{
+/* VDLinux, add new function revert to default loglevel, 2014-02-07
+*/
+	console_loglevel = CONSOLE_LOGLEVEL_DEFAULT;
+}
+
+static inline void console_revert(int old_lvl)
+{
+	/* VDLinux, add new function revert to old loglevel */
+	console_loglevel = old_lvl;
+
 }
 
 struct va_format {
@@ -111,6 +134,12 @@ int no_printk(const char *fmt, ...)
 {
 	return 0;
 }
+
+#ifdef __cplusplus
+
+extern "C" int printk(const char *fmt, ...);
+
+#else // __cplusplus
 
 #ifdef CONFIG_EARLY_PRINTK
 extern asmlinkage __printf(1, 2)
@@ -228,7 +257,13 @@ static inline void show_regs_print_info(const char *log_lvl)
 }
 #endif
 
+#endif // __cplusplus
+
+#ifdef __cplusplus
+asmlinkage void dump_stack(void) __cold;
+#else
 extern asmlinkage void dump_stack(void) __cold;
+#endif
 
 #ifndef pr_fmt
 #define pr_fmt(fmt) fmt
@@ -460,5 +495,22 @@ static inline void print_hex_dump_bytes(const char *prefix_str, int prefix_type,
 	print_hex_dump(KERN_DEBUG, prefix_str, prefix_type, rowsize,	\
 		       groupsize, buf, len, ascii)
 #endif /* defined(CONFIG_DYNAMIC_DEBUG) */
+
+#ifdef CONFIG_EMRG_SAVE_KLOG
+enum klog_error_type {
+        WRITE_RAW_KLOG_TYPE_PANIC = 1,
+        WRITE_RAW_KLOG_TYPE_OOPS,
+	WRITE_RAW_KLOG_TYPE_SOFTLOCKUP,
+	WRITE_RAW_KLOG_TYPE_OOM_PANIC,
+	WRITE_RAW_KLOG_TYPE_SIGILL,
+	WRITE_RAW_KLOG_TYPE_ASYNC_EXT_ABORT,
+	WRITE_RAW_KLOG_TYPE_BAD_PAGE,
+	WRITE_RAW_KLOG_TYPE_CMA_ALLOC_FAIL
+};
+struct pt_regs;
+void write_emrg_klog(struct pt_regs *regs, u32 type);
+#else
+#define write_emrg_klog(regs, type)
+#endif
 
 #endif

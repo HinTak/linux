@@ -92,6 +92,7 @@ struct zram_stats {
 	atomic64_t zero_pages;		/* no. of zero filled pages */
 	atomic64_t pages_stored;	/* no. of pages currently stored */
 	atomic_long_t max_used_pages;	/* no. of maximum pages stored */
+	atomic64_t writestall;		/* no. of write slow paths */
 };
 
 struct zram_meta {
@@ -109,7 +110,6 @@ struct zram {
 	 * the number of pages zram can consume for storing compressed data
 	 */
 	unsigned long limit_pages;
-	int max_comp_streams;
 
 	struct zram_stats stats;
 	atomic_t refcount; /* refcount for zram_meta */
@@ -122,4 +122,13 @@ struct zram {
 	u64 disksize;	/* bytes */
 	char compressor[10];
 };
+
+typedef void (*print_zram_info_t)(struct seq_file *);
+typedef size_t (*get_zram_used_t)(void);
+struct _pt_zram_struct {
+	print_zram_info_t pt_zram_info;
+	spinlock_t pt_zram_lock;
+	get_zram_used_t get_zram_used;
+};
+extern struct _pt_zram_struct pt_zram_struct;
 #endif

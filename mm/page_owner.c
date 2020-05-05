@@ -5,10 +5,16 @@
 #include <linux/bootmem.h>
 #include <linux/stacktrace.h>
 #include <linux/page_owner.h>
+#include <linux/stackdepot.h>
+
 #include "internal.h"
 
-static bool page_owner_disabled = true;
+static bool page_owner_disabled;
 bool page_owner_inited __read_mostly;
+
+static depot_stack_handle_t dummy_handle;
+static depot_stack_handle_t failure_handle;
+static depot_stack_handle_t early_handle;
 
 static void init_early_allocated_pages(void);
 
@@ -32,11 +38,43 @@ static bool need_page_owner(void)
 	return true;
 }
 
+static __always_inline depot_stack_handle_t create_dummy_stack(void)
+{
+	unsigned long entries[4];
+	struct stack_trace dummy;
+
+	dummy.nr_entries = 0;
+	dummy.max_entries = ARRAY_SIZE(entries);
+	dummy.entries = &entries[0];
+	dummy.skip = 0;
+
+	save_stack_trace(&dummy);
+	return depot_save_stack(&dummy, GFP_KERNEL);
+}
+
+static noinline void register_dummy_stack(void)
+{
+	dummy_handle = create_dummy_stack();
+}
+
+static noinline void register_failure_stack(void)
+{
+	failure_handle = create_dummy_stack();
+}
+
+static noinline void register_early_stack(void)
+{
+	early_handle = create_dummy_stack();
+}
+
 static void init_page_owner(void)
 {
 	if (page_owner_disabled)
 		return;
 
+	register_dummy_stack();
+	register_failure_stack();
+	register_early_stack();
 	page_owner_inited = true;
 	init_early_allocated_pages();
 }
@@ -54,56 +92,142 @@ void __reset_page_owner(struct page *page, unsigned int order)
 	for (i = 0; i < (1 << order); i++) {
 		page_ext = lookup_page_ext(page + i);
 		__clear_bit(PAGE_EXT_OWNER, &page_ext->flags);
+		if (!i && test_bit(PAGE_EXT_FALLBACK, &page_ext->flags)){
+			count_vm_events(PG_LOWMEM_FALLBACK, (-1<< order));
+			__clear_bit(PAGE_EXT_FALLBACK, &page_ext->flags);
+		}
+#ifdef CONFIG_CMA_DEBUG_REFTRACE
+		if (!i && test_bit(PAGE_EXT_MIGRATE_FAIL, &page_ext->flags)){
+			__clear_bit(PAGE_EXT_MIGRATE_FAIL, &page_ext->flags);
+		}	
+#endif
 	}
+
 }
 
-void __set_page_owner(struct page *page, unsigned int order, gfp_t gfp_mask)
+static inline bool check_recursive_alloc(struct stack_trace *trace,
+					unsigned long ip)
 {
-	struct page_ext *page_ext = lookup_page_ext(page);
+	int i, count;
+
+	if (!trace->nr_entries)
+		return false;
+
+	for (i = 0, count = 0; i < trace->nr_entries; i++) {
+		if (trace->entries[i] == ip && ++count == 2)
+			return true;
+	}
+
+	return false;
+}
+
+static noinline depot_stack_handle_t save_stack(gfp_t flags)
+{
+	unsigned long entries[PAGE_OWNER_STACK_DEPTH];
 	struct stack_trace trace = {
 		.nr_entries = 0,
-		.max_entries = ARRAY_SIZE(page_ext->trace_entries),
-		.entries = &page_ext->trace_entries[0],
-		.skip = 3,
+		.entries = entries,
+		.max_entries = PAGE_OWNER_STACK_DEPTH,
+		.skip = 2
 	};
+	depot_stack_handle_t handle;
 
 	save_stack_trace(&trace);
+	if (trace.nr_entries != 0 &&
+	    trace.entries[trace.nr_entries-1] == ULONG_MAX)
+		trace.nr_entries--;
 
+	/*
+	 * We need to check recursion here because our request to stackdepot
+	 * could trigger memory allocation to save new entry. New memory
+	 * allocation would reach here and call depot_save_stack() again
+	 * if we don't catch it. There is still not enough memory in stackdepot
+	 * so it would try to allocate memory again and loop forever.
+	 */
+	if (check_recursive_alloc(&trace, _RET_IP_))
+		return dummy_handle;
+
+	handle = depot_save_stack(&trace, flags);
+	if (!handle)
+		handle = failure_handle;
+
+	return handle;
+}
+
+static inline void __set_page_owner_handle(struct page_ext *page_ext,
+	depot_stack_handle_t handle, unsigned int order, gfp_t gfp_mask)
+{
+	page_ext->handle = handle;
 	page_ext->order = order;
 	page_ext->gfp_mask = gfp_mask;
-	page_ext->nr_entries = trace.nr_entries;
+	page_ext->pid = current->pid;
 
 	__set_bit(PAGE_EXT_OWNER, &page_ext->flags);
 }
 
-static ssize_t
-print_page_owner(char __user *buf, size_t count, unsigned long pfn,
-		struct page *page, struct page_ext *page_ext)
+noinline void __set_page_owner(struct page *page, unsigned int order,
+					gfp_t gfp_mask)
 {
-	int ret;
+	struct page_ext *page_ext = lookup_page_ext(page);
+	depot_stack_handle_t handle;
+
+	if (unlikely(!page_ext))
+		return;
+
+	handle = save_stack(gfp_mask);
+	__set_page_owner_handle(page_ext, handle, order, gfp_mask);
+}
+
+#ifdef CONFIG_CMA_DEBUG
+#define can_be_read_fs(p) ((p)->mapping != NULL &&  \
+	(p)->mapping->host != NULL && \
+	(unsigned long)(p)->mapping->host > (unsigned long)PAGE_OFFSET && \
+	(p)->mapping->host->i_sb != NULL && \
+	(p)->mapping->host->i_sb->s_type != NULL)
+
+#define BUF_SIZE	 512
+void migrate_failed_page_dump(struct page *page, char* reason)
+{
+	unsigned long pfn = page_to_pfn(page);
+	unsigned long entries[PAGE_OWNER_STACK_DEPTH];
 	int pageblock_mt, page_mt;
-	char *kbuf;
 	struct stack_trace trace = {
-		.nr_entries = page_ext->nr_entries,
-		.entries = &page_ext->trace_entries[0],
+		.nr_entries = 0,
+		.entries = entries,
+		.max_entries = PAGE_OWNER_STACK_DEPTH,
+		.skip = 0
 	};
+	depot_stack_handle_t handle;
+	int ret = 0;
+	struct page_ext *page_ext;
+	char kbuf[BUF_SIZE];
 
-	kbuf = kmalloc(count, GFP_KERNEL);
-	if (!kbuf)
-		return -ENOMEM;
+	if (!page_owner_inited)
+		return;
+	page_ext = lookup_page_ext(page);
 
-	ret = snprintf(kbuf, count,
-			"Page allocated via order %u, mask 0x%x\n",
-			page_ext->order, page_ext->gfp_mask);
+	/*
+	 * Some pages could be missed by concurrent allocation or free,
+	 * because we don't hold the zone lock.
+	 */
+	if (!test_bit(PAGE_EXT_OWNER, &page_ext->flags))
+		return;
 
-	if (ret >= count)
-		goto err;
+	handle = READ_ONCE(page_ext->handle);
+	if (!handle) {
+		pr_alert("page_owner info is not active (free page?)\n");
+		return;
+	}
 
+	depot_fetch_stack(handle, &trace);
 	/* Print information relevant to grouping pages by mobility */
 	pageblock_mt = get_pfnblock_migratetype(page, pfn);
 	page_mt  = gfpflags_to_migratetype(page_ext->gfp_mask);
-	ret += snprintf(kbuf + ret, count - ret,
-			"PFN %lu Block %lu type %d %s Flags %s%s%s%s%s%s%s%s%s%s%s%s\n",
+
+	ret = snprintf(kbuf, BUF_SIZE,
+			"PFN %lx Block %lu type %d %s "
+			"Flags %s%s%s%s%s%s%s%s%s%s%s%s%s%s(0x%lx)\n"
+			"PID %d\n",
 			pfn,
 			pfn >> pageblock_order,
 			pageblock_mt,
@@ -119,11 +243,194 @@ print_page_owner(char __user *buf, size_t count, unsigned long pfn,
 			PageWriteback(page)	? "W" : " ",
 			PageCompound(page)	? "C" : " ",
 			PageSwapCache(page)	? "B" : " ",
-			PageMappedToDisk(page)	? "M" : " ");
+			PageMappedToDisk(page)	? "M" : " ",
+			page_has_private(page)	? "P" : " ",
+			PageReclaim(page) ? "W" : " ",
+			page->flags,
+			page_ext->pid);
+	ret += snprint_stack_trace(kbuf + ret, BUF_SIZE - ret, &trace, 0);
+
+	pr_alert("[cma] %s page:0x%p [count:%d, mapping:%p, mapcount:%d index:%lu private:%lu fs:%s]\n"
+			"Page allocated via order %u, mask 0x%x\n %s\n",
+			reason, page, page_ref_count(page), READ_ONCE(page->mapping),
+			atomic_read(&page->_mapcount), page->index, page_private(page),
+			can_be_read_fs(page) ? page->mapping->host->i_sb->s_type->name : "",
+			page_ext->order, page_ext->gfp_mask,  kbuf);
+}
+#endif
+
+void __split_page_owner(struct page *page, unsigned int order)
+{
+	int i;
+	struct page_ext *page_ext = lookup_page_ext(page);
+
+	if (unlikely(!page_ext))
+		return;
+
+	page_ext->order = 0;
+	for (i = 1; i < (1 << order); i++)
+		__copy_page_owner(page, page + i);
+
+}
+
+void __copy_page_owner(struct page *oldpage, struct page *newpage)
+{
+	struct page_ext *old_ext = lookup_page_ext(oldpage);
+	struct page_ext *new_ext = lookup_page_ext(newpage);
+
+	new_ext->order = old_ext->order;
+	new_ext->gfp_mask = old_ext->gfp_mask;
+	new_ext->pid = current->pid;
+	new_ext->handle = old_ext->handle;
+
+	/*
+	 * We don't clear the bit on the oldpage as it's going to be freed
+	 * after migration. Until then, the info can be useful in case of
+	 * a bug, and the overal stats will be off a bit only temporarily.
+	 * Also, migrate_misplaced_transhuge_page() can still fail the
+	 * migration and then we want the oldpage to retain the info. But
+	 * in that case we also don't need to explicitly clear the info from
+	 * the new page, which will be freed.
+	 */
+	__set_bit(PAGE_EXT_OWNER, &new_ext->flags);
+
+}
+#ifdef CONFIG_DEBUG_PAGEALLOC_PRINT_OWNER
+ssize_t
+print_one_page_owner( size_t count, unsigned long pfn,
+                struct page *page, struct page_ext *page_ext)
+{
+        int ret;
+        int pageblock_mt, page_mt;
+        char *kbuf;
+        unsigned long entries[PAGE_OWNER_STACK_DEPTH];
+        struct stack_trace trace = {
+                .nr_entries = 0,
+                .entries = entries,
+                .max_entries = PAGE_OWNER_STACK_DEPTH,
+                .skip = 0
+        };
+
+        depot_stack_handle_t handle = READ_ONCE(page_ext->handle);
+        if (!handle)
+	{
+		printk(KERN_ERR"%s handle is NULL!\n",__FUNCTION__);
+		return -EFAULT;
+	}
+
+        kbuf = kmalloc(count, GFP_KERNEL);
+        if (!kbuf)
+                return -ENOMEM;
+
+        ret = snprintf(kbuf, count,
+                        "Page allocated via order %u, mask 0x%x\n",
+                        page_ext->order, page_ext->gfp_mask);
+
+        if (ret >= count)
+                goto err;
+
+        /* Print information relevant to grouping pages by mobility */
+        pageblock_mt = get_pfnblock_migratetype(page, pfn);
+        page_mt  = gfpflags_to_migratetype(page_ext->gfp_mask);
+        ret += snprintf(kbuf + ret, count - ret,
+                        "PFN %lu Block %lu type %d %s Flags %s%s%s%s%s%s%s%s%s%s%s%s\n"
+                        "PID %d\n",
+                        pfn,
+                        pfn >> pageblock_order,
+                        pageblock_mt,
+                        pageblock_mt != page_mt ? "Fallback" : "        ",
+                        PageLocked(page)        ? "K" : " ",
+                        PageError(page)         ? "E" : " ",
+                        PageReferenced(page)    ? "R" : " ",
+                        PageUptodate(page)      ? "U" : " ",
+                        PageDirty(page)         ? "D" : " ",
+                        PageLRU(page)           ? "L" : " ",
+                        PageActive(page)        ? "A" : " ",
+                        PageSlab(page)          ? "S" : " ",
+                        PageWriteback(page)     ? "W" : " ",
+                        PageCompound(page)      ? "C" : " ",
+                        PageSwapCache(page)     ? "B" : " ",
+                        PageMappedToDisk(page)  ? "M" : " ",
+                        page_ext->pid);
+
+        if (ret >= count)
+                goto err;
+
+        depot_fetch_stack(handle, &trace);
+        ret += snprint_stack_trace(kbuf + ret, count - ret, &trace, 0);
+        if (ret >= count)
+                goto err;
+
+        ret += snprintf(kbuf + ret, count - ret, "\n");
+        if (ret >= count)
+                goto err;
+
+	printk(KERN_ERR"%s\n",kbuf);
+
+        kfree(kbuf);
+        return ret;
+
+err:
+        kfree(kbuf);
+        return -ENOMEM;
+}
+
+#endif
+
+static ssize_t
+print_page_owner(char __user *buf, size_t count, unsigned long pfn,
+		struct page *page, struct page_ext *page_ext,
+		depot_stack_handle_t handle)
+{
+	int ret;
+	int pageblock_mt, page_mt;
+	char *kbuf;
+	unsigned long entries[PAGE_OWNER_STACK_DEPTH];
+	struct stack_trace trace = {
+		.nr_entries = 0,
+		.entries = entries,
+		.max_entries = PAGE_OWNER_STACK_DEPTH,
+		.skip = 0
+	};
+	kbuf = kmalloc(count, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
+
+	ret = snprintf(kbuf, count,
+			"Page allocated via order %u, mask 0x%x\n",
+			page_ext->order, page_ext->gfp_mask);
 
 	if (ret >= count)
 		goto err;
 
+	/* Print information relevant to grouping pages by mobility */
+	pageblock_mt = get_pfnblock_migratetype(page, pfn);
+	page_mt  = gfpflags_to_migratetype(page_ext->gfp_mask);
+	ret += snprintf(kbuf + ret, count - ret,
+			"PFN %lu Block %lu type %d %s Flags %s%s%s%s%s%s%s%s%s%s%s%s\n"
+			"PID %d\n",
+			pfn,
+			pfn >> pageblock_order,
+			pageblock_mt,
+			pageblock_mt != page_mt ? "Fallback" : "        ",
+			PageLocked(page)	? "K" : " ",
+			PageError(page)		? "E" : " ",
+			PageReferenced(page)	? "R" : " ",
+			PageUptodate(page)	? "U" : " ",
+			PageDirty(page)		? "D" : " ",
+			PageLRU(page)		? "L" : " ",
+			PageActive(page)	? "A" : " ",
+			PageSlab(page)		? "S" : " ",
+			PageWriteback(page)	? "W" : " ",
+			PageCompound(page)	? "C" : " ",
+			PageSwapCache(page)	? "B" : " ",
+			PageMappedToDisk(page)	? "M" : " ",
+			page_ext->pid);
+
+	if (ret >= count)
+		goto err;
+
+	depot_fetch_stack(handle, &trace);
 	ret += snprint_stack_trace(kbuf + ret, count - ret, &trace, 0);
 	if (ret >= count)
 		goto err;
@@ -149,6 +456,7 @@ read_page_owner(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 	unsigned long pfn;
 	struct page *page;
 	struct page_ext *page_ext;
+	depot_stack_handle_t handle;
 
 	if (!page_owner_inited)
 		return -EINVAL;
@@ -195,10 +503,20 @@ read_page_owner(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 		if (!test_bit(PAGE_EXT_OWNER, &page_ext->flags))
 			continue;
 
+		/*
+		 * Access to page_ext->handle isn't synchronous so we should
+		 * be careful to access it.
+		 */
+		handle = READ_ONCE(page_ext->handle);
+		if (!handle)
+			continue;
+
 		/* Record the next PFN to read in the file offset */
 		*ppos = (pfn - min_low_pfn) + 1;
+		return print_page_owner(buf, count, pfn, page,
+				page_ext, handle);
 
-		return print_page_owner(buf, count, pfn, page, page_ext);
+
 	}
 
 	return 0;
@@ -251,12 +569,12 @@ static void init_pages_in_zone(pg_data_t *pgdat, struct zone *zone)
 
 			page_ext = lookup_page_ext(page);
 
-			/* Maybe overraping zone */
+			/* Maybe overlaping zone */
 			if (test_bit(PAGE_EXT_OWNER, &page_ext->flags))
 				continue;
 
 			/* Found early allocated page */
-			set_page_owner(page, 0, 0);
+			__set_page_owner_handle(page_ext, early_handle, 0, 0);
 			count++;
 		}
 	}

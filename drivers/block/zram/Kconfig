@@ -32,3 +32,12 @@ config ZRAM_DEBUG
 	help
 	  This option adds additional debugging code to the compressed
 	  RAM block device driver.
+
+config ZRAM_DISKSIZE
+	string "Compressed RAM block device disksize"
+	depends on ZRAM
+	default "50%"
+	help
+	  This option set zram block device disksize.disksize can be 
+	  provided in the form of bytes like 1G or in percentage of 
+	  total ram. 50% represents, disksize is 50% of total ram size
