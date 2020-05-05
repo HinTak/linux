@@ -1,0 +1,10 @@
+config BT_HCISBC
+	tristate "HCI SBC Driver"
+	help
+		Bluetooth HCI SBC driver.
+		This driver is required if you want to encode BT PCM samples to SBC
+		encoded form and send this encoded to BTUSB.
+
+		Say Y here to compile support for Bluetooth SBC into the
+		kernel or say M to compile it as module (btsbc).
+

@@ -406,6 +406,7 @@ nfsd_setattr(struct svc_rqst *rqstp, struct svc_fh *fhp, struct iattr *iap,
 	umode_t		ftype = 0;
 	__be32		err;
 	int		host_err;
+	bool		get_write_count;
 	int		size_change = 0;
 
 	if (iap->ia_valid & (ATTR_ATIME | ATTR_MTIME | ATTR_SIZE))
@@ -413,10 +414,18 @@ nfsd_setattr(struct svc_rqst *rqstp, struct svc_fh *fhp, struct iattr *iap,
 	if (iap->ia_valid & ATTR_SIZE)
 		ftype = S_IFREG;
 
+	/* Callers that do fh_verify should do the fh_want_write: */
+	get_write_count = !fhp->fh_dentry;
+
 	/* Get inode */
 	err = fh_verify(rqstp, fhp, ftype, accmode);
 	if (err)
 		goto out;
+	if (get_write_count) {
+		host_err = fh_want_write(fhp);
+		if (host_err)
+			return nfserrno(host_err);
+	}
 
 	dentry = fhp->fh_dentry;
 	inode = dentry->d_inode;
@@ -749,6 +758,46 @@ nfsd_access(struct svc_rqst *rqstp, struct svc_fh *fhp, u32 *access, u32 *suppor
 	return error;
 }
 #endif /* CONFIG_NFSD_V3 */
+
+#ifdef CONFIG_FAT_FS
+#include "../fat/fat.h"
+#endif
+
+__be32
+nfsd_fat_set_open_cnt(struct svc_rqst *rqstp, struct svc_fh *fhp,
+			u32 *open_count)
+{
+	struct dentry *dentry;
+	__be32 error;
+	u32 clnt_open_count = *open_count;
+	struct file *file;
+
+	error = fh_verify(rqstp, fhp, 0, NFSD_MAY_NOP);
+	if (error)
+		goto out;
+
+	dentry = fhp->fh_dentry;
+
+#ifdef CONFIG_FAT_FS
+	fat_set_nfs_clnt_open_count(dentry->d_inode, clnt_open_count);
+
+	if (fat_get_nfs_clnt_open_count(dentry->d_inode) == 0) {
+		/*
+		 * file open_count at NFS Client reached zero, so emulate a
+		 * call to fat_file_release so that we can change the inode
+		 * number finally.
+		 */
+		error = nfsd_open(rqstp, fhp, 0, NFSD_MAY_NOP, &file);
+		if (error)
+			return error;
+
+		nfsd_close(file);
+	}
+#endif
+
+out:
+	return error;
+}
 
 static int nfsd_open_break_lease(struct inode *inode, int access)
 {
@@ -1096,6 +1145,17 @@ __be32 nfsd_read(struct svc_rqst *rqstp, struct svc_fh *fhp,
 	err = nfsd_open(rqstp, fhp, S_IFREG, NFSD_MAY_READ, &file);
 	if (err)
 		return err;
+
+	if (rqstp->rq_vers == NFS3_VERSION) {
+		struct nfsd3_readargs *argp; /* NFS READ arguments */
+		argp = (struct nfsd3_readargs *)rqstp->rq_argp;
+
+		if (argp->f_mode & FMODE_RANDOM) {
+			spin_lock(&file->f_lock);
+			file->f_mode |= FMODE_RANDOM;
+			spin_unlock(&file->f_lock);
+		}
+	}
 
 	inode = file_inode(file);
 

@@ -298,7 +298,16 @@ xfs_file_aio_read(
 				xfs_rw_iunlock(ip, XFS_IOLOCK_EXCL);
 				return ret;
 			}
-			truncate_pagecache_range(VFS_I(ip), pos, -1);
+
+			/*
+			 * Invalidate whole pages. This can return an error if
+			 * we fail to invalidate a page, but this should never
+			 * happen on XFS. Warn if it does fail.
+			 */
+			ret = invalidate_inode_pages2_range(VFS_I(ip)->i_mapping,
+						pos >> PAGE_CACHE_SHIFT, -1);
+			WARN_ON_ONCE(ret);
+			ret = 0;
 		}
 		xfs_rw_ilock_demote(ip, XFS_IOLOCK_EXCL);
 	}
@@ -677,7 +686,15 @@ xfs_file_dio_aio_write(
 						    pos, -1);
 		if (ret)
 			goto out;
-		truncate_pagecache_range(VFS_I(ip), pos, -1);
+		/*
+		 * Invalidate whole pages. This can return an error if
+		 * we fail to invalidate a page, but this should never
+		 * happen on XFS. Warn if it does fail.
+		 */
+		ret = invalidate_inode_pages2_range(VFS_I(ip)->i_mapping,
+						pos >> PAGE_CACHE_SHIFT, -1);
+		WARN_ON_ONCE(ret);
+		ret = 0;
 	}
 
 	/*
@@ -817,7 +834,8 @@ xfs_file_fallocate(
 	int		cmd = XFS_IOC_RESVSP;
 	int		attr_flags = XFS_ATTR_NOLOCK;
 
-	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE))
+	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE |
+		     FALLOC_FL_COLLAPSE_RANGE))
 		return -EOPNOTSUPP;
 
 	bf.l_whence = 0;
@@ -828,6 +846,26 @@ xfs_file_fallocate(
 
 	if (mode & FALLOC_FL_PUNCH_HOLE)
 		cmd = XFS_IOC_UNRESVSP;
+	else if (mode & FALLOC_FL_COLLAPSE_RANGE) {
+		unsigned blksize_mask = (1 << inode->i_blkbits) - 1;
+
+		if (offset & blksize_mask || len & blksize_mask) {
+			error = -EINVAL;
+			goto out_unlock;
+		}
+		/*
+		 * There is no need to overlap collapse range with EOF,
+		 * in which case it is effectively a truncate operation
+		 * But for truncate_range, overlap is possible.
+		 */
+		if (offset + len > i_size_read(inode)) {
+			error = -EINVAL;
+			goto out_unlock;
+		}
+
+		new_size = i_size_read(inode) - len;
+		cmd = XFS_COLLAPSE_RANGE;
+	}
 
 	/* check the new inode size is valid before allocating */
 	if (!(mode & FALLOC_FL_KEEP_SIZE) &&
@@ -846,7 +884,7 @@ xfs_file_fallocate(
 		goto out_unlock;
 
 	/* Change file size if needed */
-	if (new_size) {
+	if (new_size  || mode & FALLOC_FL_COLLAPSE_RANGE) {
 		struct iattr iattr;
 
 		iattr.ia_valid = ATTR_SIZE;
@@ -1409,6 +1447,14 @@ xfs_file_llseek(
 		return -EINVAL;
 	}
 }
+
+#ifdef CONFIG_XFS_FS_TRUNCATE_RANGE
+int xfs_truncate_range(struct file *file, loff_t offset, loff_t len)
+{
+	return xfs_file_fallocate(file, FALLOC_FL_COLLAPSE_RANGE,
+				  offset, len);
+}
+#endif
 
 const struct file_operations xfs_file_operations = {
 	.llseek		= xfs_file_llseek,

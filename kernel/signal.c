@@ -43,6 +43,9 @@
 #include <asm/cacheflush.h>
 #include "audit.h"	/* audit_signal_info() */
 
+#ifdef CONFIG_PROC_VD_SIGNAL_HANDLER_LIST
+#include <linux/vd_signal_policy.h>
+#endif
 /*
  * SLAB caches for signal bits.
  */
@@ -1053,6 +1056,26 @@ static int __send_signal(int sig, struct siginfo *info, struct task_struct *t,
 
 	assert_spin_locked(&t->sighand->siglock);
 
+#ifdef CONFIG_COREDUMP_SIGKILL_BLOCKED
+	if (sig == SIGKILL && signal_block_sigkill(t)) {
+		pr_alert("##### Ignore sending the signal because Coredump in expected : %d, %s(%d)->%s(%d) %s\n",
+		sig, current->comm, current->pid, t->comm, t->pid, __func__);
+		ret = -EBUSY;
+		result = TRACE_SIGNAL_SIGKILL_BLOCKED;
+		goto ret;
+	}
+#endif
+
+#ifdef USE_PROHIBIT_SIG 
+	if(sig == CONFIG_PROHIBIT_SIG)
+	{
+		printk(KERN_ERR"[SABSP]: SIGNAL[%d] %s(%d) ->%s(%d)  %s\n",
+                        sig, current->comm, current->pid, t->comm, t->pid, __func__);
+		printk(KERN_ERR"[SABSP]: make coredump ->%s(%d)\n",current->comm, current->pid); 
+		t = current;
+		sig = SIGSEGV;
+	}
+#endif
 	result = TRACE_SIGNAL_IGNORED;
 	if (!prepare_signal(sig, t,
 			from_ancestor_ns || (info == SEND_SIG_FORCED)))
@@ -1139,6 +1162,16 @@ static int __send_signal(int sig, struct siginfo *info, struct task_struct *t,
 	}
 
 out_set:
+#if CONFIG_PRINT_KILL_SIGNAL
+#if defined(CONFIG_PRINT_KILL_SIGNAL_ONLY_PERMITTED) && defined(CONFIG_VD_RELEASE)
+	if ((sig == SIGKILL) && !sig_kernel_ignore(sig) && (t != NULL)) {
+#else
+	if (sig_kernel_print_info(sig) && !sig_kernel_ignore(sig) && (t != NULL)) {
+#endif
+		printk(KERN_ALERT "##### send signal SIG : %d, %s(%d)->%s(%d) %s\n",
+			sig, current->comm, current->pid, t->comm, t->pid, __func__);
+        }
+#endif
 	signalfd_notify(t, sig);
 	sigaddset(&pending->signal, sig);
 	complete_signal(sig, t, group);
@@ -1214,10 +1247,15 @@ int do_send_sig_info(int sig, struct siginfo *info, struct task_struct *p,
 	if (lock_task_sighand(p, &flags)) {
 		ret = send_signal(sig, info, p, group);
 		unlock_task_sighand(p, &flags);
+	} else {
+		pr_alert("##### lock_task_sighand failure issue %s(%d) for signal:%d ####\n", p->comm, p->pid, sig);
 	}
 
 	return ret;
 }
+#ifdef CONFIG_VD_LOW_MEMORY_KILLER
+EXPORT_SYMBOL(do_send_sig_info);
+#endif
 
 /*
  * Force a signal that the process can't ignore: if necessary
@@ -1237,6 +1275,10 @@ force_sig_info(int sig, struct siginfo *info, struct task_struct *t)
 	int ret, blocked, ignored;
 	struct k_sigaction *action;
 
+#ifdef CONFIG_PRINT_KILL_SIGNAL
+	pr_alert("##### send signal from KERNEL, SIG : %d, %s, PID:%d, %s\n",
+		sig, t->comm, t->pid, __func__);
+#endif
 	spin_lock_irqsave(&t->sighand->siglock, flags);
 	action = &t->sighand->action[sig-1];
 	ignored = action->sa.sa_handler == SIG_IGN;
@@ -1266,6 +1308,10 @@ int zap_other_threads(struct task_struct *p)
 
 	p->signal->group_stop_count = 0;
 
+#if CONFIG_PRINT_KILL_SIGNAL
+	pr_alert("##### send SIGKILL for threads of process: %s (%d)\n",
+			p->comm, p->pid);
+#endif
 	while_each_thread(p, t) {
 		task_clear_jobctl_pending(t, JOBCTL_PENDING_MASK);
 		count++;
@@ -2189,6 +2235,15 @@ static int ptrace_signal(int signr, siginfo_t *info)
 	return signr;
 }
 
+#ifdef CONFIG_NOT_ALLOW_REBOOT_DURING_COREDUMP
+atomic_t coredump_in_progress=ATOMIC_INIT(0);
+EXPORT_SYMBOL(coredump_in_progress);
+#endif
+
+#ifdef CONFIG_KPI_SYSTEM_SUPPORT
+extern void set_kpi_fault(unsigned long pc, unsigned long lr, char *thread_name, char *process_name, char *type);
+#endif
+
 int get_signal_to_deliver(siginfo_t *info, struct k_sigaction *return_ka,
 			  struct pt_regs *regs, void *cookie)
 {
@@ -2285,7 +2340,27 @@ relock:
 			if (ka->sa.sa_flags & SA_ONESHOT)
 				ka->sa.sa_handler = SIG_DFL;
 
+#ifndef CONFIG_PLAT_TIZEN
+			/* ignored user defined signal handler, call default
+			 * handler, Linux Part 2011-06-19 */
+#ifdef CONFIG_PROC_VD_SIGNAL_HANDLER_LIST
+			/*if task name is found if condition is false,handler is allowed*/
+			if (((signr == SIGBUS) ||  (signr == SIGABRT) ||
+				(signr == SIGSEGV) || (signr == SIGILL)) &&
+				!vd_signal_policy_check(current->group_leader->comm)) {
+#else
+			if ((signr == SIGBUS) ||  (signr == SIGABRT) ||
+			    (signr == SIGSEGV) || (signr == SIGILL)) {
+#endif
+				pr_alert("##### ignored user defined signal (%d) handler,call kernel default handler for\n", signr);
+			} else {
+				//printk(KERN_ALERT " ##### call kernel default signal (%d) handler\n", signr);
+				break; /* will return non-zero "signr" value */
+			}
+
+#else
 			break; /* will return non-zero "signr" value */
+#endif
 		}
 
 		/*
@@ -2294,6 +2369,15 @@ relock:
 		if (sig_kernel_ignore(signr)) /* Default is nothing. */
 			continue;
 
+#if CONFIG_PRINT_KILL_SIGNAL /* print deliver signal SP_DEBUG */
+#if !(defined(CONFIG_PRINT_KILL_SIGNAL_ONLY_PERMITTED) && defined(CONFIG_VD_RELEASE))
+		if (sig_kernel_print_info(signr))
+			printk(KERN_ALERT "##### deliver signal SIG : %d, %s(%d), tgid: %d (%s), %s\n",
+			signr, current->comm, current->pid,
+			task_tgid_vnr(current), current->group_leader->comm, __func__);
+
+#endif
+#endif
 		/*
 		 * Global init gets no signals it doesn't want.
 		 * Container-init gets no signals it doesn't want from same
@@ -2304,10 +2388,12 @@ relock:
 		 * or must have come from an ancestor namespace. In either
 		 * case, the signal cannot be dropped.
 		 */
+#ifndef CONFIG_INIT_CREATE_COREDUMP
 		if (unlikely(signal->flags & SIGNAL_UNKILLABLE) &&
 				!sig_kernel_only(signr))
 			continue;
 
+#endif
 		if (sig_kernel_stop(signr)) {
 			/*
 			 * The default action is to stop all threads in
@@ -2344,12 +2430,45 @@ relock:
 
 		spin_unlock_irq(&sighand->siglock);
 
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+		/*	Update mask with user sent sianal numbers for which
+			dump_info is to be forced
+			addr to dump_info is 0 since it is user sent signal and
+			not generated by any code fault
+		*/
+		if (unlikely(sig_kernel_force_dump_info(signr) &&
+			!(signal->flags & SIGNAL_GROUP_COREDUMP)))
+			dump_info(current, regs, 0);
+#endif
 		/*
 		 * Anything else is fatal, maybe with a core dump.
 		 */
 		current->flags |= PF_SIGNALED;
 
 		if (sig_kernel_coredump(signr)) {
+#ifdef CONFIG_KPI_SYSTEM_SUPPORT
+#ifndef CONFIG_PLAT_TIZEN
+#ifndef CONFIG_PROC_VD_TASK_LIST
+		int i;
+		for (i=0 ; i < ALLOWED_TASK_NUM ; i++) {
+			if (!strncmp(current->group_leader->comm, allowTask[i], TASK_COMM_LEN)){
+				if (signr != SIGBUS && signr != SIGILL && signr != SIGSEGV && signr != SIGABRT)
+					set_kpi_fault((unsigned long)signr, 0, current->comm, current->group_leader->comm, "crash");
+				break;
+			}
+		}
+#else
+		/*if task name not found and signal is either of three, set_kpi_fault*/
+		if (vd_policy_allow_task_check(current->group_leader->comm)) {
+			if (signr != SIGBUS && signr != SIGILL && signr != SIGSEGV && signr != SIGABRT)
+				set_kpi_fault((unsigned long)signr, 0, current->comm, current->group_leader->comm, "crash");
+		}
+#endif
+#else  /*ifdef CONFIG_PLAT_TIZEN */
+		if (signr != SIGBUS && signr != SIGILL && signr != SIGSEGV && signr != SIGABRT)
+			set_kpi_fault((unsigned long)signr, 0, current->comm, current->group_leader->comm, "crash");
+#endif /*CONFIG_PLAT_TIZEN*/
+#endif
 			if (print_fatal_signals)
 				print_fatal_signal(info->si_signo);
 			proc_coredump_connector(current);
@@ -2361,7 +2480,22 @@ relock:
 			 * first and our do_group_exit call below will use
 			 * that value and ignore the one we pass it.
 			 */
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+			printk(KERN_ALERT "[VDLP COREDUMP] SIGNR:%d\n\n", signr);
+#endif
+#ifdef CONFIG_NOT_ALLOW_REBOOT_DURING_COREDUMP
+			atomic_inc(&coredump_in_progress);
+#endif
+#ifdef CONFIG_SMART_DEADLOCK
+			hook_smart_deadlock_exception_case(SMART_DEADLOCK_CRASH_START);
+#endif
 			do_coredump(info);
+#ifdef CONFIG_SMART_DEADLOCK
+			hook_smart_deadlock_exception_case(SMART_DEADLOCK_CRASH_STOP);
+#endif
+#ifdef CONFIG_NOT_ALLOW_REBOOT_DURING_COREDUMP
+			atomic_dec(&coredump_in_progress);
+#endif
 		}
 
 		/*
@@ -2848,7 +2982,12 @@ int do_sigtimedwait(const sigset_t *which, siginfo_t *info,
 		recalc_sigpending();
 		spin_unlock_irq(&tsk->sighand->siglock);
 
+		/* Call under pair of freezer_do_not_count() / freezer_count()
+		 * use freezable blocking call.
+		 */
+		freezer_do_not_count();
 		timeout = schedule_timeout_interruptible(timeout);
+		freezer_count();
 
 		spin_lock_irq(&tsk->sighand->siglock);
 		__set_task_blocked(tsk, &tsk->real_blocked);
@@ -2916,6 +3055,18 @@ SYSCALL_DEFINE2(kill, pid_t, pid, int, sig)
 	info.si_pid = task_tgid_vnr(current);
 	info.si_uid = from_kuid_munged(current_user_ns(), current_uid());
 
+#ifdef CONFIG_PROHIBIT_SIGNAL_HOOKING
+	if ((sig == SIGABRT ) || (sig == SIGILL ) || (sig == SIGBUS ) || (sig == SIGSEGV ))
+	{
+		if (strcmp(current->comm, "gatord"))
+		{
+			printk(KERN_ALERT "##### Prohibit %s(%d) USER sending SIGABRT, SIGILL, SIGBUS, SIGSEGV, SIG : %d, kill USER......\n", current->comm, current->pid, sig);
+			force_sig(SIGBUS, current);
+		}
+
+	}
+#endif
+
 	return kill_something_info(sig, &info, pid);
 }
 
@@ -2924,10 +3075,23 @@ do_send_specific(pid_t tgid, pid_t pid, int sig, struct siginfo *info)
 {
 	struct task_struct *p;
 	int error = -ESRCH;
+	pid_t tgid_vnr;
 
 	rcu_read_lock();
 	p = find_task_by_vpid(pid);
-	if (p && (tgid <= 0 || task_tgid_vnr(p) == tgid)) {
+	if (p)
+	{
+		tgid_vnr = task_tgid_vnr(p);
+	}	
+	else
+	{
+		pr_alert("##### fail get [find_task_by_vpid] %s(%d) for sig:%d, check_kill_permission returned: %d ####\n",
+			current->comm, current->pid, sig, error);
+		rcu_read_unlock();
+		return error;
+	}
+
+	if (tgid <= 0 || tgid_vnr == tgid) {
 		error = check_kill_permission(sig, info, p);
 		/*
 		 * The null signal is a permissions and process existence
@@ -2942,7 +3106,13 @@ do_send_specific(pid_t tgid, pid_t pid, int sig, struct siginfo *info)
 			 */
 			if (unlikely(error == -ESRCH))
 				error = 0;
+		} else {
+			pr_alert("##### Permission/wrong signal issue %s(%d) for sig:%d, check_kill_permission returned: %d ####\n",
+			current->comm, current->pid, sig, error);
 		}
+	} else  {
+		pr_alert("##### %s failure %s(%d) for task:%p tgid:%d, task_tgid_vnr:%d for sig:%d, ####\n",
+			__func__, current->comm, current->pid, p, tgid, tgid_vnr, sig);
 	}
 	rcu_read_unlock();
 
@@ -2974,6 +3144,18 @@ static int do_tkill(pid_t tgid, pid_t pid, int sig)
  */
 SYSCALL_DEFINE3(tgkill, pid_t, tgid, pid_t, pid, int, sig)
 {
+
+#ifdef CONFIG_PROHIBIT_SIGNAL_HOOKING
+	if ((sig == SIGABRT ) || (sig == SIGILL ) || (sig == SIGBUS ) || (sig == SIGSEGV ))
+	{
+		if (strcmp(current->comm, "gatord"))
+		{
+			printk(KERN_ALERT "##### Prohibit %s(%d) USER sending SIGABRT, SIGILL, SIGBUS, SIGSEGV, SIG : %d, kill USER......\n", current->comm, current->pid, sig);
+			force_sig(SIGBUS, current);
+		}
+	}
+#endif
+
 	/* This is only valid for single tasks */
 	if (pid <= 0 || tgid <= 0)
 		return -EINVAL;
@@ -2990,6 +3172,18 @@ SYSCALL_DEFINE3(tgkill, pid_t, tgid, pid_t, pid, int, sig)
  */
 SYSCALL_DEFINE2(tkill, pid_t, pid, int, sig)
 {
+
+#ifdef CONFIG_PROHIBIT_SIGNAL_HOOKING
+	if ((sig == SIGABRT ) || (sig == SIGILL ) || (sig == SIGBUS ) || (sig == SIGSEGV ))
+	{
+		if (strcmp(current->comm, "gatord"))
+		{
+			printk(KERN_ALERT "##### Prohibit %s(%d) USER sending SIGABRT, SIGILL, SIGBUS, SIGSEGV, SIG : %d, kill USER......\n", current->comm, current->pid, sig);
+			force_sig(SIGBUS, current);
+		}
+	}
+#endif
+
 	/* This is only valid for single tasks */
 	if (pid <= 0)
 		return -EINVAL;
@@ -3089,6 +3283,57 @@ COMPAT_SYSCALL_DEFINE4(rt_tgsigqueueinfo,
 }
 #endif
 
+#ifdef CONFIG_PLAT_TIZEN
+typedef  struct {
+	char *name;
+	unsigned long long sigmask;
+} signal_allow_library;
+
+signal_allow_library signal_allow_libs[] = {{"sys-assert", SIG_KERNEL_ALLOW_FIRST_HANDLER},
+						{"eina", rt_sigmask(SIGBUS)} };
+
+static int do_sigaction_vd_policy_check(struct task_struct *t,
+		int sig, unsigned long addr)
+{
+	int elf_handler = -EINVAL, i;
+	/* the original code is:
+	 *
+	 * sig_kernel_allow_first_handler(sig)
+	 * && (sig_handler(t, sig) != SIG_DFL
+	 *      || !compare_library_name_address("sys-assert", addr)
+	 * && !vd_signal_policy_check(current->comm))
+	 *
+	 */
+
+	if (!sig_kernel_allow_first_handler(sig))
+		return 0;
+
+	/* yeah, we unlock sighand lock and enable IRQs because 2 of the
+	 * following checks can sleep, which is hardly something that we
+	 * would like to see in atomic context w/IRQs disabled. on the
+	 * other hand, sig_handler(t, sig) check definitely wishes to be
+	 * performed under the sighand lock. */
+	spin_unlock_irq(&t->sighand->siglock);
+	/* nothing to do here, opt out */
+	if (vd_signal_policy_check(t->comm)) {
+		spin_lock_irq(&t->sighand->siglock);
+		return 0;
+	}
+
+	for (i = 0; i < sizeof(signal_allow_libs)/sizeof(signal_allow_library); i++) {
+		if (siginmask(sig, signal_allow_libs[i].sigmask)) {
+			elf_handler = find_match_elf_name(t, signal_allow_libs[i].name, addr);
+			if (!elf_handler)
+				break;
+		}
+	}
+
+	/* grab the lock and check task's sig_handler() */
+	spin_lock_irq(&t->sighand->siglock);
+	return elf_handler;
+}
+#endif
+
 int do_sigaction(int sig, struct k_sigaction *act, struct k_sigaction *oact)
 {
 	struct task_struct *t = current;
@@ -3098,6 +3343,19 @@ int do_sigaction(int sig, struct k_sigaction *act, struct k_sigaction *oact)
 	if (!valid_signal(sig) || sig < 1 || (act && sig_kernel_only(sig)))
 		return -EINVAL;
 
+#ifdef CONFIG_PROHIBIT_SIGNAL_HOOKING
+	if ((sig == SIGABRT) || (sig == SIGILL) ||
+			(sig == SIGBUS) || (sig == SIGSEGV)) {
+		if (strcmp(current->comm, "gatord")) {
+			pr_alert("##### Prohibit %s(%d) USER hooking"
+					"SIGABRT, SIGILL, SIGBUS, SIGSEGV, "
+					"Current SIG : %d, kill USER......\n",
+					current->comm, current->pid, sig);
+			force_sig(SIGBUS, current);
+		}
+	}
+#endif
+
 	k = &t->sighand->action[sig-1];
 
 	spin_lock_irq(&current->sighand->siglock);
@@ -3105,6 +3363,21 @@ int do_sigaction(int sig, struct k_sigaction *act, struct k_sigaction *oact)
 		*oact = *k;
 
 	if (act) {
+#ifdef CONFIG_PLAT_TIZEN
+		unsigned long addr = (unsigned long)act->sa.sa_handler;
+
+		if (do_sigaction_vd_policy_check(t, sig, addr)) {
+			spin_unlock_irq(&t->sighand->siglock);
+			/* return fail to handler registering process */
+			/* return -EPERM; */
+			return 0;
+		}
+		/* we dropped the lock in the middle, refresh values */
+		k = &t->sighand->action[sig-1];
+		if (oact)
+			*oact = *k;
+#endif
+
 		sigdelsetmask(&act->sa.sa_mask,
 			      sigmask(SIGKILL) | sigmask(SIGSTOP));
 		*k = *act;

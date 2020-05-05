@@ -27,6 +27,8 @@ struct irq_desc;
  * @irq_count:		stats field to detect stalled irqs
  * @last_unhandled:	aging timer for unhandled count
  * @irqs_unhandled:	stats field for spurious unhandled interrupts
+ * @threads_handled:	stats field for deferred spurious detection of threaded handlers
+ * @threads_handled_last: comparator field for deferred spurious detection of theraded handlers
  * @lock:		locking for SMP
  * @affinity_hint:	hint to user space for preferred irq affinity
  * @affinity_notify:	context for notification of affinity changes
@@ -52,6 +54,11 @@ struct irq_desc {
 	unsigned int		irq_count;	/* For detecting broken IRQs */
 	unsigned long		last_unhandled;	/* Aging timer for unhandled count */
 	unsigned int		irqs_unhandled;
+	atomic_t		threads_handled;
+	int			threads_handled_last;
+#ifdef CONFIG_IRQ_TIME
+	long long           runtime;
+#endif
 	raw_spinlock_t		lock;
 	struct cpumask		*percpu_enabled;
 #ifdef CONFIG_SMP
@@ -103,6 +110,75 @@ static inline struct msi_desc *irq_desc_get_msi_desc(struct irq_desc *desc)
 	return desc->irq_data.msi_desc;
 }
 
+extern void vd_irq_set(int irq, struct irq_desc *desc);
+extern void vd_irq_unset(int irq, struct irq_desc *desc);
+extern int is_timer_irq(struct irq_desc *desc);
+
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+extern void show_irq(void);
+#endif
+
+#ifdef CONFIG_IRQ_TIME
+#include <linux/time.h>
+#include <linux/interrupt.h>
+
+struct irq_desc_debug{
+	struct timeval	last_time;
+	struct timeval	last_time_kth;
+	struct timeval	last_time_tint;
+	long long       total_time;
+	const char      *name;
+	unsigned int    irq;
+	unsigned int    irq_run;
+};
+
+extern struct irq_desc_debug irq_desc_last[NR_CPUS];
+
+static void irq_time_before_handle(unsigned int irq, struct irq_desc *desc)
+{
+	int cpu = smp_processor_id();
+
+	do_gettimeofday(&irq_desc_last[cpu].last_time);
+
+	if (is_timer_irq(desc))
+		do_gettimeofday(&irq_desc_last[cpu].last_time_tint);
+
+	irq_desc_last[cpu].irq = irq;
+	irq_desc_last[cpu].irq_run = irq;
+	irq_desc_last[cpu].name = 0;
+
+	if (desc->action && desc->action->name)
+		irq_desc_last[cpu].name = desc->action->name;
+}
+
+static void irq_time_after_handle(unsigned int irq, struct irq_desc *desc)
+{
+	struct timeval before, after;
+	long long time_val;
+	int cpu = smp_processor_id();
+
+	before.tv_sec  = irq_desc_last[cpu].last_time.tv_sec;
+	before.tv_usec = irq_desc_last[cpu].last_time.tv_usec;
+
+	do_gettimeofday(&after);
+
+	time_val = (after.tv_sec - before.tv_sec) * USEC_PER_SEC;
+	time_val += after.tv_usec - before.tv_usec;
+
+	irq_desc_last[cpu].total_time += time_val;
+
+	if(desc->runtime < time_val)
+		desc->runtime = time_val;
+
+	irq_desc_last[cpu].irq_run = 0;
+}
+#else
+static void irq_time_before_handle(unsigned int irq, struct irq_desc *desc)
+{}
+static void irq_time_after_handle(unsigned int irq, struct irq_desc *desc)
+{}
+#endif
+
 /*
  * Architectures call this to let the generic IRQ layer
  * handle an interrupt. If the descriptor is attached to an
@@ -111,7 +187,13 @@ static inline struct msi_desc *irq_desc_get_msi_desc(struct irq_desc *desc)
  */
 static inline void generic_handle_irq_desc(unsigned int irq, struct irq_desc *desc)
 {
+	vd_irq_set(irq, desc);
+	irq_time_before_handle(irq, desc);
+
 	desc->handle_irq(irq, desc);
+
+	irq_time_after_handle(irq, desc);
+	vd_irq_unset(irq, desc);
 }
 
 int generic_handle_irq(unsigned int irq);

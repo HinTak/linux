@@ -948,4 +948,7 @@ static __init int sysctl_ipv4_init(void)
 	return 0;
 }
 
+VD_PROC_SYSCTL_TABLE_OP(ipv4_table);
+VD_PROC_SYSCTL_TABLE_OP(ipv4_net_table);
+
 __initcall(sysctl_ipv4_init);

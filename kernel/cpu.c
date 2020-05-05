@@ -419,7 +419,7 @@ out:
 	return ret;
 }
 
-int __cpuinit cpu_up(unsigned int cpu)
+int __ref cpu_up(unsigned int cpu)
 {
 	int err = 0;
 
@@ -523,6 +523,11 @@ void __weak arch_enable_nonboot_cpus_end(void)
 {
 }
 
+#if defined(CONFIG_SCHED_HMP) && defined(CONFIG_EXYNOS5_DYNAMIC_CPU_HOTPLUG)
+extern struct cpumask hmp_slow_cpu_mask;
+extern int disable_dm_hotplug_before_suspend;
+#endif
+
 void __ref enable_nonboot_cpus(void)
 {
 	int cpu, error;
@@ -536,6 +541,11 @@ void __ref enable_nonboot_cpus(void)
 	printk(KERN_INFO "Enabling non-boot CPUs ...\n");
 
 	arch_enable_nonboot_cpus_begin();
+
+#if defined(CONFIG_SCHED_HMP) && defined(CONFIG_EXYNOS5_DYNAMIC_CPU_HOTPLUG)
+	if (!disable_dm_hotplug_before_suspend)
+		cpumask_and(frozen_cpus, frozen_cpus, &hmp_slow_cpu_mask);
+#endif
 
 	for_each_cpu(cpu, frozen_cpus) {
 		error = _cpu_up(cpu, 1);
@@ -698,10 +708,12 @@ void set_cpu_present(unsigned int cpu, bool present)
 
 void set_cpu_online(unsigned int cpu, bool online)
 {
-	if (online)
+	if (online) {
 		cpumask_set_cpu(cpu, to_cpumask(cpu_online_bits));
-	else
+		cpumask_set_cpu(cpu, to_cpumask(cpu_active_bits));
+	} else {
 		cpumask_clear_cpu(cpu, to_cpumask(cpu_online_bits));
+	}
 }
 
 void set_cpu_active(unsigned int cpu, bool active)
@@ -726,3 +738,23 @@ void init_cpu_online(const struct cpumask *src)
 {
 	cpumask_copy(to_cpumask(cpu_online_bits), src);
 }
+
+static ATOMIC_NOTIFIER_HEAD(idle_notifier);
+
+void idle_notifier_register(struct notifier_block *n)
+{
+	atomic_notifier_chain_register(&idle_notifier, n);
+}
+EXPORT_SYMBOL_GPL(idle_notifier_register);
+
+void idle_notifier_unregister(struct notifier_block *n)
+{
+	atomic_notifier_chain_unregister(&idle_notifier, n);
+}
+EXPORT_SYMBOL_GPL(idle_notifier_unregister);
+
+void idle_notifier_call_chain(unsigned long val)
+{
+	atomic_notifier_call_chain(&idle_notifier, val, NULL);
+}
+EXPORT_SYMBOL_GPL(idle_notifier_call_chain);

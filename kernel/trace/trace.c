@@ -43,6 +43,10 @@
 #include "trace.h"
 #include "trace_output.h"
 
+#if defined(CONFIG_KDEBUGD_FTRACE) && defined(CONFIG_KDEBUGD_FTRACE_USER_BACKTRACE)
+extern void kdbg_save_stack_trace_user(struct stack_trace *trace);
+#endif
+
 /*
  * On boot up, the ring buffer is set to the minimum size, so that
  * we do not waste memory on systems that are not using tracing.
@@ -423,6 +427,9 @@ int __trace_puts(unsigned long ip, const char *str, int size)
 	struct print_entry *entry;
 	unsigned long irq_flags;
 	int alloc;
+	int pc;
+
+	pc = preempt_count();
 
 	if (unlikely(tracing_selftest_running || tracing_disabled))
 		return 0;
@@ -432,7 +439,7 @@ int __trace_puts(unsigned long ip, const char *str, int size)
 	local_save_flags(irq_flags);
 	buffer = global_trace.trace_buffer.buffer;
 	event = trace_buffer_lock_reserve(buffer, TRACE_PRINT, alloc, 
-					  irq_flags, preempt_count());
+					  irq_flags, pc);
 	if (!event)
 		return 0;
 
@@ -449,6 +456,7 @@ int __trace_puts(unsigned long ip, const char *str, int size)
 		entry->buf[size] = '\0';
 
 	__buffer_unlock_commit(buffer, event);
+	ftrace_trace_stack(buffer, irq_flags, 4, pc);
 
 	return size;
 }
@@ -466,6 +474,9 @@ int __trace_bputs(unsigned long ip, const char *str)
 	struct bputs_entry *entry;
 	unsigned long irq_flags;
 	int size = sizeof(struct bputs_entry);
+	int pc;
+
+	pc = preempt_count();
 
 	if (unlikely(tracing_selftest_running || tracing_disabled))
 		return 0;
@@ -473,7 +484,7 @@ int __trace_bputs(unsigned long ip, const char *str)
 	local_save_flags(irq_flags);
 	buffer = global_trace.trace_buffer.buffer;
 	event = trace_buffer_lock_reserve(buffer, TRACE_BPUTS, size,
-					  irq_flags, preempt_count());
+					  irq_flags, pc);
 	if (!event)
 		return 0;
 
@@ -482,6 +493,7 @@ int __trace_bputs(unsigned long ip, const char *str)
 	entry->str			= str;
 
 	__buffer_unlock_commit(buffer, event);
+	ftrace_trace_stack(buffer, irq_flags, 4, pc);
 
 	return 1;
 }
@@ -733,7 +745,7 @@ static struct {
 	{ trace_clock_local,	"local",	1 },
 	{ trace_clock_global,	"global",	1 },
 	{ trace_clock_counter,	"counter",	0 },
-	{ trace_clock_jiffies,	"uptime",	1 },
+	{ trace_clock_jiffies,	"uptime",	0 },
 	{ trace_clock,		"perf",		1 },
 	ARCH_TRACE_CLOCKS
 };
@@ -1027,13 +1039,13 @@ update_max_tr_single(struct trace_array *tr, struct task_struct *tsk, int cpu)
 }
 #endif /* CONFIG_TRACER_MAX_TRACE */
 
-static void default_wait_pipe(struct trace_iterator *iter)
+static int default_wait_pipe(struct trace_iterator *iter)
 {
 	/* Iterators are static, they should be filled or empty */
 	if (trace_buffer_iter(iter, iter->cpu_file))
-		return;
+		return 0;
 
-	ring_buffer_wait(iter->trace_buffer->buffer, iter->cpu_file);
+	return ring_buffer_wait(iter->trace_buffer->buffer, iter->cpu_file);
 }
 
 #ifdef CONFIG_FTRACE_STARTUP_TEST
@@ -1306,7 +1318,6 @@ void tracing_start(void)
 
 	arch_spin_unlock(&ftrace_max_lock);
 
-	ftrace_start();
  out:
 	raw_spin_unlock_irqrestore(&global_trace.start_lock, flags);
 }
@@ -1353,7 +1364,6 @@ void tracing_stop(void)
 	struct ring_buffer *buffer;
 	unsigned long flags;
 
-	ftrace_stop();
 	raw_spin_lock_irqsave(&global_trace.start_lock, flags);
 	if (global_trace.stop_count++)
 		goto out;
@@ -1400,12 +1410,12 @@ static void tracing_stop_tr(struct trace_array *tr)
 
 void trace_stop_cmdline_recording(void);
 
-static void trace_save_cmdline(struct task_struct *tsk)
+static int trace_save_cmdline(struct task_struct *tsk)
 {
 	unsigned pid, idx;
 
 	if (!tsk->pid || unlikely(tsk->pid > PID_MAX_DEFAULT))
-		return;
+		return 0;
 
 	/*
 	 * It's not the end of the world if we don't get
@@ -1414,7 +1424,7 @@ static void trace_save_cmdline(struct task_struct *tsk)
 	 * so if we miss here, then better luck next time.
 	 */
 	if (!arch_spin_trylock(&trace_cmdline_lock))
-		return;
+		return 0;
 
 	idx = map_pid_to_cmdline[tsk->pid];
 	if (idx == NO_CMDLINE_MAP) {
@@ -1439,6 +1449,8 @@ static void trace_save_cmdline(struct task_struct *tsk)
 	memcpy(&saved_cmdlines[idx], tsk->comm, TASK_COMM_LEN);
 
 	arch_spin_unlock(&trace_cmdline_lock);
+
+	return 1;
 }
 
 void trace_find_cmdline(int pid, char comm[])
@@ -1480,9 +1492,8 @@ void tracing_record_cmdline(struct task_struct *tsk)
 	if (!__this_cpu_read(trace_cmdline_save))
 		return;
 
-	__this_cpu_write(trace_cmdline_save, false);
-
-	trace_save_cmdline(tsk);
+	if (trace_save_cmdline(tsk))
+		__this_cpu_write(trace_cmdline_save, false);
 }
 
 void
@@ -1816,7 +1827,11 @@ ftrace_trace_userstack(struct ring_buffer *buffer, unsigned long flags, int pc)
 	trace.skip		= 0;
 	trace.entries		= entry->caller;
 
+#if defined(CONFIG_KDEBUGD_FTRACE) && defined(CONFIG_KDEBUGD_FTRACE_USER_BACKTRACE)
+	kdbg_save_stack_trace_user(&trace);
+#else
 	save_stack_trace_user(&trace);
+#endif
 	if (!filter_check_discard(call, entry, buffer, event))
 		__buffer_unlock_commit(buffer, event);
 
@@ -4055,17 +4070,19 @@ tracing_poll_pipe(struct file *filp, poll_table *poll_table)
  *
  *     Anyway, this is really very primitive wakeup.
  */
-void poll_wait_pipe(struct trace_iterator *iter)
+int poll_wait_pipe(struct trace_iterator *iter)
 {
 	set_current_state(TASK_INTERRUPTIBLE);
 	/* sleep for 100 msecs, and try again. */
 	schedule_timeout(HZ / 10);
+	return 0;
 }
 
 /* Must be called with trace_types_lock mutex held. */
 static int tracing_wait_pipe(struct file *filp)
 {
 	struct trace_iterator *iter = filp->private_data;
+	int ret;
 
 	while (trace_empty(iter)) {
 
@@ -4075,9 +4092,12 @@ static int tracing_wait_pipe(struct file *filp)
 
 		mutex_unlock(&iter->mutex);
 
-		iter->trace->wait_pipe(iter);
+		ret = iter->trace->wait_pipe(iter);
 
 		mutex_lock(&iter->mutex);
+
+		if (ret)
+			return ret;
 
 		if (signal_pending(current))
 			return -EINTR;
@@ -5012,8 +5032,12 @@ tracing_buffers_read(struct file *filp, char __user *ubuf,
 				goto out_unlock;
 			}
 			mutex_unlock(&trace_types_lock);
-			iter->trace->wait_pipe(iter);
+			ret = iter->trace->wait_pipe(iter);
 			mutex_lock(&trace_types_lock);
+			if (ret) {
+				size = ret;
+				goto out_unlock;
+			}
 			if (signal_pending(current)) {
 				size = -EINTR;
 				goto out_unlock;
@@ -5225,8 +5249,10 @@ tracing_buffers_splice_read(struct file *file, loff_t *ppos,
 			goto out;
 		}
 		mutex_unlock(&trace_types_lock);
-		iter->trace->wait_pipe(iter);
+		ret = iter->trace->wait_pipe(iter);
 		mutex_lock(&trace_types_lock);
+		if (ret)
+			goto out;
 		if (signal_pending(current)) {
 			ret = -EINTR;
 			goto out;
@@ -6490,6 +6516,11 @@ __init static int clear_boot_tracer(void)
 
 	return 0;
 }
+
+#ifdef CONFIG_KDEBUGD_FTRACE
+/* Let kdebugd have access to static functions in this file */
+#include "../kdebugd/trace/kdbg_ftrace_core_helper.c"
+#endif /* CONFIG_KDEBUGD_FTRACE */
 
 early_initcall(tracer_alloc_buffers);
 fs_initcall(tracer_init_debugfs);

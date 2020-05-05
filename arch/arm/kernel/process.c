@@ -125,6 +125,9 @@ EXPORT_SYMBOL(pm_power_off);
 void (*arm_pm_restart)(char str, const char *cmd) = null_restart;
 EXPORT_SYMBOL_GPL(arm_pm_restart);
 
+void (*arm_pm_restart_standby)(char str, const char *cmd) = null_restart;
+EXPORT_SYMBOL_GPL(arm_pm_restart_standby);
+
 /*
  * This is our default idle handler.
  */
@@ -147,6 +150,7 @@ void arch_cpu_idle_prepare(void)
 
 void arch_cpu_idle_enter(void)
 {
+	idle_notifier_call_chain(IDLE_START);
 	ledtrig_cpu(CPU_LED_IDLE_START);
 #ifdef CONFIG_PL310_ERRATA_769419
 	wmb();
@@ -156,6 +160,7 @@ void arch_cpu_idle_enter(void)
 void arch_cpu_idle_exit(void)
 {
 	ledtrig_cpu(CPU_LED_IDLE_END);
+	idle_notifier_call_chain(IDLE_END);
 }
 
 #ifdef CONFIG_HOTPLUG_CPU
@@ -205,6 +210,7 @@ void machine_shutdown(void)
  */
 void machine_halt(void)
 {
+	local_irq_disable();
 	smp_send_stop();
 
 	local_irq_disable();
@@ -219,6 +225,7 @@ void machine_halt(void)
  */
 void machine_power_off(void)
 {
+	local_irq_disable();
 	smp_send_stop();
 
 	if (pm_power_off)
@@ -238,8 +245,10 @@ void machine_power_off(void)
  */
 void machine_restart(char *cmd)
 {
+	local_irq_disable();
 	smp_send_stop();
 
+        cmd = NULL; /* sdp_micom_restart() refer to it */
 	arm_pm_restart(reboot_mode, cmd);
 
 	/* Give a grace period for failure to restart of 1s */
@@ -250,6 +259,28 @@ void machine_restart(char *cmd)
 	local_irq_disable();
 	while (1);
 }
+EXPORT_SYMBOL(machine_restart);
+
+/*
+ * this is machine_restart for entering to standby not normal boot. 
+ */
+void machine_restart_standby(char *cmd)
+{
+	local_irq_disable();
+	smp_send_stop();
+
+	arm_pm_restart_standby(reboot_mode, cmd);
+
+	/* Give a grace period for failure to restart of 1s */
+	mdelay(1000);
+
+	/* Whoops - the platform was unable to reboot. Tell the user! */
+	printk("Reboot failed -- System halted\n");
+	local_irq_disable();
+	while (1);
+}
+EXPORT_SYMBOL(machine_restart_standby);
+
 
 void __show_regs(struct pt_regs *regs)
 {
@@ -362,6 +393,9 @@ copy_thread(unsigned long clone_flags, unsigned long stack_start,
 		childregs->ARM_r0 = 0;
 		if (stack_start)
 			childregs->ARM_sp = stack_start;
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+		p->user_ssp = childregs->ARM_sp;
+#endif
 	} else {
 		memset(childregs, 0, sizeof(struct pt_regs));
 		thread->cpu_context.r4 = stk_sz;

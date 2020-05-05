@@ -1,5 +1,6 @@
 menu "Generic Driver Options"
 
+source "drivers/base/kds/Kconfig"
 config UEVENT_HELPER_PATH
 	string "path to uevent helper"
 	depends on HOTPLUG

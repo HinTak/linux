@@ -351,6 +351,299 @@ struct mgmt_cp_set_device_id {
 } __packed;
 #define MGMT_SET_DEVICE_ID_SIZE		8
 
+#define MGMT_OP_SET_3DS_FEATURES	0x0029
+struct mgmt_cp_set_3ds_features {
+	__u8 features;
+	__u8 manuf_status;
+	__u8 threshold;
+} __packed;
+#define MGMT_SET_3DS_FEATURES_SIZE	3
+
+#define MGMT_OP_SET_TRIGGERED_CLOCK_CAPTURE	0x002A
+struct mgmt_cp_set_triggered_clock_capture {
+	__u16 conn_handle;
+	__u8 enable;
+	__u8 which_clock;
+	__u8 lpo_allowed;
+	__u8 num_clk_cap_to_filter;
+} __packed;
+#define MGMT_SET_TRIGGERED_CLOCK_CAPTURE_SIZE	6
+
+#define MGMT_OP_SET_CONNECTIONLESS_SLAVE_BROADCAST	0x002B
+struct mgmt_cp_set_connectionless_slave_broadcast {
+	__u8 enable;
+	__u8 lt_addr;
+	__u8 lpo_allowed;
+	__u16 packet_types;
+	__u16 csb_int_min;
+	__u16 csb_int_max;
+	__u32 csb_sv_tout;
+} __packed;
+#define MGMT_SET_CONNECTIONLESS_SLAVE_BROADCAST_SIZE	13
+struct mgmt_rp_set_connectionless_slave_broadcast {
+	__u8 state;
+	__u8 lt_addr;
+	__u16 csb_int;
+} __packed;
+
+#define MGMT_OP_START_SYNC_TRAIN	0x002C
+#define MGMT_START_SYNC_TRAIN_SIZE	0
+
+#define MGMT_OP_SET_RESERVED_LT_ADDR	0x002D
+struct mgmt_cp_set_reserved_lt_addr {
+	__u8 lt_addr;
+} __packed;
+#define MGMT_SET_RESERVED_LT_ADDR_SIZE	1
+struct mgmt_rp_set_reserved_lt_addr {
+	__u8 lt_addr;
+} __packed;
+
+#define MGMT_OP_DELETE_RESERVED_LT_ADDR	0x002E
+struct mgmt_cp_delete_reserved_lt_addr {
+	__u8 lt_addr;
+} __packed;
+#define MGMT_DELETE_RESERVED_LT_ADDR_SIZE	1
+struct mgmt_rp_delete_reserved_lt_addr {
+	__u8 lt_addr;
+} __packed;
+
+#define MGMT_OP_SET_CONNECTIONLESS_SLAVE_BROADCAST_DATA	0x002F
+struct mgmt_cp_set_connectionless_slave_broadcast_data {
+	__u8 lt_addr;
+	__u8 fragment;
+	__u8 data_length;
+	__u8 data[16];
+} __packed;
+#define MGMT_SET_CONNECTIONLESS_SLAVE_BROADCAST_DATA_SIZE	19
+struct mgmt_rp_set_connectionless_slave_broadcast_data {
+	__u8 lt_addr;
+} __packed;
+
+#define MGMT_OP_READ_SYNC_TRAIN_PARAMS	0x0030
+struct mgmt_rp_read_sync_train_params {
+	__u16 sync_train_int;
+	__u32 sync_train_tout;
+	__u8 service_data;
+} __packed;
+
+#define MGMT_OP_WRITE_SYNC_TRAIN_PARAMS	0x0031
+struct mgmt_cp_write_sync_train_params {
+	__u16 sync_int_min;
+	__u16 sync_int_max;
+	__u32 sync_train_tout;
+	__u8 service_data;
+} __packed;
+#define MGMT_WRITE_SYNC_TRAIN_PARAMS_SIZE	9
+struct mgmt_rp_write_sync_train_params {
+	__u16 sync_train_int;
+} __packed;
+
+#define MGMT_OP_VSPEC_SET_3D_CTRL	0x0032
+struct mgmt_cp_vspec_set_3d_ctrl {
+	__u8 mode;
+	__u8 bd_addr[6];
+} __packed;
+#define MGMT_VSPEC_SET_3D_CTRL_SIZE	7
+
+#define MGMT_OP_VSPEC_SET_3D_DELAY	0x0033
+struct mgmt_cp_vspec_set_3d_delay {
+	__u8 display_id;
+	__u16 left_open;
+	__u16 left_close;
+	__u16 right_open;
+	__u16 right_close;
+	__u16 delay;
+	__u8 dual_view;
+} __packed;
+#define MGMT_VSPEC_SET_3D_DELAY_SIZE	12
+
+#define MGMT_OP_VSPEC_VSYNC_DETECT	0x0034
+struct mgmt_cp_vspec_vsync_detect {
+	__u8 enable;
+} __packed;
+#define MGMT_VSPEC_VSYNC_DETECT_SIZE	1
+
+#define MGMT_OP_TRUNCATED_PAGE		0x0035
+struct mgmt_cp_truncated_page {
+	bdaddr_t bd_addr;
+	__u8 page_scan_resp_mode;
+	__le16 clock_offset;
+} __packed;
+#define MGMT_TRUNCATED_PAGE_SIZE 4
+
+#define MGMT_OP_TRUNCATE_PAGE_CANCEL	0x0036
+struct mgmt_cp_truncated_page_cancel {
+	bdaddr_t bd_addr;
+} __packed;
+#define MGMT_TRUNCATE_PAGE_CANCEL_SIZE 6
+struct mgmt_rp_truncated_page_cancel {
+	bdaddr_t bd_addr;
+} __packed;
+
+#define MGMT_OP_SET_CONNECTIONLESS_SLAVE_BROADCAST_RECEIVE 0x0037
+struct mgmt_cp_set_connectionless_slave_broadcast_receive {
+	__u8 enable;
+	bdaddr_t bd_addr;
+	__u8 lt_addr;
+	__le16 interval;
+	__le32 clock_offset;
+	__le32 nxt_clb_clock;
+	__le16 csb_tout;
+	__u8 remote_timimg_accuracy;
+	__u8 skip;
+	__le16 packet_type;
+	__u8 afh_channel_map[10];
+} __packed;
+#define MGMT_SET_CONNECTIONLESS_SLAVE_BROADCAST_RECEIVE_SIZE 23
+struct mgmt_rp_set_connectionless_slave_broadcast_receive {
+	bdaddr_t bd_addr;
+	__u8 lt_addr;
+} __packed;
+
+#define MGMT_OP_RECEIVE_SYNC_TRAIN	0x0038
+struct mgmt_cp_receive_sync_train {
+	bdaddr_t bd_addr;
+	__le16 sync_tout;
+	__le16 sync_window;
+	__le16 sync_train_scan_interval;
+} __packed;
+#define MGMT_RECEIVE_SYNC_TRAIN_SIZE 12
+
+#define MGMT_OP_SET_AFH_CHANNEL_CLASSIFICATION	0x0039
+struct mgmt_cp_set_afh_channel_classification {
+	__u8 afh_channel_map[10];
+} __packed;
+#define MGMT_SET_AFH_CHANNEL_CLASSIFICATION_PARAMS_SIZE	10
+
+#define MGMT_OP_VSPEC_SET_TX_POWER	0x003A
+struct mgmt_cp_vspec_set_tx_power {
+	__u8 tx_power[36];
+} __packed;
+#define MGMT_VSPEC_SET_TX_POWER_SIZE	36
+
+#define MGMT_OP_VSPEC_SET_HEADLESS_MODE		0x003B
+struct mgmt_cp_vspec_set_headless_mode {
+	__u8 enable;
+} __packed;
+#define MGMT_VSPEC_SET_HEADLESS_MODE_SIZE	1
+
+#define MGMT_OP_VSPEC_ADD_HEADLESS_DEVICE	0x003C
+struct mgmt_cp_vspec_add_headless_device {
+	bdaddr_t bd_addr;
+	__u8 link_key[16];
+	__u8 hexclass[3];
+} __packed;
+#define MGMT_VSPEC_ADD_HEADLESS_DEVICE_SIZE	25
+
+#define MGMT_OP_VSPEC_GET_ALL_HEADLESS_DEVICE_LIST	0x003D
+#define MGMT_VSPEC_GET_ALL_HEADLESS_DEVICE_LIST_SIZE	0
+struct mgmt_rp_vspec_get_all_headless_device_list {
+	__u8 status;
+	__u8 headless_dev_count;
+	__u8 data[0];
+} __packed;
+
+#define MGMT_OP_VSPEC_DELETE_HEADLESS_DEVICE_BY_ADDRESS		0x003E
+struct mgmt_cp_vspec_delete_headless_device_by_address {
+	bdaddr_t bd_addr;
+} __packed;
+#define MGMT_VSPEC_DELETE_HEADLESS_DEVICE_BY_ADDRESS_SIZE	6
+
+#define MGMT_OP_VSPEC_SET_HEADLESS_SCAN_MODE	0x003F
+struct mgmt_cp_vspec_set_headless_scan_mode {
+	__u8 page_scan_enable;
+	__u8 llr_scan_enable;
+} __packed;
+#define MGMT_VSPEC_SET_HEADLESS_SCAN_MODE_SIZE		2
+
+#define MGMT_OP_VSPEC_SET_LLR_WRITE_SCAN_MODE		0x0040
+struct mgmt_cp_vspec_set_llr_write_scan_mode {
+	__u8 enable;
+} __packed;
+#define MGMT_VSPEC_SET_LLR_WRITE_SCAN_MODE_SIZE	1
+
+#define MGMT_OP_VSPEC_READ_LLR_SCAN_PARAMS	0x0041
+struct mgmt_rp_vspec_read_llr_scan_params {
+	__u8 status;
+	__u8 data[14];
+} __packed;
+#define MGMT_VSPEC_READ_LLR_SCAN_PARAMS_SIZE	0
+
+#define MGMT_OP_VSPEC_WRITE_LLR_SCAN_PARAMS	0x0042
+struct mgmt_cp_vspec_write_llr_scan_params {
+	__u8 data[14];
+} __packed;
+#define MGMT_VSPEC_WRITE_LLR_SCAN_PARAMS_SIZE	14
+
+#define MGMT_OP_SET_SHARED_PCM_BUFFER_INFO 0x0043
+struct mgmt_cp_set_shared_pcm_buffer_info {
+	__u32 buffer_size;
+	__u32 base_address;
+	__u32 access_point_address;
+	__u32 frame_size_address;
+	__u32 enable_mard_address;
+} __packed;
+#define MGMT_OP_SET_SHARED_PCM_BUFFER_INFO_SIZE 20
+
+#define MGMT_OP_VSPEC_AV_STREAM_CONTROL           0x0044
+struct mgmt_cp_vspec_av_stream_control {
+        __u8 enable;
+} __packed;
+#define MGMT_VSPEC_AV_STREAM_CONTROL_PARAMS_SIZE  1
+
+#define MGMT_OP_SET_ADVERTISING		0x0045
+
+#define MGMT_OP_SET_SCAN_PARAMS		0x0046
+struct mgmt_cp_set_scan_params {
+	__le16	interval;
+	__le16	window;
+} __packed;
+#define MGMT_SET_SCAN_PARAMS_SIZE	4
+
+#define MGMT_OP_SET_ADVERTISING_PARAMS	0x0047
+struct mgmt_cp_set_advertising_params {
+	__le16  interval_min;
+	__le16  interval_max;
+	__u8 filter_policy;
+	__u8 type;
+} __packed;
+#define MGMT_SET_ADVERTISING_PARAMS_SIZE 6
+
+#define MGMT_OP_SET_ADVERTISING_DATA	0x0048
+struct mgmt_cp_set_advertising_data {
+	__u8    data[HCI_MAX_AD_LENGTH - 3];
+} __packed;
+#define MGMT_SET_ADVERTISING_DATA_SIZE	(HCI_MAX_AD_LENGTH - 3)
+
+#define MGMT_OP_SET_SCAN_RSP_DATA	0x0049
+struct mgmt_cp_set_scan_rsp_data {
+	__u8    data[HCI_MAX_AD_LENGTH];
+} __packed;
+#define MGMT_SET_SCAN_RSP_DATA_SIZE	HCI_MAX_AD_LENGTH
+
+#define MGMT_OP_ADD_DEV_WHITE_LIST		0x004A
+struct mgmt_cp_add_dev_white_list {
+	__u8	bdaddr_type;
+	bdaddr_t bdaddr;
+} __packed;
+#define MGMT_ADD_DEV_WHITE_LIST_SIZE	7
+
+#define MGMT_OP_REMOVE_DEV_FROM_WHITE_LIST		0x004B
+struct mgmt_cp_remove_dev_from_white_list {
+	__u8	bdaddr_type;
+	bdaddr_t bdaddr;
+} __packed;
+#define MGMT_REMOVE_DEV_FROM_WHITE_LIST_SIZE	7
+
+#define MGMT_OP_CLEAR_DEV_WHITE_LIST		0x004C
+#define MGMT_OP_CLEAR_DEV_WHITE_LIST_SIZE		0
+
+#define MGMT_OP_VSPEC_SET_HEADLESS_ADV_DATA	0x004D
+struct mgmt_cp_vspec_set_headless_adv_data {
+	__u8    data[HCI_MAX_AD_LENGTH];
+} __packed;
+#define MGMT_VSPEC_SET_HEADLESS_ADV_DATA_SIZE	HCI_MAX_AD_LENGTH
+
 #define MGMT_EV_CMD_COMPLETE		0x0001
 struct mgmt_ev_cmd_complete {
 	__le16	opcode;
@@ -486,3 +779,81 @@ struct mgmt_ev_passkey_notify {
 	__le32	passkey;
 	__u8	entered;
 } __packed;
+#define MGMT_EV_ASSOCIATION_NOTIFICATION	0x0019
+struct mgmt_ev_association_notification {
+	struct mgmt_addr_info addr;
+	__u8 type;
+	__u8 level;
+} __packed;
+
+#define MGMT_EV_TRIGGERED_CLOCK_CAPTURE 0x001A
+struct mgmt_ev_triggered_clock_capture {
+	__u16 conn_handle;
+	__u8 which_clk;
+	__u32 clk;
+	__u16 slot_offset;
+} __packed;
+
+#define MGMT_EV_SYNC_TRAIN_COMPLETE 0x001B
+struct mgmt_ev_sync_train_complete {
+	__u8 status;
+} __packed;
+
+#define MGMT_EV_SLAVE_PAGE_RESP_TIMEOUT 0x001C
+
+#define MGMT_EV_INQUIRY_RESPONSE_NOTIFICATION 0x001D
+struct mgmt_ev_inquiry_response_notification {
+	__u8 lap[3];
+	__s8 rssi;
+} __packed;
+
+#define MGMT_EV_VSPEC_3D_CODE_CHANGE 0x001E
+
+#define MGMT_EV_VSPEC_FRAME_PERIOD 0x001F
+struct mgmt_ev_vspec_frame_period {
+	__u16	frame_period;
+	__u8	period_fraction;
+	__u8	init_measurement;
+} __packed;
+
+#define MGMT_EV_SYNC_TRAIN_RECEIVE 0x0020
+struct mgmt_ev_sync_train_receive {
+	__u8 status;
+	bdaddr_t bdaddr;
+	__le32 clock_offset;
+	__u8 afh_channel_map[10];
+	__u8 lt_addr;
+	__le32 next_broadcast_instant;
+	__le16 slave_broadcast_interval;
+	__u8 service_data;
+} __packed;
+
+#define MGMT_EV_SLAVE_BROADCAST_RECEIVE 0x0021
+struct mgmt_ev_slave_broadcast_receive {
+	bdaddr_t bdaddr;
+	__u8 lt_addr;
+	__le32 clock;
+	__le32 offset;
+	__u8 status;
+	__u8 fragment;
+	__u8 data_length;
+	__u8 data[0];
+} __packed;
+
+#define MGMT_EV_SLAVE_BROADCAST_TIMEOUT 0x0022
+struct mgmt_ev_slave_broadcast_timeout {
+	bdaddr_t bdaddr;
+	__u8 lt_addr;
+} __packed;
+
+#define MGMT_EV_TRUNCATED_PAGE_COMPLETE 0x0023
+struct mgmt_ev_truncated_page_complete {
+	__u8 status;
+	bdaddr_t bdaddr;
+} __packed;
+
+#define MGMT_EV_CLB_CHANNEL_MAP_CHANGE 0x0024
+struct mgmt_ev_clb_channel_map_change {
+	__u8 afh_channel_map[10];
+} __packed;
+

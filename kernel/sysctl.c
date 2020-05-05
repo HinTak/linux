@@ -106,6 +106,12 @@ extern unsigned int core_pipe_limit;
 #endif
 extern int pid_max;
 extern int pid_max_min, pid_max_max;
+#ifdef CONFIG_PROFILE_MEMORY_USAGE
+extern int sysctl_profile_memory_usage;
+extern int profile_memory_usage_sysctl_handler(ctl_table*, int,
+						void __user *,
+						size_t *, loff_t *);
+#endif
 extern int percpu_pagelist_fraction;
 extern int compat_log;
 extern int latencytop_enabled;
@@ -143,6 +149,11 @@ static int min_percpu_pagelist_fract = 8;
 
 static int ngroups_max = NGROUPS_MAX;
 static const int cap_last_cap = CAP_LAST_CAP;
+
+/*this is needed for proc_doulongvec_minmax of sysctl_hung_task_timeout_secs */
+#ifdef CONFIG_DETECT_HUNG_TASK
+static unsigned long hung_task_timeout_max = (LONG_MAX/HZ);
+#endif
 
 #ifdef CONFIG_INOTIFY_USER
 #include <linux/inotify.h>
@@ -187,6 +198,12 @@ static int proc_dointvec_minmax_coredump(struct ctl_table *table, int write,
 #ifdef CONFIG_COREDUMP
 static int proc_dostring_coredump(struct ctl_table *table, int write,
 		void __user *buffer, size_t *lenp, loff_t *ppos);
+#endif
+
+#ifdef CONFIG_VD_HMP
+int sched_vdhmp_handler(struct ctl_table *table, int write,
+		void __user *buffer, size_t *lenp,
+		loff_t *ppos);
 #endif
 
 #ifdef CONFIG_MAGIC_SYSRQ
@@ -272,6 +289,9 @@ static int min_extfrag_threshold;
 static int max_extfrag_threshold = 1000;
 #endif
 
+int proc_dointvec_debug(struct ctl_table *table, int write,
+        void __user *buffer, size_t *lenp, loff_t *ppos);
+
 static struct ctl_table kern_table[] = {
 	{
 		.procname	= "sched_child_runs_first",
@@ -280,6 +300,26 @@ static struct ctl_table kern_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
+#ifdef CONFIG_VD_HMP
+	{
+		.procname	= "sched_vd_hmp_log_level",
+		.data		= &sysctl_sched_vd_hmp_log_level,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero,
+		.extra2		= &three,
+	},
+	{
+		.procname	= "sched_vd_hmp_policy",
+		.data		= &sysctl_sched_vd_hmp_policy,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= sched_vdhmp_handler,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+#endif /* CONFIG_VD_HMP */
 #ifdef CONFIG_SCHED_DEBUG
 	{
 		.procname	= "sched_min_granularity_ns",
@@ -740,7 +780,7 @@ static struct ctl_table kern_table[] = {
 		.data		= &console_loglevel,
 		.maxlen		= 4*sizeof(int),
 		.mode		= 0644,
-		.proc_handler	= proc_dointvec,
+		.proc_handler	= proc_dointvec_debug,
 	},
 	{
 		.procname	= "printk_ratelimit",
@@ -966,6 +1006,7 @@ static struct ctl_table kern_table[] = {
 		.maxlen		= sizeof(unsigned long),
 		.mode		= 0644,
 		.proc_handler	= proc_dohung_task_timeout_secs,
+		.extra2		= &hung_task_timeout_max,
 	},
 	{
 		.procname	= "hung_task_warnings",
@@ -1043,6 +1084,16 @@ static struct ctl_table kern_table[] = {
 		.maxlen		= sizeof(sysctl_perf_event_sample_rate),
 		.mode		= 0644,
 		.proc_handler	= perf_proc_update_handler,
+		.extra1		= &one,
+	},
+	{
+		.procname	= "perf_cpu_time_max_percent",
+		.data		= &sysctl_perf_cpu_time_max_percent,
+		.maxlen		= sizeof(sysctl_perf_cpu_time_max_percent),
+		.mode		= 0644,
+		.proc_handler	= perf_cpu_time_max_percent_handler,
+		.extra1		= &zero,
+		.extra2		= &one_hundred,
 	},
 #endif
 #ifdef CONFIG_KMEMCHECK
@@ -1238,6 +1289,15 @@ static struct ctl_table vm_table[] = {
 		.extra1		= &one,
 		.extra2		= &three,
 	},
+#ifdef CONFIG_PROFILE_MEMORY_USAGE
+	{
+		.procname	= "profile_memory_usage",
+		.data		= &sysctl_profile_memory_usage,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= profile_memory_usage_sysctl_handler,
+	},
+#endif
 #ifdef CONFIG_COMPACTION
 	{
 		.procname	= "compact_memory",
@@ -2008,6 +2068,47 @@ int proc_dointvec(struct ctl_table *table, int write,
 		    	    NULL,NULL);
 }
 
+/* debug for set printk level */
+int proc_dointvec_debug(struct ctl_table *table, int write,
+		void __user *buffer, size_t *lenp, loff_t *ppos)
+{
+
+	if(write)
+	{
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] trying loglevel : %s \n",(char*)buffer);
+		printk(KERN_EMERG "[SP_DEBUG] PID : %d %s \n",current->pid, current->comm);
+		printk(KERN_EMERG "[SP_DEBUG] PPID : %d %s \n",
+				current->real_parent->pid, current->real_parent->comm);
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		printk(KERN_EMERG "[SP_DEBUG] setting printk loglevel is blocked \n");
+		return -EINVAL;
+	}
+	else
+	{
+		return do_proc_dointvec(table,write,buffer,lenp,ppos,
+				NULL,NULL);
+	}
+}
+
 /*
  * Taint values can only be increased
  * This means we can safely use a temporary.
@@ -2584,6 +2685,42 @@ int proc_do_large_bitmap(struct ctl_table *table, int write,
 	}
 }
 
+/* @FIXME */
+ssize_t vd_proc_sysctl_operation(struct ctl_table *table,
+		struct file *file,
+		int write,
+		char __user *buf,
+		size_t *count,
+		loff_t *ppos)
+{
+	const char *procname;
+	struct dentry *d_entry = file->f_path.dentry;
+	ssize_t error, res = *count;
+
+	spin_lock(&d_entry->d_lock);
+	if (!d_entry->d_name.name) {
+		spin_unlock(&d_entry->d_lock);
+		return -ENOENT;
+	}
+
+	procname = d_entry->d_name.name;
+	while (table) {
+		if (!strcmp(table->procname, procname))
+			break;
+		table++;
+	}
+	spin_unlock(&d_entry->d_lock);
+
+	if (!table)
+		return -ENOENT;
+
+	error = table->proc_handler(table, write, buf, count, ppos);
+	if (!error)
+		error = res;
+
+	return error;
+}
+
 #else /* CONFIG_PROC_SYSCTL */
 
 int proc_dostring(struct ctl_table *table, int write,
@@ -2635,6 +2772,15 @@ int proc_doulongvec_ms_jiffies_minmax(struct ctl_table *table, int write,
     return -ENOSYS;
 }
 
+ssize_t vd_proc_sysctl_operation(struct ctl_table *table,
+		struct file *file,
+		int write,
+		char __user *buf,
+		size_t *count,
+		loff_t *ppos)
+{
+	return -ENOSYS;
+}
 
 #endif /* CONFIG_PROC_SYSCTL */
 

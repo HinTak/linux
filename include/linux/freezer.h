@@ -11,6 +11,9 @@
 extern atomic_t system_freezing_cnt;	/* nr of freezing conds in effect */
 extern bool pm_freezing;		/* PM freezing in effect */
 extern bool pm_nosig_freezing;		/* PM nosig freezing in effect */
+#ifdef CONFIG_IOTMODE
+extern bool pm_iot_freezing;		/* PM iot freezing in effect */
+#endif
 
 /*
  * Timeout for stopping processes
@@ -37,6 +40,13 @@ static inline bool freezing(struct task_struct *p)
 	return freezing_slow_path(p);
 }
 
+static inline bool check_freezing(void)
+{
+	if (likely(!atomic_read(&system_freezing_cnt)))
+		return false;
+	return true;
+}
+
 /* Takes and releases task alloc lock using task_lock() */
 extern void __thaw_task(struct task_struct *t);
 
@@ -44,6 +54,10 @@ extern bool __refrigerator(bool check_kthr_stop);
 extern int freeze_processes(void);
 extern int freeze_kernel_threads(void);
 extern void thaw_processes(void);
+#ifdef CONFIG_IOTMODE
+extern void thaw_processes_prepare(void);
+extern void thaw_processes_iot(void);
+#endif
 extern void thaw_kernel_threads(void);
 
 static inline bool try_to_freeze(void)
@@ -207,12 +221,17 @@ static inline bool freezer_should_skip(struct task_struct *p)
 #else /* !CONFIG_FREEZER */
 static inline bool frozen(struct task_struct *p) { return false; }
 static inline bool freezing(struct task_struct *p) { return false; }
+static inline bool check_freezing(void) { return false; }
 static inline void __thaw_task(struct task_struct *t) {}
 
 static inline bool __refrigerator(bool check_kthr_stop) { return false; }
 static inline int freeze_processes(void) { return -ENOSYS; }
 static inline int freeze_kernel_threads(void) { return -ENOSYS; }
 static inline void thaw_processes(void) {}
+#ifdef CONFIG_IOTMODE
+static inline void thaw_processes_prepare(void) {}
+static inline void thaw_processes_iot(void) {}
+#endif
 static inline void thaw_kernel_threads(void) {}
 
 static inline bool try_to_freeze_nowarn(void) { return false; }

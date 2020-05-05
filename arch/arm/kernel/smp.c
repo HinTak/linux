@@ -46,6 +46,10 @@
 #include <asm/virt.h>
 #include <asm/mach/arch.h>
 
+#ifdef CONFIG_ARCH_NVT72668
+#include <mach/motherboard.h>
+#endif
+
 /*
  * as from 2.5, kernels no longer have an init_tasks structure
  * so we need some other way of telling a new secondary core
@@ -57,7 +61,7 @@ struct secondary_data secondary_data;
  * control for which core is the next to come out of the secondary
  * boot "holding pen"
  */
-volatile int __cpuinitdata pen_release = -1;
+volatile int pen_release = -1;
 
 enum ipi_msg_type {
 	IPI_WAKEUP,
@@ -66,7 +70,16 @@ enum ipi_msg_type {
 	IPI_CALL_FUNC,
 	IPI_CALL_FUNC_SINGLE,
 	IPI_CPU_STOP,
+	IPI_COMPLETION,
+	IPI_CPU_BACKTRACE,
+#ifdef CONFIG_ACCURATE_COREDUMP
+	IPI_SYNC_BLOCK,
+#endif
+	IPI_TZ_SS = 0xb,
 };
+
+/* For reliability, we're prepared to waste bits here. */
+static DECLARE_BITMAP(backtrace_mask, NR_CPUS) __read_mostly;
 
 static DECLARE_COMPLETION(cpu_running);
 
@@ -78,6 +91,13 @@ void __init smp_set_ops(struct smp_operations *ops)
 		smp_ops = *ops;
 };
 
+static unsigned long get_arch_pgd(pgd_t *pgd)
+{
+	phys_addr_t pgdir = virt_to_phys(pgd);
+	BUG_ON(pgdir & ARCH_PGD_MASK);
+	return pgdir >> ARCH_PGD_SHIFT;
+}
+
 int __cpuinit __cpu_up(unsigned int cpu, struct task_struct *idle)
 {
 	int ret;
@@ -87,8 +107,8 @@ int __cpuinit __cpu_up(unsigned int cpu, struct task_struct *idle)
 	 * its stack and the page tables.
 	 */
 	secondary_data.stack = task_stack_page(idle) + THREAD_START_SP;
-	secondary_data.pgdir = virt_to_phys(idmap_pgd);
-	secondary_data.swapper_pg_dir = virt_to_phys(swapper_pg_dir);
+	secondary_data.pgdir = get_arch_pgd(idmap_pgd);
+	secondary_data.swapper_pg_dir = get_arch_pgd(swapper_pg_dir);
 	__cpuc_flush_dcache_area(&secondary_data, sizeof(secondary_data));
 	outer_clean_range(__pa(&secondary_data), __pa(&secondary_data + 1));
 
@@ -364,6 +384,8 @@ asmlinkage void __cpuinit secondary_start_kernel(void)
 	 */
 	percpu_timer_setup();
 
+	local_restore_irq_affinities();
+
 	local_irq_enable();
 	local_fiq_enable();
 
@@ -463,6 +485,7 @@ static const char *ipi_types[NR_IPI] = {
 	S(IPI_CALL_FUNC, "Function call interrupts"),
 	S(IPI_CALL_FUNC_SINGLE, "Single function call interrupts"),
 	S(IPI_CPU_STOP, "CPU stop interrupts"),
+	S(IPI_COMPLETION, "completion interrupts"),
 };
 
 void show_ipi_list(struct seq_file *p, int prec)
@@ -479,6 +502,24 @@ void show_ipi_list(struct seq_file *p, int prec)
 		seq_printf(p, " %s\n", ipi_types[i]);
 	}
 }
+
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+void print_ipi_list(void)
+{
+    unsigned int cpu, i;
+    static int prec = 0;
+
+    for (i = 0; i < NR_IPI; i++) {
+        printk("%*s%u: ", prec - 1, "IPI", i);
+
+        for_each_online_cpu(cpu)
+            printk( "%10u ",
+                    __get_irq_stat(cpu, ipi_irqs[i]));
+
+        printk(" %s\n", ipi_types[i]);
+    }
+}
+#endif
 
 u64 smp_irq_stat_cpu(unsigned int cpu)
 {
@@ -569,12 +610,22 @@ static DEFINE_RAW_SPINLOCK(stop_lock);
 /*
  * ipi_cpu_stop - handle IPI from smp_send_stop()
  */
-static void ipi_cpu_stop(unsigned int cpu)
+static void ipi_cpu_stop(unsigned int cpu, struct pt_regs *regs)
 {
+	struct thread_info *thread = current_thread_info();
+
 	if (system_state == SYSTEM_BOOTING ||
 	    system_state == SYSTEM_RUNNING) {
 		raw_spin_lock(&stop_lock);
+
+		console_panic_zap_locks(cpu);
+
 		printk(KERN_CRIT "CPU%u: stopping\n", cpu);
+
+		printk(KERN_CRIT "Process %.*s (pid: %d, stack limit = 0x%p)\n",
+				TASK_COMM_LEN, thread->task->comm, task_pid_nr(thread->task), thread + 1);
+
+		__show_regs(regs);
 		dump_stack();
 		raw_spin_unlock(&stop_lock);
 	}
@@ -584,8 +635,70 @@ static void ipi_cpu_stop(unsigned int cpu)
 	local_fiq_disable();
 	local_irq_disable();
 
-	while (1)
+	while (1){
 		cpu_relax();
+	#ifdef CONFIG_ARCH_NVT72668
+		CPU_CEASE(1);
+	#endif
+	}
+}
+
+#ifdef CONFIG_ACCURATE_COREDUMP
+int lock_other_cpus;
+
+void block_other_cpus_on_core_dump(void)
+{
+	cpumask_t mask;
+	
+	preempt_disable();
+
+	cpumask_copy(&mask, cpu_online_mask);
+	lock_other_cpus = 1;
+	cpu_clear(smp_processor_id(), mask);
+	smp_cross_call(&mask, IPI_SYNC_BLOCK);
+}
+
+void unblock_other_cpus_on_core_dump(void)
+{
+	lock_other_cpus = 0;
+	preempt_enable();
+}
+
+void ipi_sync_block(void)
+{
+	preempt_disable();
+	while (lock_other_cpus)
+		cpu_relax();
+	preempt_enable();
+}
+#endif
+
+static void ipi_cpu_backtrace(struct pt_regs *regs)
+{
+	unsigned int cpu = smp_processor_id();
+
+	if (cpumask_test_cpu(cpu, to_cpumask(backtrace_mask))) {
+		static arch_spinlock_t lock = __ARCH_SPIN_LOCK_UNLOCKED;
+
+		arch_spin_lock(&lock);
+		pr_warn("IPI backtrace for cpu %d\n", cpu);
+		show_regs(regs);
+		arch_spin_unlock(&lock);
+		cpumask_clear_cpu(cpu, to_cpumask(backtrace_mask));
+	}
+}
+
+static DEFINE_PER_CPU(struct completion *, cpu_completion);
+
+int register_ipi_completion(struct completion *completion, int cpu)
+{
+	per_cpu(cpu_completion, cpu) = completion;
+	return IPI_COMPLETION;
+}
+
+static void ipi_complete(unsigned int cpu)
+{
+	complete(per_cpu(cpu_completion, cpu));
 }
 
 /*
@@ -595,6 +708,8 @@ asmlinkage void __exception_irq_entry do_IPI(int ipinr, struct pt_regs *regs)
 {
 	handle_IPI(ipinr, regs);
 }
+irqreturn_t (*secos_hook)(int irq, void *unused) = NULL;
+EXPORT_SYMBOL(secos_hook);
 
 void handle_IPI(int ipinr, struct pt_regs *regs)
 {
@@ -634,10 +749,36 @@ void handle_IPI(int ipinr, struct pt_regs *regs)
 
 	case IPI_CPU_STOP:
 		irq_enter();
-		ipi_cpu_stop(cpu);
+		ipi_cpu_stop(cpu,regs);
 		irq_exit();
 		break;
 
+	case IPI_COMPLETION:
+		irq_enter();
+		ipi_complete(cpu);
+		irq_exit();
+		break;
+
+case IPI_CPU_BACKTRACE:
+		irq_enter();
+		ipi_cpu_backtrace(regs);
+		irq_exit();
+		break;
+
+#ifdef CONFIG_ACCURATE_COREDUMP
+	case IPI_SYNC_BLOCK:
+		/* ipi irq statistics is not update */
+		irq_enter();
+		ipi_sync_block();
+		irq_exit();
+		scheduler_ipi();
+		/* rescheduling starts after handler return */
+		break;
+#endif
+	case IPI_TZ_SS:
+		if(secos_hook)
+			secos_hook( IPI_TZ_SS,NULL);
+		break;
 	default:
 		printk(KERN_CRIT "CPU%u: Unknown IPI message 0x%x\n",
 		       cpu, ipinr);
@@ -656,13 +797,17 @@ void smp_send_stop(void)
 	unsigned long timeout;
 	struct cpumask mask;
 
+	printk(KERN_ERR"================================================================================\n");
+	printk(KERN_ERR" SMP Send Stop Other CPU!\n");
+	printk(KERN_ERR"================================================================================\n");
+
 	cpumask_copy(&mask, cpu_online_mask);
 	cpumask_clear_cpu(smp_processor_id(), &mask);
 	if (!cpumask_empty(&mask))
 		smp_cross_call(&mask, IPI_CPU_STOP);
 
 	/* Wait up to one second for other CPUs to stop */
-	timeout = USEC_PER_SEC;
+	timeout = 2*USEC_PER_SEC;
 	while (num_online_cpus() > 1 && timeout--)
 		udelay(1);
 
@@ -677,6 +822,52 @@ int setup_profiling_timer(unsigned int multiplier)
 {
 	return -EINVAL;
 }
+
+static void flush_all_cpu_cache(void *info)
+{
+	flush_cache_louis();
+}
+
+#ifdef CONFIG_SCHED_HMP
+
+#include <asm/cputype.h>
+
+extern struct cpumask hmp_slow_cpu_mask;
+extern struct cpumask hmp_fast_cpu_mask;
+
+static void flush_all_cluster_cache(void *info)
+{
+	flush_cache_all();
+}
+
+void flush_all_cpu_caches(void)
+{
+        unsigned int cpu, cluster, target_cpu;
+
+	preempt_disable();
+	cpu = smp_processor_id();
+	cluster = MPIDR_AFFINITY_LEVEL(cpu_logical_map(cpu), 1);
+
+	if (!cluster)
+		target_cpu = first_cpu(hmp_slow_cpu_mask);
+	else
+		target_cpu = first_cpu(hmp_fast_cpu_mask);
+
+	smp_call_function(flush_all_cpu_cache, NULL, 1);
+	smp_call_function_single(target_cpu, flush_all_cluster_cache, NULL, 1);
+	flush_cache_all();
+
+	preempt_enable();
+}
+#else
+void flush_all_cpu_caches(void)
+{
+	preempt_disable();
+	smp_call_function(flush_all_cpu_cache, NULL, 1);
+	flush_cache_all();
+	preempt_enable();
+}
+#endif
 
 #ifdef CONFIG_CPU_FREQ
 
@@ -730,3 +921,36 @@ static int __init register_cpufreq_notifier(void)
 core_initcall(register_cpufreq_notifier);
 
 #endif
+
+void arch_trigger_all_cpu_backtrace(void)
+{
+	static unsigned long backtrace_flag;
+	int i;
+
+	get_cpu();
+	if (test_and_set_bit(0, &backtrace_flag)) {
+		/*
+		* If there is already a trigger_all_cpu_backtrace() in progress
+		* (backtrace_flag == 1), don't output double cpu dump infos.
+		*/
+		put_cpu();
+		return;
+	}
+
+	cpumask_copy(to_cpumask(backtrace_mask), cpu_online_mask);
+
+	pr_info("\nSending IPI to all CPUs:");
+	smp_cross_call(to_cpumask(backtrace_mask), IPI_CPU_BACKTRACE);
+
+	/* Wait for up to 10 seconds for all CPUs to do the backtrace */
+	for (i = 0; i < 10 * 1000; i++) {
+		if (cpumask_empty(to_cpumask(backtrace_mask)))
+			break;
+
+		mdelay(1);
+	}
+
+	clear_bit(0, &backtrace_flag);
+	smp_mb();
+	put_cpu();
+}

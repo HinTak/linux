@@ -267,4 +267,6 @@ static __init int sysctl_core_init(void)
 	return register_pernet_subsys(&sysctl_core_ops);
 }
 
+VD_PROC_SYSCTL_TABLE_OP(net_core_table);
+
 fs_initcall(sysctl_core_init);

@@ -626,6 +626,14 @@ out:
 	complete(&p->wait);
 }
 
+#ifdef CONFIG_LOOP_MOUNT_CHECK
+static inline bool loop_is_file_busy(struct file *file, bool is_rdonly)
+{
+	struct inode *inode = file->f_path.dentry->d_inode;
+
+	return (atomic_read(&inode->i_writecount) > !is_rdonly);
+}
+#endif
 
 /*
  * loop_change_fd switched the backing store of a loopback device to
@@ -667,6 +675,11 @@ static int loop_change_fd(struct loop_device *lo, struct block_device *bdev,
 	/* size of the new backing store needs to be the same */
 	if (get_loop_size(lo, file) != get_loop_size(lo, old_file))
 		goto out_putf;
+
+#ifdef CONFIG_LOOP_MOUNT_CHECK
+	if (loop_is_file_busy(file, true))
+		goto out_putf;
+#endif
 
 	/* and ... switch */
 	error = loop_switch(lo, file);
@@ -868,6 +881,11 @@ static int loop_set_fd(struct loop_device *lo, fmode_t mode,
 	if (!(file->f_mode & FMODE_WRITE) || !(mode & FMODE_WRITE) ||
 	    !file->f_op->write)
 		lo_flags |= LO_FLAGS_READ_ONLY;
+
+#ifdef CONFIG_LOOP_MOUNT_CHECK
+	if (loop_is_file_busy(file, !!(lo_flags & LO_FLAGS_READ_ONLY)))
+		goto out_putf;
+#endif
 
 	lo_blocksize = S_ISBLK(inode->i_mode) ?
 		inode->i_bdev->bd_block_size : PAGE_SIZE;

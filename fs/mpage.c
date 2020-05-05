@@ -71,14 +71,17 @@ static void mpage_end_io(struct bio *bio, int err)
 	bio_put(bio);
 }
 
-static struct bio *mpage_bio_submit(int rw, struct bio *bio)
+/* selp patch : remove static to be used by other modules */
+struct bio *mpage_bio_submit(int rw, struct bio *bio)
 {
 	bio->bi_end_io = mpage_end_io;
 	submit_bio(rw, bio);
 	return NULL;
 }
+EXPORT_SYMBOL(mpage_bio_submit);
 
-static struct bio *
+/* selp patch : remove static to be used by other modules */
+struct bio *
 mpage_alloc(struct block_device *bdev,
 		sector_t first_sector, int nr_vecs,
 		gfp_t gfp_flags)
@@ -98,6 +101,7 @@ mpage_alloc(struct block_device *bdev,
 	}
 	return bio;
 }
+EXPORT_SYMBOL(mpage_alloc);
 
 /*
  * support function for mpage_readpages.  The fs supplied get_block might
@@ -278,6 +282,13 @@ do_mpage_readpage(struct bio *bio, struct page *page, unsigned nr_pages,
 		goto confused;
 	}
 
+#ifdef CONFIG_BD_CACHE_ENABLED
+	if (bio && test_bit(AS_DIRECT, &page->mapping->flags)) {
+		//printk("%s: AS_DIRECT, set_bit(BIO_DIRECT, &bio->bi_flags)\n", __FUNCTION__);
+		set_bit(BIO_DIRECT, &bio->bi_flags);
+	}
+#endif
+ 
 	/*
 	 * This page will go to BIO.  Do we need to send this BIO off first?
 	 */
@@ -292,6 +303,13 @@ alloc_new:
 		if (bio == NULL)
 			goto confused;
 	}
+
+#ifdef CONFIG_BD_CACHE_ENABLED
+	if (bio && test_bit(AS_DIRECT, &page->mapping->flags)) {
+		//printk("%s: AS_DIRECT, set_bit(BIO_DIRECT, &bio->bi_flags)\n", __FUNCTION__);
+		set_bit(BIO_DIRECT, &bio->bi_flags);
+	}
+#endif
 
 	length = first_hole << blkbits;
 	if (bio_add_page(bio, page, length, 0) < length) {
@@ -310,6 +328,13 @@ out:
 	return bio;
 
 confused:
+
+#ifdef CONFIG_BD_CACHE_ENABLED
+	if (bio && test_bit(AS_DIRECT, &page->mapping->flags)) {
+		//printk("%s: AS_DIRECT, set_bit(BIO_DIRECT, &bio->bi_flags)\n", __FUNCTION__);
+		set_bit(BIO_DIRECT, &bio->bi_flags);
+	}
+#endif
 	if (bio)
 		bio = mpage_bio_submit(READ, bio);
 	if (!PageUptodate(page))

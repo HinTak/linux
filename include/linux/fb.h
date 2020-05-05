@@ -47,6 +47,9 @@ struct device_node;
 
 #define FB_MISC_PRIM_COLOR	1
 #define FB_MISC_1ST_DETAIL	2	/* First Detailed Timing is preferred */
+
+#define GET_UMP_SECURE_ID	0xc0046d36		//for x11 mali ump
+
 struct fb_chroma {
 	__u32 redx;	/* in fraction of 1024 */
 	__u32 greenx;
@@ -491,6 +494,7 @@ struct fb_info {
 	void *fbcon_par;                /* fbcon use-only private area */
 	/* From here on everything is device dependent */
 	void *par;
+	unsigned int ump_secure_id;
 	/* we need the PCI or similar aperture base/size not
 	   smem_start/size as smem_start may just be an object
 	   allocated inside the aperture so may not actually overlap */

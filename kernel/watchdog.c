@@ -28,12 +28,25 @@
 #include <asm/irq_regs.h>
 #include <linux/kvm_para.h>
 #include <linux/perf_event.h>
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+void show_kernel_patch_version(void);
+#endif
 
 int watchdog_enabled = 1;
-int __read_mostly watchdog_thresh = 10;
+int __read_mostly watchdog_thresh = 30;	/* FIXME : temporal solution for soft lockup */
 static int __read_mostly watchdog_disabled;
 static u64 __read_mostly sample_period;
 
+#ifdef CONFIG_IRQ_TIME
+#include <linux/irq.h>
+#endif
+
+#ifdef CONFIG_PRINT_SMC_HISTORY_PRINT
+print_smc_info_sec_fn print_smc_info_sec;
+EXPORT_SYMBOL(print_smc_info_sec);
+#endif // CONFIG_PRINT_SMC_HISTORY_PRINT
+ 
 static DEFINE_PER_CPU(unsigned long, watchdog_touch_ts);
 static DEFINE_PER_CPU(struct task_struct *, softlockup_watchdog);
 static DEFINE_PER_CPU(struct hrtimer, watchdog_hrtimer);
@@ -108,6 +121,14 @@ static int get_softlockup_thresh(void)
 	return watchdog_thresh * 2;
 }
 
+#ifdef CONFIG_CHECK_SMALL_SOFTLOCKUP
+static int get_softlockup_small_thresh(void)
+{
+	/* 1/4 from softlockup threshold */
+	return watchdog_thresh / 2;
+}
+#endif
+
 /*
  * Returns seconds, approximately.  We don't need nanosecond
  * resolution, and we don't need to waste time with a big divide when
@@ -133,6 +154,11 @@ static void set_sample_period(void)
 /* Commands for resetting the watchdog */
 static void __touch_watchdog(void)
 {
+#ifdef CONFIG_IRQ_TIME
+	int cpu = smp_processor_id();
+
+	do_gettimeofday(&irq_desc_last[cpu].last_time_kth);
+#endif
 	__this_cpu_write(watchdog_touch_ts, get_timestamp());
 }
 
@@ -203,6 +229,19 @@ static int is_softlockup(unsigned long touch_ts)
 	return 0;
 }
 
+#ifdef CONFIG_CHECK_SMALL_SOFTLOCKUP
+static int is_small_softlockup(unsigned long touch_ts)
+{
+	unsigned long now = get_timestamp();
+
+	/* Warn about potentially unreasonable delays: */
+	if (time_after(now, touch_ts + get_softlockup_small_thresh()))
+		return now - touch_ts;
+
+	return 0;
+}
+#endif
+
 #ifdef CONFIG_HARDLOCKUP_DETECTOR
 
 static struct perf_event_attr wd_hw_attr = {
@@ -261,6 +300,10 @@ static void watchdog_interrupt_count(void)
 static int watchdog_nmi_enable(unsigned int cpu);
 static void watchdog_nmi_disable(unsigned int cpu);
 
+#ifdef CONFIG_SDP_BUS_ERR_LOGGER
+int sdp_bus_err_logger(void); 
+#endif
+
 /* watchdog kicker functions */
 static enum hrtimer_restart watchdog_timer_fn(struct hrtimer *hrtimer)
 {
@@ -316,19 +359,51 @@ static enum hrtimer_restart watchdog_timer_fn(struct hrtimer *hrtimer)
 		printk(KERN_EMERG "BUG: soft lockup - CPU#%d stuck for %us! [%s:%d]\n",
 			smp_processor_id(), duration,
 			current->comm, task_pid_nr(current));
+#ifdef CONFIG_VDLP_VERSION_INFO
+		show_kernel_patch_version();
+#endif
+
 		print_modules();
 		print_irqtrace_events(current);
 		if (regs)
 			show_regs(regs);
 		else
 			dump_stack();
+#ifdef CONFIG_PRINT_SMC_HISTORY_PRINT
+		if ( print_smc_info_sec )
+			print_smc_info_sec();
+#endif
+
+#ifdef CONFIG_IRQ_TIME
+		show_irq();
+#endif
+		write_emrg_klog(regs, WRITE_RAW_KLOG_TYPE_SOFTLOCKUP);
 
 		if (softlockup_panic)
 			panic("softlockup: hung tasks");
-		__this_cpu_write(soft_watchdog_warn, true);
-	} else
-		__this_cpu_write(soft_watchdog_warn, false);
 
+#ifdef CONFIG_SDP_BUS_ERR_LOGGER
+		sdp_bus_err_logger();
+#endif
+		__this_cpu_write(soft_watchdog_warn, true);
+	} else {
+#ifdef CONFIG_CHECK_SMALL_SOFTLOCKUP
+		duration = is_small_softlockup(touch_ts);
+		if (unlikely(duration)) {
+			printk(KERN_EMERG "INFO: CPU#%d stuck for %us! [%s:%d]\n",
+				smp_processor_id(), duration,
+				current->comm, task_pid_nr(current));
+			if (regs)
+				show_regs(regs);
+			else
+				dump_stack();
+#ifdef CONFIG_IRQ_TIME
+			show_irq();
+#endif
+		}
+#endif
+		__this_cpu_write(soft_watchdog_warn, false);
+	}
 	return HRTIMER_RESTART;
 }
 

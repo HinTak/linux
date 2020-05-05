@@ -397,6 +397,12 @@ config CPU_V7
 	select CPU_PABRT_V7
 	select CPU_TLB_V7 if MMU
 
+config CPU_ARM_CORTEX_A15
+	bool "Support ARM Cortex-A15 instruction set"
+	depends on CPU_32v7
+	help
+	  Select this if your CPU (and compiler) support Cortex-A15 instruction set
+
 config CPU_THUMBONLY
 	bool
 	# There are no CPUs available with MMU that don't implement an ARM ISA:
@@ -436,7 +442,6 @@ config CPU_32v5
 
 config CPU_32v6
 	bool
-	select CPU_USE_DOMAINS if CPU_V6 && MMU
 	select TLS_REG_EMUL if !CPU_32v6K && !MMU
 
 config CPU_32v6K
@@ -651,7 +656,7 @@ config ARM_VIRT_EXT
 
 config SWP_EMULATE
 	bool "Emulate SWP/SWPB instructions"
-	depends on !CPU_USE_DOMAINS && CPU_V7
+	depends on CPU_V7
 	default y if SMP
 	select HAVE_PROC_CPU if PROC_FS
 	help
@@ -878,6 +883,13 @@ config CACHE_PL310
 	  This option enables optimisations for the PL310 cache
 	  controller.
 
+config CACHE_L2X0_DISABLE_SECURE_SUPPORT
+	bool "Use secure interface to disable L2 cache"
+	depends on CACHE_L2X0
+	default n
+	help 
+	  This option will call secure service to disable L2X0 cache in normal world.
+
 config CACHE_TAUROS2
 	bool "Enable the Tauros2 L2 cache controller"
 	depends on (ARCH_DOVE || ARCH_MMP || CPU_PJ4)
@@ -909,7 +921,7 @@ config ARM_L1_CACHE_SHIFT
 config ARM_DMA_MEM_BUFFERABLE
 	bool "Use non-cacheable memory for DMA" if (CPU_V6 || CPU_V6K) && !CPU_V7
 	depends on !(MACH_REALVIEW_PB1176 || REALVIEW_EB_ARM11MP || \
-		     MACH_REALVIEW_PB11MP)
+		     MACH_REALVIEW_PB11MP||ARCH_SDP)
 	default y if CPU_V6 || CPU_V6K || CPU_V7
 	help
 	  Historically, the kernel has used strongly ordered mappings to

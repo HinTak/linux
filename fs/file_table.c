@@ -27,6 +27,7 @@
 #include <linux/task_work.h>
 #include <linux/ima.h>
 
+#include <linux/pagevec.h>
 #include <linux/atomic.h>
 
 #include "internal.h"
@@ -53,6 +54,9 @@ static void file_free_rcu(struct rcu_head *head)
 
 static inline void file_free(struct file *f)
 {
+#ifdef CONFIG_FD_PID
+	put_pid(f->f_pid);
+#endif
 	percpu_counter_dec(&nr_files);
 	file_check_state(f);
 	call_rcu(&f->f_u.fu_rcuhead, file_free_rcu);
@@ -140,6 +144,10 @@ struct file *get_empty_filp(void)
 	spin_lock_init(&f->f_lock);
 	eventpoll_init_file(f);
 	/* f->f_version: 0 */
+#ifdef CONFIG_FD_PID
+	if (current)
+		f->f_pid = get_task_pid(current, PIDTYPE_PID);
+#endif
 	return f;
 
 over:
@@ -211,10 +219,10 @@ static void drop_file_write_access(struct file *file)
 	struct dentry *dentry = file->f_path.dentry;
 	struct inode *inode = dentry->d_inode;
 
-	put_write_access(inode);
-
 	if (special_file(inode->i_mode))
 		return;
+
+	put_write_access(inode);
 	if (file_check_writeable(file) != 0)
 		return;
 	__mnt_drop_write(mnt);
@@ -257,6 +265,16 @@ static void __fput(struct file *file)
 		i_readcount_dec(inode);
 	if (file->f_mode & FMODE_WRITE)
 		drop_file_write_access(file);
+#ifdef CONFIG_DEBUG_FILEREFCOUNT
+	if (file_count(file)) {
+		pr_err("[%s] [%s] Freeing FILE even with valid refcount(%ld)\n",
+				__func__, current->comm, file_count(file));
+		if (file->f_path.dentry)
+			pr_err("[%s] [%s]FILE[%s]\n", __func__, current->comm,
+					file->f_path.dentry->d_name.name);
+		WARN_ON(1);
+	}
+#endif
 	file->f_path.dentry = NULL;
 	file->f_path.mnt = NULL;
 	file->f_inode = NULL;
@@ -434,6 +452,68 @@ void file_sb_list_del(struct file *file)
 #define while_file_list_for_each_entry				\
 }
 
+#endif
+
+int iterate_sb_files(struct super_block *sb,
+		     int (*func)(struct file *, void *),
+		     void *arg)
+{
+	struct file *f;
+	int res = 0;
+
+	lg_global_lock(&files_lglock);
+	do_file_list_for_each_entry(sb, f) {
+		res = func(f, arg);
+		if (res)
+			break;
+	} while_file_list_for_each_entry;
+	lg_global_unlock(&files_lglock);
+	return res;
+}
+
+#ifdef CONFIG_PRINT_DIRTY_PAGES
+#define DIRTY_FILE_PATH_LENGTH 256
+
+static int print_dirty_file_path(struct file *f, void *arg)
+{
+	struct inode *inode = f->f_dentry->d_inode;
+	struct pagevec pvec;
+	long unsigned start_page_index = 0;
+	unsigned dirty_pages_count;
+
+	if (!(S_ISLNK(inode->i_mode) || S_ISREG(inode->i_mode)))
+			return 0;
+
+	pagevec_init(&pvec, 0);
+
+	dirty_pages_count = pagevec_lookup_tag(&pvec, inode->i_mapping,
+		&start_page_index, PAGECACHE_TAG_DIRTY, 1);
+
+	if (dirty_pages_count) {
+		char buffer[DIRTY_FILE_PATH_LENGTH];
+		char *file_path;
+
+		file_path = d_path(&f->f_path, buffer, DIRTY_FILE_PATH_LENGTH);
+		if (IS_ERR(file_path)) {
+			return PTR_ERR(file_path);
+			pagevec_release(&pvec);
+		}
+
+		pr_info("[DIRTY FILE]%s\n", file_path);
+		pagevec_release(&pvec);
+	}
+	return 0;
+
+}
+
+static void __print_dirty_files_one_sb(struct super_block *sb, void *arg) {
+	iterate_sb_files(sb, print_dirty_file_path, NULL);
+}
+
+void print_dirty_file(void)
+{
+	iterate_supers(__print_dirty_files_one_sb, NULL);
+}
 #endif
 
 /**

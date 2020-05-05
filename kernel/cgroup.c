@@ -63,6 +63,10 @@
 
 #include <linux/atomic.h>
 
+#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+#include <linux/sf_security.h>
+#endif
+
 /* css deactivation bias, makes css->refcnt negative to deny new trygets */
 #define CSS_DEACT_BIAS		INT_MIN
 
@@ -3703,6 +3707,19 @@ static int cgroup_pidlist_open(struct file *file, enum cgroup_filetype type)
 	retval = pidlist_array_load(cgrp, type, &l);
 	if (retval)
 		return retval;
+
+#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+	if(l->length > 0)
+	{
+		struct task_struct *p = find_task_by_vpid(l->list[0]);
+		if((p != NULL) && (!sf_process_authorized(current,p)))
+		{
+			cgroup_release_pid_array(l);
+			return -EACCES;
+		}
+	}
+#endif
+    
 	/* configure file information */
 	file->f_op = &cgroup_pidlist_operations;
 

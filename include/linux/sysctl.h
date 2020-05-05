@@ -168,6 +168,43 @@ struct ctl_path {
 
 #ifdef CONFIG_SYSCTL
 
+struct file;
+
+/* @FIXME. dirty hack:
+ * this is to workaround smack checks and to let non root users set some of
+ * sysctl values*/
+extern ssize_t vd_proc_sysctl_operation(struct ctl_table *table,
+		struct file *file, int write, char __user *buf, size_t *count,
+		loff_t *ppos);
+
+#define VD_PROC_SYSCTL_TABLE_OP(_name)						\
+ssize_t vd_proc_sysctl_write_##_name(struct file *file,			\
+		const char __user *buf, size_t count, loff_t *ppos)		\
+{										\
+	return vd_proc_sysctl_operation(_name, file, 1, (char __user *)buf,	\
+			&count, ppos);						\
+}										\
+										\
+ssize_t vd_proc_sysctl_read_##_name(struct file *file,				\
+		char __user *buf, size_t count, loff_t *ppos)			\
+{										\
+	vd_proc_sysctl_operation(_name, file, 0, buf, &count, ppos);		\
+	return count;								\
+}
+
+/* generates vd_proc_sysctl_TAB_operations file_operations structure */
+#define VD_PROC_SYSCTL_DEFINE_FILE_OPS(_name)					\
+extern ssize_t vd_proc_sysctl_write_##_name(struct file *file,			\
+		const char __user *buf, size_t count, loff_t *ppos);		\
+extern ssize_t vd_proc_sysctl_read_##_name(struct file *file,			\
+		char __user *buf, size_t count, loff_t *ppos);			\
+										\
+static const struct file_operations vd_proc_sysctl_##_name##_operations = {	\
+	.write		= vd_proc_sysctl_write_##_name,				\
+	.read		= vd_proc_sysctl_read_##_name,				\
+	.llseek		= no_llseek						\
+}
+
 void proc_sys_poll_notify(struct ctl_table_poll *poll);
 
 extern void setup_sysctl_set(struct ctl_table_set *p,
@@ -191,6 +228,14 @@ void unregister_sysctl_table(struct ctl_table_header * table);
 
 extern int sysctl_init(void);
 #else /* CONFIG_SYSCTL */
+
+#define VD_PROC_SYSCTL_DEFINE_FILE_OPS(_name)
+#define VD_PROC_SYSCTL_TABLE_OP(_name)
+
+extern ssize_t vd_proc_sysctl_operation(struct ctl_table *table,
+		struct file *file, int write, char __user *buf, size_t *count,
+		loff_t *ppos);
+
 static inline struct ctl_table_header *register_sysctl_table(struct ctl_table * table)
 {
 	return NULL;

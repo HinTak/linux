@@ -29,4 +29,12 @@ obj-$(CONFIG_IR_WINBOND_CIR) += winbond-cir.o
 obj-$(CONFIG_RC_LOOPBACK) += rc-loopback.o
 obj-$(CONFIG_IR_GPIO_CIR) += gpio-ir-recv.o
 obj-$(CONFIG_IR_IGUANA) += iguanair.o
+
+
+obj-$(CONFIG_SBB_INTERFACE) += sbb-interface.o
+obj-$(CONFIG_KERNEL_TCP_SOCKET) += kernel-socket.o
+obj-$(CONFIG_VIRTUAL_RC) += virtual-rc.o virtual-panel-rc.o
+
 obj-$(CONFIG_IR_TTUSBIR) += ttusbir.o
+
+obj-$(CONFIG_RC_WT61P807) += rc-wt61p807.o rc-panel-wt61p807.o

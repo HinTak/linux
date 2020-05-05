@@ -121,6 +121,10 @@ DEFINE_SPINLOCK(unix_table_lock);
 EXPORT_SYMBOL_GPL(unix_table_lock);
 static atomic_long_t unix_nr_socks;
 
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+extern void hook_smart_deadlock_unix_wait_for_peer_enter(struct pid *peer_pid);
+extern void hook_smart_deadlock_unix_wait_for_peer_leave();
+#endif
 
 static struct hlist_head *unix_sockets_unbound(void *addr)
 {
@@ -160,9 +164,8 @@ static inline void unix_set_secdata(struct scm_cookie *scm, struct sk_buff *skb)
 
 static inline unsigned int unix_hash_fold(__wsum n)
 {
-	unsigned int hash = (__force unsigned int)n;
+	unsigned int hash = (__force unsigned int)csum_fold(n);
 
-	hash ^= hash>>16;
 	hash ^= hash>>8;
 	return hash&(UNIX_HASH_SIZE-1);
 }
@@ -934,6 +937,10 @@ out_unlock:
 out_up:
 	mutex_unlock(&u->readlock);
 out:
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+   if (err == 0)
+       init_peercred(sock->sk);
+#endif
 	return err;
 }
 
@@ -1122,6 +1129,9 @@ restart:
 	if (other->sk_shutdown & RCV_SHUTDOWN)
 		goto out_unlock;
 
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	hook_smart_deadlock_unix_wait_for_peer_enter(other->sk_peer_pid);
+#endif
 	if (unix_recvq_full(other)) {
 		err = -EAGAIN;
 		if (!timeo)
@@ -1135,6 +1145,9 @@ restart:
 		sock_put(other);
 		goto restart;
 	}
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	hook_smart_deadlock_unix_wait_for_peer_leave();
+#endif
 
 	/* Latch our state.
 
@@ -1224,6 +1237,9 @@ out_unlock:
 		unix_state_unlock(other);
 
 out:
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	hook_smart_deadlock_unix_wait_for_peer_leave();
+#endif
 	kfree_skb(skb);
 	if (newsk)
 		unix_release_sock(newsk, 0);
@@ -1575,6 +1591,9 @@ restart:
 			goto out_unlock;
 	}
 
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	hook_smart_deadlock_unix_wait_for_peer_enter(other->sk_peer_pid);
+#endif
 	if (unix_peer(other) != sk && unix_recvq_full(other)) {
 		if (!timeo) {
 			err = -EAGAIN;
@@ -1589,7 +1608,9 @@ restart:
 
 		goto restart;
 	}
-
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	hook_smart_deadlock_unix_wait_for_peer_leave();
+#endif
 	if (sock_flag(other, SOCK_RCVTSTAMP))
 		__net_timestamp(skb);
 	maybe_add_creds(skb, sock, other);
@@ -1607,6 +1628,9 @@ out_unlock:
 out_free:
 	kfree_skb(skb);
 out:
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	hook_smart_deadlock_unix_wait_for_peer_leave();
+#endif
 	if (other)
 		sock_put(other);
 	scm_destroy(siocb->scm);
@@ -1793,8 +1817,11 @@ static int unix_dgram_recvmsg(struct kiocb *iocb, struct socket *sock,
 		goto out;
 
 	err = mutex_lock_interruptible(&u->readlock);
-	if (err) {
-		err = sock_intr_errno(sock_rcvtimeo(sk, noblock));
+	if (unlikely(err)) {
+		/* recvmsg() in non blocking mode is supposed to return -EAGAIN
+		 * sk_rcvtimeo is not honored by mutex_lock_interruptible()
+		 */
+		err = noblock ? -EAGAIN : -ERESTARTSYS;
 		goto out;
 	}
 
@@ -1914,6 +1941,7 @@ static int unix_stream_recvmsg(struct kiocb *iocb, struct socket *sock,
 	struct unix_sock *u = unix_sk(sk);
 	struct sockaddr_un *sunaddr = msg->msg_name;
 	int copied = 0;
+	int noblock = flags & MSG_DONTWAIT;
 	int check_creds = 0;
 	int target;
 	int err = 0;
@@ -1929,7 +1957,7 @@ static int unix_stream_recvmsg(struct kiocb *iocb, struct socket *sock,
 		goto out;
 
 	target = sock_rcvlowat(sk, flags&MSG_WAITALL, size);
-	timeo = sock_rcvtimeo(sk, flags&MSG_DONTWAIT);
+	timeo = sock_rcvtimeo(sk, noblock);
 
 	/* Lock the socket to prevent queue disordering
 	 * while sleeps in memcpy_tomsg
@@ -1941,8 +1969,11 @@ static int unix_stream_recvmsg(struct kiocb *iocb, struct socket *sock,
 	}
 
 	err = mutex_lock_interruptible(&u->readlock);
-	if (err) {
-		err = sock_intr_errno(timeo);
+	if (unlikely(err)) {
+		/* recvmsg() in non blocking mode is supposed to return -EAGAIN
+		 * sk_rcvtimeo is not honored by mutex_lock_interruptible()
+		 */
+		err = noblock ? -EAGAIN : -ERESTARTSYS;
 		goto out;
 	}
 

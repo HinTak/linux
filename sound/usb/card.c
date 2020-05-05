@@ -84,6 +84,12 @@ static int device_setup[SNDRV_CARDS]; /* device parameter for this card */
 static bool ignore_ctl_error;
 static bool autoclock = true;
 
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+unsigned int uac_security_mic_param = 0;
+
+module_param_named(mic_on_off, uac_security_mic_param, uint, S_IRUGO|S_IWUSR);
+MODULE_PARM_DESC(mic_on_off, "Security option for mic");
+#endif
 module_param_array(index, int, NULL, 0444);
 MODULE_PARM_DESC(index, "Index value for the USB audio adapter.");
 module_param_array(id, charp, NULL, 0444);

@@ -26,6 +26,12 @@
 #include "tick-internal.h"
 #include "ntp_internal.h"
 
+#ifdef CONFIG_KDEBUGD_FTRACE
+#include "kdbg_util.h"
+#include <trace/kdbg_ftrace_helper.h>
+#include <trace/kdbg-ftrace.h>
+#endif /* CONFIG_KDEBUGD_FTRACE */
+
 static struct timekeeper timekeeper;
 static DEFINE_RAW_SPINLOCK(timekeeper_lock);
 static seqcount_t timekeeper_seq;
@@ -177,6 +183,33 @@ static inline s64 timekeeping_get_ns(struct timekeeper *tk)
 	/* If arch requires, add in get_arch_timeoffset() */
 	return nsec + get_arch_timeoffset();
 }
+
+#ifdef CONFIG_KDEBUGD_FTRACE
+/* kdbg_ftrace_timekeeping_get_ns_raw
+ * function to get the raw nanoseconds value.
+ */
+s64 notrace kdbg_ftrace_timekeeping_get_ns_raw(void)
+{
+	cycle_t cycle_now, cycle_delta;
+	struct clocksource *clock;
+	s64 nsec;
+
+	if (fconf.trace_timestamp_nsec_status) {
+		/* read clocksource: */
+		clock = timekeeper.clock;
+		cycle_now = clock->read(clock);
+		/* calculate the delta since the last update_wall_time: */
+		cycle_delta = (cycle_now - clock->cycle_last) & clock->mask;
+
+		/* convert delta to nanoseconds. */
+		nsec = clocksource_cyc2ns(cycle_delta, clock->mult, clock->shift);
+
+		/* If arch requires, add in gettimeoffset() */
+		return nsec + get_arch_timeoffset();
+	} else
+		return 0;
+}
+#endif /* CONFIG_KDEBUGD_FTRACE */
 
 static inline s64 timekeeping_get_ns_raw(struct timekeeper *tk)
 {
@@ -490,11 +523,47 @@ int do_settimeofday(const struct timespec *tv)
 {
 	struct timekeeper *tk = &timekeeper;
 	struct timespec ts_delta, xt;
+#ifdef CONFIG_PLAT_TIZEN
+	struct timeval cur_tv = {0};
+	struct timespec cur_ts = {0};
+#endif
 	unsigned long flags;
 
 	if (!timespec_valid_strict(tv))
 		return -EINVAL;
 
+#ifdef CONFIG_PLAT_TIZEN
+	/* get the current timeval and calculate corresponding timespec*/
+	do_gettimeofday(&cur_tv);
+	cur_ts.tv_sec = cur_tv.tv_sec;
+	cur_ts.tv_nsec = cur_tv.tv_usec * NSEC_PER_USEC;
+
+	/*
+	 * In Tizen platform, do_settimeofday is allowed for task 'net-config'.
+	 * only when the time passed is bigger than current time.
+	 */
+	if ((strncmp(current->comm, "net-config", TASK_COMM_LEN))
+			&& (strncmp(current->comm, "vd-net-config", TASK_COMM_LEN))) {
+		/* Failure case when current process is *NOT* 'net-config' */
+		printk("\n");
+		printk("\033[31mERROR : do_settimeofday was called by - %s -\033[0m\n", current->comm);
+		printk("\033[31m  do_settimeofday can make potential hang problem ..\033[0m\n");
+		printk("\033[31m  You can't use this dangerous function on embedded system.\033[0m\n");
+		return -EFAULT;
+	} else {
+		if (timespec_compare(tv, &cur_ts) < 0) {
+			/* Failure case when pass timeval less that current time */
+			printk("\n");
+			printk("\033[31mERROR : do_settimeofday was called by - %s -\033[0m\n", current->comm);
+			printk("\033[31m  %s have to pass timeval[%ld] bigger than current time[%ld].\033[0m\n",
+					current->comm, tv->tv_sec, cur_ts.tv_sec);
+			return -EFAULT;
+		} else {
+			printk("\033[32m ** do_settimeofday called by :[%s] pid:[%d] (UTC)timeval:[Current:%ld Pass:%ld]** \033[0m\n",
+					current->comm, current->pid, cur_ts.tv_sec, tv->tv_sec);
+		}
+	}
+#endif
 	raw_spin_lock_irqsave(&timekeeper_lock, flags);
 	write_seqcount_begin(&timekeeper_seq);
 

@@ -140,7 +140,11 @@ static ssize_t fscaps_show(struct kobject *kobj,
 }
 KERNEL_ATTR_RO(fscaps);
 
+#ifdef CONFIG_FASTBOOT_RCU
+int rcu_expedited = 1;
+#else
 int rcu_expedited;
+#endif
 static ssize_t rcu_expedited_show(struct kobject *kobj,
 				  struct kobj_attribute *attr, char *buf)
 {

@@ -127,7 +127,7 @@ int fat_chain_add(struct inode *inode, int new_dclus, int nr_cluster)
 		struct fat_entry fatent;
 
 		fatent_init(&fatent);
-		ret = fat_ent_read(inode, &fatent, last);
+		ret = fat_ent_read(sb, &fatent, last);
 		if (ret >= 0) {
 			int wait = inode_needs_sync(inode);
 			ret = fat_ent_write(inode, &fatent, new_dclus, wait);

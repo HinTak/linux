@@ -33,6 +33,10 @@
 
 #include <asm/ioctls.h>
 
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+struct logger_log *log_smart_deadlock = NULL;
+#endif
+
 /**
  * struct logger_log - represents a specific log, such as 'main' or 'radio'
  * @buffer:	The actual ring buffer
@@ -471,15 +475,21 @@ static ssize_t logger_aio_write(struct kiocb *iocb, const struct iovec *iov,
 	struct logger_log *log = file_get_log(iocb->ki_filp);
 	size_t orig;
 	struct logger_entry header;
-	struct timespec now;
+	unsigned long nsec;
+	u64 ts;
 	ssize_t ret = 0;
 
-	now = current_kernel_time();
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	if (log == log_smart_deadlock)
+		return -EACCES;
+#endif
+	ts = local_clock();
+	nsec = do_div(ts, 1000000000);
 
 	header.pid = current->tgid;
 	header.tid = current->pid;
-	header.sec = now.tv_sec;
-	header.nsec = now.tv_nsec;
+	header.sec = ts;
+	header.nsec = nsec;
 	header.euid = current_euid();
 	header.len = min_t(size_t, iocb->ki_left, LOGGER_ENTRY_MAX_PAYLOAD);
 	header.hdr_size = sizeof(struct logger_entry);
@@ -528,6 +538,44 @@ static ssize_t logger_aio_write(struct kiocb *iocb, const struct iovec *iov,
 
 	return ret;
 }
+
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+ssize_t write_dlog_from_kernel(void *buf, int buf_size)
+{
+	struct logger_log *log = log_smart_deadlock;
+	struct logger_entry header;
+	unsigned long nsec;
+	u64 ts;
+	ssize_t ret = 0;
+
+	ts = local_clock();
+	nsec = do_div(ts, 1000000000);
+
+	header.pid = current->tgid;
+	header.tid = current->pid;
+	header.sec = ts;
+	header.nsec = nsec;
+	header.euid = current_euid();
+	header.len = min_t(size_t, buf_size, LOGGER_ENTRY_MAX_PAYLOAD);
+	header.hdr_size = sizeof(struct logger_entry);
+
+	if (unlikely(!header.len))
+		return 0;
+
+	mutex_lock(&log->mutex);
+
+	fix_up_readers(log, sizeof(struct logger_entry) + header.len);
+	do_write_log(log, &header, sizeof(struct logger_entry));
+	do_write_log(log, buf, buf_size);
+
+	mutex_unlock(&log->mutex);
+	wake_up_interruptible(&log->wq);
+
+	return ret;
+}
+EXPORT_SYMBOL(write_dlog_from_kernel);
+#endif
+
 
 static struct logger_log *get_log_from_minor(int minor)
 {
@@ -742,6 +790,7 @@ static const struct file_operations logger_fops = {
 	.release = logger_release,
 };
 
+
 /*
  * Log size must must be a power of two, and greater than
  * (LOGGER_ENTRY_MAX_PAYLOAD + sizeof(struct logger_entry)).
@@ -783,6 +832,14 @@ static int __init create_log(char *log_name, int size)
 	INIT_LIST_HEAD(&log->logs);
 	list_add_tail(&log->logs, &log_list);
 
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	if( !(strcmp(log_name,LOGGER_LOG_SMART_DEADLOCK ))) {
+		printk( "[smart deadlock] find out log [log_smart_deadlock]\n");
+		log_smart_deadlock = log;
+		//log_smart_deadlock->misc.mode = S_IRUSR | S_IWUSR | S_IRGRP| S_IWGRP | S_IROTH | S_IWOTH;
+	}
+#endif
+
 	/* finally, initialize the misc device for this log */
 	ret = misc_register(&log->misc);
 	if (unlikely(ret)) {
@@ -804,25 +861,47 @@ out_free_buffer:
 	return ret;
 }
 
+#ifdef CONFIG_TIZEN_TV_DLOG_DEBUG
+#define LOGGER_LOG_MAIN_SIZE		(8*1024*1024)
+#define LOGGER_LOG_EVENTS_SIZE		(256*1024)
+#define LOGGER_LOG_RADIO_SIZE		(256*1024)
+#define LOGGER_LOG_SYSTEM_SIZE		(2*1024*1024)
+#else 
+#define LOGGER_LOG_MAIN_SIZE		(1024*1024)
+#define LOGGER_LOG_EVENTS_SIZE		(256*1024)
+#define LOGGER_LOG_RADIO_SIZE		(256*1024)
+#define LOGGER_LOG_SYSTEM_SIZE		(512*1024)
+#endif
+
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+#define LOGGER_LOG_SMART_DEADLOCK_SIZE      (256*1024)
+#endif
+
 static int __init logger_init(void)
 {
 	int ret;
 
-	ret = create_log(LOGGER_LOG_MAIN, 256*1024);
+	ret = create_log(LOGGER_LOG_MAIN, LOGGER_LOG_MAIN_SIZE);
 	if (unlikely(ret))
 		goto out;
 
-	ret = create_log(LOGGER_LOG_EVENTS, 256*1024);
+	ret = create_log(LOGGER_LOG_EVENTS, LOGGER_LOG_EVENTS_SIZE);
 	if (unlikely(ret))
 		goto out;
 
-	ret = create_log(LOGGER_LOG_RADIO, 256*1024);
+	ret = create_log(LOGGER_LOG_RADIO, LOGGER_LOG_RADIO_SIZE);
 	if (unlikely(ret))
 		goto out;
 
-	ret = create_log(LOGGER_LOG_SYSTEM, 256*1024);
+	ret = create_log(LOGGER_LOG_SYSTEM, LOGGER_LOG_SYSTEM_SIZE);
 	if (unlikely(ret))
 		goto out;
+
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	ret = create_log(LOGGER_LOG_SMART_DEADLOCK, LOGGER_LOG_SMART_DEADLOCK_SIZE);
+	if (unlikely(ret))
+		goto out;
+#endif
 
 out:
 	return ret;

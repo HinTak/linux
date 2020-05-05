@@ -82,20 +82,20 @@ static int lzo_uncompress(struct squashfs_sb_info *msblk, void **buffer,
 	void *buff = stream->input;
 	int avail, i, bytes = length, res;
 	size_t out_len = srclength;
+	int err = -EINVAL;
 
 	mutex_lock(&msblk->read_data_mutex);
 
 	for (i = 0; i < b; i++) {
 		wait_on_buffer(bh[i]);
 		if (!buffer_uptodate(bh[i]))
-			goto block_release;
+			goto eio_err;
 
 		avail = min(bytes, msblk->devblksize - offset);
 		memcpy(buff, bh[i]->b_data + offset, avail);
 		buff += avail;
 		bytes -= avail;
 		offset = 0;
-		put_bh(bh[i]);
 	}
 
 	res = lzo1x_decompress_safe(stream->input, (size_t)length,
@@ -114,15 +114,14 @@ static int lzo_uncompress(struct squashfs_sb_info *msblk, void **buffer,
 	mutex_unlock(&msblk->read_data_mutex);
 	return res;
 
-block_release:
-	for (; i < b; i++)
-		put_bh(bh[i]);
+eio_err:
+	err = -EIO;
 
 failed:
 	mutex_unlock(&msblk->read_data_mutex);
 
 	ERROR("lzo decompression failed, data probably corrupt\n");
-	return -EIO;
+	return err;
 }
 
 const struct squashfs_decompressor squashfs_lzo_comp_ops = {

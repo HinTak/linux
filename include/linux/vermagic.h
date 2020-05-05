@@ -1,4 +1,5 @@
 #include <generated/utsrelease.h>
+#include <linux/vdlp_version.h>
 
 /* Simply sanity version stamp for modules. */
 #ifdef CONFIG_SMP
@@ -26,7 +27,7 @@
 #endif
 
 #define VERMAGIC_STRING 						\
-	UTS_RELEASE " "							\
+	DTV_KERNEL_VERSION " "						\
 	MODULE_VERMAGIC_SMP MODULE_VERMAGIC_PREEMPT 			\
 	MODULE_VERMAGIC_MODULE_UNLOAD MODULE_VERMAGIC_MODVERSIONS	\
 	MODULE_ARCH_VERMAGIC

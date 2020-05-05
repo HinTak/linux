@@ -74,3 +74,11 @@ obj-$(CONFIG_NET_VENDOR_VIA) += via/
 obj-$(CONFIG_NET_VENDOR_WIZNET) += wiznet/
 obj-$(CONFIG_NET_VENDOR_XILINX) += xilinx/
 obj-$(CONFIG_NET_VENDOR_XIRCOM) += xircom/
+
+ifdef CONFIG_MACH_NT14M
+obj-$(CONFIG_NVT_FASTETH_MAC) += nvt_fasteth_mac/NT14M/
+endif
+
+ifdef CONFIG_MACH_NT14U
+obj-$(CONFIG_NVT_FASTETH_MAC) += nvt_fasteth_mac/NT14U/
+endif

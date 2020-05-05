@@ -239,7 +239,40 @@ static inline int check_wakeup_irqs(void) { return 0; }
 
 extern cpumask_var_t irq_default_affinity;
 
-extern int irq_set_affinity(unsigned int irq, const struct cpumask *cpumask);
+/* Internal implementation. Use the helpers below */
+extern int __irq_set_affinity(unsigned int irq, const struct cpumask *cpumask,
+			      bool force);
+
+/**
+ * irq_set_affinity - Set the irq affinity of a given irq
+ * @irq:	Interrupt to set affinity
+ * @mask:	cpumask
+ *
+ * Fails if cpumask does not contain an online CPU
+ */
+static inline int
+irq_set_affinity(unsigned int irq, const struct cpumask *cpumask)
+{
+	return __irq_set_affinity(irq, cpumask, false);
+}
+
+/**
+ * irq_force_affinity - Force the irq affinity of a given irq
+ * @irq:	Interrupt to set affinity
+ * @mask:	cpumask
+ *
+ * Same as irq_set_affinity, but without checking the mask against
+ * online cpus.
+ *
+ * Solely for low level cpu hotplug code, where we need to make per
+ * cpu interrupts affine before the cpu becomes online.
+ */
+static inline int
+irq_force_affinity(unsigned int irq, const struct cpumask *cpumask)
+{
+	return __irq_set_affinity(irq, cpumask, true);
+}
+
 extern int irq_can_set_affinity(unsigned int irq);
 extern int irq_select_affinity(unsigned int irq);
 
@@ -273,6 +306,11 @@ irq_set_affinity_notifier(unsigned int irq, struct irq_affinity_notify *notify);
 static inline int irq_set_affinity(unsigned int irq, const struct cpumask *m)
 {
 	return -EINVAL;
+}
+
+static inline int irq_force_affinity(unsigned int irq, const struct cpumask *cpumask)
+{
+	return 0;
 }
 
 static inline int irq_can_set_affinity(unsigned int irq)
@@ -527,7 +565,7 @@ static inline int tasklet_trylock(struct tasklet_struct *t)
 
 static inline void tasklet_unlock(struct tasklet_struct *t)
 {
-	smp_mb__before_clear_bit(); 
+	smp_mb__before_clear_bit();
 	clear_bit(TASKLET_STATE_RUN, &(t)->state);
 }
 
@@ -655,7 +693,7 @@ void tasklet_hrtimer_cancel(struct tasklet_hrtimer *ttimer)
  * if more than one irq occurred.
  */
 
-#if defined(CONFIG_GENERIC_HARDIRQS) && !defined(CONFIG_GENERIC_IRQ_PROBE) 
+#if defined(CONFIG_GENERIC_HARDIRQS) && !defined(CONFIG_GENERIC_IRQ_PROBE)
 static inline unsigned long probe_irq_on(void)
 {
 	return 0;

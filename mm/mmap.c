@@ -10,6 +10,7 @@
 #include <linux/slab.h>
 #include <linux/backing-dev.h>
 #include <linux/mm.h>
+#include <linux/vmacache.h>
 #include <linux/shm.h>
 #include <linux/mman.h>
 #include <linux/pagemap.h>
@@ -36,6 +37,7 @@
 #include <linux/sched/sysctl.h>
 #include <linux/notifier.h>
 #include <linux/memory.h>
+#include <linux/ksm.h>
 
 #include <asm/uaccess.h>
 #include <asm/cacheflush.h>
@@ -83,8 +85,11 @@ pgprot_t vm_get_page_prot(unsigned long vm_flags)
 			pgprot_val(arch_vm_get_page_prot(vm_flags)));
 }
 EXPORT_SYMBOL(vm_get_page_prot);
-
-int sysctl_overcommit_memory __read_mostly = OVERCOMMIT_GUESS;  /* heuristic overcommit */
+#ifdef CONFIG_OVERCOMMIT_ALWAYS
+int sysctl_overcommit_memory __read_mostly = OVERCOMMIT_ALWAYS;
+#else
+int sysctl_overcommit_memory __read_mostly = OVERCOMMIT_GUESS; /* heuristic overcommit */
+#endif
 int sysctl_overcommit_ratio __read_mostly = 50;	/* default is 50% */
 int sysctl_max_map_count __read_mostly = DEFAULT_MAX_MAP_COUNT;
 unsigned long sysctl_user_reserve_kbytes __read_mostly = 1UL << 17; /* 128MB */
@@ -94,6 +99,281 @@ unsigned long sysctl_admin_reserve_kbytes __read_mostly = 1UL << 13; /* 8MB */
  * other variables. It can be updated by several CPUs frequently.
  */
 struct percpu_counter vm_committed_as ____cacheline_aligned_in_smp;
+
+#ifdef CONFIG_RSS_INFO
+
+#define VMAG_RWXS_MASK	(VM_READ|VM_WRITE|VM_EXEC|VM_SHARED)
+#define VMAG_RWS_MASK	(VM_READ|VM_WRITE|VM_SHARED)
+#define VFN_UP(x)	(((x) + PAGE_SIZE-1) >> PAGE_SHIFT)
+#define VFN_DOWN(x)	((x) >> PAGE_SHIFT)
+
+int _get_group_idx(struct mm_struct *mm, unsigned long flags,
+		    struct file *file, unsigned long start, unsigned long end){
+
+	unsigned int Islibcode = 0;
+	unsigned int Islibdata = 0;
+
+	/* code : (file && (r-xp)) */
+	if (file && (flags & VMAG_RWXS_MASK) == (VM_READ|VM_EXEC)) {
+		/*
+		If the value of mm->end_code,mm->end_data equal zero,
+		we can't check where this vma is included in.(main region? or library region?)
+		To reserve this problem we serarch ".so" string in the name of mapped file.
+		When searching is completed, strstr string library returns valid value(not NULL).
+		So, we can work around this problem.
+		If we find better solution, we will fix it.
+		*/
+		Islibcode = (mm->end_code!=0);
+		Islibcode = Islibcode && !(VFN_DOWN(mm->start_code) <= VFN_DOWN(start) && VFN_UP(end) <= VFN_UP(mm->end_code));
+		Islibcode = Islibcode || (mm->end_code==0 && strstr(file->f_dentry->d_iname,".so"));
+
+		if(Islibcode)
+			return VMAG_LIBCODE;
+
+		return VMAG_CODE;
+	}
+	/* data : (file && (rw*p) && exec file) */
+	else if (file && (flags & VMAG_RWS_MASK) == (VM_READ|VM_WRITE)
+                       && (file->f_dentry->d_inode->i_mode & S_IXUGO)) {
+
+		Islibdata = (mm->end_data!=0);
+		Islibdata = Islibdata && !(VFN_DOWN(mm->start_data) <= VFN_DOWN(start) && VFN_UP(end) <= VFN_UP(mm->end_data));
+		Islibdata = Islibdata || (mm->end_data==0 && strstr(file->f_dentry->d_iname,".so"));
+
+		if(Islibdata)
+			return VMAG_LIBDATA;
+
+		return VMAG_DATA;
+	}
+	/* HEAP : !file && (rw*p) && brk */
+	else if (!file && ((flags & VMAG_RWS_MASK) == (VM_READ|VM_WRITE))
+			&& (VFN_DOWN(start) <= VFN_DOWN(mm->brk) && VFN_UP(end) >= VFN_UP(mm->start_brk))) {
+
+		return VMAG_HEAP;
+	}
+#ifdef  CONFIG_STACK_GROWSUP
+	/* user stack : VM_GROWSUP */
+	else if (flags & VM_GROWSUP) {
+		return VMAG_STACK;
+	}
+#else
+	/* user stack : VM_GROWSDOWN */
+	else if (flags & VM_GROWSDOWN) {
+		return VMAG_STACK;
+	}
+#endif
+	/*
+	 * mmap : anon && (rw-p)
+	 *   cond |= (!vma->vm_file
+	 *   && (vma->vm_flags & mask) == (VM_READ|VM_WRITE));
+	 * shm  : (rw-s)
+	 */
+	else {
+		return VMAG_OTHER;
+	}
+}
+
+int inline get_group_idx(struct vm_area_struct *vma) {
+	return _get_group_idx(vma->vm_mm, vma->vm_flags, vma->vm_file,
+			      vma->vm_start, vma->vm_end);
+}
+
+void inc_rss_counter(struct vm_area_struct *vma, unsigned long value)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	int idx = get_group_idx(vma);
+
+	mm->curr_rss[idx] += value;
+	if (mm->max_rss[idx] <= mm->curr_rss[idx])
+		mm->max_rss[idx] += value;
+}
+EXPORT_SYMBOL(inc_rss_counter);
+
+void dec_rss_counter(struct vm_area_struct *vma, unsigned long value)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	int idx = get_group_idx(vma);
+
+	mm->curr_rss[idx] -= value;
+}
+EXPORT_SYMBOL(dec_rss_counter);
+
+int get_rss_cnt(struct mm_struct *mm, int group, unsigned long *cur, unsigned long *max)
+{
+	if (cur) *cur = mm->curr_rss[group];
+	if (max) *max = mm->max_rss[group];
+	return 0;
+}
+
+int is_page_present(struct mm_struct *mm, unsigned long address)
+{
+	pgd_t *pgd;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *ptep, pte;
+	unsigned long pfn;
+
+	pgd = pgd_offset(mm, address);
+	if (pgd_none(*pgd) || unlikely(pgd_bad(*pgd)))
+		goto out;
+
+	pud = pud_offset(pgd, address);
+	if (pud_none(*pud) || unlikely(pud_bad(*pud)))
+		goto out;
+
+	pmd = pmd_offset(pud, address);
+	if (pmd_none(*pmd) || unlikely(pmd_bad(*pmd)))
+		goto out;
+
+
+	ptep = pte_offset_map(pmd, address);
+
+	pte = *ptep;
+	pte_unmap(ptep);
+	if (pte_present(pte)) {
+		pfn = pte_pfn(pte);
+		if (pfn_valid(pfn)) {
+			return 1;
+		}
+	}
+
+out:
+	return 0;
+}
+
+int get_vma_rss(struct vm_area_struct *vma)
+{
+	int nr = 0;
+	unsigned long addr = vma->vm_start;
+	struct mm_struct *mm = vma->vm_mm;
+
+	spin_lock(&mm->page_table_lock);
+	do {
+		cond_resched_lock(&mm->page_table_lock);
+		nr += is_page_present(mm, addr);
+		addr += PAGE_SIZE;
+	} while(addr < vma->vm_end);
+	spin_unlock(&mm->page_table_lock);
+	return nr;
+}
+
+#else
+int _get_group_idx(struct mm_struct *mm, unsigned long flags, struct file *file, unsigned long start, unsigned long end ) { return 0; }
+int get_group_idx(struct vm_area_struct *vma) { return 0; }
+void inc_rss_counter(struct vm_area_struct *vma, unsigned long value) {}
+void dec_rss_counter(struct vm_area_struct *vma, unsigned long value) {}
+int get_rss_cnt(struct mm_struct *mm, int group, unsigned long *cur, unsigned long *max) { return 0; }
+int is_page_present(struct mm_struct *mm, unsigned long address) { return 0; }
+int get_vma_rss(struct vm_area_struct *vma) { return 0; }
+#endif  /* CONFIG_RSS_INFO */
+
+
+#ifdef CONFIG_MUPT_TRACE /* CONFIG_MUPT_TRACE starts */
+#include <linux/module.h>
+
+struct mupt_expose_struct __mupt;
+EXPORT_SYMBOL(__mupt);
+
+DEFINE_SPINLOCK(mupt_lock);
+EXPORT_SYMBOL(mupt_lock);
+
+void mupt_entry_func(struct task_struct *tsk)
+{
+	struct module *mupt_module = NULL;
+	unsigned long flags;
+
+	mutex_lock(&module_mutex);
+	mupt_module = find_module("mupt");
+	mutex_unlock(&module_mutex);
+
+	tsk->mupt = NULL;
+	spin_lock_irqsave(&mupt_lock, flags);
+	if (mupt_module && __mupt.mupt_entry_func) {
+		if (false == thread_group_leader(tsk)) { /* thread */
+			struct task_struct *p_tsk = find_task_by_vpid(tsk->tgid);
+			if (p_tsk && p_tsk->mupt) {
+				__mupt.mupt_entry_func(tsk);
+			}
+		} else { /* process */
+			__mupt.mupt_entry_func(tsk);
+		}
+	}
+	spin_unlock_irqrestore(&mupt_lock, flags);
+}
+
+void mupt_exit_func(struct task_struct *tsk)
+{
+	unsigned long flags;
+	if(tsk->mupt) {
+		spin_lock_irqsave(&mupt_lock, flags);
+		if (__mupt.mupt_exit_func)
+			__mupt.mupt_exit_func(tsk);
+		else {
+			kfree(tsk->mupt);
+			tsk->mupt = NULL;
+		}
+		spin_unlock_irqrestore(&mupt_lock, flags);
+	}
+}
+
+void mupt_inc_ctr (struct vm_area_struct *vma, struct page *page,
+			unsigned long addr, int value)
+{
+	unsigned long flags;
+	if (current->mupt) {
+		spin_lock_irqsave(&mupt_lock, flags);
+		if (__mupt.mupt_inc_ctr)
+			__mupt.mupt_inc_ctr(vma, page, addr, value);
+		spin_unlock_irqrestore(&mupt_lock, flags);
+	}
+}
+
+void mupt_dec_ctr (struct vm_area_struct *vma, struct page *page, 
+			unsigned long addr, int value)
+{
+	unsigned long flags;
+	if (current->mupt) {
+		spin_lock_irqsave(&mupt_lock, flags);
+		if (__mupt.mupt_dec_ctr)
+			__mupt.mupt_dec_ctr(vma, page, addr, value);
+		spin_unlock_irqrestore(&mupt_lock, flags);
+	}
+}
+
+void mupt_terminate_thread(struct task_struct *tsk)
+{
+	unsigned long flags;
+	if(tsk->mupt) {
+		spin_lock_irqsave(&mupt_lock, flags);
+		if(__mupt.mupt_terminate_thread && __mupt.mupt_exit_func)
+			__mupt.mupt_terminate_thread(tsk);
+		spin_unlock_irqrestore(&mupt_lock, flags);
+	}
+}
+
+int mupt_get_group_idx(struct vm_area_struct *vma)
+{
+	return _get_group_idx(vma->vm_mm, vma->vm_flags, vma->vm_file,
+			      vma->vm_start, vma->vm_end);
+}
+EXPORT_SYMBOL(mupt_get_group_idx);
+
+struct task_struct *mupt_find_task_by_vpid(pid_t vnr)
+{
+	return find_task_by_vpid(vnr);
+}
+EXPORT_SYMBOL(mupt_find_task_by_vpid);
+
+#else /* !CONFIG_MUPT_TRACE */
+
+void mupt_entry_func(struct task_struct *p) { return; }
+void mupt_exit_func(struct task_struct *tsk) { return; }
+void mupt_inc_ctr (struct vm_area_struct *vma, struct page *page, unsigned long addr, int value) { return; }
+void mupt_dec_ctr (struct vm_area_struct *vma, struct page *page, unsigned long addr, int value) { return; }
+void mupt_terminate_thread(struct task_struct *tsk) { return; }
+int mupt_get_group_idx(struct vm_area_struct *vma) { return 0; }
+struct task_struct *mupt_find_task_by_vpid(pid_t vnr) { return NULL; }
+#endif /* CONFIG_MUPT_TRACE end*/
 
 /*
  * The global memory commitment made in the system can be a metric
@@ -682,8 +962,9 @@ __vma_unlink(struct mm_struct *mm, struct vm_area_struct *vma,
 	prev->vm_next = next = vma->vm_next;
 	if (next)
 		next->vm_prev = prev;
-	if (mm->mmap_cache == vma)
-		mm->mmap_cache = prev;
+
+	/* Kill the cache */
+	vmacache_invalidate(mm);
 }
 
 /*
@@ -1515,7 +1796,15 @@ munmap_back:
 			return -ENOMEM;
 		vm_flags |= VM_ACCOUNT;
 	}
-
+	/*
+	 * Simple ksm-related hack, part 1:
+	 *
+	 * If it is possible set VM_MERGEABLE flag in vm_flags, thus vma will
+	 * be correctly expanded in the case we already have mergeable
+	 * neighbour. The flag should be unset before the call to ksm_madvise.
+	 */
+	if (!file)
+		ksm_set_vm_mergeable_if_possible(&vm_flags);
 	/*
 	 * Can we just expand an old mapping?
 	 */
@@ -1613,7 +1902,21 @@ out:
 
 	if (file)
 		uprobe_mmap(vma);
-
+#ifdef CONFIG_KSM_KERNEL_MADVISE
+	else {
+		/*
+		 * Simple ksm-related hack, part 2:
+		 *
+		 * Here the flag should be cleared. See ksm_madvise internals
+		 * for more information.
+		 */
+		vma->vm_flags &= ~VM_MERGEABLE;
+		error = ksm_madvise(vma, addr, addr + len,
+			MADV_MERGEABLE, &vma->vm_flags);
+		if (error)
+			pr_err("Madvise failed, err code %d\n", error);
+	}
+#endif
 	return addr;
 
 unmap_and_free_vma:
@@ -1991,34 +2294,33 @@ EXPORT_SYMBOL(get_unmapped_area);
 /* Look up the first VMA which satisfies  addr < vm_end,  NULL if none. */
 struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)
 {
-	struct vm_area_struct *vma = NULL;
+	struct rb_node *rb_node;
+	struct vm_area_struct *vma;
 
 	/* Check the cache first. */
-	/* (Cache hit rate is typically around 35%.) */
-	vma = ACCESS_ONCE(mm->mmap_cache);
-	if (!(vma && vma->vm_end > addr && vma->vm_start <= addr)) {
-		struct rb_node *rb_node;
+	vma = vmacache_find(mm, addr);
+	if (likely(vma))
+		return vma;
 
-		rb_node = mm->mm_rb.rb_node;
-		vma = NULL;
+	rb_node = mm->mm_rb.rb_node;
+	vma = NULL;
 
-		while (rb_node) {
-			struct vm_area_struct *vma_tmp;
+	while (rb_node) {
+		struct vm_area_struct *tmp;
 
-			vma_tmp = rb_entry(rb_node,
-					   struct vm_area_struct, vm_rb);
+		tmp = rb_entry(rb_node, struct vm_area_struct, vm_rb);
 
-			if (vma_tmp->vm_end > addr) {
-				vma = vma_tmp;
-				if (vma_tmp->vm_start <= addr)
-					break;
-				rb_node = rb_node->rb_left;
-			} else
-				rb_node = rb_node->rb_right;
-		}
-		if (vma)
-			mm->mmap_cache = vma;
+		if (tmp->vm_end > addr) {
+			vma = tmp;
+			if (tmp->vm_start <= addr)
+				break;
+			rb_node = rb_node->rb_left;
+		} else
+			rb_node = rb_node->rb_right;
 	}
+
+	if (vma)
+		vmacache_update(addr, vma);
 	return vma;
 }
 
@@ -2396,7 +2698,9 @@ detach_vmas_to_be_unmapped(struct mm_struct *mm, struct vm_area_struct *vma,
 	else
 		addr = vma ?  vma->vm_start : mm->mmap_base;
 	mm->unmap_area(mm, addr);
-	mm->mmap_cache = NULL;		/* Kill the cache. */
+
+	/* Kill the cache */
+	vmacache_invalidate(mm);
 }
 
 /*
@@ -2578,6 +2882,10 @@ int vm_munmap(unsigned long start, size_t len)
 	down_write(&mm->mmap_sem);
 	ret = do_munmap(mm, start, len);
 	up_write(&mm->mmap_sem);
+#ifdef CONFIG_MUPT_TRACE
+	if (current->mupt)
+		current->mupt->max_mupt[0] = current->mupt->curr_mupt[0];
+#endif
 	return ret;
 }
 EXPORT_SYMBOL(vm_munmap);

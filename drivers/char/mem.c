@@ -38,6 +38,8 @@
 
 #define DEVPORT_MINOR	4
 
+#ifndef CONFIG_PROHIBIT_DEVMEM
+
 static inline unsigned long size_inside_page(unsigned long start,
 					     unsigned long size)
 {
@@ -356,6 +358,7 @@ static int mmap_kmem(struct file *file, struct vm_area_struct *vma)
 	return mmap_mem(file, vma);
 }
 #endif
+#endif
 
 #ifdef CONFIG_CRASH_DUMP
 /*
@@ -391,6 +394,7 @@ static ssize_t read_oldmem(struct file *file, char __user *buf,
 }
 #endif
 
+#ifndef CONFIG_PROHIBIT_DEVMEM
 #ifdef CONFIG_DEVKMEM
 /*
  * This function reads the *virtual* memory as seen by the kernel.
@@ -572,6 +576,7 @@ static ssize_t write_kmem(struct file *file, const char __user *buf,
 	return virtr + wrote ? : err;
 }
 #endif
+#endif
 
 #ifdef CONFIG_DEVPORT
 static ssize_t read_port(struct file *file, char __user *buf,
@@ -727,6 +732,7 @@ static loff_t null_lseek(struct file *file, loff_t offset, int orig)
 	return file->f_pos = 0;
 }
 
+#ifndef CONFIG_PROHIBIT_DEVMEM
 /*
  * The memory devices use the full 32/64 bits of the offset, and so we cannot
  * check against negative addresses: they are ok. The return value is weird,
@@ -764,6 +770,7 @@ static int open_port(struct inode *inode, struct file *filp)
 {
 	return capable(CAP_SYS_RAWIO) ? 0 : -EPERM;
 }
+#endif
 
 #define zero_lseek	null_lseek
 #define full_lseek      null_lseek
@@ -774,6 +781,7 @@ static int open_port(struct inode *inode, struct file *filp)
 #define open_kmem	open_mem
 #define open_oldmem	open_mem
 
+#ifndef CONFIG_PROHIBIT_DEVMEM
 static const struct file_operations mem_fops = {
 	.llseek		= memory_lseek,
 	.read		= read_mem,
@@ -792,6 +800,7 @@ static const struct file_operations kmem_fops = {
 	.open		= open_kmem,
 	.get_unmapped_area = get_unmapped_area_mem,
 };
+#endif
 #endif
 
 static const struct file_operations null_fops = {
@@ -851,9 +860,11 @@ static const struct memdev {
 	const struct file_operations *fops;
 	struct backing_dev_info *dev_info;
 } devlist[] = {
+#ifndef CONFIG_PROHIBIT_DEVMEM
 	 [1] = { "mem", 0, &mem_fops, &directly_mappable_cdev_bdi },
 #ifdef CONFIG_DEVKMEM
 	 [2] = { "kmem", 0, &kmem_fops, &directly_mappable_cdev_bdi },
+#endif
 #endif
 	 [3] = { "null", 0666, &null_fops, NULL },
 #ifdef CONFIG_DEVPORT

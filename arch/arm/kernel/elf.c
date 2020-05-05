@@ -34,6 +34,15 @@ int elf_check_arch(const struct elf32_hdr *x)
 		if (flt_fmt == EF_ARM_VFP_FLOAT && !(elf_hwcap & HWCAP_VFP))
 			return 0;
 	}
+#ifdef CONFIG_PNACL
+	/* patched by VD 20121030 */
+	/* to prohibit execute file without entry */
+	if (x->e_type == ET_EXEC)
+	{
+		if(!(eflags & 2))
+			return 0;
+	}
+#endif /*CONFIG_PNACL*/
 	return 1;
 }
 EXPORT_SYMBOL(elf_check_arch);

@@ -72,7 +72,25 @@
 #define SND_AUDIOCODEC_IEC61937              ((__u32) 0x0000000B)
 #define SND_AUDIOCODEC_G723_1                ((__u32) 0x0000000C)
 #define SND_AUDIOCODEC_G729                  ((__u32) 0x0000000D)
-#define SND_AUDIOCODEC_MAX                   SND_AUDIOCODEC_G729
+#define SND_AUDIOCODEC_AC3                   	((__u32) 0x0000000E)
+#define SND_AUDIOCODEC_DTS                  	((__u32) 0x0000000F)
+#define SND_AUDIOCODEC_ADPCM                	((__u32) 0x00000010)
+#define SND_AUDIOCODEC_MULAW                  	((__u32) 0x00000011)
+#define SND_AUDIOCODEC_ALAW 	             	((__u32) 0x00000012)
+#define SND_AUDIOCODEC_EAC3						((__u32) 0x00000013)
+#define SND_AUDIOCODEC_HEAAC                 	((__u32) 0x00000014)
+#define SND_AUDIOCODEC_DTS_LBR                 	((__u32) 0x00000015)
+//#ifdef CONFIG_ARCH_SDP1412
+#if defined(CONFIG_ARCH_SDP1404) || defined (CONFIG_ARCH_SDP1412)
+//for loss less codec
+#define SND_AUDIOCODEC_DTS_HD_MA				((__u32) 0x00000016)
+#define SND_AUDIOCODEC_TRUE_HD					((__u32) 0x00000017)
+#define SND_AUDIOCODEC_DTS_HD_HRA				((__u32) 0x00000018)
+#define SND_AUDIOCODEC_MAX                   SND_AUDIOCODEC_DTS_HD_HRA+1
+#else
+#define SND_AUDIOCODEC_MAX                   SND_AUDIOCODEC_DTS_LBR
+#endif 
+
 
 /*
  * Profile and modes are listed with bit masks. This allows for a

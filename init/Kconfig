@@ -34,7 +34,7 @@ config BROKEN
 config BROKEN_ON_SMP
 	bool
 	depends on BROKEN || !SMP
-	default y
+	default n
 
 config INIT_ENV_ARG_LIMIT
 	int
@@ -44,6 +44,43 @@ config INIT_ENV_ARG_LIMIT
 	  Maximum of each of the number of arguments and environment
 	  variables passed to init from the kernel command line.
 
+
+config DEFERRED_INITCALL
+	bool "Deferred initcall to reduce boot time"
+	help
+	  It is possibly to defer module init calls without having 
+	  to build the modules dynamically. This requires modifying 
+	  the kernel. For modules that are not needed at boot replace 
+	  the ?œmodule_init()??function calls to ?œdeferred_module_init()?
+	  For exmaple,
+	  1) module_init(ehci_hcd_init) to deferred_modle_init(echi_hcd_init)
+ 	  2) module_init(uhci_hcd_init) to deferred_module_init(uhci_hcd_init)
+	  Once the system booted, the deferred calls can be executed by doing:
+	  #> echo 1 > /proc/deferred_initcalls
+
+config FASTBOOT_RCU
+	bool "Expedited grace-period primitive to accelerate boot time"
+	default y
+	help
+	RCU(read-copy-update) subsystem supports two syncrhonizaton mechanism
+	such as synchronize_rcu_expedited() and synchronize_rcu(). We suggest
+	that you enable expedited grace-period primitives if you want to reduce
+	latency. However, this method can 1) increase CPU utilization, 2) degrade
+	real-time latency, and 3) degrade energy efficiency.
+	If you want to avoid the three side-effects, please set it back after boot
+        time. For example, #> echo 0 > /sys/kernel/rcu_expedited
+        The meaning of 'rcu_expedited' kernel parameter value is as follows.
+	#> echo 0 > /sys/kernel/rcu_expedited means synchronize_rcu_expedited().
+	#> echo 1 > /sys/kernel/rcu_expedited means synchronize_rcu().
+
+	This feature automatically tunes  default value for delays from grace-period
+	initialization to first attempt to force quiescent states(FQS). In this case,
+	units are 'jiffies', minimum value is 'zero', and maximum value is 'HZ'.
+
+	This feature will reduce time gap (e.g. from 40msec to 7msec on Golf.P board)
+	between the services that are starget by Systemd. In other words, we can
+	dramatically reduce the dealy time of services by systemd daemon
+	(e.g. /usr/lib/systemd/system/*.service) at boot time for embedded devices.
 
 config CROSS_COMPILE
 	string "Cross-compiler tool prefix"
@@ -1365,6 +1402,14 @@ config FUTEX
 	  support for "fast userspace mutexes".  The resulting kernel may not
 	  run glibc-based applications correctly.
 
+config HAVE_FUTEX_CMPXCHG
+	bool
+	depends on FUTEX
+	help
+	  Architectures should select this if futex_atomic_cmpxchg_inatomic()
+	  is implemented and always working. This removes a couple of runtime
+	  checks.
+
 config EPOLL
 	bool "Enable eventpoll support" if EXPERT
 	default y
@@ -1595,6 +1640,19 @@ config TRACEPOINTS
 	bool
 
 source "arch/Kconfig"
+
+config KNBD_SUPPORT
+	bool "Minimal core-support of KNBD"
+	default n
+	select SWAP
+	select ZRAM
+	select BLK_DEV_NBD
+	select NBD_KNBD_SUPPORT
+	select KNBD_SWAP_EXTENSION
+	select OOM_RESCUER
+	help
+	  KNBD solution needs some kernel core modifications to allow its
+	  modules work properly.
 
 endmenu		# General setup
 

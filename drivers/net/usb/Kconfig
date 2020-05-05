@@ -139,6 +139,11 @@ config USB_USBNET
 	  To compile this driver as a module, choose M here: the
 	  module will be called usbnet.
 
+config SAMSUNG_PATCH_WITH_USB_MODEMLOG
+        bool "Samsung modification for Supporting webAPI based Dongles"
+        depends on USB_USBNET
+        default y
+
 config USB_NET_AX8817X
 	tristate "ASIX AX88xxx Based USB 2.0 Ethernet Adapters"
 	depends on USB_USBNET
@@ -166,6 +171,11 @@ config USB_NET_AX8817X
 
 	  This driver creates an interface named "ethX", where X depends on
 	  what other networking devices you have in use.
+	  
+config USB_NET_AX88772
+	tristate "USB LAN AX88772 Driver"
+        help
+            Say Y here if you want to use USB LAN AX88772 Driver.
 
 config USB_NET_AX88179_178A
 	tristate "ASIX AX88179/178A USB 3.0/2.0 to Gigabit Ethernet"
@@ -226,6 +236,41 @@ config USB_NET_CDC_EEM
 	  what other networking devices you have in use.  However, if the
 	  IEEE 802 "local assignment" bit is set in the address, a "usbX"
 	  name is used instead.
+
+config SAMSUNG_HOST_USBNET_COMMON
+	bool "Samsung modification for CDC-EEM preformance and latency improvement"
+	depends on USB_NET_CDC_EEM
+	default n
+
+config SAMSUNG_HOST_USBNET_BOTTOM_HALF
+        bool "Samsung patch for Bottom Half in Receive path"
+        depends on SAMSUNG_HOST_USBNET_COMMON
+        default y
+
+config SAMSUNG_HOST_USBNET_MTU_CHANGE
+        bool "Samsung patch for enabling MTU size change of usbnet link"
+        depends on SAMSUNG_HOST_USBNET_COMMON
+        default y
+
+config SAMSUNG_HOST_USBNET_NO_CRC
+	bool "Samsung modification for disabling crc in eem"
+	depends on SAMSUNG_HOST_USBNET_COMMON 
+	default y
+
+config SAMSUNG_HOST_USBNET_NO_SKBCLONING
+	bool "Samsung modification for disabling skb cloning in EEM"
+	depends on SAMSUNG_HOST_USBNET_COMMON 
+	default y
+
+config SAMSUNG_HOST_USBNET_NO_EEM
+	bool "Samsung modification for disabling EEM protocol"
+	depends on SAMSUNG_HOST_USBNET_COMMON
+	default n
+
+config SAMSUNG_HOST_USBNET_LINK_SAVE_RESTORE
+	bool "Samsung modification for usbnet link save and restore"
+	depends on SAMSUNG_HOST_USBNET_COMMON && PM
+	default y
 
 config USB_NET_CDC_NCM
 	tristate "CDC NCM support"

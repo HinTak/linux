@@ -412,6 +412,11 @@ __und_usr:
 	@
 	adr	r9, BSYM(ret_from_exception)
 
+	@ IRQs must be enabled before attempting to read the instruction from
+	@ user space since that could cause a page/translation fault if the 
+	@ page table was modified by another CPU. 
+	enable_irq
+
 	tst	r3, #PSR_T_BIT			@ Thumb mode?
 	bne	__und_usr_thumb
 	sub	r4, r2, #4			@ ARM instr at LR - 4
@@ -515,7 +520,7 @@ ENDPROC(__und_usr)
  *  r9  = normal "successful" return address
  *  r10 = this threads thread_info structure
  *  lr  = unrecognised instruction return address
- * IRQs disabled, FIQs enabled.
+ * IRQs enabled, FIQs enabled.
  */
 	@
 	@ Fall-through from Thumb-2 __und_usr
@@ -622,7 +627,6 @@ call_fpe:
 #endif
 
 do_fpe:
-	enable_irq
 	ldr	r4, .LCfp
 	add	r10, r10, #TI_FPSTATE		@ r10 = workspace
 	ldr	pc, [r4]			@ Call FP module USR entry point
@@ -650,8 +654,7 @@ __und_usr_fault_32:
 	b	1f
 __und_usr_fault_16:
 	mov	r1, #2
-1:	enable_irq
-	mov	r0, sp
+1:	mov	r0, sp
 	adr	lr, BSYM(ret_from_exception)
 	b	__und_fault
 ENDPROC(__und_usr_fault_32)
@@ -957,10 +960,19 @@ __kuser_helper_end:
  * SP points to a minimal amount of processor-private memory, the address
  * of which is copied into r0 for the mode specific abort handler.
  */
+#ifdef CONFIG_ARM_ERRATA_775420
+	.macro  vector_stub, name, mode, correction=0, abort=0
+#else
 	.macro	vector_stub, name, mode, correction=0
+#endif
 	.align	5
 
 vector_\name:
+#ifdef CONFIG_ARM_ERRATA_775420
+	.if \abort
+	dsb
+	.endif
+#endif
 	.if \correction
 	sub	lr, lr, #\correction
 	.endif
@@ -1033,7 +1045,11 @@ vector_rst:
  * Data abort dispatcher
  * Enter in ABT mode, spsr = USR CPSR, lr = USR PC
  */
+#ifdef CONFIG_ARM_ERRATA_775420
+	vector_stub	dabt, ABT_MODE, 8, 1
+#else
 	vector_stub	dabt, ABT_MODE, 8
+#endif
 
 	.long	__dabt_usr			@  0  (USR_26 / USR_32)
 	.long	__dabt_invalid			@  1  (FIQ_26 / FIQ_32)
@@ -1056,7 +1072,11 @@ vector_rst:
  * Prefetch abort dispatcher
  * Enter in ABT mode, spsr = USR CPSR, lr = USR PC
  */
+#ifdef CONFIG_ARM_ERRATA_775420
+	vector_stub	pabt, ABT_MODE, 4, 1
+#else
 	vector_stub	pabt, ABT_MODE, 4
+#endif
 
 	.long	__pabt_usr			@  0 (USR_26 / USR_32)
 	.long	__pabt_invalid			@  1 (FIQ_26 / FIQ_32)

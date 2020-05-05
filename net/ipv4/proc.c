@@ -115,6 +115,7 @@ static const struct snmp_mib snmp4_ipstats_list[] = {
 static const struct snmp_mib snmp4_ipextstats_list[] = {
 	SNMP_MIB_ITEM("InNoRoutes", IPSTATS_MIB_INNOROUTES),
 	SNMP_MIB_ITEM("InTruncatedPkts", IPSTATS_MIB_INTRUNCATEDPKTS),
+	SNMP_MIB_ITEM("InPkts", IPSTATS_MIB_INPKTS),
 	SNMP_MIB_ITEM("InMcastPkts", IPSTATS_MIB_INMCASTPKTS),
 	SNMP_MIB_ITEM("OutMcastPkts", IPSTATS_MIB_OUTMCASTPKTS),
 	SNMP_MIB_ITEM("InBcastPkts", IPSTATS_MIB_INBCASTPKTS),
@@ -437,6 +438,7 @@ static int netstat_seq_show(struct seq_file *seq, void *v)
 {
 	int i;
 	struct net *net = seq->private;
+	unsigned long long int inpkts, nonucastpkts;
 
 	seq_puts(seq, "TcpExt:");
 	for (i = 0; snmp4_net_list[i].name != NULL; i++)
@@ -460,6 +462,24 @@ static int netstat_seq_show(struct seq_file *seq, void *v)
 					     offsetof(struct ipstats_mib, syncp)));
 
 	seq_putc(seq, '\n');
+
+	inpkts = snmp_fold_field64(
+				(void __percpu **)net->mib.ip_statistics,
+				IPSTATS_MIB_INPKTS,
+				offsetof(struct ipstats_mib, syncp));
+
+	nonucastpkts = snmp_fold_field64(
+				(void __percpu **)net->mib.ip_statistics,
+				IPSTATS_MIB_INBCASTPKTS,
+				offsetof(struct ipstats_mib, syncp));
+
+	nonucastpkts += snmp_fold_field64(
+				(void __percpu **)net->mib.ip_statistics,
+				IPSTATS_MIB_INMCASTPKTS,
+				offsetof(struct ipstats_mib, syncp));
+
+	seq_printf(seq, "InUcastPkts: %llu\n", inpkts - nonucastpkts);
+
 	return 0;
 }
 

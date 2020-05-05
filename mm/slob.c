@@ -524,6 +524,11 @@ size_t ksize(const void *block)
 }
 EXPORT_SYMBOL(ksize);
 
+size_t __ksize(const void *object)
+{
+	return ksize(object);
+}
+
 int __kmem_cache_create(struct kmem_cache *c, unsigned long flags)
 {
 	if (flags & SLAB_DESTROY_BY_RCU) {

@@ -30,7 +30,8 @@
 #include <linux/list.h>
 #include <linux/dma-mapping.h>
 #include <linux/fs.h>
-
+#include <linux/kds.h>
+#include <linux/wait.h>
 struct device;
 struct dma_buf;
 struct dma_buf_attachment;
@@ -123,6 +124,10 @@ struct dma_buf {
 	const struct dma_buf_ops *ops;
 	/* mutex to serialize list manipulation, attach/detach and vmap/unmap */
 	struct mutex lock;
+        struct kds_resource kds;
+	wait_queue_head_t wq_exclusive;
+	wait_queue_head_t wq_shared;
+	struct kds_callback kds_cb;
 	unsigned vmapping_counter;
 	void *vmap_ptr;
 	const char *exp_name;
@@ -157,9 +162,25 @@ struct dma_buf_attachment {
  * kernel side.  For example, an exporter that needs to keep a dmabuf ptr
  * so that subsequent exports don't create a new dmabuf.
  */
-static inline void get_dma_buf(struct dma_buf *dmabuf)
+static inline bool get_dma_buf(struct dma_buf *dmabuf)
 {
-	get_file(dmabuf->file);
+    struct file *file = dmabuf->file;
+	
+    /* Instead of blindly increasing ref_count, use fget logic here */
+    /* get_file(dmabuf->file); */
+    if (!atomic_long_inc_not_zero(&file->f_count)) {
+        pr_err("Trying to increment refcount 0\n");
+        /*BUG();*/
+		//dump_stack();
+		return 0;
+    }
+	return 1;
+}
+
+static inline struct kds_resource *
+	get_dma_buf_kds_resource(struct dma_buf *dmabuf)
+{
+	return &dmabuf->kds;
 }
 
 struct dma_buf_attachment *dma_buf_attach(struct dma_buf *dmabuf,
@@ -194,6 +215,7 @@ int dma_buf_mmap(struct dma_buf *, struct vm_area_struct *,
 		 unsigned long);
 void *dma_buf_vmap(struct dma_buf *);
 void dma_buf_vunmap(struct dma_buf *, void *vaddr);
+int kds_dma_buf_module_register(struct kds_dma_buf_register *kds_funcs);
 int dma_buf_debugfs_create_file(const char *name,
 				int (*write)(struct seq_file *));
 #endif /* __DMA_BUF_H__ */

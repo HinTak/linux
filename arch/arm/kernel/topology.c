@@ -25,6 +25,9 @@
 #include <asm/cputype.h>
 #include <asm/topology.h>
 
+#if defined(CONFIG_VD_HMP) || defined(CONFIG_SCHED_HMP)
+#include <asm/smp_plat.h>
+#endif
 /*
  * cpu power scale management
  */
@@ -313,3 +316,178 @@ void __init init_cpu_topology(void)
 
 	parse_dt_topology();
 }
+
+#ifdef CONFIG_VD_HMP
+static const char * const little_cores[] = {
+	"arm,cortex-a7",
+	NULL,
+};
+
+static bool is_little_cpu(struct device_node *cn)
+{
+	const char * const *lc;
+	for (lc = little_cores; *lc; lc++)
+		if (of_device_is_compatible(cn, *lc))
+			return true;
+	return false;
+}
+
+void hmp_set_cpu_masks(struct cpumask *fast_mask, struct cpumask *slow_mask)
+{
+	struct device_node *cn = NULL;
+	int cpu;
+
+	cpumask_clear(fast_mask);
+	cpumask_clear(slow_mask);
+
+	/* try to parse CPU masks from config */
+	if (strlen(CONFIG_HMP_FAST_CPU_MASK) &&
+	    strlen(CONFIG_HMP_SLOW_CPU_MASK)) {
+		if (cpumask_parse(CONFIG_HMP_FAST_CPU_MASK, fast_mask) ||
+		    cpumask_parse(CONFIG_HMP_SLOW_CPU_MASK, slow_mask))
+			pr_err("vd_hmp: Failed to get CPU masks from config!\n");
+		else
+			return;
+	}
+
+	/* try to get CPU masks from DT */
+	while ((cn = of_find_node_by_type(cn, "cpu"))) {
+		const u32 *mpidr;
+		int len;
+
+		mpidr = of_get_property(cn, "reg", &len);
+		if (!mpidr || len != 4) {
+			pr_err("* %s missing reg property\n", cn->full_name);
+			continue;
+		}
+
+		cpu = get_logical_index(be32_to_cpup(mpidr));
+		if (cpu == -EINVAL) {
+			pr_err("couldn't get logical index for mpidr %x\n",
+							be32_to_cpup(mpidr));
+			break;
+		}
+
+		if (is_little_cpu(cn))
+			cpumask_set_cpu(cpu, slow_mask);
+		else
+			cpumask_set_cpu(cpu, fast_mask);
+	}
+
+	if (!cpumask_empty(fast_mask) && !cpumask_empty(slow_mask))
+		return;
+
+	/* if failed to get masks from DT or config, all cores are fast */
+	pr_err("vd_hmp: Failed to get CPU masks from DT!\n");
+	cpumask_setall(fast_mask);
+	cpumask_clear(slow_mask);
+}
+#endif /* CONFIG_VD_HMP */
+
+#ifdef CONFIG_SCHED_HMP
+
+static const char * const little_cores[] = {
+	"arm,cortex-a7",
+	NULL,
+};
+
+static bool is_little_cpu(struct device_node *cn)
+{
+	const char * const *lc;
+	for (lc = little_cores; *lc; lc++)
+		if (of_device_is_compatible(cn, *lc))
+			return true;
+	return false;
+}
+
+void __init arch_get_fast_and_slow_cpus(struct cpumask *fast,
+					struct cpumask *slow)
+{
+	struct device_node *cn = NULL;
+	int cpu;
+
+	cpumask_clear(fast);
+	cpumask_clear(slow);
+
+	/*
+	 * Use the config options if they are given. This helps testing
+	 * HMP scheduling on systems without a big.LITTLE architecture.
+	 */
+	if (strlen(CONFIG_SCHED_HMP_FAST_CPU_MASK)
+	    && strlen(CONFIG_SCHED_HMP_SLOW_CPU_MASK)) {
+		if (cpulist_parse(CONFIG_SCHED_HMP_FAST_CPU_MASK, fast))
+			WARN(1, "Failed to parse HMP fast cpu mask!\n");
+		if (cpulist_parse(CONFIG_SCHED_HMP_SLOW_CPU_MASK, slow))
+			WARN(1, "Failed to parse HMP slow cpu mask!\n");
+		return;
+	}
+
+	/*
+	 * Else, parse device tree for little cores.
+	 */
+	while ((cn = of_find_node_by_type(cn, "cpu"))) {
+
+		const u32 *mpidr;
+		int len;
+
+		mpidr = of_get_property(cn, "reg", &len);
+		if (!mpidr || len != 4) {
+			pr_err("* %s missing reg property\n", cn->full_name);
+			continue;
+		}
+
+		cpu = get_logical_index(be32_to_cpup(mpidr));
+		if (cpu == -EINVAL) {
+			pr_err("couldn't get logical index for mpidr %x\n",
+							be32_to_cpup(mpidr));
+			break;
+		}
+
+		if (is_little_cpu(cn))
+			cpumask_set_cpu(cpu, slow);
+		else
+			cpumask_set_cpu(cpu, fast);
+	}
+
+	if (!cpumask_empty(fast) && !cpumask_empty(slow))
+		return;
+
+	/*
+	 * We didn't find both big and little cores so let's call all cores
+	 * fast as this will keep the system running, with all cores being
+	 * treated equal.
+	 */
+	cpumask_setall(fast);
+	cpumask_clear(slow);
+}
+
+struct cpumask hmp_slow_cpu_mask;
+struct cpumask hmp_fast_cpu_mask;
+
+void __init arch_get_hmp_domains(struct list_head *hmp_domains_list)
+{
+	struct hmp_domain *domain;
+
+	arch_get_fast_and_slow_cpus(&hmp_fast_cpu_mask, &hmp_slow_cpu_mask);
+
+	/*
+	 * Initialize hmp_domains
+	 * Must be ordered with respect to compute capacity.
+	 * Fastest domain at head of list.
+	 */
+	if(!cpumask_empty(&hmp_slow_cpu_mask)) {
+		domain = (struct hmp_domain *)
+			kmalloc(sizeof(struct hmp_domain), GFP_KERNEL);
+		BUG_ON(ZERO_OR_NULL_PTR(domain));
+		cpumask_copy(&domain->possible_cpus, &hmp_slow_cpu_mask);
+		cpumask_and(&domain->cpus, cpu_online_mask, &domain->possible_cpus);
+		list_add(&domain->hmp_domains, hmp_domains_list);
+	}
+	domain = (struct hmp_domain *)
+		kmalloc(sizeof(struct hmp_domain), GFP_KERNEL);
+	BUG_ON(ZERO_OR_NULL_PTR(domain));
+	cpumask_copy(&domain->possible_cpus, &hmp_fast_cpu_mask);
+	cpumask_and(&domain->cpus, cpu_online_mask, &domain->possible_cpus);
+	list_add(&domain->hmp_domains, hmp_domains_list);
+}
+#endif /* CONFIG_SCHED_HMP */

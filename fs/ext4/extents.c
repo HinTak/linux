@@ -2511,6 +2511,27 @@ ext4_ext_rm_leaf(handle_t *handle, struct inode *inode,
 	ex_ee_block = le32_to_cpu(ex->ee_block);
 	ex_ee_len = ext4_ext_get_actual_len(ex);
 
+	/*
+	 * If we're starting with an extent other than the last one in the
+	 * node, we need to see if it shares a cluster with the extent to
+	 * the right (towards the end of the file). If its leftmost cluster
+	 * is this extent's rightmost cluster and it is not cluster aligned,
+	 * we'll mark it as a partial that is not to be deallocated.
+	 */
+
+	if (ex != EXT_LAST_EXTENT(eh)) {
+		ext4_fsblk_t current_pblk, right_pblk;
+		long long current_cluster, right_cluster;
+
+		current_pblk = ext4_ext_pblock(ex) + ex_ee_len - 1;
+		current_cluster = (long long)EXT4_B2C(sbi, current_pblk);
+		right_pblk = ext4_ext_pblock(ex + 1);
+		right_cluster = (long long)EXT4_B2C(sbi, right_pblk);
+		if (current_cluster == right_cluster &&
+			EXT4_PBLK_COFF(sbi, right_pblk))
+			*partial_cluster = -right_cluster;
+	}
+
 	trace_ext4_ext_rm_leaf(inode, start, ex, *partial_cluster);
 
 	while (ex >= EXT_FIRST_EXTENT(eh) &&
@@ -4032,7 +4053,7 @@ int ext4_ext_map_blocks(handle_t *handle, struct inode *inode,
 	struct ext4_extent newex, *ex, *ex2;
 	struct ext4_sb_info *sbi = EXT4_SB(inode->i_sb);
 	ext4_fsblk_t newblock = 0;
-	int free_on_err = 0, err = 0, depth;
+	int free_on_err = 0, err = 0, depth, ret;
 	unsigned int allocated = 0, offset = 0;
 	unsigned int allocated_clusters = 0;
 	struct ext4_allocation_request ar;
@@ -4093,9 +4114,13 @@ int ext4_ext_map_blocks(handle_t *handle, struct inode *inode,
 			if (!ext4_ext_is_uninitialized(ex))
 				goto out;
 
-			allocated = ext4_ext_handle_uninitialized_extents(
+			ret = ext4_ext_handle_uninitialized_extents(
 				handle, inode, map, path, flags,
 				allocated, newblock);
+			if (ret < 0)
+				err = ret;
+			else
+				allocated = ret;
 			goto out3;
 		}
 	}
@@ -4748,3 +4773,678 @@ int ext4_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 
 	return error;
 }
+
+/*
+ * Function to mark the path buffer dirty.
+ * It also check if there are sufficient credits left in the
+ * journal to update metadata. If the number of credits are less
+ * than 10, restart the handle with additional credits.
+ */
+int ext4_trange_dirty_path(handle_t *handle, struct inode *inode,
+			   struct ext4_ext_path *path)
+{
+	int credits, err;
+	if (handle->h_buffer_credits < 10) {
+		credits = 2*ext4_writepage_trans_blocks(inode);
+		err = ext4_ext_truncate_extend_restart(handle, inode, credits);
+		/* EAGAIN is success */
+		if (err && err != -EAGAIN) {
+			pr_err("Journal restart fail\n");
+			return err;
+		}
+	}
+	err = ext4_ext_get_access(handle, inode, path);
+	return err;
+}
+
+/*
+ * Function to update extents and extent indexes
+ */
+
+int ext4_ext_update_path(struct ext4_ext_path *path, ext4_lblk_t shift,
+			 struct inode *inode, handle_t *handle,
+			 ext4_lblk_t *start_block)
+{
+	int depth, err = 0, flag = 0;
+	struct ext4_extent *ex_start, *ex_last;
+
+	BUG_ON(path == NULL);
+	depth = path->p_depth;
+	while (depth >= 0) {
+		if (depth == path->p_depth) {
+			err = ext4_trange_dirty_path(handle, inode,
+						     path + depth);
+			if (err)
+				goto out;
+			if (path[depth].p_ext ==
+				EXT_FIRST_EXTENT(path[depth].p_hdr))
+				flag |= EXTENT_START_FLAG;
+			ex_start = path[depth].p_ext;
+			if (!ex_start) {
+				pr_err("Start extent is NULL\n");
+				return -EIO;
+			}
+			ex_last = EXT_LAST_EXTENT(path[depth].p_hdr);
+			while (ex_start <= ex_last) {
+				ex_start->ee_block -= shift;
+				*start_block +=
+					ext4_ext_get_actual_len(ex_start);
+				ex_start++;
+			}
+			err = ext4_ext_dirty(handle, inode, path + depth);
+			if (err)
+				goto out;
+		} else {
+			/* If encountered starting extent, update index too */
+			if (path->p_depth - depth == 1) {
+				if (flag & EXTENT_START_FLAG) {
+					/* Update index too */
+					err = ext4_trange_dirty_path(handle,
+							inode, path + depth);
+					if (err)
+						goto out;
+					path[depth].p_idx->ei_block -= shift;
+					err = ext4_ext_dirty(handle, inode,
+							     path + depth);
+					if (err)
+						goto out;
+					flag &= ~EXTENT_START_FLAG;
+				} else
+					/* No need to update any extent index */
+					break;
+			}
+			/* Check, if earlier encountered starting index */
+			if (flag & INDEX_START_FLAG) {
+				err = ext4_trange_dirty_path(handle, inode,
+							     path + (depth));
+				if (err)
+					goto out;
+				path[depth].p_idx->ei_block -= shift;
+				err = ext4_ext_dirty(handle, inode,
+						     path + depth);
+				if (err)
+					goto out;
+				flag &= ~INDEX_START_FLAG;
+			}
+			/* Check if this is a starting index */
+			if (path[depth].p_idx ==
+			    EXT_FIRST_INDEX(path[depth].p_hdr)) {
+				/* starting of a block */
+				flag |= INDEX_START_FLAG;
+			} else
+				break;
+		}
+		depth--;
+	}
+out:
+	return err;
+}
+
+/*
+ * This function calls ext4_ext_find_extent after scanning
+ * all the file blocks, backwards, starting from the last block to
+ * be removed till the start of file.
+ */
+
+static int ext4_ext_update_logical(struct inode *inode, handle_t *handle,
+				   ext4_lblk_t start_block, ext4_lblk_t shift,
+				   ext4_lblk_t end_block)
+{
+	struct ext4_ext_path *path = NULL;
+	int err = 0;
+	if (start_block == end_block)
+		return err;
+
+	while (start_block < end_block) {
+		path = ext4_ext_find_extent(inode, start_block, path);
+		if (IS_ERR(path)) {
+			pr_err("Error in calculating path\n");
+			err = PTR_ERR(path);
+			break;
+		}
+		err = ext4_ext_update_path(path, shift, inode,
+					   handle, &start_block);
+		ext4_ext_drop_refs(path);
+		kfree(path);
+		path = NULL;
+		if (err)
+			break;
+	}
+	return err;
+}
+
+/*
+ * This function first calls ext4_ext_hole_punch() to punch a hole in
+ * the file and than calls ext4_update_logical() to update the logical
+ * offsets and make them look continuous.
+ */
+
+int ext4_ext_truncate_range(struct file *file, loff_t start, loff_t end)
+{
+	handle_t *handle;
+	struct inode *inode = file->f_path.dentry->d_inode;
+	struct super_block *sb = inode->i_sb;
+	ext4_lblk_t init_block, shift, last_block;
+	int ret, credits;
+	loff_t orig_end = end;
+	last_block = inode->i_size >> EXT4_BLOCK_SIZE_BITS(sb);
+	/*
+	* In case inode size is not aligned to blocksize, last_block
+	* calculated above would be 1 less than actual blocks
+	* assigned to file. Handle this
+	*/
+	if (do_mod(inode->i_size, inode->i_sb->s_blocksize)) {
+		last_block++;
+		if (end == inode->i_size)
+			end = last_block << EXT4_BLOCK_SIZE_BITS(sb);
+	}
+	init_block = end >> EXT4_BLOCK_SIZE_BITS(sb);
+	shift = (end - start) >> EXT4_BLOCK_SIZE_BITS(sb);
+
+	ret = ext4_punch_hole(file, start, (end - start));
+	if (ret) {
+		pr_err("Hole punch failed\n");
+		return ret;
+	}
+
+	ret = sync_inode_metadata(inode, 1);
+	if (ret) {
+		pr_err("Meta data commit failed\n");
+		return ret;
+	}
+
+	ret = filemap_write_and_wait_range(inode->i_mapping, start, -1);
+	if (ret) {
+		pr_err("Data commit failed\n");
+		return ret;
+	}
+
+	truncate_inode_pages_range(inode->i_mapping, start, -1);
+	ext4_es_remove_extent(inode, start, EXT_MAX_BLOCKS - start);
+	credits = 2*ext4_writepage_trans_blocks(inode);
+	handle = ext4_journal_start(inode, EXT4_HT_TRUNCATE, credits);
+	if (IS_ERR(handle)) {
+		ret = PTR_ERR(handle);
+		pr_err("handle error = %d at try 1\n", ret);
+		ret = ext4_force_commit(sb);
+		if (ret) {
+			pr_err("Could not force commit journal\n");
+			return ret;
+		}
+		handle = ext4_journal_start(inode, EXT4_HT_TRUNCATE, credits);
+		if (IS_ERR(handle)) {
+			ret = PTR_ERR(handle);
+			pr_err("handle error = %d, aborting\n", ret);
+			return ret;
+		}
+	}
+	down_write(&EXT4_I(inode)->i_data_sem);
+	if (end <= inode->i_size)
+		ret = ext4_ext_update_logical(inode, handle, init_block,
+					      shift, last_block);
+	if (ret) {
+		pr_err("Updating logical offsets failed\n");
+		up_write(&EXT4_I(inode)->i_data_sem);
+		ext4_journal_stop(handle);
+		return ret;
+	}
+	i_size_write(inode, inode->i_size - (orig_end - start));
+	EXT4_I(inode)->i_disksize -= (orig_end - start);
+	up_write(&EXT4_I(inode)->i_data_sem);
+	ext4_mark_inode_dirty(handle, inode);
+	ret = ext4_journal_stop(handle);
+
+	/* 
+	 * Since file-> pos keeps tracks of the seek pointer for a file,
+	 * so a read might have taken file->pos ahead of the truncate range position.
+	 * After truncate adjust the file->pos so that seek does not return wrong, which
+	 * can result in reading from a wrong position after truncate                
+	 */
+       if (current->files && !ret) {
+               struct files_struct *files = current->files;    
+               struct fdtable *fdt = NULL;
+               unsigned int nr_open_fds = 0;
+
+               spin_lock(&files->file_lock);
+               fdt = files_fdtable(files); /* pointer to fd array */
+               nr_open_fds = fdt->max_fds;
+
+               while (nr_open_fds > 0) {
+                       if (fdt->fd[nr_open_fds - 1]) {
+                               if ((GET_INODE_FROM_FILP(file) 
+                                       == GET_INODE_FROM_FILP(fdt->fd[nr_open_fds - 1])) 
+                                       && (GET_SUPERDEV_FROM_FILP(file) 
+                                       == GET_SUPERDEV_FROM_FILP(fdt->fd[nr_open_fds - 1]))) {
+                                               spin_lock(&fdt->fd[nr_open_fds - 1]->f_lock);
+                                               if ((fdt->fd[nr_open_fds - 1]->f_pos > start)
+                                                       && (fdt->fd[nr_open_fds - 1]->f_pos <= end)) {
+                                                               fdt->fd[nr_open_fds - 1]->f_pos = start;
+                                               } else if (fdt->fd[nr_open_fds - 1]->f_pos > end) {
+                                                               fdt->fd[nr_open_fds - 1]->f_pos = 
+                                                               fdt->fd[nr_open_fds - 1]->f_pos - (end - start);
+                                               }
+                                               spin_unlock(&fdt->fd[nr_open_fds - 1]->f_lock);
+                               }
+                       }
+                       nr_open_fds--;
+               }
+               spin_unlock(&files->file_lock);
+       }
+	return ret;
+}
+
+int ext4_cmp_offsets(const void *a, const void *b)
+{
+	return ((trange_t *)b)->start_off - ((trange_t *)a)->start_off;
+}
+
+#if defined(CONFIG_EXT4_FS_SPLIT_FILE) || defined(CONFIG_EXT4_FS_MERGE_FILE)
+/*
+ * extend_journal_blocks - Extent the credit limit of handle
+ *                      If unable to extend it will throw error,
+ *                      no restart of journal transaction.
+ * @handle:	handle to journal
+ * @needed:	number of journal blocks
+ * return 0 on success
+ */
+static int extend_journal_blocks(handle_t *handle, int needed)
+{
+	int err = 0;
+
+	if (!ext4_handle_valid(handle))
+		return 0;
+
+	if (handle->h_buffer_credits > needed)
+		return 0;
+
+	err = ext4_journal_extend(handle, needed);
+	if (err <= 0)
+		return err;
+
+	err = ext4_journal_restart(handle, needed);
+	if (err == 0)
+		err = -EAGAIN;
+	ext_debug("restart or extend again...\n");
+	return err;
+
+}
+
+/**
+ * ext4_split_move_extents - Split File from offset_block and fill
+ *			the destination file
+ *
+ * @isrc:	  inode of src file to split
+ * @offset_block: split point, its a logical block number.
+ * @idest:		inode of destination filename
+ * return 0 on success
+ */
+int ext4_split_move_extents(struct inode *isrc,
+			 __u64 offset_block, struct inode *idest)
+{
+	int depth, i = 0;
+	struct ext4_extent_header *hdr;
+	struct ext4_ext_path *path = NULL;
+	struct ext4_ext_path *d_path = NULL;
+	struct ext4_map_blocks map;
+	struct ext4_extent *ex = NULL;
+	struct ext4_extent *last_ex;
+	int err = 0, jblocks;
+	handle_t *handle;
+	ext4_lblk_t lblk_seq = 0;
+	int erase_index = 0;
+	int split_flag = 0;
+	ext4_lblk_t orig_split_point = 0; /* split point requested by app */
+
+	loff_t rem_offset = 0;
+	int block_bits;
+
+	rem_offset =  do_mod(isrc->i_size, isrc->i_sb->s_blocksize);
+
+	/* First split at offset_block the src file (isrc) */
+	depth = ext_depth(isrc);
+	err = get_ext_path(isrc, offset_block, &path);
+	if (err) {
+		ext_debug("First split path err\n");
+		return -EIO;
+	}
+
+	if (ext4_ext_is_uninitialized(path[depth].p_ext))
+		split_flag = EXT4_EXT_MARK_UNINIT2 | EXT4_EXT_MARK_UNINIT1;
+
+	map.m_pblk = ext4_ext_pblock(path[depth].p_ext);
+	map.m_lblk = offset_block;
+	map.m_len = (unsigned int) ((EXT4_I(isrc)->i_disksize >>
+					isrc->i_sb->s_blocksize_bits));
+	map.m_flags = 0;
+	jblocks = ext4_writepage_trans_blocks(isrc);
+	handle = ext4_journal_start(isrc, EXT4_HT_MOVE_EXTENTS, jblocks);
+	if (IS_ERR(handle)) {
+		err = PTR_ERR(handle);
+		goto split_err;
+	}
+
+	ex = path[depth].p_ext;
+	orig_split_point = offset_block;
+
+	/* handling holes if split point falls in hole */
+	if (offset_block < le32_to_cpu(ex->ee_block) ||
+	     offset_block >= (le32_to_cpu(ex->ee_block) +
+				  ext4_ext_get_actual_len(ex))) {
+		if (offset_block > le32_to_cpu(ex->ee_block))
+			offset_block = le32_to_cpu(ex->ee_block) +
+					ext4_ext_get_actual_len(ex) - 1;
+		else
+			offset_block = le32_to_cpu(ex->ee_block);
+
+	}
+
+	err = ext4_split_extent_at(handle, isrc, path,
+		offset_block, split_flag,
+		EXT4_GET_BLOCKS_METADATA_NOFAIL | EXT4_GET_BLOCKS_PRE_IO);
+
+	if (err < 0) {
+		ext4_debug("ext4_split_extent failed\n");
+		goto split_err;
+	}
+
+	ex = NULL;
+
+	ext4_ext_drop_refs(path);
+	kfree(path);
+	path = NULL;
+	ext4_mark_inode_dirty(handle, isrc);
+	err = ext4_journal_stop(handle);
+	if (err)
+		goto split_err;
+
+	/* update the idest with all the extents found */
+	/* also update the isrc with extents removed */
+
+	depth = ext_depth(isrc);
+	hdr = ext_inode_hdr(isrc);
+	if (!hdr || ext4_ext_check(isrc, hdr, depth))
+		return -EIO;
+
+	i = depth;
+	err = get_ext_path(isrc, offset_block, &path);
+	ex = path[i].p_ext;
+
+	if (ex == NULL) {
+		ext_debug("fatal: No extent found for block number for %llu\n",
+				offset_block);
+		return -EIO;
+	}
+
+	ext4_flush_unwritten_io(isrc);
+
+	lblk_seq = idest->i_size >> EXT4_BLOCK_SIZE_BITS(idest->i_sb);
+	if (do_mod(idest->i_size, idest->i_sb->s_blocksize))
+		lblk_seq++;
+
+split_loop:
+	err = 0;
+	ext_debug("Split: Loop on EAGAIN\n");
+
+	/* start journal for idest * isrc */
+	handle = ext4_journal_start(isrc, EXT4_HT_MOVE_EXTENTS, jblocks);
+	if (IS_ERR(handle))
+		return -EIO;
+
+	while (i >= 0 && err == 0) {
+		if (i == depth) {
+			hdr = path[i].p_hdr;
+			if (!hdr)
+				goto split_err;
+
+			if (!ex)
+				ex = EXT_FIRST_EXTENT(hdr);
+
+			last_ex =  EXT_LAST_EXTENT(hdr);
+
+			err = extend_journal_blocks(handle, jblocks);
+			if (err)
+				goto split_err;
+
+			/* get access for isrc */
+			err = ext4_ext_get_access(handle, isrc, path + i);
+			if (err) {
+				ext_debug("Path access  err\n");
+				goto split_err;
+			}
+
+			for ( ; ex != NULL && ex <= last_ex; ex++) {
+				err = get_ext_path(idest, lblk_seq, &d_path);
+				if (err) {
+					if (d_path)
+						err = 0;
+					else {
+						ext_debug("Break for loop Path err\n");
+						goto split_err;
+					}
+				}
+
+				if (!ext4_ext_is_uninitialized(ex)
+					&&  ext4_ext_get_actual_len(ex)) {
+
+					ex->ee_block = cpu_to_le32(lblk_seq);
+					err = ext4_ext_insert_extent(
+						handle, idest, d_path, ex, 0);
+					if (err) {
+						ext_debug("Error insert extent at %u\n",
+								lblk_seq);
+						goto split_err;
+					}
+
+					lblk_seq += ext4_ext_get_actual_len(ex);
+
+					idest->i_blocks +=
+						(ext4_ext_get_actual_len(ex) *
+					 (EXT4_BLOCK_SIZE(idest->i_sb) >> 9));
+
+					i_size_write(idest, idest->i_size +
+						(ext4_ext_get_actual_len(ex) *
+						EXT4_BLOCK_SIZE(idest->i_sb)));
+
+					isrc->i_blocks -=
+						 (ext4_ext_get_actual_len(ex) *
+					 (EXT4_BLOCK_SIZE(isrc->i_sb) >> 9));
+				} else {
+					ext4_fsblk_t leaf;
+					leaf = ext4_ext_pblock(ex);
+
+					ext4_free_blocks(handle, isrc, NULL,
+						leaf,
+						ext4_ext_get_actual_len(ex),
+						EXT4_FREE_BLOCKS_METADATA
+						| EXT4_FREE_BLOCKS_FORGET);
+				}
+
+				memset(ex, 0, sizeof(struct ext4_extent));
+				le16_add_cpu(&(hdr->eh_entries), -1);
+
+				ext4_ext_drop_refs(d_path);
+				kfree(d_path);
+				d_path = NULL;
+			}
+
+			if (hdr) {
+				if (!le16_to_cpu(hdr->eh_entries)) {
+					erase_index = 1;
+					hdr->eh_depth = 0;
+				} else
+					erase_index = 0;
+			}
+
+			/* stop journal */
+			ext4_ext_dirty(handle, isrc, path + i);
+			ext4_mark_inode_dirty(handle, isrc);
+			ext4_mark_inode_dirty(handle, idest);
+
+			brelse(path[i].p_bh);
+			path[i].p_bh = NULL;
+			ext_debug("move level down : %d\n", i-1);
+			i--;
+			ex = NULL;
+			continue;
+		}
+
+		if (erase_index) {
+
+			struct ext4_extent_idx *lei;
+			ext4_fsblk_t leaf;
+
+			if (path[i].p_idx == NULL) {
+				ext_debug("Unknown Exception path[i].p_idx can't be NULL\n");
+				err = -EIO;
+				break;
+			}
+
+			leaf = ext4_idx_pblock(path[i].p_idx);
+			err = extend_journal_blocks(handle, jblocks);
+			if (err)
+				goto split_err;
+
+			/* get access for isrc */
+			err = ext4_ext_get_access(handle, isrc, path + i);
+			if (err) {
+				ext_debug("Path access  err\n");
+				goto split_err;
+			}
+
+			lei = path[i].p_idx;
+
+			if ((lei + 1) <= EXT_LAST_INDEX(path[i].p_hdr))
+				memmove(lei, lei+1,
+				 ((EXT_LAST_INDEX(path[i].p_hdr) - lei)
+					 * sizeof(struct ext4_extent_idx)));
+
+			memset(EXT_LAST_INDEX(path[i].p_hdr), 0,
+						sizeof(struct ext4_extent_idx));
+			le16_add_cpu(&(path[i].p_hdr->eh_entries), -1);
+			ext4_ext_dirty(handle, isrc, path + i);
+
+			ext4_free_blocks(handle, isrc, NULL, leaf, 1,
+					EXT4_FREE_BLOCKS_METADATA
+					 | EXT4_FREE_BLOCKS_FORGET);
+
+			erase_index = 0;
+		} else {
+			if (!path[i].p_idx)
+				path[i].p_idx = EXT_FIRST_INDEX(path[i].p_hdr);
+			else
+				path[i].p_idx++;
+		}
+
+		if (path[i].p_idx <= EXT_LAST_INDEX(path[i].p_hdr)) {
+
+			struct buffer_head *bh = NULL;
+			memset(path + i + 1, 0, sizeof(struct ext4_ext_path));
+
+			bh = sb_bread(isrc->i_sb,
+					ext4_idx_pblock(path[i].p_idx));
+			if (!bh) {
+				/* should we reset i_size? */
+				err = -EIO;
+				ext_debug("break bh NULL\n");
+				goto split_err;
+			}
+
+			if (WARN_ON(i + 1 > depth)) {
+				err = -EIO;
+				ext_debug("i + 1 > depth break on\n");
+				put_bh(bh);
+				goto split_err;
+			}
+
+			if (ext4_ext_check(isrc, ext_block_hdr(bh),
+							depth - i - 1)) {
+				err = -EIO;
+				ext_debug("ext check failed break\n");
+				put_bh(bh);
+				goto split_err;
+			}
+
+			path[i + 1].p_bh = bh;
+			path[i + 1].p_hdr = ext_block_hdr(path[i+1].p_bh);
+			ext_debug("move level up : %d\n", i+1);
+			i++;
+		 } else {
+			erase_index = 0;
+			if (!le16_to_cpu(path[i].p_hdr->eh_entries)) {
+				erase_index = 1;
+				path[i].p_hdr->eh_depth = 0;
+			}
+
+			brelse(path[i].p_bh);
+			path[i].p_bh = NULL;
+			ext_debug("move level down : %d\n", i-1);
+			i--;
+		 }
+	}
+
+	if (path) {
+		ext4_ext_drop_refs(path);
+		kfree(path);
+		path = NULL;
+	}
+
+	block_bits = isrc->i_sb->s_blocksize_bits;
+
+	/* File size updates */
+	if (rem_offset)
+		i_size_write(idest,
+		 (idest->i_size - idest->i_sb->s_blocksize) + rem_offset);
+
+	if (orig_split_point < offset_block)
+		i_size_write(isrc, ((orig_split_point << block_bits)));
+	else
+		i_size_write(isrc, ((offset_block << block_bits)));
+
+	EXT4_I(idest)->i_disksize = idest->i_size;
+	EXT4_I(isrc)->i_disksize = isrc->i_size;
+
+	idest->i_atime = idest->i_mtime = idest->i_ctime = ext4_current_time(idest);
+
+	isrc->i_atime = isrc->i_mtime = ext4_current_time(isrc);
+
+	ext4_mark_inode_dirty(handle, idest);
+	ext4_mark_inode_dirty(handle, isrc);
+
+	err = ext4_journal_stop(handle);
+	if (err)
+		goto split_err;
+
+	/* 
+	 * Sync source file meta data to disk, and invalidate
+	 * all page cache entries for original file
+	 */
+	sync_inode_metadata(isrc, 1);
+	invalidate_inode_pages2(isrc->i_mapping);
+	
+	/*
+	 * Sync destination file meta data to disk
+	 */
+	sync_inode_metadata(idest, 1);
+
+	return 0; /* Success */
+
+split_err:
+	if (!IS_ERR(handle)) {
+		ext4_journal_abort_handle("ext4_split_file: ",
+				 __LINE__, __func__, NULL, handle, err);
+		ext4_journal_stop(handle);
+	}
+
+	if (err == -EAGAIN)
+		goto split_loop;
+
+	if (path) {
+		ext4_ext_drop_refs(path);
+		kfree(path);
+		path = NULL;
+	}
+
+	return -EIO;
+
+}
+#endif /* CONFIG_EXT4_FS_SPLIT_FILE */

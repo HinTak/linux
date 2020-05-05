@@ -9,6 +9,10 @@
 #include <linux/mutex.h>
 #include <linux/ftrace.h>
 
+#ifdef CONFIG_KDEBUGD_FTRACE
+#include <trace/kdbg_ftrace_helper.h>
+#endif
+
 #include "trace_output.h"
 
 /* must be a power of 2 */
@@ -526,6 +530,11 @@ int seq_print_user_ip(struct trace_seq *s, struct mm_struct *mm,
 	return ret;
 }
 
+#ifdef CONFIG_KDEBUGD_FTRACE
+/* Let kdebugd have access to static functions in this file */
+#include "../kdebugd/trace/kdbg_ftrace_output_helper.c"
+#endif /* CONFIG_KDEBUGD_FTRACE */
+
 int
 seq_print_userip_objs(const struct userstack_entry *entry, struct trace_seq *s,
 		      unsigned long sym_flags)
@@ -564,7 +573,11 @@ seq_print_userip_objs(const struct userstack_entry *entry, struct trace_seq *s,
 		if (!ret)
 			break;
 		if (ret)
+#if !(defined(CONFIG_KDEBUGD_FTRACE) && defined(CONFIG_KDEBUGD_FTRACE_USER_BACKTRACE))
 			ret = seq_print_user_ip(s, mm, ip, sym_flags);
+#else
+			ret = kdbg_ftrace_seq_print_user_ip(s, (unsigned int)ip, entry, i);
+#endif /* CONFIG_KDEBUGD_FTRACE */
 		ret = trace_seq_puts(s, "\n");
 	}
 

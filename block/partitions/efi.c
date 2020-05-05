@@ -97,6 +97,7 @@
 #include <linux/ctype.h>
 #include <linux/math64.h>
 #include <linux/slab.h>
+#include <linux/kernel.h>
 #include "check.h"
 #include "efi.h"
 
@@ -659,8 +660,8 @@ int efi_partition(struct parsed_partitions *state)
 		efi_guid_unparse(&ptes[i].unique_partition_guid, info->uuid);
 
 		/* Naively convert UTF16-LE to 7 bits. */
-		label_max = min(sizeof(info->volname) - 1,
-				sizeof(ptes[i].partition_name));
+		label_max = min(ARRAY_SIZE(info->volname) - 1,
+				ARRAY_SIZE(ptes[i].partition_name));
 		info->volname[label_max] = 0;
 		while (label_count < label_max) {
 			u8 c = ptes[i].partition_name[label_count] & 0xff;

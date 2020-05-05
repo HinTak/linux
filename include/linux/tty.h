@@ -238,7 +238,7 @@ struct tty_struct {
 	int index;
 
 	/* Protects ldisc changes: Lock tty not pty */
-	struct mutex ldisc_mutex;
+	struct ld_semaphore ldisc_sem;
 	struct tty_ldisc *ldisc;
 
 	struct mutex atomic_write_lock;
@@ -278,6 +278,9 @@ struct tty_struct {
 	/* If the tty has a pending do_SAK, queue it here - akpm */
 	struct work_struct SAK_work;
 	struct tty_port *port;
+#ifdef CONFIG_UART_BROADCAST
+	struct list_head list;
+#endif
 };
 
 /* Each of a tty's open files has private_data pointing to tty_file_private */
@@ -306,8 +309,6 @@ struct tty_file_private {
 #define TTY_DO_WRITE_WAKEUP 	5	/* Call write_wakeup after queuing new */
 #define TTY_PUSH 		6	/* n_tty private */
 #define TTY_CLOSING 		7	/* ->close() in progress */
-#define TTY_LDISC 		9	/* Line discipline attached */
-#define TTY_LDISC_CHANGING 	10	/* Line discipline changing */
 #define TTY_LDISC_OPEN	 	11	/* Line discipline is open */
 #define TTY_HW_COOK_OUT 	14	/* Hardware can do output cooking */
 #define TTY_HW_COOK_IN 		15	/* Hardware can do input cooking */
@@ -567,6 +568,7 @@ extern void tty_ldisc_begin(void);
 extern struct tty_ldisc_ops tty_ldisc_N_TTY;
 extern void n_tty_inherit_ops(struct tty_ldisc_ops *ops);
 
+
 /* tty_audit.c */
 #ifdef CONFIG_AUDIT
 extern void tty_audit_add_data(struct tty_struct *tty, unsigned char *data,
@@ -596,6 +598,19 @@ static inline void tty_audit_push(struct tty_struct *tty)
 static inline int tty_audit_push_current(void)
 {
 	return 0;
+}
+#endif
+#ifdef CONFIG_PRINT_MSG_PID_NAME_TAG
+#define PID_NAME_TAG_SIZE 60
+extern int pid_name_tag;
+static inline void set_pid_name_tag(int tag)
+{
+	pid_name_tag = tag;
+}
+
+static inline int get_pid_name_tag(void)
+{
+	return pid_name_tag;
 }
 #endif
 

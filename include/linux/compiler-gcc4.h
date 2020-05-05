@@ -75,11 +75,7 @@
  *
  * (asm goto is automatically volatile - the naming reflects this.)
  */
-#if GCC_VERSION <= 40801
-# define asm_volatile_goto(x...)	do { asm goto(x); asm (""); } while (0)
-#else
-# define asm_volatile_goto(x...)	do { asm goto(x); } while (0)
-#endif
+#define asm_volatile_goto(x...)	do { asm goto(x); asm (""); } while (0)
 
 #ifdef CONFIG_ARCH_USE_BUILTIN_BSWAP
 #if GCC_VERSION >= 40400
@@ -90,3 +86,14 @@
 #define __HAVE_BUILTIN_BSWAP16__
 #endif
 #endif /* CONFIG_ARCH_USE_BUILTIN_BSWAP */
+
+
+/*
+ * WARNING
+ * This works ONLY with VD gcc compiler. gcc-4.9 in VD has
+ * backported some asan patches from gcc-5 (sizeof some structs
+ * is different).
+ */
+#if GCC_VERSION >= 40902
+#define KASAN_ABI_VERSION 4
+#endif

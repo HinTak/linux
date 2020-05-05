@@ -87,6 +87,8 @@ mempool_t *xfs_ioend_pool;
 #define MNTOPT_BARRIER	"barrier"	/* use writer barriers for log write and
 					 * unwritten extent conversion */
 #define MNTOPT_NOBARRIER "nobarrier"	/* .. disable */
+#define MNTOPT_SECURITY	"security_xattr" /* enable security xattr support */
+#define MNTOPT_NOSECURITY "nosecurity_xattr" /* .. disable */
 #define MNTOPT_64BITINODE   "inode64"	/* inodes can be allocated anywhere */
 #define MNTOPT_32BITINODE   "inode32"	/* inode allocation limited to
 					 * XFS_MAXINUMBER_32 */
@@ -208,6 +210,7 @@ xfs_parseargs(
 	 */
 	mp->m_flags |= XFS_MOUNT_BARRIER;
 	mp->m_flags |= XFS_MOUNT_COMPAT_IOSIZE;
+	mp->m_flags |= XFS_MOUNT_SECURITY;
 #if !XFS_BIG_INUMS
 	mp->m_flags |= XFS_MOUNT_SMALL_INUMS;
 #endif
@@ -328,6 +331,10 @@ xfs_parseargs(
 			mp->m_flags |= XFS_MOUNT_BARRIER;
 		} else if (!strcmp(this_char, MNTOPT_NOBARRIER)) {
 			mp->m_flags &= ~XFS_MOUNT_BARRIER;
+		} else if (!strcmp(this_char, MNTOPT_SECURITY)) {
+			mp->m_flags &= XFS_MOUNT_SECURITY;
+		} else if (!strcmp(this_char, MNTOPT_NOSECURITY)) {
+			mp->m_flags &= ~XFS_MOUNT_SECURITY;
 		} else if (!strcmp(this_char, MNTOPT_IKEEP)) {
 			mp->m_flags |= XFS_MOUNT_IKEEP;
 		} else if (!strcmp(this_char, MNTOPT_NOIKEEP)) {
@@ -521,6 +528,7 @@ xfs_showargs(
 		{ XFS_MOUNT_COMPAT_IOSIZE,	"," MNTOPT_LARGEIO },
 		{ XFS_MOUNT_BARRIER,		"," MNTOPT_NOBARRIER },
 		{ XFS_MOUNT_SMALL_INUMS,	"," MNTOPT_64BITINODE },
+		{ XFS_MOUNT_SECURITY,		"," MNTOPT_NOSECURITY },
 		{ 0, NULL }
 	};
 	struct proc_xfs_info	*xfs_infop;

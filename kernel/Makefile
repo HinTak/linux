@@ -12,6 +12,10 @@ obj-y     = fork.o exec_domain.o panic.o printk.o \
 	    notifier.o ksysfs.o cred.o \
 	    async.o range.o groups.o lglock.o smpboot.o
 
+obj-$(CONFIG_IOTMODE)   += iotnode.o
+#Add for DTVLOGD
+obj-$(CONFIG_DTVLOGD)   += dtvlogd.o
+
 ifdef CONFIG_FUNCTION_TRACER
 # Do not trace debug files and internal ftrace files
 CFLAGS_REMOVE_lockdep.o = -pg
@@ -96,6 +100,9 @@ obj-$(CONFIG_BINFMT_ELF) += elfcore.o
 obj-$(CONFIG_COMPAT_BINFMT_ELF) += elfcore.o
 obj-$(CONFIG_BINFMT_ELF_FDPIC) += elfcore.o
 obj-$(CONFIG_FUNCTION_TRACER) += trace/
+#Add for KDEBUGD
+#Add for T2DDEBUGD
+obj-$(CONFIG_T2D_DEBUGD) += t2ddebugd/
 obj-$(CONFIG_TRACING) += trace/
 obj-$(CONFIG_TRACE_CLOCK) += trace/
 obj-$(CONFIG_RING_BUFFER) += trace/

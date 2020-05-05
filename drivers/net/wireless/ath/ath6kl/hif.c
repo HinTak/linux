@@ -1,6 +1,5 @@
 /*
  * Copyright (c) 2007-2011 Atheros Communications Inc.
- * Copyright (c) 2011-2012 Qualcomm Atheros, Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -16,13 +15,10 @@
  */
 #include "hif.h"
 
-#include <linux/export.h>
-
 #include "core.h"
 #include "target.h"
 #include "hif-ops.h"
 #include "debug.h"
-#include "trace.h"
 
 #define MAILBOX_FOR_BLOCK_SIZE          1
 
@@ -63,19 +59,30 @@ int ath6kl_hif_rw_comp_handler(void *context, int status)
 
 	return 0;
 }
-EXPORT_SYMBOL(ath6kl_hif_rw_comp_handler);
-
 #define REG_DUMP_COUNT_AR6003   60
 #define REGISTER_DUMP_LEN_MAX   60
+#define REG_DUMP_COUNT_AR6004   60
 
 static void ath6kl_hif_dump_fw_crash(struct ath6kl *ar)
 {
 	__le32 regdump_val[REGISTER_DUMP_LEN_MAX];
 	u32 i, address, regdump_addr = 0;
 	int ret;
+	int dumpcount = REG_DUMP_COUNT_AR6004;
 
-	if (ar->target_type != TARGET_TYPE_AR6003)
+	if (ar->target_type != TARGET_TYPE_AR6003 &&
+		ar->target_type != TARGET_TYPE_AR6004)
 		return;
+
+	switch (ar->target_type) {
+	case TARGET_TYPE_AR6003:
+		dumpcount = REG_DUMP_COUNT_AR6003;
+		break;
+	case TARGET_TYPE_AR6004:
+	default:
+		dumpcount = REG_DUMP_COUNT_AR6004;
+		break;
+	}
 
 	/* the reg dump pointer is copied to the host interest area */
 	address = ath6kl_get_hi_item_addr(ar, HI_ITEM(hi_failure_state));
@@ -86,17 +93,17 @@ static void ath6kl_hif_dump_fw_crash(struct ath6kl *ar)
 
 	if (ret || !regdump_addr) {
 		ath6kl_warn("failed to get ptr to register dump area: %d\n",
-			    ret);
+				ret);
 		return;
 	}
 
 	ath6kl_dbg(ATH6KL_DBG_IRQ, "register dump data address 0x%x\n",
-		   regdump_addr);
+		regdump_addr);
 	regdump_addr = TARG_VTOP(ar->target_type, regdump_addr);
 
 	/* fetch register dump data */
 	ret = ath6kl_diag_read(ar, regdump_addr, (u8 *)&regdump_val[0],
-				  REG_DUMP_COUNT_AR6003 * (sizeof(u32)));
+				dumpcount * (sizeof(u32)));
 	if (ret) {
 		ath6kl_warn("failed to get register dump: %d\n", ret);
 		return;
@@ -104,17 +111,17 @@ static void ath6kl_hif_dump_fw_crash(struct ath6kl *ar)
 
 	ath6kl_info("crash dump:\n");
 	ath6kl_info("hw 0x%x fw %s\n", ar->wiphy->hw_version,
-		    ar->wiphy->fw_version);
+			ar->wiphy->fw_version);
 
-	BUILD_BUG_ON(REG_DUMP_COUNT_AR6003 % 4);
+	BUILD_BUG_ON(REG_DUMP_COUNT_AR6004 % 4);
 
-	for (i = 0; i < REG_DUMP_COUNT_AR6003; i += 4) {
+	for (i = 0; i < dumpcount / 4; i++) {
 		ath6kl_info("%d: 0x%8.8x 0x%8.8x 0x%8.8x 0x%8.8x\n",
-			    i,
-			    le32_to_cpu(regdump_val[i]),
-			    le32_to_cpu(regdump_val[i + 1]),
-			    le32_to_cpu(regdump_val[i + 2]),
-			    le32_to_cpu(regdump_val[i + 3]));
+				4 * i,
+				le32_to_cpu(regdump_val[i]),
+				le32_to_cpu(regdump_val[i + 1]),
+				le32_to_cpu(regdump_val[i + 2]),
+				le32_to_cpu(regdump_val[i + 3]));
 	}
 
 }
@@ -136,8 +143,8 @@ static int ath6kl_hif_proc_dbg_intr(struct ath6kl_device *dev)
 		ath6kl_warn("Failed to clear debug interrupt: %d\n", ret);
 
 	ath6kl_hif_dump_fw_crash(dev->ar);
-	ath6kl_read_fwlogs(dev->ar);
-	ath6kl_recovery_err_notify(dev->ar, ATH6KL_FW_ASSERT);
+
+	ath6kl_fw_crash_trap(dev->ar);
 
 	return ret;
 }
@@ -287,7 +294,7 @@ static int ath6kl_hif_proc_counter_intr(struct ath6kl_device *dev)
 			     dev->irq_en_reg.cntr_int_status_en;
 
 	ath6kl_dbg(ATH6KL_DBG_IRQ,
-		   "valid interrupt source(s) in COUNTER_INT_STATUS: 0x%x\n",
+		"valid interrupt source(s) in COUNTER_INT_STATUS: 0x%x\n",
 		counter_int_status);
 
 	/*
@@ -340,7 +347,8 @@ static int ath6kl_hif_proc_err_intr(struct ath6kl_device *dev)
 	status = hif_read_write_sync(dev->ar, ERROR_INT_STATUS_ADDRESS,
 				     reg_buf, 4, HIF_WR_SYNC_BYTE_FIX);
 
-	WARN_ON(status);
+	if (status)
+		WARN_ON(1);
 
 	return status;
 }
@@ -361,7 +369,7 @@ static int ath6kl_hif_proc_cpu_intr(struct ath6kl_device *dev)
 	}
 
 	ath6kl_dbg(ATH6KL_DBG_IRQ,
-		   "valid interrupt source(s) in CPU_INT_STATUS: 0x%x\n",
+		"valid interrupt source(s) in CPU_INT_STATUS: 0x%x\n",
 		cpu_int_status);
 
 	/* Clear the interrupt */
@@ -384,7 +392,8 @@ static int ath6kl_hif_proc_cpu_intr(struct ath6kl_device *dev)
 	status = hif_read_write_sync(dev->ar, CPU_INT_STATUS_ADDRESS,
 				     reg_buf, 4, HIF_WR_SYNC_BYTE_FIX);
 
-	WARN_ON(status);
+	if (status)
+		WARN_ON(1);
 
 	return status;
 }
@@ -435,10 +444,9 @@ static int proc_pending_irqs(struct ath6kl_device *dev, bool *done)
 		if (status)
 			goto out;
 
-		ath6kl_dump_registers(dev, &dev->irq_proc_reg,
-				      &dev->irq_en_reg);
-		trace_ath6kl_sdio_irq(&dev->irq_en_reg,
-				      sizeof(dev->irq_en_reg));
+		if (AR_DBG_LVL_CHECK(ATH6KL_DBG_IRQ))
+			ath6kl_dump_registers(dev, &dev->irq_proc_reg,
+					 &dev->irq_en_reg);
 
 		/* Update only those registers that are enabled */
 		host_int_status = dev->irq_proc_reg.host_int_status &
@@ -516,6 +524,7 @@ static int proc_pending_irqs(struct ath6kl_device *dev, bool *done)
 		status = ath6kl_hif_proc_counter_intr(dev);
 
 out:
+#ifdef BYPASS_IRQ_RECHECK
 	/*
 	 * An optimization to bypass reading the IRQ status registers
 	 * unecessarily which can re-wake the target, if upper layers
@@ -534,6 +543,18 @@ out:
 
 	if (!dev->htc_cnxt->chk_irq_status_cnt)
 		*done = true;
+#else
+	/*
+	 * The benefit is that if packet happens to arrive during that extra
+	 * read (bursty traffic), we maybe able to catch the packet and
+	 * continue RX without waiting for the next interrupt. This seems to
+	 * improve throughput on slower processors.
+	 *
+	 * NOTE : There might be a chance to hold CPU time to let other SDIO
+	 * devices starvation. In sdio_irq.c, the SDIO irq thread run each
+	 * SDIO device¡¦s call-back one bye one.
+	 */
+#endif
 
 	ath6kl_dbg(ATH6KL_DBG_IRQ,
 		   "proc_pending_irqs: (done:%d, status=%d\n", *done, status);
@@ -568,7 +589,6 @@ int ath6kl_hif_intr_bh_handler(struct ath6kl *ar)
 
 	return status;
 }
-EXPORT_SYMBOL(ath6kl_hif_intr_bh_handler);
 
 static int ath6kl_hif_enable_intrs(struct ath6kl_device *dev)
 {
@@ -696,6 +716,11 @@ int ath6kl_hif_setup(struct ath6kl_device *dev)
 
 	ath6kl_dbg(ATH6KL_DBG_HIF, "hif block size %d mbox addr 0x%x\n",
 		   dev->htc_cnxt->block_sz, dev->ar->mbox_info.htc_addr);
+
+	/* usb doesn't support enabling interrupts */
+	/* FIXME: remove check once USB support is implemented */
+	if (dev->ar->hif_type == ATH6KL_HIF_TYPE_USB)
+		return 0;
 
 	status = ath6kl_hif_disable_intrs(dev);
 

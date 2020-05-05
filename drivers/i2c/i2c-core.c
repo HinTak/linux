@@ -425,7 +425,15 @@ static const struct attribute_group *i2c_dev_attr_groups[] = {
 	NULL
 };
 
+static int i2c_device_pm_prepare(struct device *dev)
+{
+    if(!device_async_suspend_enabled(dev))
+		device_enable_async_suspend(dev);
+	return 0;
+}
+
 static const struct dev_pm_ops i2c_device_pm_ops = {
+	.prepare = i2c_device_pm_prepare,
 	.suspend = i2c_device_pm_suspend,
 	.resume = i2c_device_pm_resume,
 	.freeze = i2c_device_pm_freeze,
@@ -484,7 +492,8 @@ static int i2c_check_client_addr_validity(const struct i2c_client *client)
 			return -EINVAL;
 	} else {
 		/* 7-bit address, reject the general call address */
-		if (client->addr == 0x00 || client->addr > 0x7f)
+	//	if (client->addr == 0x00 || client->addr > 0x7f)
+		if (client->addr > 0x7f)	/* INX TCON 0x00 SOC141008*/
 			return -EINVAL;
 	}
 	return 0;
@@ -506,6 +515,9 @@ static int i2c_check_addr_validity(unsigned short addr)
 	 *  0x78-0x7b  10-bit slave addressing
 	 *  0x7c-0x7f  Reserved for future purposes
 	 */
+	if(addr == 0x00)	/* INX TCON 0x00 SOC141008*/
+		return 0;
+
 	if (addr < 0x08 || addr > 0x77)
 		return -EINVAL;
 	return 0;

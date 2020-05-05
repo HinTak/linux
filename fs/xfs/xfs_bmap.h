@@ -27,6 +27,8 @@ struct xfs_trans;
 
 extern kmem_zone_t	*xfs_bmap_free_item_zone;
 
+#define XFS_BMAP_MAX_SHIFT_EXTENTS	1
+
 /*
  * List of extents to be free "later".
  * The list is kept sorted on xbf_startblock.
@@ -203,6 +205,10 @@ int	xfs_bunmapi(struct xfs_trans *tp, struct xfs_inode *ip,
 int	xfs_check_nostate_extents(struct xfs_ifork *ifp, xfs_extnum_t idx,
 		xfs_extnum_t num);
 uint	xfs_default_attroffset(struct xfs_inode *ip);
+int	xfs_bmap_shift_extents(struct xfs_trans *tp, struct xfs_inode *ip,
+		xfs_fileoff_t start_fsb, xfs_fileoff_t offset_shift_fsb,
+		int *done, xfs_fileoff_t *next_fsb, xfs_fsblock_t *firstblock,
+		struct xfs_bmap_free *flist, int num_exts);
 
 #ifdef __KERNEL__
 /* bmap to userspace formatter - copy to user & advance pointer */

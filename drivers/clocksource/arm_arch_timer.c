@@ -38,6 +38,7 @@ static int arch_timer_ppi[MAX_TIMER_PPI];
 static struct clock_event_device __percpu *arch_timer_evt;
 
 static bool arch_timer_use_virtual = true;
+static bool arch_timer_c3stop;
 
 /*
  * Architected system timer support.
@@ -125,7 +126,9 @@ static int arch_timer_set_next_event_phys(unsigned long evt,
 
 static int __cpuinit arch_timer_setup(struct clock_event_device *clk)
 {
-	clk->features = CLOCK_EVT_FEAT_ONESHOT | CLOCK_EVT_FEAT_C3STOP;
+	clk->features = CLOCK_EVT_FEAT_ONESHOT;
+	if (arch_timer_c3stop)
+		clk->features |= CLOCK_EVT_FEAT_C3STOP;
 	clk->name = "arch_sys_timer";
 	clk->rating = 450;
 	if (arch_timer_use_virtual) {
@@ -174,10 +177,11 @@ static int arch_timer_available(void)
 		arch_timer_rate = freq;
 	}
 
-	pr_info_once("Architected local timer running at %lu.%02luMHz (%s).\n",
+	pr_info_once("Architected local timer running at %lu.%02luMHz (%s, %s).\n",
 		     (unsigned long)arch_timer_rate / 1000000,
 		     (unsigned long)(arch_timer_rate / 10000) % 100,
-		     arch_timer_use_virtual ? "virt" : "phys");
+		     arch_timer_use_virtual ? "virt" : "phys",
+		     arch_timer_c3stop ? "c3stop" : "always-on");
 	return 0;
 }
 
@@ -367,6 +371,8 @@ static void __init arch_timer_init(struct device_node *np)
 			return;
 		}
 	}
+
+	arch_timer_c3stop = !of_property_read_bool(np, "always-on");
 
 	arch_timer_register();
 	arch_timer_arch_init();

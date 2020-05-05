@@ -162,6 +162,15 @@ __do_page_cache_readahead(struct address_space *mapping, struct file *filp,
 	int ret = 0;
 	loff_t isize = i_size_read(inode);
 
+#ifdef CONFIG_BD_CACHE_ENABLED
+	/*
+	 * This line is added for DVD media which includes BD contents.
+	 * author : chungki, mail : chungki0201.woo@samsung.net
+	 */
+	int first_hit = 1;
+#endif
+
+
 	if (isize == 0)
 		goto out;
 
@@ -179,8 +188,26 @@ __do_page_cache_readahead(struct address_space *mapping, struct file *filp,
 		rcu_read_lock();
 		page = radix_tree_lookup(&mapping->page_tree, page_offset);
 		rcu_read_unlock();
+#ifdef CONFIG_BD_CACHE_ENABLED
+		/*
+		 * This lines are modified for DVD media which includes BD contents.
+		 * author : chungki, mail : chungki0201.woo@samsung.net
+		 */
+		if (page) {
+			if(test_bit(AS_DIRECT, &mapping->flags) && first_hit) {
+				invalidate_mapping_pages(mapping, page_offset, page_offset+(nr_to_read-page_idx));
+				first_hit = 0;
+
+				if(radix_tree_lookup(&mapping->page_tree, page_offset))
+					continue;
+			}
+			else
+				continue;
+		}
+#else
 		if (page)
 			continue;
+#endif
 
 		page = page_cache_alloc_readahead(mapping);
 		if (!page)
@@ -510,6 +537,11 @@ void page_cache_sync_readahead(struct address_space *mapping,
 	if (!ra->ra_pages)
 		return;
 
+#ifdef CONFIG_FS_SEL_READAHEAD
+	if (!ra->state)
+		return;
+#endif
+
 	/* be dumb */
 	if (filp && (filp->f_mode & FMODE_RANDOM)) {
 		force_page_cache_readahead(mapping, filp, offset, req_size);
@@ -545,6 +577,11 @@ page_cache_async_readahead(struct address_space *mapping,
 	/* no read-ahead */
 	if (!ra->ra_pages)
 		return;
+
+#ifdef CONFIG_FS_SEL_READAHEAD
+	if (!ra->state)
+		return;
+#endif
 
 	/*
 	 * Same bit is used for PG_readahead and PG_reclaim.

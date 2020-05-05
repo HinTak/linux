@@ -101,19 +101,19 @@ extern int __get_user_1(void *);
 extern int __get_user_2(void *);
 extern int __get_user_4(void *);
 
-#define __GUP_CLOBBER_1	"lr", "cc"
+#define __GUP_CLOBBER_1	"lr", "cc" __asmbl_clobber("ip")
 #ifdef CONFIG_CPU_USE_DOMAINS
 #define __GUP_CLOBBER_2	"ip", "lr", "cc"
 #else
-#define __GUP_CLOBBER_2 "lr", "cc"
+#define __GUP_CLOBBER_2 "lr", "cc" __asmbl_clobber("ip")
 #endif
-#define __GUP_CLOBBER_4	"lr", "cc"
+#define __GUP_CLOBBER_4	"lr", "cc" __asmbl_clobber("ip")
 
 #define __get_user_x(__r2,__p,__e,__l,__s)				\
 	   __asm__ __volatile__ (					\
 		__asmeq("%0", "r0") __asmeq("%1", "r2")			\
 		__asmeq("%3", "r1")					\
-		"bl	__get_user_" #__s				\
+		__asmbl("", "ip", "__get_user_" #__s)			\
 		: "=&r" (__e), "=r" (__r2)				\
 		: "0" (__p), "r" (__l)					\
 		: __GUP_CLOBBER_##__s)
@@ -156,7 +156,7 @@ extern int __put_user_8(void *, unsigned long long);
 	   __asm__ __volatile__ (					\
 		__asmeq("%0", "r0") __asmeq("%2", "r2")			\
 		__asmeq("%3", "r1")					\
-		"bl	__put_user_" #__s				\
+		__asmbl("", "ip", "__put_user_" #__s)			\
 		: "=&r" (__e)						\
 		: "0" (__p), "r" (__r2), "r" (__l)			\
 		: "ip", "lr", "cc")
@@ -164,8 +164,9 @@ extern int __put_user_8(void *, unsigned long long);
 #define __put_user_check(x,p)							\
 	({								\
 		unsigned long __limit = current_thread_info()->addr_limit - 1; \
+		const typeof(*(p)) __user *__tmp_p = (p);		\
 		register const typeof(*(p)) __r2 asm("r2") = (x);	\
-		register const typeof(*(p)) __user *__p asm("r0") = (p);\
+		register const typeof(*(p)) __user *__p asm("r0") = __tmp_p; \
 		register unsigned long __l asm("r1") = __limit;		\
 		register int __e asm("r0");				\
 		switch (sizeof(*(__p))) {				\

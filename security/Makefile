@@ -24,7 +24,11 @@ obj-$(CONFIG_SECURITY_TOMOYO)		+= tomoyo/built-in.o
 obj-$(CONFIG_SECURITY_APPARMOR)		+= apparmor/built-in.o
 obj-$(CONFIG_SECURITY_YAMA)		+= yama/built-in.o
 obj-$(CONFIG_CGROUP_DEVICE)		+= device_cgroup.o
+obj-$(CONFIG_NETSEC_LSM_SECURITY)	+= netsec_lsm.o
 
 # Object integrity file lists
 subdir-$(CONFIG_INTEGRITY)		+= integrity
 obj-$(CONFIG_INTEGRITY)			+= integrity/built-in.o
+
+subdir-$(CONFIG_SECURITY_SFD)		+= sfd
+obj-$(CONFIG_SECURITY_SFD) += sfd/built-in.o

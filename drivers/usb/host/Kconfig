@@ -18,6 +18,9 @@ config USB_C67X00_HCD
 config USB_XHCI_HCD
 	tristate "xHCI HCD (USB 3.0) support"
 	depends on USB_ARCH_HAS_XHCI
+	select USB_XHCI_PLATFORM if ARCH_SDP
+	select USB_XHCI_PLATFORM if ARCH_NVT72668
+	select USB_PHY if ARCH_NVT72668
 	---help---
 	  The eXtensible Host Controller Interface (xHCI) is standard for USB 3.0
 	  "SuperSpeed" host controller hardware.
@@ -29,6 +32,10 @@ if USB_XHCI_HCD
 
 config USB_XHCI_PLATFORM
 	tristate
+
+config USB_XHCI_PLATFORM
+	tristate "xHCI platform support"
+	depends on USB_XHCI_HCD
 
 config USB_XHCI_HCD_DEBUGGING
 	bool "Debugging for the xHCI host controller"
@@ -63,9 +70,25 @@ config USB_EHCI_HCD
 	  To compile this driver as a module, choose M here: the
 	  module will be called ehci-hcd.
 
+config USB_ENABLE
+	tristate "USB Enable"
+	depends on USB && USB_ARCH_HAS_EHCI
+	default M
+	---help---
+	  Module to control USB Enable GPIO
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called usb_enable.ko.
+
+config USB_SERDES_LOCK
+	bool "USB Serdes Lock"
+	default y
+	---help---
+	  Module to check USB Serdes Lock GPIO
+
 config USB_EHCI_ROOT_HUB_TT
 	bool "Root Hub Transaction Translators"
-	depends on USB_EHCI_HCD || USB_CHIPIDEA_HOST
+	depends on (USB_EHCI_HCD && !USB_EHCI_HCD_NT72668) || USB_CHIPIDEA_HOST
 	---help---
 	  Some EHCI chips have vendor-specific extensions to integrate
 	  transaction translators, so that no OHCI or UHCI companion
@@ -77,7 +100,7 @@ config USB_EHCI_ROOT_HUB_TT
 
 config USB_EHCI_TT_NEWSCHED
 	bool "Improved Transaction Translator scheduling"
-	depends on USB_EHCI_HCD || USB_CHIPIDEA_HOST
+	depends on (USB_EHCI_HCD && !USB_EHCI_HCD_NT72668) || USB_CHIPIDEA_HOST
 	default y
 	---help---
 	  This changes the periodic scheduling code to fill more of the low
@@ -98,7 +121,23 @@ config USB_EHCI_TT_NEWSCHED
 config USB_FSL_MPH_DR_OF
 	tristate
 
+if ARCH_NVT72668
+config USB_NT72668_HCD
+	bool
+	depends on USB_EHCI_HCD_NT72668 || USB_XHCI_HCD
+	default y
+endif
+
 if USB_EHCI_HCD
+
+if ARCH_NVT72668
+config USB_EHCI_HCD_NT72668
+	bool "NT72668 EHCI support"
+	depends on USB_EHCI_HCD
+	default y
+	---help---
+		Support for NT72668 on-chip EHCI USB controller
+endif
 
 config USB_EHCI_PCI
 	tristate

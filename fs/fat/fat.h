@@ -100,7 +100,8 @@ struct msdos_sb_info {
 	spinlock_t dir_hash_lock;
 	struct hlist_head dir_hashtable[FAT_HASH_SIZE];
 
-	unsigned int dirty;           /* fs state before mount */
+	spinlock_t ipos_busy_lock;
+	struct list_head *ipos_list_head;
 };
 
 #define FAT_CACHE_VALID	0	/* special case for valid cache */
@@ -124,6 +125,7 @@ struct msdos_inode_info {
 	loff_t i_pos;		/* on-disk position of directory entry or 0 */
 	struct hlist_node i_fat_hash;	/* hash by i_location */
 	struct hlist_node i_dir_hash;	/* hash by i_logstart */
+	atomic_t i_clnt_open_count;
 	struct rw_semaphore truncate_lock; /* protect bmap against truncate */
 	struct inode vfs_inode;
 };
@@ -134,6 +136,12 @@ struct fat_slot_info {
 	int nr_slots;		/* number of slots + 1(de) in filename */
 	struct msdos_dir_entry *de;
 	struct buffer_head *bh;
+};
+
+struct ipos_busy_list {
+	struct list_head ipos_list;
+	loff_t i_pos;	/* on disk position for busy directory entry */
+	int nr_slots;
 };
 
 static inline struct msdos_sb_info *MSDOS_SB(struct super_block *sb)
@@ -345,7 +353,7 @@ static inline void fatent_brelse(struct fat_entry *fatent)
 }
 
 extern void fat_ent_access_init(struct super_block *sb);
-extern int fat_ent_read(struct inode *inode, struct fat_entry *fatent,
+extern int fat_ent_read(struct super_block *sb, struct fat_entry *fatent,
 			int entry);
 extern int fat_ent_write(struct inode *inode, struct fat_entry *fatent,
 			 int new, int wait);
@@ -372,6 +380,8 @@ extern void fat_detach(struct inode *inode);
 extern struct inode *fat_iget(struct super_block *sb, loff_t i_pos);
 extern struct inode *fat_build_inode(struct super_block *sb,
 			struct msdos_dir_entry *de, loff_t i_pos);
+extern int fat_entry_busy(struct msdos_sb_info *sbi, loff_t ipos,
+			struct buffer_head *bh);
 extern int fat_sync_inode(struct inode *inode);
 extern int fat_fill_super(struct super_block *sb, void *data, int silent,
 			  int isvfat, void (*setup)(struct super_block *));
@@ -379,10 +389,14 @@ extern int fat_fill_inode(struct inode *inode, struct msdos_dir_entry *de);
 
 extern int fat_flush_inodes(struct super_block *sb, struct inode *i1,
 			    struct inode *i2);
+extern void fat_remove_busy_entry(struct inode *inode);
 static inline unsigned long fat_dir_hash(int logstart)
 {
 	return hash_32(logstart, FAT_HASH_BITS);
 }
+extern void fat_set_nfs_clnt_open_count(struct inode *inode,
+					u32 clnt_open_count);
+extern int fat_get_nfs_clnt_open_count(struct inode *inode);
 
 /* fat/misc.c */
 extern __printf(3, 4) __cold

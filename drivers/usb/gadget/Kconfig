@@ -276,6 +276,13 @@ config USB_S3C_HSOTG
 	  The Samsung S3C64XX USB2.0 high-speed gadget controller
 	  integrated into the S3C64XX series SoC.
 
+config USB_SDP_OTGD
+	tristate "SDP High Speed USB OTG device (DMA)"
+	default n
+	help
+		The Samsung USB2.0 high-speed gadget controller
+		integrated into the SDP series SoC.
+
 config USB_IMX
 	tristate "Freescale i.MX1 USB Peripheral Controller"
 	depends on ARCH_MXC
@@ -862,6 +869,59 @@ config USB_G_ACM_MS
 
 	  Say "y" to link the driver statically, or "m" to build a
 	  dynamically linked module called "g_acm_ms".
+
+config USB_G_SAM_MULTI
+   tristate "Samsung Multifunction Composite Gadget (EXPERIMENTAL)"
+   depends on BLOCK && NET
+   select SAMSUNG_DEVICE_USBNET_COMMON
+   help
+     The Multifunction Composite Gadget provides Ethernet EEM 
+     and mass storage. 
+
+     You will be asked to choose which of the two configurations is
+     to be available in the gadget.  At least one configuration must
+     be chosen to make the gadget usable.  Selecting more than one
+     configuration will prevent Windows from automatically detecting
+     the gadget as a composite gadget, so an INF file will be needed to
+     use the gadget.
+
+     Say "y" to link the driver statically, or "m" to build a
+     dynamically linked module called "g_sam_multi".
+
+config SAMSUNG_DEVICE_USBNET_COMMON
+   bool
+   depends on USB_G_SAM_MULTI
+   default y
+
+config SAMSUNG_DEVICE_USBNET_BOTTOM_HALF
+   bool "Samsung patch for Bottom Half in Receive path"
+   depends on USB_G_SAM_MULTI
+   default y
+
+config SAMSUNG_DEVICE_USBNET_MTU_CHANGE
+   bool "Samsung patch for enabling MTU size change for usbnet link"
+   depends on USB_G_SAM_MULTI
+   default y
+
+config SAMSUNG_DEVICE_USBNET_USB1_PING_FIX
+   bool "Samsung patch for correcting issue with icmp ping"
+   depends on USB_G_SAM_MULTI
+   default y
+
+config SAMSUNG_DEVICE_USBNET_ZLP_FIX
+   bool "Samsung patch for adding zero length packet"
+   depends on USB_G_SAM_MULTI
+   default y
+
+config SAMSUNG_DEVICE_STORAGE_GADGET
+   bool "Samsung patch for remote storage device access"
+   depends on USB_G_SAM_MULTI
+   default y
+
+config SAMSUNG_DEVICE_USBNET_NO_EEM
+   bool "Samsung patch to remove EEM parsing from recieved packets"
+   depends on USB_G_SAM_MULTI
+   default n
 
 config USB_G_MULTI
 	tristate "Multifunction Composite Gadget"

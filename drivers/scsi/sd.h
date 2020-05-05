@@ -11,7 +11,12 @@
 /*
  * Time out in seconds for disks and Magneto-opticals (which are slower).
  */
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT 
+//hongyabi patch JAN-24-2007
+#define SD_TIMEOUT              (5 * HZ)
+#else
 #define SD_TIMEOUT		(30 * HZ)
+#endif
 #define SD_MOD_TIMEOUT		(75 * HZ)
 #define SD_FLUSH_TIMEOUT	(60 * HZ)
 #define SD_WRITE_SAME_TIMEOUT	(120 * HZ)
@@ -19,7 +24,15 @@
 /*
  * Number of allowed retries
  */
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+/* selp patch : by namjae.jeon@samsung.com
+ *  * Optimize the number of unnecessary maximum sd retry(5(original)->3(hongyabi)->1).
+ *   */
+//hongyabi patch JAN-24-2007
+#define SD_MAX_RETRIES          1
+#else
 #define SD_MAX_RETRIES		5
+#endif
 #define SD_PASSTHROUGH_RETRIES	1
 #define SD_MAX_MEDIUM_TIMEOUTS	2
 
@@ -34,6 +47,13 @@
  */
 #define SD_LAST_BUGGY_SECTORS	8
 
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG_MREADER
+struct poller_type {
+        int prev_state;
+        int pid;
+        struct completion done_notify;
+};
+#endif
 enum {
 	SD_EXT_CDB_SIZE = 32,	/* Extended CDB size */
 	SD_MEMPOOL_SIZE = 2,	/* CDB pool size */
@@ -72,6 +92,11 @@ struct scsi_disk {
 	u8		write_prot;
 	u8		protection_type;/* Data Integrity Field */
 	u8		provisioning_mode;
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG_MREADER
+	struct poller_type	poller;
+	struct task_struct	*sd_task;
+	struct mutex    sd_disk_del_mutex; 
+#endif
 	unsigned	ATO : 1;	/* state of disk ATO bit */
 	unsigned	cache_override : 1; /* temp override of WCE,RCD */
 	unsigned	WCE : 1;	/* state of disk WCE bit */

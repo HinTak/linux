@@ -47,6 +47,8 @@ int lookup_symbol_attrs(unsigned long addr, unsigned long *size, unsigned long *
 
 #else /* !CONFIG_KALLSYMS */
 
+// [SABSP] disable kallsyms_lookup_name() / kallsyms_on_each_symbol() to prevent usage in release mode (force compile error)
+/*
 static inline unsigned long kallsyms_lookup_name(const char *name)
 {
 	return 0;
@@ -59,6 +61,7 @@ static inline int kallsyms_on_each_symbol(int (*fn)(void *, const char *,
 {
 	return 0;
 }
+*/
 
 static inline int kallsyms_lookup_size_offset(unsigned long addr,
 					      unsigned long *symbolsize,

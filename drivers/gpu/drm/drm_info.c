@@ -211,7 +211,19 @@ static int drm_gem_one_name_info(int id, void *ptr, void *data)
 		   atomic_read(&obj->refcount.refcount));
 	return 0;
 }
+#ifdef CONFIG_SDP_DMA_BUF_PATCH
+int drm_gem_name_info(struct seq_file *m, void *data)
+{
+	struct drm_info_node *node = (struct drm_info_node *) m->private;
+	struct drm_device *dev = node->minor->dev;
 
+	seq_printf(m, "  name     size handles refcount\n");
+	mutex_lock(&dev->object_name_lock);
+	idr_for_each(&dev->object_name_idr, drm_gem_one_name_info, m);
+	mutex_unlock(&dev->object_name_lock);
+	return 0;
+}
+#else
 int drm_gem_name_info(struct seq_file *m, void *data)
 {
 	struct drm_info_node *node = (struct drm_info_node *) m->private;
@@ -221,6 +233,7 @@ int drm_gem_name_info(struct seq_file *m, void *data)
 	idr_for_each(&dev->object_name_idr, drm_gem_one_name_info, m);
 	return 0;
 }
+#endif
 
 #if DRM_DEBUG_CODE
 

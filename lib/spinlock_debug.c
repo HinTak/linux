@@ -13,6 +13,11 @@
 #include <linux/delay.h>
 #include <linux/export.h>
 
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+void show_kernel_patch_version(void);
+#endif
+
 void __raw_spin_lock_init(raw_spinlock_t *lock, const char *name,
 			  struct lock_class_key *key)
 {
@@ -64,6 +69,9 @@ static void spin_dump(raw_spinlock_t *lock, const char *msg)
 		owner ? owner->comm : "<none>",
 		owner ? task_pid_nr(owner) : -1,
 		lock->owner_cpu);
+#ifdef CONFIG_VDLP_VERSION_INFO
+	show_kernel_patch_version();
+#endif
 	dump_stack();
 }
 

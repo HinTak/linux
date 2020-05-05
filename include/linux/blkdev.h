@@ -99,7 +99,7 @@ struct request {
 
 	struct request_queue *q;
 
-	unsigned int cmd_flags;
+	u64 cmd_flags;
 	enum rq_cmd_type_bits cmd_type;
 	unsigned long atomic_flags;
 
@@ -570,7 +570,7 @@ static inline void queue_flag_clear(unsigned int flag, struct request_queue *q)
 
 #define list_entry_rq(ptr)	list_entry((ptr), struct request, queuelist)
 
-#define rq_data_dir(rq)		((rq)->cmd_flags & 1)
+#define rq_data_dir(rq)		(((rq)->cmd_flags & 1) != 0)
 
 static inline unsigned int blk_queue_cluster(struct request_queue *q)
 {
@@ -802,6 +802,11 @@ extern void blk_execute_rq_nowait(struct request_queue *, struct gendisk *,
 
 static inline struct request_queue *bdev_get_queue(struct block_device *bdev)
 {
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+        // FEB-01-2007
+        if(bdev->bd_disk == NULL)
+                return NULL;
+#endif
 	return bdev->bd_disk->queue;
 }
 
@@ -1509,6 +1514,79 @@ static inline bool blk_integrity_is_initialized(struct gendisk *g)
 
 #endif /* CONFIG_BLK_DEV_INTEGRITY */
 
+#if defined(CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM)
+
+enum hw_iovec_comp_type {
+           HW_IOVEC_COMP_UNCOMPRESSED=1<<1,
+           HW_IOVEC_COMP_GZIP=1<<2,
+           HW_IOVEC_COMP_ZLIB=1<<3,
+           HW_IOVEC_COMP_LZO=1<<4,
+           HW_IOVEC_COMP_MAX=1<<5,
+};
+
+enum hw_iovec_encrypt_type {
+           HW_IOVEC_ENCRYPT_NONE=1<<1,
+};
+
+enum hw_iovec_hash_type {
+           HW_IOVEC_HASH_NONE=1<<1,
+           HW_IOVEC_HASH_SHA1=1<<2,
+           HW_IOVEC_HASH_SHA256=1<<3,
+           HW_IOVEC_HASH_MD5=1<<4,
+};
+
+/* make synchronization hash_type at "fs/vdfs4/vdfs4.h" */
+enum req_hash_type {
+	REQ_HASH_TYPE_UNDEF = 0,
+	REQ_HASH_TYPE_SHA1,
+	REQ_HASH_TYPE_SHA256,
+	REQ_HASH_TYPE_MD5,
+	REQ_HASH_TYPE_NR,
+};
+
+struct req_hash {
+	enum req_hash_type hash_type;
+	u8 *data;
+};
+
+/*
+ * We decompress physically contiguous buffer, thus scattered
+ * hw IO vector has special requirements:
+ * 1. offset of the first element of hw IO vec must be at least
+ *    aligned on 8 bytes
+ * 2. all other offsets must be aligned on sector size
+ * 3. only length of last hw IO vec element can be equal to any size
+ *
+ * e.g.
+ *
+ * |===|===|===|===|===|===|===| physical disk (sectors)
+ *   ^-----|   ^-------|   ^-|   hw IO vec 3 elements
+ *  /  1   |   /   2   /   /3 \
+ * /       |  /       /   /   /
+ * |       | /       /   /   /
+ * |       |/       /   /   /
+ * |       |       /   /   /     mapping
+ * |       |       |  /   /
+ * |       |       | /   /
+ * |       |       |/   /
+ * |  1    |   2   | 3 |
+ * |...........|...........|.... physical pages of contigous buffer
+ *
+ */
+struct hw_iovec {
+	unsigned long long  phys_off;
+	unsigned int        len;
+};
+
+struct hw_capability {
+	unsigned int comp_type;
+	unsigned int encryption;
+	unsigned int hash_type;
+	int min_size;		// (1 << min_size) compressed size support
+	int max_size;		// (1 << max_size) compressed size support
+};
+#endif
+
 struct block_device_operations {
 	int (*open) (struct block_device *, fmode_t);
 	void (*release) (struct gendisk *, fmode_t);
@@ -1516,6 +1594,15 @@ struct block_device_operations {
 	int (*compat_ioctl) (struct block_device *, fmode_t, unsigned, unsigned long);
 	int (*direct_access) (struct block_device *, sector_t,
 						void **, unsigned long *);
+#if defined( CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM)
+	int (*hw_decompress_vec)(struct block_device *bdev,
+			const struct hw_iovec *vec,
+			unsigned int vec_cnt,
+			struct page **out_pages,
+			unsigned int out_cnt, struct req_hash *rq_hash,
+			enum hw_iovec_comp_type comp_type,
+			enum hw_iovec_encrypt_type enc_type);
+#endif
 	unsigned int (*check_events) (struct gendisk *disk,
 				      unsigned int clearing);
 	/* ->media_changed() is DEPRECATED, use ->check_events() instead */

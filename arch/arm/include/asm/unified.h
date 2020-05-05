@@ -50,6 +50,7 @@
 #ifdef __ASSEMBLY__
 #define W(instr)	instr
 #define BSYM(sym)	sym
+#else
 #endif
 
 #endif	/* CONFIG_THUMB2_KERNEL */

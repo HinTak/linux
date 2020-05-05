@@ -2,6 +2,8 @@
 # Makefile for the Linux Bluetooth subsystem.
 #
 
+EXTRA_CFLAGS += -I$(src)/../../drivers/bluetooth/btpcm/
+
 obj-$(CONFIG_BT)	+= bluetooth.o
 obj-$(CONFIG_BT_RFCOMM)	+= rfcomm/
 obj-$(CONFIG_BT_BNEP)	+= bnep/

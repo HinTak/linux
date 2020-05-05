@@ -1,0 +1,353 @@
+/*
+ * Novatek Ltd. 72668
+ *
+ * Cortex-A9 MPCore
+ *
+ */
+
+/dts-v1/;
+/include/ "nvtca9-72668.dtsi"
+
+#define ___STR__(...) #__VA_ARGS__
+#define __STR__(...) ___STR__(__VA_ARGS__)
+
+#define DO_NOT_TOUCH___RESERVED_SPACE_50b \
+        \x00\
+        \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\
+        \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\
+        \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\
+        \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\
+        \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20
+
+
+
+/ {
+	model = "nvt-72668";
+	nvt,cortex_a9,site = <0xf>;
+	compatible = "novatek,ca9,72668", "novatek,ca9";
+	interrupt-parent = <&gic>;
+	#address-cells = <1>;
+	#size-cells = <1>;
+
+	chosen {
+		bootargs = __STR__(console=ttyS0,115200 earlyprintk maxcpus=2 no_console_suspend root=/dev/mmcblk0p22 SELP_ENABLE=00000000 rootfstype=vdfs init=/sbin/init rw mem=584M@68M mem=610M@2462M coherent_pool=1M DO_NOT_TOUCH___RESERVED_SPACE_50b);
+
+	boot-modes = <&shift_s_mode>;
+	};
+
+	pmu {
+		compatible = "arm,cortex-a9-pmu";
+		interrupts = <0 105 4>,
+					 <0 106 4>,
+					 <0 107 4>,
+					 <0 108 4>;
+	};
+
+	uart@fd091000 {
+		compatible = "ns16550a";
+		reg = <0xfd091000 0x1000>;
+		interrupts = <0 29 4>;
+		clocks = <&ahb_clk>;
+		baud = <115200>;
+		reg-shift = <2>;
+		reg-io-width = <4>;
+		no-loopback-test = <1>;
+	};
+
+	uart@fd090000 {
+		compatible = "ns16550a";
+		reg = <0xfd090000 0x1000>;
+		interrupts = <0 51 4>;
+		clocks = <&ahb_clk>;
+		baud = <115200>;
+		reg-shift = <2>;
+		reg-io-width = <4>;
+		no-loopback-test = <1>;
+	};
+
+	uart@fd092000 {
+		compatible = "ns16550a";
+		reg = <0xfd092000 0x1000>;
+		interrupts = <0 45 4>;
+		clocks = <&ahb_clk>;
+		baud = <115200>;
+		reg-shift = <2>;
+		reg-io-width = <4>;
+		no-loopback-test = <1>;
+	};
+
+	nfc@0xfc048000 {
+		compatible = "nvt,nfc";
+		//    NFC
+		reg = <0xfc048000 0x200>;
+		interrupts = <0 63 4>;
+	};
+
+	mmc@0xfc048300 {
+		compatible = "nvt,hsmmc";
+		//    SDC                 NFC                 FCR
+		reg = <0xfc048300 0x100>, <0xfc048000 0x200>, <0xfc048200 0x100>;
+		interrupts = <0 63 4>;
+		max-bus-frequency = <180000000>;
+	};
+	
+	unzip@0xfd6f0000 {
+		compatible = "novatek,nvt-unzip";
+		interrupts = <0 97 4>;
+		reg = <0xfd6f0000 0x40>;	
+	};
+
+	ahb_status@0xfc0f0088 {
+		compatible = "nvt,ahb-status";
+		reg = <0xfc0f0088 0x4>;
+		interrupts = <0 68 4>;
+	};
+
+	twd@ffd00600 {
+		compatible = "arm,cortex-a9-twd-timer";
+		reg = <0xffd00600 0x20>;
+		interrupts = <1 13 0xf01>;
+		clocks = <&periph_clk>;
+	};
+
+	global_timer@ffd00200 {
+		compatible = "arm,cortex-a9-global-timer";
+		reg = <0xffd00200 0x20>;
+		interrupts = <1 11 0xf01>;
+		clocks = <&periph_clk>;
+	};
+
+	clk_gen {
+		compatible = "nvt,clkgen";
+		reg = <0xfd020000 0x400>, <0xfd670000 0x1000>, <0xfd720000 0x400>, <0xfd0f0c18 0x4>;
+	};
+
+	ethernet@fd160000 {
+		compatible = "nvt,synopsys-mac";
+		//    MAC                  DMA                  GPIO mux          Clock pad-in mux  Clock control
+		reg = <0xfd160000 0x0ffc>, <0xfd161000 0x0054>, <0xfd100400 0x4>, <0xfc040bf0 0x4>, <0xfc040bf4 0x4>;
+		interrupts = <0 42 4>;
+	};
+
+	ehci@fc1f0000 {
+		compatible = "nvt,NT72668-ehci";
+		//    AHB                 APB
+		reg = <0xfc1f0000 0x200>, <0xfd170000 0x500>;
+		interrupts = <0 76 4>;
+		id = <0>;
+	};
+
+	ehci@fc000000 {
+		compatible = "nvt,NT72668-ehci";
+		//    AHB                 APB
+		reg = <0xfc000000 0x200>, <0xfd178000 0x500>;
+		interrupts = <0 54 4>;
+		id = <1>;
+	};
+
+	ehci@fc140000 {
+		compatible = "nvt,NT72668-ehci";
+		//    AHB                 APB
+		reg = <0xfc140000 0x200>, <0xfd180000 0x500>;
+		interrupts = <0 55 4>;
+		id = <2>;
+	};
+
+	ehci@fc1a0000 {
+		compatible = "nvt,NT72668-ehci";
+		//    AHB                 APB
+		reg = <0xfc1a0000 0x200>, <0xfd184000 0x500>;
+		interrupts = <0 56 4>;
+		id = <3>;
+	};
+
+	xhci@fc200000 {
+		compatible = "nvt,NT72668-xhci";
+		//    AHB                  APB                 APB
+		reg = <0xfc200000 0xd000>, <0xfd180000 0x500>, <0xfd188000 0x1000>;
+		interrupts = <0 53 4>;
+	};
+
+  gpioa: gpio@fd0f0000 {
+			compatible = "nvt,nt726xx-gpio";
+			reg = <0xfd0f0000 0x18>,
+            <0xfd0f0018 0x18>,
+            <0xfd0f0030 0x18>,
+            <0xfd0f0048 0x18>,
+            <0xfd100000 0x18>,
+            <0xfd100400 0x18>,
+            <0xfd0f0060 0x18>;
+			nvt,hwmods = "gpioa";
+			nvt,gpio-always-on;
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+	/*	
+  gpiob: gpio@fd0f0018 {
+			compatible = "nvt,nt726xx-gpio";
+			reg = <0xfd0f0018 0x18>;
+			nvt,hwmods = "gpiob";
+			nvt,gpio-always-on;
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+		
+	gpioc: gpio@fd0f0030 {
+			compatible = "nvt,nt726xx-gpio";
+			reg = <0xfd0f0030 0x18>;
+			nvt,hwmods = "gpioc";
+			nvt,gpio-always-on;
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+		
+	gpiod: gpio@fd0f0048 {
+			compatible = "nvt,nt726xx-gpio";
+			reg = <0xfd0f0048 0x18>;
+			nvt,hwmods = "gpiod";
+			nvt,gpio-always-on;
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+	gpioe: gpio@fd100000 {
+			compatible = "nvt,nt726xx-gpio";
+			reg = <0xfd100000 0x18>;
+			nvt,hwmods = "gpioe";
+			nvt,gpio-always-on;
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+  */
+	gpio@fd100400 {
+		compatible = "nvt,NT72668-gpio";
+		reg = <0xfd100400 0x1000>;
+	};
+	/*	
+	gpioh: gpio@fd100400_evan {
+			compatible = "nvt,nt726xx-gpio";
+			reg = <0xfd100400 0x18>;
+			nvt,hwmods = "gpioh";
+			nvt,gpio-always-on;
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+    	          
+	gpioj: gpio@fd0f0060 {
+			compatible = "nvt,nt726xx-gpio";
+			reg = <0xfd0f0060 0x18>;
+			nvt,hwmods = "gpioj";
+			nvt,gpio-always-on;
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+	*/
+	gic: interrupt-controller@ffd01000 {
+		compatible = "arm,cortex-a9-gic";
+		#interrupt-cells = <3>;
+		#address-cells = <0>;
+		interrupt-controller;
+		reg = <0xffd01000 0x1000>,
+		      <0xffd00100 0x100>;
+	};
+
+  i2c0: i2c@fd000000 {
+    compatible = "nvt,nt726xx_i2c.0";
+    nvt,hwmods = "i2c0";
+    reg = <0xfd000000 0x100>;
+    interrupts = <99>;
+    clock-frequency = <400>;
+  };  
+
+  i2c1: i2c@fd000100 {
+    compatible = "nvt,nt726xx_i2c.1";
+    nvt,hwmods = "i2c1";
+    reg = <0xfd000100 0x100>;
+    interrupts = <99>;
+    clock-frequency = <400>;
+  };  
+
+  i2c2: i2c@fd000200 {
+    compatible = "nvt,nt726xx_i2c.2";
+    nvt,hwmods = "i2c2";
+    reg = <0xfd000200 0x100>;
+    interrupts = <99>;
+    clock-frequency = <400>;
+  };
+
+  i2c3: i2c@fd000300 {
+    compatible = "nvt,nt726xx_i2c.3";
+    nvt,hwmods = "i2c3";
+    reg = <0xfd000300 0x100>;
+    interrupts = <99>;
+    clock-frequency = <400>;
+  };
+
+  i2c4: i2c@fd000400 {
+    compatible = "nvt,nt726xx_i2c.4";
+    nvt,hwmods = "i2c4";
+    reg = <0xfd000400 0x100>;
+    interrupts = <99>;
+    clock-frequency = <400>;
+  };
+
+  i2c5: i2c@fd000500 {
+    compatible = "nvt,nt726xx_i2c.5";
+    nvt,hwmods = "i2c5";
+    reg = <0xfd000500 0x100>;
+    interrupts = <99>;
+    clock-frequency = <400>;
+  };    
+
+	L2: cache-controller@ffe00000 {
+		compatible = "arm,pl310-cache";
+		reg = <0xffe00000 0x1000>;
+		interrupts = <0 96 4>;
+		cache-level = <2>;
+		arm,data-latency = <6 6 6>;
+		arm,tag-latency = <6 6 6>;
+	};
+
+	cpu_clk: gb_timer_clk: twd_clk {
+			compatible = "fixed-clock1";
+			#clock-cells = <0>;
+			clock-frequency = <55000000>;
+			clock-output-names = "cpu_clk";
+	};
+
+	periph_clk: periph_clk {
+			compatible = "nvt,periph_clk";
+			#clock-cells = <0>;
+			clock-output-names = "periph_clk";
+	};
+
+	axi_clk {
+			compatible = "fixed-clock2";
+			#clock-cells = <0>;
+			clock-frequency = <40000000>;
+			clock-output-names = "axi_clk";
+	};
+
+	ahb_clk: ahb_clk {
+			compatible = "nvt,ahb_clk";
+			#clock-cells = <0>;
+			clock-output-names = "ahb_clk";
+	};
+
+	smbclk: oscclk1: osc@1 {
+			compatible = "nvt,ca9-72668-osc";
+			freq-range = <20000000 12000000>;
+			#clock-cells = <0>;
+			clock-output-names = "refclk1";
+	};
+
+	s24c512c@50 {
+			compatible = "sii,s24c512c";
+			reg = <0x50>;
+	};
+
+	tztv_jackident {
+		compatible = "nvt,tztv-jackident";
+    };
+
+};

@@ -304,8 +304,15 @@ static int dev_uevent(struct kset *kset, struct kobject *kobj,
 	if (dev->type && dev->type->name)
 		add_uevent_var(env, "DEVTYPE=%s", dev->type->name);
 
+	/*
+	 * dev->driver is set NULL under dev->udev_mutex so it should be
+	 * checked within dev->udev_mutex. This prevents a race between
+	 * dev_uevent and __device_release_driver.
+	 */
+	mutex_lock(&dev->udev_mutex);
 	if (dev->driver)
 		add_uevent_var(env, "DRIVER=%s", dev->driver->name);
+	mutex_unlock(&dev->udev_mutex);
 
 	/* Add common DT information about the device */
 	of_device_uevent(dev, env);
@@ -698,6 +705,7 @@ void device_initialize(struct device *dev)
 	kobject_init(&dev->kobj, &device_ktype);
 	INIT_LIST_HEAD(&dev->dma_pools);
 	mutex_init(&dev->mutex);
+	mutex_init(&dev->udev_mutex);
 	lockdep_set_novalidate_class(&dev->mutex);
 	spin_lock_init(&dev->devres_lock);
 	INIT_LIST_HEAD(&dev->devres_head);

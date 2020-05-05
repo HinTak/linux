@@ -122,6 +122,9 @@ function_stack_trace_call(unsigned long ip, unsigned long parent_ip,
 		 *    ftrace_call
 		 */
 		__trace_stack(tr, flags, 5, pc);
+#if defined(CONFIG_KDEBUGD_FTRACE) && defined(CONFIG_KDEBUGD_FTRACE_USER_BACKTRACE)
+		ftrace_trace_userstack(tr->trace_buffer.buffer, flags, preempt_count());
+#endif
 	}
 
 	atomic_dec(&data->disabled);

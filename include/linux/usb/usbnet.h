@@ -30,8 +30,11 @@ struct usbnet {
 	struct driver_info	*driver_info;
 	const char		*driver_name;
 	void			*driver_priv;
-	wait_queue_head_t	*wait;
+	wait_queue_head_t	wait;
 	struct mutex		phy_mutex;
+#ifdef CONFIG_SAMSUNG_HOST_USBNET_COMMON
+	u32			intf_id;
+#endif
 	unsigned char		suspend_count;
 	unsigned char		pkt_cnt, pkt_err;
 
@@ -218,6 +221,11 @@ struct skb_data {	/* skb->cb is one of these */
 	struct usbnet		*dev;
 	enum skb_state		state;
 	size_t			length;
+#ifdef SAMSUNG_USBNET_HYPERUART_PREALLOC
+	char			skb_src[16];
+	unsigned int		prealloc_pool_id;
+	unsigned int		prealloc_buf_id;
+#endif
 };
 
 extern int usbnet_open(struct net_device *net);

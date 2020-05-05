@@ -446,7 +446,6 @@ struct drm_file {
 
 	struct file *filp;
 	void *driver_priv;
-
 	int is_master; /* this file private is a master for a minor */
 	struct drm_master *master; /* master this node is currently associated with
 				      N.B. not always minor->master */
@@ -463,8 +462,8 @@ struct drm_file {
 	wait_queue_head_t event_wait;
 	struct list_head event_list;
 	int event_space;
-
-	struct drm_prime_file_private prime;
+	pid_t drm_pid;
+	struct drm_prime_file_private prime;	
 };
 
 /** Wait queue */
@@ -933,12 +932,15 @@ struct drm_driver {
 				struct dma_buf *dma_buf);
 	/* low-level interface used by drm_gem_prime_{import,export} */
 	int (*gem_prime_pin)(struct drm_gem_object *obj);
+	void (*gem_prime_unpin)(struct drm_gem_object *obj);
 	struct sg_table *(*gem_prime_get_sg_table)(struct drm_gem_object *obj);
 	struct drm_gem_object *(*gem_prime_import_sg_table)(
 				struct drm_device *dev, size_t size,
 				struct sg_table *sgt);
 	void *(*gem_prime_vmap)(struct drm_gem_object *obj);
 	void (*gem_prime_vunmap)(struct drm_gem_object *obj, void *vaddr);
+	int (*gem_prime_mmap)(struct drm_gem_object *obj,
+				struct vm_area_struct *vma);
 
 	/* vga arb irq handler */
 	void (*vgaarb_irq)(struct drm_device *dev, bool state);
@@ -1212,7 +1214,11 @@ struct drm_device {
 
 	/** \name GEM information */
 	/*@{ */
+#ifdef CONFIG_SDP_DMA_BUF_PATCH
+	struct mutex object_name_lock;
+#else
 	spinlock_t object_name_lock;
+#endif
 	struct idr object_name_idr;
 	/*@} */
 	int switch_power_state;
@@ -1599,7 +1605,10 @@ void drm_prime_remove_buf_handle(struct drm_prime_file_private *prime_fpriv, str
 int drm_prime_add_dma_buf(struct drm_device *dev, struct drm_gem_object *obj);
 int drm_prime_lookup_obj(struct drm_device *dev, struct dma_buf *buf,
 			 struct drm_gem_object **obj);
-
+#ifdef CONFIG_SDP_DMA_BUF_PATCH
+extern void drm_prime_remove_buf_handle_locked(struct drm_prime_file_private *prime_fpriv,
+					struct dma_buf *dma_buf);
+#endif
 #if DRM_DEBUG_CODE
 extern int drm_vma_info(struct seq_file *m, void *data);
 #endif
@@ -1648,6 +1657,8 @@ int drm_gem_private_object_init(struct drm_device *dev,
 void drm_gem_object_handle_free(struct drm_gem_object *obj);
 void drm_gem_vm_open(struct vm_area_struct *vma);
 void drm_gem_vm_close(struct vm_area_struct *vma);
+int drm_gem_mmap_obj(struct drm_gem_object *obj, unsigned long obj_size,
+		     struct vm_area_struct *vma);
 int drm_gem_mmap(struct file *filp, struct vm_area_struct *vma);
 
 #include <drm/drm_global.h>
@@ -1676,6 +1687,11 @@ drm_gem_object_unreference_unlocked(struct drm_gem_object *obj)
 	}
 }
 
+#ifdef CONFIG_SDP_DMA_BUF_PATCH
+int drm_gem_handle_create_tail(struct drm_file *file_priv,
+			       struct drm_gem_object *obj,
+			       u32 *handlep);
+#endif
 int drm_gem_handle_create(struct drm_file *file_priv,
 			  struct drm_gem_object *obj,
 			  u32 *handlep);
@@ -1706,6 +1722,19 @@ drm_gem_object_handle_unreference(struct drm_gem_object *obj)
 	drm_gem_object_unreference(obj);
 }
 
+#ifdef CONFIG_SDP_DMA_BUF_PATCH
+extern void dma_buf_put(struct dma_buf *dmabuf);
+static inline void 
+drm_gem_object_exported_dma_buf_free(struct drm_gem_object *obj)
+{
+        /* Unbreak the reference cycle if we have an exported dma_buf. */
+        if (obj->export_dma_buf) {
+                dma_buf_put(obj->export_dma_buf);
+                obj->export_dma_buf = NULL;
+        }
+}
+#endif
+
 static inline void
 drm_gem_object_handle_unreference_unlocked(struct drm_gem_object *obj)
 {
@@ -1720,9 +1749,16 @@ drm_gem_object_handle_unreference_unlocked(struct drm_gem_object *obj)
 	* ref, in which case the object would disappear before we
 	* checked for a name
 	*/
-
+#ifdef CONFIG_SDP_DMA_BUF_PATCH
+	if (atomic_dec_and_test(&obj->handle_count))
+        {
+		drm_gem_object_handle_free(obj);
+		drm_gem_object_exported_dma_buf_free(obj);
+	}
+#else
 	if (atomic_dec_and_test(&obj->handle_count))
 		drm_gem_object_handle_free(obj);
+#endif
 	drm_gem_object_unreference_unlocked(obj);
 }
 

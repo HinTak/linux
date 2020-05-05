@@ -16,7 +16,11 @@ xhci-hcd-y += xhci-ring.o xhci-hub.o xhci-dbg.o
 xhci-hcd-$(CONFIG_PCI)	+= xhci-pci.o
 
 ifneq ($(CONFIG_USB_XHCI_PLATFORM), )
+ifeq ($(CONFIG_ARCH_NVT72668),y)
+	xhci-hcd-y		+= xhci-NT72668.o
+else
 	xhci-hcd-y		+= xhci-plat.o
+endif
 endif
 
 obj-$(CONFIG_USB_WHCI_HCD)	+= whci/
@@ -24,6 +28,8 @@ obj-$(CONFIG_USB_WHCI_HCD)	+= whci/
 obj-$(CONFIG_PCI)		+= pci-quirks.o
 
 obj-$(CONFIG_USB_EHCI_HCD)	+= ehci-hcd.o
+obj-$(CONFIG_USB_ENABLE)	+= usb_enable.o
+obj-$(CONFIG_USB_SERDES_LOCK)   += usb_serdeslock.o
 obj-$(CONFIG_USB_EHCI_PCI)	+= ehci-pci.o
 obj-$(CONFIG_USB_EHCI_HCD_PLATFORM)	+= ehci-platform.o
 obj-$(CONFIG_USB_EHCI_MXC)	+= ehci-mxc.o
