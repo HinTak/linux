@@ -3,6 +3,25 @@
 #
 
 obj-y                          := main.o version.o mounts.o
+
+ifeq ($(CONFIG_RSA_API),y)
+obj-y   += secureboot/SBKN_bignum.o
+obj-y   += secureboot/SBKN_CC_API.o
+obj-y   += secureboot/SBKN_rsa.o
+endif
+
+ifeq ($(CONFIG_SHA_API),y)
+obj-y   += secureboot/sha1.o
+obj-y   += secureboot/sha256.o
+endif
+
+ifeq ($(CONFIG_EXECUTE_AUTHULD),y)
+obj-y   += secureboot/sha1_API.o
+endif
+
+obj-y   += secureboot/Secureboot.o
+obj-y   += secureboot/MicomCtrl_api.o
+
 ifneq ($(CONFIG_BLK_DEV_INITRD),y)
 obj-y                          += noinitramfs.o
 else

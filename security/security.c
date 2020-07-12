@@ -25,6 +25,9 @@
 #include <linux/personality.h>
 #include <linux/backing-dev.h>
 #include <net/flow.h>
+#ifdef CONFIG_KDEBUGD_AGENT_SMACK_DISABLE
+#include <kdebugd/kdebugd.h>
+#endif
 
 #define MAX_LSM_EVM_XATTR	2
 
@@ -237,6 +240,10 @@ void security_bprm_committed_creds(struct linux_binprm *bprm)
 
 int security_bprm_secureexec(struct linux_binprm *bprm)
 {
+#ifdef CONFIG_KDEBUGD_AGENT_SMACK_DISABLE
+	if (!kdbg_smack_enable)
+		return 0;
+#endif
 	return security_ops->bprm_secureexec(bprm);
 }
 
@@ -833,6 +840,15 @@ int security_kernel_module_from_file(struct file *file)
 int security_task_fix_setuid(struct cred *new, const struct cred *old,
 			     int flags)
 {
+#ifdef CONFIG_PROHIBIT_GROUP_SETUID
+	/* someone is trying to change user privilege to root(0) with group setuid syscall */
+	if((__kuid_val(new->uid) == 0 && __kuid_val(old->uid) != 0) ||
+		(__kuid_val(new->euid) == 0 && __kuid_val(old->euid) != 0 ))
+	{
+		return -EINVAL;
+	}
+#endif
+
 	return security_ops->task_fix_setuid(new, old, flags);
 }
 

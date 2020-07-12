@@ -201,6 +201,7 @@ struct ehci_hcd {			/* one per controller */
 	unsigned		frame_index_bug:1; /* MosChip (AKA NetMos) */
 	unsigned		need_oc_pp_cycle:1; /* MPC834X port power */
 	unsigned		imx28_write_fix:1; /* For Freescale i.MX28 */
+	unsigned		has_synopsys_reset_bug:1; /* Synopsys HC port reset during SOF */
 
 	/* required for usb32 quirk */
 	#define OHCI_CTRL_HCFS          (3 << 6)
@@ -213,6 +214,7 @@ struct ehci_hcd {			/* one per controller */
 	unsigned		has_hostpc:1;
 	unsigned		has_ppcd:1; /* support per-port change bits */
 	u8			sbrn;		/* packed release number */
+	int			handshake_fail_cnt;	/* ij.jang: for ehci-sdp debuggin */
 
 	/* irq statistics */
 #ifdef EHCI_STATS

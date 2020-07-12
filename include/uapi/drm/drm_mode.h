@@ -152,6 +152,15 @@ struct drm_mode_get_plane {
 
 	__u32 count_format_types;
 	__u64 format_type_ptr;
+
+	/* plane info for user to get */
+	/* Signed dest location allows it to be partially off screen */
+	__s32 crtc_x, crtc_y;
+	__u32 crtc_w, crtc_h;
+
+	/* Source values are 16.16 fixed point */
+	__u32 src_x, src_y;
+	__u32 src_h, src_w;
 };
 
 struct drm_mode_get_plane_res {

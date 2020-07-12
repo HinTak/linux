@@ -147,6 +147,7 @@ struct hci_dev {
 	__u8		bus;
 	__u8		dev_type;
 	bdaddr_t	bdaddr;
+	__u8		own_addr_type;
 	__u8		dev_name[HCI_MAX_NAME_LENGTH];
 	__u8		short_name[HCI_MAX_SHORT_NAME_LENGTH];
 	__u8		eir[HCI_MAX_EIR_LENGTH];
@@ -170,6 +171,9 @@ struct hci_dev {
 	__u16		page_scan_interval;
 	__u16		page_scan_window;
 	__u8		page_scan_type;
+
+	__u16		le_scan_interval;
+	__u16		le_scan_window;
 
 	__u16		devid_source;
 	__u16		devid_vendor;
@@ -290,6 +294,32 @@ struct hci_dev {
 	__u8			adv_data[HCI_MAX_AD_LENGTH];
 	__u8			adv_data_len;
 
+	__u8	ext_3ds_features;
+	__u8	ext_3ds_manuf_status;
+	__u8	ext_3ds_threshold;
+	__u8	service_data;
+	__u8	lt_addr;
+	__u16	csb_int;
+	__u16	csb_int_min;
+	__u16	csb_int_max;
+	__u16	sync_int_min;
+	__u16	sync_int_max;
+	__u16	sync_train_int;
+	__u32	sync_train_tout;
+
+	__u8	scan_rsp_data[HCI_MAX_AD_LENGTH];
+	__u8	scan_rsp_data_len;
+	__u16	adv_min_interval;
+	__u16	adv_max_interval;
+	__u8	adv_filter_policy;
+	__u8	adv_type;
+	__u8	adv_manufacturer[HCI_MAX_AD_LENGTH - 5];
+	__u8	adv_manufacturer_len;
+	__u8	adv_uuid[HCI_MAX_AD_LENGTH - 5];
+	__u8	adv_uuid_len;
+	__u8	scan_rsp_manufacturer[HCI_MAX_AD_LENGTH - 2];
+	__u8	scan_rsp_manufacturer_len;
+
 	int (*open)(struct hci_dev *hdev);
 	int (*close)(struct hci_dev *hdev);
 	int (*flush)(struct hci_dev *hdev);
@@ -297,6 +327,11 @@ struct hci_dev {
 	int (*send)(struct sk_buff *skb);
 	void (*notify)(struct hci_dev *hdev, unsigned int evt);
 	int (*ioctl)(struct hci_dev *hdev, unsigned int cmd, unsigned long arg);
+	/* Send av_sk to btusb driver */
+	struct sock *av_sk;
+	void (*av_config)(struct hci_dev *hdev);
+	void (*av_start)(struct hci_dev *hdev);
+	void (*av_stop)(struct hci_dev *hdev);
 };
 
 #define HCI_PHY_HANDLE(handle)	(handle & 0xff)
@@ -1121,6 +1156,7 @@ int mgmt_set_powered_failed(struct hci_dev *hdev, int err);
 int mgmt_powered(struct hci_dev *hdev, u8 powered);
 int mgmt_discoverable(struct hci_dev *hdev, u8 discoverable);
 int mgmt_connectable(struct hci_dev *hdev, u8 connectable);
+void mgmt_advertising(struct hci_dev *hdev, u8 advertising);
 int mgmt_write_scan_failed(struct hci_dev *hdev, u8 scan, u8 status);
 int mgmt_new_link_key(struct hci_dev *hdev, struct link_key *key,
 		      bool persistent);
@@ -1178,6 +1214,33 @@ int mgmt_device_unblocked(struct hci_dev *hdev, bdaddr_t *bdaddr, u8 type);
 bool mgmt_valid_hdev(struct hci_dev *hdev);
 int mgmt_new_ltk(struct hci_dev *hdev, struct smp_ltk *key, u8 persistent);
 
+bool mgmt_sync_train_completed(struct hci_dev *hdev, u8 status);
+bool mgmt_sync_train_received(struct hci_dev *hdev, u8 status, bdaddr_t bdaddr,
+				__le32 clock_offset, __u8 *afh_channel_map,
+				__u8 lt_addr, __le32 next_broadcast_instant,
+				__u16 slave_broadcast_int, __u8 service_data);
+bool mgmt_slave_broadcast_received(struct hci_dev *hdev, bdaddr_t bdaddr,
+				__u8 lt_addr, __le32 clock, __le32 offset,
+				__u8 status, __u8 fragment, __u8 data_length,
+				__u8 *data);
+bool mgmt_slave_broadcast_timeout_event(struct hci_dev *hdev, bdaddr_t bdaddr,
+					__u8 lt_addr);
+bool mgmt_truncated_page_complete_event(struct hci_dev *hdev, u8 status,
+					bdaddr_t bdaddr);
+bool mgmt_slave_broadcast_channel_map_change_event(struct hci_dev *hdev,
+					 __u8 *afh_channel_map);
+bool mgmt_triggered_clock_capture(struct hci_dev *hdev, u16 conn_handle,
+			u8 which_clk, u32 clk, u16 slot_offset);
+bool mgmt_slave_page_reponse_timeout(struct hci_dev *hdev);
+bool mgmt_inquiry_response_notification(struct hci_dev *hdev, u8 *lap, s8 rssi);
+bool mgmt_vspec_3d_code_change(struct hci_dev *hdev);
+bool mgmt_vspec_3d_frame_period(struct hci_dev *hdev, u16 frame_period,
+				u8 period_fraction, u8 init_measurement);
+int mgmt_vspec_get_all_headless_device_list_complete(struct hci_dev *hdev, u8 status,
+						__u8 headless_dev_count, __u8 data_length,
+						__u8 *data);
+int mgmt_vspec_read_llr_scan_params_complete(struct hci_dev *hdev, __u8 status,
+						 __u8 data_length, __u8 *data);
 /* HCI info for socket */
 #define hci_pi(sk) ((struct hci_pinfo *) sk)
 

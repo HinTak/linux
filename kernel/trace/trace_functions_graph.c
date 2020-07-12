@@ -70,7 +70,11 @@ static struct tracer_opt trace_opts[] = {
 static struct tracer_flags tracer_flags = {
 	/* Don't display overruns and proc by default */
 	.val = TRACE_GRAPH_PRINT_CPU | TRACE_GRAPH_PRINT_OVERHEAD |
+#ifndef CONFIG_KDEBUGD_FTRACE
 	       TRACE_GRAPH_PRINT_DURATION | TRACE_GRAPH_PRINT_IRQS,
+#else
+	       TRACE_GRAPH_PRINT_DURATION | TRACE_GRAPH_PRINT_IRQS | TRACE_GRAPH_PRINT_ABS_TIME | TRACE_GRAPH_PRINT_PROC,
+#endif /* CONFIG_KDEBUGD_FTRACE */
 	.opts = trace_opts
 };
 

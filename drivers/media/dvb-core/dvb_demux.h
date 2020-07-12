@@ -75,6 +75,8 @@ struct dvb_demux_feed {
 		dmx_section_cb sec;
 	} cb;
 
+	dmx_ts_hdr_cb ts_hdr_cb;
+
 	struct dvb_demux *demux;
 	void *priv;
 	int type;
@@ -136,6 +138,8 @@ struct dvb_demux {
 
 	struct timespec speed_last_time; /* for TS speed check */
 	uint32_t speed_pkts_cnt; /* for TS speed check */
+
+	u32 record_mode;
 };
 
 int dvb_dmx_init(struct dvb_demux *dvbdemux);

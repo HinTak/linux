@@ -72,6 +72,13 @@ bool elv_rq_merge_ok(struct request *rq, struct bio *bio)
 	if (!blk_rq_merge_ok(rq, bio))
 		return 0;
 
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	/* Cannot merge directIO to non-directO requests */
+	if (!(rq->cmd_flags & REQ_DIRECTIO) !=
+		!test_bit(BIO_DIRECT, (unsigned long *)&bio->bi_flags) )
+	return 0;
+#endif
+
 	if (!elv_iosched_allow_merge(rq, bio))
 		return 0;
 

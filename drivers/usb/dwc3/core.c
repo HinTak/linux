@@ -64,6 +64,10 @@ static char *maximum_speed = "super";
 module_param(maximum_speed, charp, 0);
 MODULE_PARM_DESC(maximum_speed, "Maximum supported speed.");
 
+static char *operating_mode = "undefined";
+module_param(operating_mode, charp, 0);
+MODULE_PARM_DESC(operating_mode, "Operating mode.");
+
 /* -------------------------------------------------------------------------- */
 
 void dwc3_set_mode(struct dwc3 *dwc, u32 mode)
@@ -99,9 +103,11 @@ static void dwc3_core_soft_reset(struct dwc3 *dwc)
 	reg |= DWC3_GUSB2PHYCFG_PHYSOFTRST;
 	dwc3_writel(dwc->regs, DWC3_GUSB2PHYCFG(0), reg);
 
+#if 0	/* move to core_init() */
 	usb_phy_init(dwc->usb2_phy);
 	usb_phy_init(dwc->usb3_phy);
-	mdelay(100);
+	mdelay(5);
+#endif
 
 	/* Clear USB3 PHY reset */
 	reg = dwc3_readl(dwc->regs, DWC3_GUSB3PIPECTL(0));
@@ -113,12 +119,13 @@ static void dwc3_core_soft_reset(struct dwc3 *dwc)
 	reg &= ~DWC3_GUSB2PHYCFG_PHYSOFTRST;
 	dwc3_writel(dwc->regs, DWC3_GUSB2PHYCFG(0), reg);
 
-	mdelay(100);
+	mdelay(5);
 
 	/* After PHYs are stable we can take Core out of reset state */
 	reg = dwc3_readl(dwc->regs, DWC3_GCTL);
 	reg &= ~DWC3_GCTL_CORESOFTRESET;
 	dwc3_writel(dwc->regs, DWC3_GCTL, reg);
+	mdelay(5);	/* soc-linux-3.8@302593: douk.nam, for bus hang problem */
 }
 
 /**
@@ -298,6 +305,11 @@ static int dwc3_core_init(struct dwc3 *dwc)
 	u32			reg;
 	int			ret;
 
+	/* phy init first */
+	usb_phy_init(dwc->usb2_phy);
+	usb_phy_init(dwc->usb3_phy);
+	mdelay(5);
+
 	reg = dwc3_readl(dwc->regs, DWC3_GSNPSID);
 	/* This should read as U3 followed by revision number */
 	if ((reg & DWC3_GSNPSID_MASK) != 0x55330000) {
@@ -363,6 +375,18 @@ static void dwc3_core_exit(struct dwc3 *dwc)
 	usb_phy_shutdown(dwc->usb3_phy);
 }
 
+static int get_operating_mode(const char *mode_str)
+{
+	if (!strcmp("host", mode_str) && (IS_ENABLED(CONFIG_USB_DWC3_HOST) || IS_ENABLED(CONFIG_USB_DWC3_DUAL_ROLE)))
+		return DWC3_MODE_HOST;
+	else if (!strcmp("device", mode_str) &&
+			(IS_ENABLED(CONFIG_USB_DWC3_GADGET) || IS_ENABLED(CONFIG_USB_DWC3_DUAL_ROLE)))
+		return DWC3_MODE_DEVICE;
+	else if (!strcmp("drd", mode_str) && IS_ENABLED(CONFIG_USB_DWC3_DUAL_ROLE))
+		return DWC3_MODE_DRD;
+	return -1;
+}
+
 #define DWC3_ALIGN_MASK		(16 - 1)
 
 static int dwc3_probe(struct platform_device *pdev)
@@ -377,7 +401,7 @@ static int dwc3_probe(struct platform_device *pdev)
 	void __iomem		*regs;
 	void			*mem;
 
-	u8			mode;
+	int			mode;
 
 	mem = devm_kzalloc(dev, sizeof(*dwc) + DWC3_ALIGN_MASK, GFP_KERNEL);
 	if (!mem) {
@@ -490,6 +514,8 @@ static int dwc3_probe(struct platform_device *pdev)
 		dwc->maximum_speed = DWC3_DCFG_SUPERSPEED;
 
 	dwc->needs_fifo_resize = of_property_read_bool(node, "tx-fifo-resize");
+	/* support Hawk-P suspend */
+	dwc->disconnect_on_suspend = of_property_read_bool(node, "disconnect_on_suspend");
 
 	pm_runtime_enable(dev);
 	pm_runtime_get_sync(dev);
@@ -516,12 +542,23 @@ static int dwc3_probe(struct platform_device *pdev)
 		goto err1;
 	}
 
-	if (IS_ENABLED(CONFIG_USB_DWC3_HOST))
-		mode = DWC3_MODE_HOST;
-	else if (IS_ENABLED(CONFIG_USB_DWC3_GADGET))
-		mode = DWC3_MODE_DEVICE;
-	else
-		mode = DWC3_MODE_DRD;
+	/* override operating mode
+		priority := module parameter > device tree > kconfig */
+	mode = get_operating_mode(operating_mode);
+	if (mode < 0) {
+		const char *val;
+		if (node && !of_property_read_string(node, "dwc3_mode", &val)) {
+			mode = get_operating_mode(val);
+		}
+	}
+	if (mode < 0) {
+		if (IS_ENABLED(CONFIG_USB_DWC3_HOST))
+			mode = DWC3_MODE_HOST;
+		else if (IS_ENABLED(CONFIG_USB_DWC3_GADGET))
+			mode = DWC3_MODE_DEVICE;
+		else
+			mode = DWC3_MODE_DRD;
+	}
 
 	switch (mode) {
 	case DWC3_MODE_DEVICE:
@@ -531,6 +568,7 @@ static int dwc3_probe(struct platform_device *pdev)
 			dev_err(dev, "failed to initialize gadget\n");
 			goto err2;
 		}
+		dev_info(dev, "device mode.\n");
 		break;
 	case DWC3_MODE_HOST:
 		dwc3_set_mode(dwc, DWC3_GCTL_PRTCAP_HOST);
@@ -539,6 +577,7 @@ static int dwc3_probe(struct platform_device *pdev)
 			dev_err(dev, "failed to initialize host\n");
 			goto err2;
 		}
+		dev_info(dev, "host mode.\n");
 		break;
 	case DWC3_MODE_DRD:
 		dwc3_set_mode(dwc, DWC3_GCTL_PRTCAP_OTG);
@@ -553,6 +592,7 @@ static int dwc3_probe(struct platform_device *pdev)
 			dev_err(dev, "failed to initialize gadget\n");
 			goto err2;
 		}
+		dev_info(dev, "DRD mode.\n");
 		break;
 	default:
 		dev_err(dev, "Unsupported mode of operation %d\n", mode);
@@ -568,6 +608,8 @@ static int dwc3_probe(struct platform_device *pdev)
 
 	pm_runtime_allow(dev);
 
+	dev_info(dev, "probed, disconnect_on_suspend=%d\n",
+			dwc->disconnect_on_suspend);
 	return 0;
 
 err3:
@@ -603,12 +645,6 @@ static int dwc3_remove(struct platform_device *pdev)
 {
 	struct dwc3	*dwc = platform_get_drvdata(pdev);
 
-	usb_phy_set_suspend(dwc->usb2_phy, 1);
-	usb_phy_set_suspend(dwc->usb3_phy, 1);
-
-	pm_runtime_put(&pdev->dev);
-	pm_runtime_disable(&pdev->dev);
-
 	dwc3_debugfs_exit(dwc);
 
 	switch (dwc->mode) {
@@ -629,7 +665,14 @@ static int dwc3_remove(struct platform_device *pdev)
 
 	dwc3_event_buffers_cleanup(dwc);
 	dwc3_free_event_buffers(dwc);
+
+	usb_phy_set_suspend(dwc->usb2_phy, 1);
+	usb_phy_set_suspend(dwc->usb3_phy, 1);
+
 	dwc3_core_exit(dwc);
+
+	pm_runtime_put_sync(&pdev->dev);
+	pm_runtime_disable(&pdev->dev);
 
 	return 0;
 }
@@ -684,6 +727,8 @@ static int dwc3_suspend(struct device *dev)
 	struct dwc3	*dwc = dev_get_drvdata(dev);
 	unsigned long	flags;
 
+	dev_info(dev, "suspend.\n");
+
 	spin_lock_irqsave(&dwc->lock, flags);
 
 	switch (dwc->mode) {
@@ -711,11 +756,18 @@ static int dwc3_resume(struct device *dev)
 	struct dwc3	*dwc = dev_get_drvdata(dev);
 	unsigned long	flags;
 
-	usb_phy_init(dwc->usb3_phy);
-	usb_phy_init(dwc->usb2_phy);
-	msleep(100);
+	dev_info(dev, "resume.\n");
 
+	if (!dwc->disconnect_on_suspend) {
+		usb_phy_init(dwc->usb3_phy);
+		usb_phy_init(dwc->usb2_phy);
+		msleep(4);
+	}
+	
 	spin_lock_irqsave(&dwc->lock, flags);
+
+	if (dwc->disconnect_on_suspend)
+		dwc3_core_init(dwc);
 
 	dwc3_writel(dwc->regs, DWC3_GCTL, dwc->gctl);
 

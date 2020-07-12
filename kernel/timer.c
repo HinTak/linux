@@ -43,6 +43,11 @@
 #include <linux/slab.h>
 #include <linux/compat.h>
 
+#ifdef CONFIG_KDEBUGD_COUNTER_MONITOR
+#include <kdebugd/sec_topthread.h> /*This header file is for topthread info*/
+#include <kdebugd/sec_cpuusage.h> /*This header file is for cpuusage info*/
+#endif
+
 #include <asm/uaccess.h>
 #include <asm/unistd.h>
 #include <asm/div64.h>
@@ -774,6 +779,54 @@ out_unlock:
 	return ret;
 }
 
+static inline int
+__mod_timer_on(struct timer_list *timer, int cpu,
+						unsigned long expires, bool pending_only)
+{
+	struct tvec_base *base, *new_base;
+	unsigned long flags;
+	int ret = 0;
+
+	timer_stats_timer_set_start_info(timer);
+	BUG_ON(!timer->function);
+
+	base = lock_timer_base(timer, &flags);
+
+	ret = detach_if_pending(timer, base, false);
+	if (!ret && pending_only)
+		goto out_unlock;
+
+	debug_activate(timer, expires);
+
+	new_base = per_cpu(tvec_bases, cpu);
+
+	if (base != new_base) {
+		/*
+		 * We are trying to schedule the timer on the local CPU.
+		 * However we can't change timer's base while it is running,
+		 * otherwise del_timer_sync() can't detect that the timer's
+		 * handler yet has not finished. This also guarantees that
+		 * the timer is serialized wrt itself.
+		 */
+		if (likely(base->running_timer != timer)) {
+			/* See the comment in lock_timer_base() */
+			timer_set_base(timer, NULL);
+			spin_unlock(&base->lock);
+			base = new_base;
+			spin_lock(&base->lock);
+			timer_set_base(timer, base);
+		}
+	}
+
+	timer->expires = expires;
+	internal_add_timer(base, timer);
+
+out_unlock:
+	spin_unlock_irqrestore(&base->lock, flags);
+
+	return ret;
+}
+
 /**
  * mod_timer_pending - modify a pending timer's timeout
  * @timer: the pending timer to be modified
@@ -822,7 +875,7 @@ unsigned long apply_slack(struct timer_list *timer, unsigned long expires)
 
 	bit = find_last_bit(&mask, BITS_PER_LONG);
 
-	mask = (1 << bit) - 1;
+	mask = (1UL << bit) - 1;
 
 	expires_limit = expires_limit & ~(mask);
 
@@ -864,6 +917,22 @@ int mod_timer(struct timer_list *timer, unsigned long expires)
 	return __mod_timer(timer, expires, false, TIMER_NOT_PINNED);
 }
 EXPORT_SYMBOL(mod_timer);
+
+int mod_timer_on(struct timer_list *timer, int cpu, unsigned long expires)
+{
+	expires = apply_slack(timer, expires);
+
+	/*
+	 * This is a common optimization triggered by the
+	 * networking code - if the timer is re-modified
+	 * to be the same thing then just return:
+	 */
+	if (timer_pending(timer) && timer->expires == expires)
+		return 1;
+
+	return __mod_timer_on(timer, cpu, expires, false);
+}
+EXPORT_SYMBOL(mod_timer_on);
 
 /**
  * mod_timer_pinned - modify a timer's timeout
@@ -1088,6 +1157,54 @@ static int cascade(struct tvec_base *base, struct tvec *tv, int index)
 
 	return index;
 }
+#ifdef CONFIG_RUN_TIMER_DEBUG
+unsigned long time_current;
+void (*time_fn)(unsigned long);
+struct list_head *selp_head;
+struct task_struct *selp_task;
+void show_timer_list(void)
+{
+	struct timer_list *timer;
+	unsigned long data=0;
+	void (*fn)(unsigned long);
+	int i = 0;
+
+	printk( KERN_ALERT "====================================================\n");
+	if( selp_task )
+		printk( KERN_ALERT "selp_task : %s[%d]\n", selp_task->comm, selp_task->pid);
+	else
+		printk( KERN_ALERT "selp_task is NULL\n");
+	printk( KERN_ALERT "data:0x%lx, time_fn : %p\n", data, time_fn);
+	if( time_fn != NULL )
+		print_symbol("time_fn name : %p", (long unsigned int)time_fn);
+	else
+		printk("time_fn is NULL\n");
+
+	printk("\n");
+
+	printk( KERN_ALERT "====================================================\n");
+	printk( KERN_ALERT "remaing timer list...\n");
+	printk( KERN_ALERT "----------------------------------------------------\n");
+	if( selp_head != NULL )
+	{
+		list_for_each_entry(timer, selp_head,entry)
+		{
+			fn = timer->function;
+			data = timer->data;
+			printk( KERN_ALERT "[%2d] data: 0x%lx, fn:%p\n", i, data, fn);
+			print_symbol("fn name : %p", (long unsigned int)fn);
+			printk( "\n");
+			i++;
+		}
+	}
+	else
+		printk( KERN_ALERT "selp_head is NULL! (oops doesn't occur in time_fn()?)\n");
+	printk( KERN_ALERT "====================================================\n");
+}
+EXPORT_SYMBOL(show_timer_list);
+
+extern int valid_module_addr(unsigned long addr);
+#endif
 
 static void call_timer_fn(struct timer_list *timer, void (*fn)(unsigned long),
 			  unsigned long data)
@@ -1114,7 +1231,31 @@ static void call_timer_fn(struct timer_list *timer, void (*fn)(unsigned long),
 	lock_map_acquire(&lockdep_map);
 
 	trace_timer_expire_entry(timer);
+#ifdef CONFIG_RUN_TIMER_DEBUG
+	// FOR SELP DEBUGGING
+	time_current = data;
+	time_fn = fn;
+	selp_task = current;
+
+	if( !virt_addr_valid( fn ) && !valid_module_addr( (unsigned long)fn ) )
+	{
+		printk("=================================================================================");
+		printk("fn() is not invalid... %p, %s[%d]\n", fn, current->comm, current->pid);
+		printk("=================================================================================");
+
+		BUG_ON(1);
+		printk("while(1)... Please attach T32 if you need...\n");
+		while(1);
+	}
+	else
+		fn(data);
+
+	time_current = 0;
+	time_fn = NULL;
+	selp_task = NULL;
+#else
 	fn(data);
+#endif
 	trace_timer_expire_exit(timer);
 
 	lock_map_release(&lockdep_map);
@@ -1178,11 +1319,23 @@ static inline void __run_timers(struct tvec_base *base)
 
 			if (irqsafe) {
 				spin_unlock(&base->lock);
+#ifdef CONFIG_RUN_TIMER_DEBUG
+				selp_head = head;
+#endif
 				call_timer_fn(timer, fn, data);
+#ifdef CONFIG_RUN_TIMER_DEBUG
+				selp_head = NULL;
+#endif
 				spin_lock(&base->lock);
 			} else {
 				spin_unlock_irq(&base->lock);
+#ifdef CONFIG_RUN_TIMER_DEBUG
+				selp_head = head;
+#endif
 				call_timer_fn(timer, fn, data);
+#ifdef CONFIG_RUN_TIMER_DEBUG
+				selp_head = NULL;
+#endif
 				spin_lock_irq(&base->lock);
 			}
 		}
@@ -1361,6 +1514,10 @@ void update_process_times(int user_tick)
 #endif
 	scheduler_tick();
 	run_posix_cpu_timers(p);
+
+#ifdef CONFIG_KDEBUGD_COUNTER_MONITOR
+	sec_topthread_timer_interrupt_handler (cpu);
+#endif
 }
 
 /*

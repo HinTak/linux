@@ -46,6 +46,7 @@
 #include "squashfs_fs_i.h"
 #include "squashfs.h"
 
+#ifdef CONFIG_ENABLE_SQUASHFS_EXPORT
 /*
  * Look-up inode number (ino) in table, returning the inode location.
  */
@@ -115,6 +116,7 @@ static struct dentry *squashfs_get_parent(struct dentry *child)
 
 	return squashfs_export_iget(inode->i_sb, parent_ino);
 }
+#endif /* CONFIG_ENABLE_SQUASHFS_EXPORT */
 
 
 /*
@@ -156,8 +158,10 @@ __le64 *squashfs_read_inode_lookup_table(struct super_block *sb,
 }
 
 
+#ifdef CONFIG_ENABLE_SQUASHFS_EXPORT
 const struct export_operations squashfs_export_ops = {
 	.fh_to_dentry = squashfs_fh_to_dentry,
 	.fh_to_parent = squashfs_fh_to_parent,
 	.get_parent = squashfs_get_parent
 };
+#endif

@@ -37,6 +37,13 @@ static inline bool freezing(struct task_struct *p)
 	return freezing_slow_path(p);
 }
 
+static inline bool check_freezing(void)
+{
+	if (likely(!atomic_read(&system_freezing_cnt)))
+		return false;
+	return true;
+}
+
 /* Takes and releases task alloc lock using task_lock() */
 extern void __thaw_task(struct task_struct *t);
 
@@ -207,6 +214,7 @@ static inline bool freezer_should_skip(struct task_struct *p)
 #else /* !CONFIG_FREEZER */
 static inline bool frozen(struct task_struct *p) { return false; }
 static inline bool freezing(struct task_struct *p) { return false; }
+static inline bool check_freezing(void) { return false; }
 static inline void __thaw_task(struct task_struct *t) {}
 
 static inline bool __refrigerator(bool check_kthr_stop) { return false; }

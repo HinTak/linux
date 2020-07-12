@@ -24,6 +24,8 @@ obj-$(CONFIG_USB_WHCI_HCD)	+= whci/
 obj-$(CONFIG_PCI)		+= pci-quirks.o
 
 obj-$(CONFIG_USB_EHCI_HCD)	+= ehci-hcd.o
+obj-$(CONFIG_USB_ENABLE)	+= usb_enable.o
+obj-$(CONFIG_USB_SERDES_LOCK)   += usb_serdeslock.o
 obj-$(CONFIG_USB_EHCI_PCI)	+= ehci-pci.o
 obj-$(CONFIG_USB_EHCI_HCD_PLATFORM)	+= ehci-platform.o
 obj-$(CONFIG_USB_EHCI_MXC)	+= ehci-mxc.o

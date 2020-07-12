@@ -108,7 +108,9 @@ static struct sk_buff *eem_tx_fixup(struct usbnet *dev, struct sk_buff *skb,
 {
 	struct sk_buff	*skb2 = NULL;
 	u16		len = skb->len;
+#ifndef CONFIG_SAMSUNG_HOST_USBNET_NO_CRC
 	u32		crc = 0;
+#endif
 	int		padlen = 0;
 
 	/* When ((len + EEM_HEAD + ETH_FCS_LEN) % dev->maxpacket) is
@@ -119,8 +121,11 @@ static struct sk_buff *eem_tx_fixup(struct usbnet *dev, struct sk_buff *skb,
 	 */
 	if (!((len + EEM_HEAD + ETH_FCS_LEN) % dev->maxpacket))
 		padlen += 2;
-
+#ifdef CONFIG_SAMSUNG_HOST_USBNET_NO_SKBCLONING
+	if (1) {
+#else
 	if (!skb_cloned(skb)) {
+#endif
 		int	headroom = skb_headroom(skb);
 		int	tailroom = skb_tailroom(skb);
 
@@ -147,6 +152,22 @@ static struct sk_buff *eem_tx_fixup(struct usbnet *dev, struct sk_buff *skb,
 	skb = skb2;
 
 done:
+#ifdef CONFIG_SAMSUNG_HOST_USBNET_NO_CRC
+	/* use the "no CRC" option */
+	put_unaligned_be32(0xdeadbeef, skb_put(skb, 4));
+
+	/* EEM packet header format:
+	 * b0..13:  length of ethernet frame
+	 * b14:     bmCRC (0 == sentinel CRC)
+	 * b15:     bmType (0 == data)
+	 */
+	len = skb->len;
+	put_unaligned_le16(len & 0x3FFF, skb_push(skb, 2));
+
+	/* add a zero-length EEM packet, if needed */
+	if (padlen)
+		put_unaligned_le16(0, skb_put(skb, 2));
+#else
 	/* we don't use the "no Ethernet CRC" option */
 	crc = crc32_le(~0, skb->data, skb->len);
 	crc = ~crc;
@@ -165,6 +186,7 @@ done:
 	if (padlen)
 		put_unaligned_le16(0, skb_put(skb, 2));
 
+#endif
 	return skb;
 }
 

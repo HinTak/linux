@@ -101,6 +101,9 @@ static void fdatawait_one_bdev(struct block_device *bdev, void *arg)
  */
 SYSCALL_DEFINE0(sync)
 {
+#ifdef CONFIG_TRACE_SYS_SYNC_FSYNC
+	printk(KERN_EMERG "[SA_BSP] !!!!!!! sync !!!!!!! - %s(%d)\n",current->comm, current->pid);
+#endif
 	int nowait = 0, wait = 1;
 
 	wakeup_flusher_threads(0, WB_REASON_SYNC);
@@ -111,6 +114,9 @@ SYSCALL_DEFINE0(sync)
 	iterate_bdevs(fdatawait_one_bdev, NULL);
 	if (unlikely(laptop_mode))
 		laptop_sync_completion();
+#ifdef CONFIG_TRACE_SYS_SYNC_FSYNC
+	printk(KERN_EMERG "[SA_BSP] !!!!!!! sync : DONE !!!!!!! - %s(%d)\n",current->comm,current->pid);
+#endif
 	return 0;
 }
 
@@ -203,8 +209,16 @@ static int do_fsync(unsigned int fd, int datasync)
 	int ret = -EBADF;
 
 	if (f.file) {
+#ifdef CONFIG_TRACE_SYS_SYNC_FSYNC
+		char path_buf[256];
+		char* p = d_path(&(f.file->f_path),path_buf, 256);
+		printk(KERN_EMERG "[SA_BSP] fsync : %s - %s(%d)\n ",p, current->comm, current->pid);
+#endif
 		ret = vfs_fsync(f.file, datasync);
 		fdput(f);
+#ifdef CONFIG_TRACE_SYS_SYNC_FSYNC
+		printk(KERN_EMERG "[SA_BSP] fsync DONE : %s - %s(%d)\n ",p, current->comm, current->pid);
+#endif
 	}
 	return ret;
 }

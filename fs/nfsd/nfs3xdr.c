@@ -350,6 +350,8 @@ nfs3svc_decode_readargs(struct svc_rqst *rqstp, __be32 *p,
 		v++;
 	}
 	args->vlen = v;
+	args->f_mode = ntohl(*p++);
+
 	return xdr_argsize_check(rqstp, p);
 }
 
@@ -609,6 +611,39 @@ nfs3svc_decode_commitargs(struct svc_rqst *rqstp, __be32 *p,
 		return 0;
 	p = xdr_decode_hyper(p, &args->offset);
 	args->count = ntohl(*p++);
+
+	return xdr_argsize_check(rqstp, p);
+}
+
+int
+nfs3svc_decode_umountargs(struct svc_rqst *rqstp, __be32 *p,
+					struct nfsd3_umountargs *args)
+{
+	args->dummy = ntohl(*p++);
+
+	return xdr_argsize_check(rqstp, p);
+}
+
+int
+nfs3svc_decode_openargs(struct svc_rqst *rqstp, __be32 *p,
+					struct nfsd3_openargs *args)
+{
+	p = decode_fh(p, &args->fh);
+	if (!p)
+		return 0;
+	args->open_count = ntohl(*p++);
+
+	return xdr_argsize_check(rqstp, p);
+}
+
+int
+nfs3svc_decode_closeargs(struct svc_rqst *rqstp, __be32 *p,
+					struct nfsd3_closeargs *args)
+{
+	p = decode_fh(p, &args->fh);
+	if (!p)
+		return 0;
+	args->open_count = ntohl(*p++);
 
 	return xdr_argsize_check(rqstp, p);
 }
@@ -1034,6 +1069,7 @@ nfs3svc_encode_fsstatres(struct svc_rqst *rqstp, __be32 *p,
 		p = xdr_encode_hyper(p, s->f_files);	/* total inodes */
 		p = xdr_encode_hyper(p, s->f_ffree);	/* free inodes */
 		p = xdr_encode_hyper(p, s->f_ffree);	/* user available inodes */
+		*p++ = htonl(s->f_type); /* FS Identification */
 		*p++ = htonl(resp->invarsec);	/* mean unchanged time */
 	}
 	return xdr_ressize_check(rqstp, p);
@@ -1098,6 +1134,35 @@ nfs3svc_encode_commitres(struct svc_rqst *rqstp, __be32 *p,
 	return xdr_ressize_check(rqstp, p);
 }
 
+/* UMOUNT */
+int
+nfs3svc_encode_umountres(struct svc_rqst *rqstp, __be32 *p,
+		struct nfsd3_umountres *resp)
+{
+	if (resp->status == 0)
+		*p++ = htonl(resp->dummy);
+	return xdr_ressize_check(rqstp, p);
+}
+
+/* OPEN */
+int
+nfs3svc_encode_openres(struct svc_rqst *rqstp, __be32 *p,
+		struct nfsd3_openres *resp)
+{
+	if (resp->status == 0)
+		*p++ = htonl(resp->open_count);
+	return xdr_ressize_check(rqstp, p);
+}
+
+/* CLOSE */
+int
+nfs3svc_encode_closeres(struct svc_rqst *rqstp, __be32 *p,
+		struct nfsd3_closeres *resp)
+{
+	if (resp->status == 0)
+		*p++ = htonl(resp->open_count);
+	return xdr_ressize_check(rqstp, p);
+}
 /*
  * XDR release functions
  */

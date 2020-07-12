@@ -30,6 +30,8 @@
 #include <linux/buffer_head.h>
 #include "udf_i.h"
 
+void udf_release_data(struct buffer_head *bh);
+
 static void udf_pc_to_char(struct super_block *sb, unsigned char *from,
 			   int fromlen, unsigned char *to)
 {
@@ -101,7 +103,7 @@ static int udf_symlink_filler(struct file *file, struct page *page)
 	}
 
 	udf_pc_to_char(inode->i_sb, symlink, inode->i_size, p);
-	brelse(bh);
+	udf_release_data(bh);
 
 	up_read(&iinfo->i_data_sem);
 	SetPageUptodate(page);

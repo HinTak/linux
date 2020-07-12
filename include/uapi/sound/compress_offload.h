@@ -80,7 +80,7 @@ struct snd_compr_tstamp {
 struct snd_compr_avail {
 	__u64 avail;
 	struct snd_compr_tstamp tstamp;
-};
+} __attribute__((packed));
 
 enum snd_compr_direction {
 	SND_COMPRESS_PLAYBACK = 0,
@@ -130,6 +130,9 @@ struct snd_compr_codec_caps {
 enum {
 	SNDRV_COMPRESS_ENCODER_PADDING = 1,
 	SNDRV_COMPRESS_ENCODER_DELAY = 2,
+	SNDRV_COMPRESS_ENCODER_PTS = 3,		
+	SNDRV_COMPRESS_ENCODER_TZ_HANDLE = 4,
+	SNDRV_COMPRESS_ENCODER_PHY_ADDR = 5, 
 };
 
 /**
@@ -187,4 +190,16 @@ struct snd_compr_metadata {
 #define SND_COMPR_TRIGGER_DRAIN 7 /*FIXME move this to pcm.h */
 #define SND_COMPR_TRIGGER_NEXT_TRACK 8
 #define SND_COMPR_TRIGGER_PARTIAL_DRAIN 9
+
+#define EncoderMpegHeader
+typedef struct
+{
+	unsigned int iSyncWord;	
+	unsigned int FrameSize;	
+	unsigned int PTS;	
+	unsigned int PhyAddress;	
+	unsigned int VirAddress;	
+	unsigned int Reserved[3];	
+}EncoderMpegHeader_t, *pEncoderMpegHeader_t;
+
 #endif

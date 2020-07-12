@@ -59,6 +59,7 @@ static void l2cap_tx(struct l2cap_chan *chan, struct l2cap_ctrl *control,
 		     struct sk_buff_head *skbs, u8 event);
 
 /* ---- L2CAP channels ---- */
+struct l2cap_chan *l2cap_audio_chan = NULL;
 
 static struct l2cap_chan *__l2cap_get_chan_by_dcid(struct l2cap_conn *conn,
 						   u16 cid)
@@ -495,6 +496,11 @@ void __l2cap_chan_add(struct l2cap_conn *conn, struct l2cap_chan *chan)
 	BT_DBG("conn %p, psm 0x%2.2x, dcid 0x%4.4x", conn,
 	       __le16_to_cpu(chan->psm), chan->dcid);
 
+	if (chan->psm == 0x0019) {
+		BT_DBG("AVDTP channel");
+		/* Save channel info */
+		l2cap_audio_chan = chan;
+	}
 	conn->disc_reason = HCI_ERROR_REMOTE_USER_TERM;
 
 	chan->conn = conn;
@@ -1547,6 +1553,11 @@ static void l2cap_conn_del(struct hci_conn *hcon, int err)
 
 	/* Kill channels */
 	list_for_each_entry_safe(chan, l, &conn->chan_l, list) {
+		if(chan->psm == 0x0019) {
+			BT_INFO("Disconnect Complete event for Audio Device, stop AV");
+			hcon->hdev->av_stop(hcon->hdev);
+			l2cap_audio_chan = NULL;
+		}
 		l2cap_chan_hold(chan);
 		l2cap_chan_lock(chan);
 
@@ -2309,7 +2320,12 @@ static struct sk_buff *l2cap_create_basic_pdu(struct l2cap_chan *chan,
 	lh->cid = cpu_to_le16(chan->dcid);
 	lh->len = cpu_to_le16(len);
 
-	err = l2cap_skbuff_fromiovec(chan, msg, len, count, skb);
+	if (chan->psm == 0x0019) {
+		memcpy(skb_put(skb, count), msg->msg_iov->iov_base, count);
+	}
+	else {
+		err = l2cap_skbuff_fromiovec(chan, msg, len, count, skb);
+	}
 	if (unlikely(err < 0)) {
 		kfree_skb(skb);
 		return ERR_PTR(err);
@@ -2521,6 +2537,42 @@ int l2cap_chan_send(struct l2cap_chan *chan, struct msghdr *msg, size_t len,
 	return err;
 }
 
+void l2cap_audio_send(void *buff, size_t len)
+{
+	struct msghdr *msg = NULL;
+
+	msg = (struct msghdr*) kmalloc(sizeof(struct msghdr), GFP_KERNEL);
+	if(msg == NULL) {
+		printk("msg could not be allocated\n");
+	}
+	memset(msg, 0, sizeof(struct msghdr));
+
+	msg->msg_iov = (struct iovec*) kmalloc(sizeof(struct iovec), GFP_KERNEL);
+	if(msg->msg_iov == NULL) {
+		printk("msg_iov could not be allocated\n");
+	}
+	memset(msg->msg_iov, 0, sizeof(struct iovec));
+
+	msg->msg_iov->iov_base = buff;
+	msg->msg_iov->iov_len = len;
+	msg->msg_iovlen = 1;
+	msg->msg_flags = 16448;
+
+	if(l2cap_audio_chan != NULL) {
+		l2cap_chan_lock(l2cap_audio_chan);
+
+		l2cap_chan_send(l2cap_audio_chan, msg, len, 7);
+
+		l2cap_chan_unlock(l2cap_audio_chan);
+	}
+}
+EXPORT_SYMBOL(l2cap_audio_send);
+
+u16 l2cap_audio_get_peer_mtu_size(void)
+{
+        return  (u16)(l2cap_audio_chan->omtu);
+}
+EXPORT_SYMBOL(l2cap_audio_get_peer_mtu_size);
 static void l2cap_send_srej(struct l2cap_chan *chan, u16 txseq)
 {
 	struct l2cap_ctrl control;
@@ -4207,6 +4259,13 @@ static inline int l2cap_disconnect_req(struct l2cap_conn *conn,
 		return 0;
 	}
 
+	if(chan->psm == 0x0019) {
+		BT_INFO("Disconnect req received from Sound Share: stop AV");
+		struct hci_conn *hcon = conn->hcon;
+		hcon->hdev->av_stop(hcon->hdev);
+		l2cap_audio_chan = NULL;
+	}
+
 	l2cap_chan_lock(chan);
 
 	sk = chan->sk;
@@ -4254,6 +4313,13 @@ static inline int l2cap_disconnect_rsp(struct l2cap_conn *conn,
 	if (!chan) {
 		mutex_unlock(&conn->chan_lock);
 		return 0;
+	}
+
+	if(chan->psm == 0x0019) {
+		printk("AVDTP disconnect\n");
+		struct hci_conn *hcon = conn->hcon;
+		hcon->hdev->av_stop(hcon->hdev);
+		l2cap_audio_chan = NULL;
 	}
 
 	l2cap_chan_lock(chan);
@@ -6338,6 +6404,11 @@ static void l2cap_conless_channel(struct l2cap_conn *conn, __le16 psm,
 
 	BT_DBG("chan %p, len %d", chan, skb->len);
 
+	/* About 3DS PSM channel, append the destination address
+	 * into packet data
+	 */
+	if (psm == 0x0021)
+		memcpy(skb_put(skb, 6), conn->dst, 6);
 	if (chan->state != BT_BOUND && chan->state != BT_CONNECTED)
 		goto drop;
 

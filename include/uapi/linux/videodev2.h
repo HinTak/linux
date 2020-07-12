@@ -83,6 +83,41 @@
 /*
  *	E N U M S
  */
+
+enum v4l2_analog_input_type {
+        V4L2_INPUTTYPE_AV                       = 0,
+        V4L2_INPUTTYPE_ATV                      = 1,
+        V4L2_INPUTTYPE_COMPONENT                = 2,
+        V4L2_INPUTTYPE_SCART                    = 3,
+        V4L2_INPUTTYPE_QPI_VIDEO_LOOPBACK_AV	= 4,  
+        V4L2_INPUTTYPE_QPI_VIDEO_LOOPBACK_COMP	= 5,
+        V4L2_INPUTTYPE_QPI_VIDEO_LOOPBACK_SCART	= 6,	 
+        V4L2_INPUTTYPE_VIDEO_LOOPBACK_AV 	= 10,
+        V4L2_INPUTTYPE_VIDEO_LOOPBACK_AV2 	= 11,
+        V4L2_INPUTTYPE_VIDEO_LOOPBACK_COMP 	= 12,
+        V4L2_INPUTTYPE_VIDEO_LOOPBACK_SCART 	= 13,
+};
+
+enum v4l2_vbi_line_std {
+        V4L2_VBI_MAN_LINE_AUTO                  = 0,
+        V4L2_VBI_MAN_LINE_TTXT                  = 1,
+        V4L2_VBI_MAN_LINE_VP                    = 2,
+        V4L2_VBI_MAN_LINE_VI                    = 3,
+        V4L2_VBI_MAN_LINE_CGMS                  = 4,
+        V4L2_VBI_MAN_LINE_GEMSTAR_1X            = 5,
+        V4L2_VBI_MAN_LINE_GEMSTAR_2X            = 6,
+        V4L2_VBI_MAN_LINE_CLOSED_CAPTION        = 7,
+        V4L2_VBI_MAN_LINE_RESERVED1             = 8,
+        V4L2_VBI_MAN_LINE_RESERVED2             = 9,
+        V4L2_VBI_MAN_LINE_RESERVED3             = 10,
+        V4L2_VBI_MAN_LINE_RESERVED4             = 11,
+        V4L2_VBI_MAN_LINE_RESERVED5             = 12,
+        V4L2_VBI_MAN_LINE_CUSTOM1               = 13,
+        V4L2_VBI_MAN_LINE_CUSTOM2               = 14,
+        V4L2_VBI_MAN_LINE_DISABLE               = 15,
+        V4L2_VBI_MAN_LINE_MAX
+};
+
 enum v4l2_field {
 	V4L2_FIELD_ANY           = 0, /* driver can choose from none,
 					 top, bottom, interlaced
@@ -400,6 +435,16 @@ struct v4l2_pix_format {
 #define V4L2_PIX_FMT_VC1_ANNEX_G v4l2_fourcc('V', 'C', '1', 'G') /* SMPTE 421M Annex G compliant stream */
 #define V4L2_PIX_FMT_VC1_ANNEX_L v4l2_fourcc('V', 'C', '1', 'L') /* SMPTE 421M Annex L compliant stream */
 #define V4L2_PIX_FMT_VP8      v4l2_fourcc('V', 'P', '8', '0') /* VP8 */
+#define V4L2_PIX_FMT_DIVX	v4l2_fourcc('D', 'I', 'V', 'X')
+#define V4L2_PIX_FMT_VC1	v4l2_fourcc('W', 'V', 'C', '1')
+#define V4L2_PIX_FMT_WMV3	v4l2_fourcc('W', 'M', 'V', '3')
+#define V4L2_PIX_FMT_RV		v4l2_fourcc('R', 'V', '4', '0')
+#define V4L2_PIX_FMT_AVS	v4l2_fourcc('A', 'V', 'S', '0')
+#define V4L2_PIX_FMT_H265	v4l2_fourcc('H', '2', '6', '5')
+#define V4L2_PIX_FMT_HEVC	v4l2_fourcc('H', 'E', 'V', 'C')
+#define V4L2_PIX_FMT_VP9	v4l2_fourcc('V', 'P', '9', '0')
+#define V4L2_PIX_FMT_AVSP	v4l2_fourcc('A', 'V', 'S', 'P')
+
 
 /*  Vendor-specific formats   */
 #define V4L2_PIX_FMT_CPIA1    v4l2_fourcc('C', 'P', 'I', 'A') /* cpia1 YUV */
@@ -686,6 +731,9 @@ struct v4l2_buffer {
 #define V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC	0x2000
 #define V4L2_BUF_FLAG_TIMESTAMP_COPY		0x4000
 
+/* indicator for last frame */
+#define V4L2_BUF_FLAG_END_OF_FILE			0x80000000
+
 /**
  * struct v4l2_exportbuffer - export of video buffer as DMABUF file descriptor
  *
@@ -950,6 +998,18 @@ typedef __u64 v4l2_std_id;
 #define V4L2_STD_UNKNOWN        0
 #define V4L2_STD_ALL            (V4L2_STD_525_60	|\
 				 V4L2_STD_625_50)
+
+/*TV Standards*/
+#define V4L2_SYS_TYPE_0         V4L2_STD_NTSC                   //NT358 : KOR, USA, TAIWAN
+#define V4L2_SYS_TYPE_1         V4L2_STD_MN                             //PAL_M,PAL_N,NT358 : BRA
+#define V4L2_SYS_TYPE_2        (V4L2_STD_SECAM          |\
+                                V4L2_STD_PAL            |\
+                                V4L2_STD_NTSC_443)                      //PAL,SECAM,NT443 : PANEURO, PANNORDIG, S.PACIFIC, HKG
+#define V4L2_SYS_TYPE_3         (V4L2_STD_SECAM         |\
+                                 V4L2_STD_PAL           |\
+                                 V4L2_STD_NTSC_443      |\
+                                 V4L2_STD_NTSC)                 //PAL,SECAM,NT443,NT358 : CHINA, ARB, S.ASIA, AsiaATV, C.ASIA
+
 
 struct v4l2_standard {
 	__u32		     index;
@@ -1227,6 +1287,12 @@ struct v4l2_ext_controls {
 	struct v4l2_ext_control *controls;
 };
 
+struct v4l2_fake_res {
+	__u32 flag; /* 0:false	1:true */
+	__u32 analog_fake_res; /* 1:RESOLUTION_480I	0:RESOLUTION_576I */
+	__u32 reserved[8];
+};
+
 #define V4L2_CTRL_ID_MASK      	  (0x0fffffff)
 #define V4L2_CTRL_ID2CLASS(id)    ((id) & 0x0fff0000UL)
 #define V4L2_CTRL_DRIVER_PRIV(id) (((id) & 0xffff) >= 0x1000)
@@ -1376,6 +1442,17 @@ struct v4l2_hw_freq_seek {
 	__u32	rangehigh;
 	__u32	reserved[5];
 };
+
+typedef enum {
+	SOUND_SYS_AUTO,
+	SOUND_SYS_BG,
+	SOUND_SYS_I,
+	SOUND_SYS_DK,
+	SOUND_SYS_M,
+	SOUND_SYS_L,
+	SOUND_SYS_UNKNOWN,
+	SOUND_SYS_MAX
+}v4l2_soundsystem_mode_t;
 
 /*
  *	R D S
@@ -1590,7 +1667,7 @@ struct v4l2_sliced_vbi_data {
 	__u32   field;          /* 0: first field, 1: second field */
 	__u32   line;           /* 1-23 */
 	__u32   reserved;       /* must be 0 */
-	__u8    data[48];
+	__u8    data[48];	/* 45 bytes for max 20 lines */
 };
 
 /*
@@ -1723,6 +1800,63 @@ struct v4l2_streamparm {
 #define V4L2_EVENT_FRAME_SYNC			4
 #define V4L2_EVENT_PRIVATE_START		0x08000000
 
+#define V4L2_EVENT_VIDEOINFO		(V4L2_EVENT_PRIVATE_START + 1)
+#define V4L2_EVENT_UNMUTE			(V4L2_EVENT_PRIVATE_START + 2)
+#define V4L2_EVENT_USERDATA_CC	(V4L2_EVENT_PRIVATE_START + 3)
+#define V4L2_EVENT_CAPTURE_DONE	(V4L2_EVENT_PRIVATE_START + 4)
+#define V4L2_EVENT_LOCK			(V4L2_EVENT_PRIVATE_START + 5)
+#define V4L2_EVENT_USERDATA_FPA	(V4L2_EVENT_PRIVATE_START + 6)
+#define V4L2_EVENT_NOT_SUPPORT	(V4L2_EVENT_PRIVATE_START + 7)
+#define V4L2_EVENT_COLOUR_DESCRIPTION (V4L2_EVENT_PRIVATE_START + 9)
+#define V4L2_EVENT_MASTERING_DISPLAY_COLOUR_VOLUME (V4L2_EVENT_PRIVATE_START + 10)
+
+struct v4l2_colour_description {
+	__u8 colour_primaries;
+	__u8 transfer_characteristics;
+	__u8 matrix_coeffs;
+};
+
+struct v4l2_mastering_display_colour_volume {
+	__u16 display_primaries_x[3];
+	__u16 display_primaries_y[3];
+	__u16 white_point_x;
+	__u16 white_point_y;
+	__u32 max_display_mastering_luminance;
+	__u32 min_display_mastering_luminance;
+};
+
+enum v4l2_unsupport_code {
+	V4L2_UNSUPPORT_FORMAT = 1,
+	V4L2_UNSUPPORT_RESOLUTION,
+	V4L2_UNSUPPORT_FRAMERATE,
+	V4L2_UNSUPPORT_PROFILE,
+	V4L2_UNSUPPORT_DUALDECODING
+};
+
+/* sdp_mfc specific : this value will get V4L2_EVENT_VIDEOINFO -> event.u.data*/
+struct v4l2_sdpmfc_videoinfo {
+	unsigned int width;
+	unsigned int height;
+	unsigned int aspect_ratio;
+	unsigned int framerate;
+	unsigned int progressive;
+	unsigned int crop_hoffset;
+	unsigned int crop_voffset;
+	unsigned int stride;
+};
+
+#define V4L2_EVENT_ENCDONE		(V4L2_EVENT_PRIVATE_START + 1)
+
+struct v4l2_sdphen_esinfo {
+	unsigned int es_offset;
+	unsigned int es_size;
+	unsigned int es_pts;
+	unsigned int w_ptr;
+	unsigned int slice_type;
+	unsigned int userdata_addr;
+	unsigned int userdata_size;
+};
+
 /* Payload for V4L2_EVENT_VSYNC */
 struct v4l2_event_vsync {
 	/* Can be V4L2_FIELD_ANY, _NONE, _TOP or _BOTTOM */
@@ -1733,6 +1867,12 @@ struct v4l2_event_vsync {
 #define V4L2_EVENT_CTRL_CH_VALUE		(1 << 0)
 #define V4L2_EVENT_CTRL_CH_FLAGS		(1 << 1)
 #define V4L2_EVENT_CTRL_CH_RANGE		(1 << 2)
+
+struct v4l2_ctrl_hdmi_hpd {
+	unsigned char port_no;
+	unsigned char is_high;
+	unsigned char is_hw_ctrl;
+};
 
 struct v4l2_event_ctrl {
 	__u32 changes;
@@ -1842,6 +1982,331 @@ struct v4l2_create_buffers {
 	struct v4l2_format	format;
 	__u32			reserved[8];
 };
+
+
+
+struct v4l2_pix_ext_format {
+	__u32 hres;
+	__u32 vres;
+    __u32 hstart;       
+    __u32 vstart;       
+    __u32 htotal;       
+    __u32 vtotal;       
+    __u32 hfreq;        
+    __u32 vfreq;        
+    __u32 scantype;     
+    __u32 hsyncpositive;
+    __u32 vsyncpositive;
+    __u32 nearfreqency; 
+    __u32 inputFormat;
+    __u32 outputFormat;
+	__u32 reserved[8];
+};
+
+
+struct v4l2_dv_hdmi_status { 
+	__u32 inputsignaltype;   ///< 0: DVI  1: HDMI  
+	__u32 inputFormat; ///< in videodev2.h, 
+                        /// RGB - V4L2_PIX_FMT_RGB444, 
+                       /// YUV422 : V4L2_PIX_FMT_YUV422P, 
+                       /// YUV444 : V4L2_PIX_FMT_YUV444
+      	__u32 videocolordepth; ///< HDMI Color Depth. 
+                                    //in videodev2.h, v4l2_colordepth 
+       	__u32 mutestatus;   ///< true : mute, false : unmute  
+	__u32 acplevel;   ///< HDMI ACP Level
+};
+
+struct av_ex_info {
+	unsigned int delay_stable_sync_lock;
+	unsigned int delay_stable_resolution;
+	unsigned int delay_stable_colorsystem;
+};
+
+typedef enum {
+  V4L2_DV_INFOPACKET_VS     =1,    ///< Vendor Specific InfoFrame
+  V4L2_DV_INFOPACKET_AVI    =2,   ///< Auxiliary Video Information InfoFrame
+  V4L2_DV_INFOPACKET_SPD    =3,   ///< Source Product Description InfoFrame
+  V4L2_DV_INFOPACKET_AUDIO  =4, ///< Audio InfoFrame
+  V4L2_DV_INFOPACKET_MPEG   =5,  ///< MPEG Source InfoFrame
+  V4L2_DV_INFOPACKET_GAMUT  =6, ///< Gamut Metadata Packet
+  V4L2_DV_INFOPACKET_ACP    =7,   ///< Audio Content Protection packet
+  V4L2_DV_INFOPACKET_UNREC  =8, ///< Unrecognized packet
+}v4l2_dv_infopacket_type ; ///< HDMI Info Frame Type and Packet Type
+
+typedef  enum {
+  V4L2_COLORDEPTH_24BIT = 1,
+  V4L2_COLORDEPTH_30BIT = 2,
+  V4L2_COLORDEPTH_36BIT = 3,
+  V4L2_COLORDEPTH_48BIT = 4
+}v4l2_dv_colordepth_type;
+
+
+/**
+ * struct v4l2_drm - v4l2_ext_control cahr *string argument
+ * @ inputport: enum v4l2_drm_inputport_type (input source type) 
+ *              - this shoould be filled by application
+ * @ plane:	display frame (main/sub) - 0 : main 1: sub , this should be fillled by application
+ * @ hres:	source horizontal resolution
+ * @ vres:	source vertical resolution
+ * @ framerate:	Source frame rate : ex) 23.974Hz -> 23974, 60Hz -> 60000
+ * @ scantype:	source scantype, 0 : interaced, 1 : progressive
+ * @ dec_info:	structure for decoder (DTV, Multimedia)
+ * @ extin_info:	structure for external input (ATV, AV, HDMI, Component, SCART, PC ...)
+ * @ reserved:	future extensions
+ */
+
+/** Source color format */
+enum v4l2_drm_colorformat_type {
+ V4L2_DRM_COLORFORMAT_RGB444 = 1,  /**< RGB 444 */
+ V4L2_DRM_COLORFORMAT_YUV444 = 2,   /**< YUV 444 */
+ V4L2_DRM_COLORFORMAT_YUV422 = 3,   /**< YUV 422 */
+ V4L2_DRM_COLORFORMAT_YUV420 = 4,   /**< YUV 420 */
+ V4L2_DRM_COLORFORMAT_YC    = 5,   /**< YC */ 
+};
+
+
+/** Frame rate definition */
+enum v4l2_drm_framerate_type {
+ /*! 23.97Hz frame rate */ 
+ V4L2_DRM_FRAMERATE_23_97HZ = 1, /* Video Clock 74.25MHz, if 74.175MHz =>23.97Hz */
+ /*! 24Hz frame rate */
+ V4L2_DRM_FRAMERATE_24HZ,  /* Video Clock 74.25MHz, if 74.175MHz =>23.97Hz */ 
+ /*! 25Hz frame rate */
+ V4L2_DRM_FRAMERATE_25HZ,
+ /*! 29.97Hz frame rate */
+ V4L2_DRM_FRAMERATE_29_97HZ,
+ /*! 30Hz frame rate */
+ V4L2_DRM_FRAMERATE_30HZ,  /* Video Clock 74.25MHz, if 74.175MHz =>29.97Hz */
+ /*! 50Hz frame rate */
+ V4L2_DRM_FRAMERATE_50HZ,
+ /*! 59.94Hz frame rate */
+ V4L2_DRM_FRAMERATE_59_94HZ,
+ /*! 60Hz frame rate */
+ V4L2_DRM_FRAMERATE_60HZ,  /* Video Clock 74.25MHz, if 74.175MHz =>59.94Hz */
+ /*! 60Hz frame rate */
+ V4L2_DRM_FRAMERATE_48HZ,  /* Video Clock 74.25MHz, if 74.175MHz =>59.94Hz */
+ /*! 47.94Hz frame rate */
+ V4L2_DRM_FRAMERATE__47_94HZ,
+ /*! 75Hz frame rate */
+ V4L2_DRM_FRAMERATE_75HZ,  
+ /*! 100Hz frame rate */
+ V4L2_DRM_FRAMERATE_100HZ, 
+ /*! 120Hz frame rate */
+ V4L2_DRM_FRAMERATE_120HZ,
+ /*! 120Hz frame rate */
+ V4L2_DRM_FRAMERATE_ETC
+};
+
+
+enum v4l2_drm_inputport_type {
+	V4L2_DRM_INPUTPORT_TYPE_DTV = 0,
+	V4L2_DRM_INPUTPORT_TYPE_MM,
+	V4L2_DRM_INPUTPORT_TYPE_ATV,
+	V4L2_DRM_INPUTPORT_TYPE_AV,
+	V4L2_DRM_INPUTPORT_TYPE_COMPONENT,
+	V4L2_DRM_INPUTPORT_TYPE_RGB,
+	V4L2_DRM_INPUTPORT_TYPE_DVI,
+	V4L2_DRM_INPUTPORT_TYPE_HDMI,
+	V4L2_DRM_INPUTPORT_TYPE_MAIN_CLONE,   // this is not V4L2 but... just put it here for convenience
+	V4L2_DRM_INPUTPORT_TYPE_JPEG_SWDEC,
+	V4L2_DRM_INPUTPORT_TYPE_MJPEG,    
+	V4L2_DRM_INPUTPORT_TYPE_SCART, 
+	V4L2_DRM_INPUTPORT_TYPE_DSP,  // add for vdsp   
+	V4L2_DRM_INPUTPORT_TYPE_LVDXRX,//added for SBB 
+	V4L2_DRM_INPUTPORT_TYPE_MAX
+};
+
+enum v4l2_aspectratio_type {
+	V4L2_ASPECTRATIO_TYPE_100_100    = 1, // 1:1
+	V4L2_ASPECTRATIO_TYPE_300_400    = 2, // 3:4
+	V4L2_ASPECTRATIO_TYPE_900_1600   = 3, // 9:16
+	V4L2_ASPECTRATIO_TYPE_100_221    = 4, // 1:2.21
+};
+
+struct v4l2_private_frame_info
+{
+	__u32 chip_id;
+	__u32 instance_id;
+	__u32 display_index;
+	__u32 showframe;
+	__u32 y_viraddr;
+	__u32 u_viraddr;
+	__u32 v_viraddr;   
+	__u32 width;       // source h resolution
+	__u32 height;      // source v resolution 
+	__u32 y_linesize;  // width + padded bytes size,   //modified (linesize -> y_linesize)
+	__u32 u_linesize;  // width + padded bytes size 
+	__u32 v_linesize;  // width + padded bytes size 
+	__u32 startline;   // only for picture   //added
+	__u32 endline;     // only for picture   //added
+	enum v4l2_drm_colorformat_type colorformat;  /**< this is for JPEG/MJPEG */    
+	__u32 framedone;
+	__u32 Keyframe;
+	__u32 dimension;     // 0: 2D, 1: 3D_Left, 2: 3D_Right
+	__u32 y_phyaddr;
+	__u32 u_phyaddr;
+	__u32 v_phyaddr;
+};
+
+enum v4l2_ctrl_hdmi_infoframe_type
+{
+	V4L2_CTRL_TYPE_HDMI_INFO_VS     =1,    ///< Vendor Specific InfoFrame
+	V4L2_CTRL_TYPE_HDMI_INFO_AVI    =2,   ///< Auxiliary Video Information InfoFrame
+	V4L2_CTRL_TYPE_HDMI_INFO_SPD    =3,   ///< Source Product Description InfoFrame
+	V4L2_CTRL_TYPE_HDMI_INFO_AUDIO  =4, ///< Audio InfoFrame
+	V4L2_CTRL_TYPE_HDMI_INFO_MPEG   =5,  ///< MPEG Source InfoFrame
+	V4L2_CTRL_TYPE_HDMI_INFO_GAMUT  =6, ///< Gamut Metadata Packet
+	V4L2_CTRL_TYPE_HDMI_INFO_ACP    =7,   ///< Audio Content Protection packet
+	V4L2_CTRL_TYPE_HDMI_INFO_UNREC  =8, ///< Unrecognized packet 
+}; ///< HDMI Info Frame Type and Packet Type
+
+enum v4l2_drm_input_stereoscopic_type
+{
+	V4L2_DRM_INPUT_STEREOSCOPIC_2D, 
+	V4L2_DRM_INPUT_STEREOSCOPIC_SBS, 
+	V4L2_DRM_INPUT_STEREOSCOPIC_TNB, 
+	V4L2_DRM_INPUT_STEREOSCOPIC_FRAME_SEQ,
+	V4L2_DRM_INPUT_STEREOSCOPIC_FRAME_PACK,
+	V4L2_DRM_INPUT_STEREOSCOPIC_3D_KR3D, 
+	V4L2_DRM_INPUT_STEREOSCOPIC_3D_MVC_B,
+	V4L2_DRM_INPUT_STEREOSCOPIC_3D_MFC_D, 
+	V4L2_DRM_INPUT_STEREOSCOPIC_3D_SVAF,
+	V4L2_DRM_INPUT_STEREOSCOPIC_3D_MVC,
+};
+
+enum v4l2_drm_main_clone_mux {
+	V4L2_DRM_MAIN_CLONE_MUX_VIDEO_ONLY,
+	V4L2_DRM_MAIN_CLONE_MUX_VIDEO_GP,
+	V4L2_DRM_MAIN_CLONE_MUX_VIDEO_EXT_GP,
+	V4L2_DRM_MAIN_CLONE_MUX_RESERVED0,
+	V4L2_DRM_MAIN_CLONE_MUX_RESERVED1,
+	V4L2_DRM_MAIN_CLONE_MUX_MAX
+};
+
+struct v4l2_dynamic_res_info {
+	__u32 next_frm_hres; /** H-Res. after next frame : set decoded h/w */
+	__u32 next_frm_vres; /** V-Res.after next frame : set decoded h/w  */
+
+	__u32 max_hres;	/** MAX H-Res. : if 0, non-seamless */
+	__u32 max_vres;	/** MAX V-Res. : if 0, non-seamless */
+
+	__u32 crop_x; /** crop[X] for changed frame : set app. */
+	__u32 crop_y; /** crop[Y] for changed frame : set app. */
+	__u32 crop_w; /** crop[W] for changed frame : set app. */
+	__u32 crop_h; /** crop[H] for changed frame : set app. */
+}; 
+
+struct v4l2_drm_dec_info {
+	enum v4l2_aspectratio_type aspectratio;      /**< enum v4l2_aspectratio_type */
+	__u32 hres;     /**< Source horizontal size */
+	__u32 vres;     /**< Source vertical size */
+	__u32 effective_hres; /**< real decoded frame horizontal size */
+	__u32 effective_vres; /**< real decoded frame vertical size */
+	__u32 framerate;  /**< Source frame rate (hz*100) : ex) 23.974Hz -> 23974, 60Hz -> 60000 */
+	__u32 scantype;   /**< Source scan type, 0 : interaced, 1 : progressive */ 
+	__u32 bpp;        /**< Source bit per pixel, 8[8bit], 10[10bit] */ 
+	struct v4l2_private_frame_info pFrame[4];
+
+	struct v4l2_dynamic_res_info next_res;	/* dynamic res(seamless) info */
+	__u32 decoder_info;  			/* info. about used HW Decoder */
+};
+
+struct v4l2_drm_extin_info{
+	__u32 src_info_send_flag ;  /**< flag for using ADC information 0:not use, 1:use */  // TODO:  need this?
+	__u32 htotal;  
+	__u32 vtotal;  
+	__u32 hactive; // h_active_start position;
+	__u32 vactive; // v_active_start position;
+	__u32 hactive_size;
+	__u32 vactive_size;
+	__u32 scantype;    /**< Source scan type, 0 : interaced, 1 : progressive */ 
+	__u32 oversampling;  /**< Over Sampling 0:no over sampling, 1:over sampling */
+	enum v4l2_drm_framerate_type framerate;  /**< Source color format */
+	enum v4l2_drm_colorformat_type colorformat;  /**< Source color format */    
+	__u32 syncmode;   /**< DE / SYNC mode information 0:DE, 1:SYNC */
+	__u32 pcinput;   /**< PC Input 0:no PC, 1:PC format */ 
+	__u32 ntscpal_type;   /**< When u32SrcInfoSendFlag is '0', NTSC / PAL Type information 0:NTSC, 1:PAL */
+
+	enum v4l2_drm_main_clone_mux clone_mux;
+};
+
+
+struct v4l2_drm {
+	enum v4l2_drm_inputport_type inputport;   // this should be filled by driver
+	__u32 plane;    // 0 : main 1: sub , this should be fillled by application
+	union {
+	struct v4l2_drm_dec_info    dec_info;        // DTV/MM info structure
+	struct v4l2_drm_extin_info  extin_info;        // Ext.input info structure
+	}u;
+	enum  v4l2_drm_input_stereoscopic_type    stereoscopic_info; // this should be fillled by application
+	__u32      reserved; // this should be filled by driver with fixed value : 0x1234ABCD
+};
+
+
+struct v4l2_video_status
+{
+	unsigned int  width;
+	unsigned int height;
+	unsigned int field;
+	struct v4l2_fract fr;
+	unsigned int lock; //0 : unlock 1:locked
+	unsigned int unmute; //0: mute, 1:unmute 
+	unsigned int status;
+	enum v4l2_aspectratio_type aspect_ratio; //  1-1:1 , 2-4:3, 3-16:9, 4-2.21:1
+	unsigned int bpp;
+	enum v4l2_drm_colorformat_type colorformat;
+	enum v4l2_sdp_not_support_type not_support;
+};
+
+/****************************************************************************/
+/* Private structure for handling hdmi edid and mhl                       */
+/****************************************************************************/
+enum v4l2_condition{
+    V4L2_CONDITION_PATTERN_ON_OFF,		// This will be removed on 2012-04-09. DO not use
+    V4L2_CONDITION_PATTERN_SELECT = V4L2_CONDITION_PATTERN_ON_OFF,
+    V4L2_CONDITION_PIP_ON_OFF,
+    V4L2_CONDITION_POWER_OFF,
+    V4L2_CONDITION_EDIT_NAME,				// 0x1 : HDMI1 / 0x2 : HDMI2 / 0x4 : HDMI3 / 0x8 : HDMI4 (bit 연산을 통해 정보 설정)
+    V4L2_CONDITION_HDMI_PATH_SETTING,	// Automation test for setting UHD HDMI path
+};
+
+struct v4l2_condition_setting{
+    enum v4l2_condition con;
+    unsigned char       value;
+};
+
+struct v4l2_edid {
+    __u32 pad;
+    __u32 lenth;    
+    __u8 *edid;
+};
+
+#define MHL_CBUS_MAX_BUFFER_SIZE 16
+struct v4l2_cbus_request{
+    unsigned char uc_command;                                // VS_CMD or RCP opcode
+    unsigned char uc_offset_data;                             // Offset of register on CBUS or RCP data
+    unsigned char uc_length;                                 // Only applicable to write burst. ignored otherwise.
+    unsigned char uc_msg_data[MHL_CBUS_MAX_BUFFER_SIZE];      // Pointer to message data area.
+};
+
+struct v4l2_mhl_cbus_data_t{
+    unsigned char uc_interrupt_status;
+    unsigned char uc_vs_cmd;
+    unsigned char uc_vs_data;
+    unsigned char uc_msg_data0;
+    unsigned char uc_msg_data1;
+};
+
+struct v4l2_factory_ctl_t{
+    char        *pc_factory_item;
+    signed int  i_value;    
+    char        *pc_strval;
+    int         dir_ctl;
+};
+
+
+/****************************************************************************/
+
 
 /*
  *	I O C T L   C O D E S   F O R   V I D E O   D E V I C E S
@@ -1961,5 +2426,7 @@ struct v4l2_create_buffers {
    drivers/media/video/v4l2-compat-ioctl32.c as well! */
 
 #define BASE_VIDIOC_PRIVATE	192		/* 192-255 are private */
+#define VIDIOC_P_EXTIN_G_EX_INFO	_IOR('V', BASE_VIDIOC_PRIVATE+0, struct av_ex_info)
+
 
 #endif /* _UAPI__LINUX_VIDEODEV2_H */

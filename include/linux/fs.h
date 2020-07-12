@@ -746,6 +746,9 @@ struct file_ra_state {
 	unsigned int ra_pages;		/* Maximum readahead window */
 	unsigned int mmap_miss;		/* Cache miss stat for mmap accesses */
 	loff_t prev_pos;		/* Cache last read() position */
+#ifdef CONFIG_FS_SEL_READAHEAD
+	atomic_t *state;            /* Readahead enabled or disabled */
+#endif
 };
 
 /*
@@ -805,6 +808,9 @@ struct file {
 	struct address_space	*f_mapping;
 #ifdef CONFIG_DEBUG_WRITECOUNT
 	unsigned long f_mnt_write_state;
+#endif
+#ifdef CONFIG_FD_PID
+	struct pid *f_pid;
 #endif
 };
 
@@ -1877,6 +1883,7 @@ extern struct vfsmount *collect_mounts(struct path *);
 extern void drop_collected_mounts(struct vfsmount *);
 extern int iterate_mounts(int (*)(struct vfsmount *, void *), void *,
 			  struct vfsmount *);
+extern void print_mounts(void);
 extern int vfs_statfs(struct path *, struct kstatfs *);
 extern int user_statfs(const char __user *, struct kstatfs *);
 extern int fd_statfs(int, struct kstatfs *);

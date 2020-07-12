@@ -1,6 +1,5 @@
 /*
  * Copyright (c) 2010-2011 Atheros Communications Inc.
- * Copyright (c) 2011 Qualcomm Atheros, Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -19,13 +18,18 @@
 
 #ifdef CONFIG_NL80211_TESTMODE
 
+void ath6kl_tm_rx_report_event(struct ath6kl *ar, void *buf, size_t buf_len);
 void ath6kl_tm_rx_event(struct ath6kl *ar, void *buf, size_t buf_len);
 int ath6kl_tm_cmd(struct wiphy *wiphy, void *data, int len);
-
+void ath6kl_wlan_hb_event(struct ath6kl *ar, u8 value, void *buf,
+	size_t buf_len);
+#ifdef ATH6KL_SUPPORT_WIFI_DISC
+void ath6kl_tm_disc_event(struct ath6kl *ar, void *buf, size_t buf_len);
+#endif
 #else
 
-static inline void ath6kl_tm_rx_event(struct ath6kl *ar, void *buf,
-				      size_t buf_len)
+static inline void ath6kl_tm_rx_report_event(struct ath6kl *ar, void *buf,
+	size_t buf_len)
 {
 }
 
@@ -34,4 +38,19 @@ static inline int ath6kl_tm_cmd(struct wiphy *wiphy, void *data, int len)
 	return 0;
 }
 
+static inline void ath6kl_tm_rx_event(struct ath6kl *ar, void *buf,
+	size_t buf_len)
+{
+}
+
+static inline void ath6kl_wlan_hb_event(struct ath6kl *ar, u8 value, void *buf,
+	size_t buf_len)
+{
+}
+#ifdef ATH6KL_SUPPORT_WIFI_DISC
+static inline void ath6kl_tm_disc_event(struct ath6kl *ar, void *buf,
+	size_t buf_len)
+{
+}
+#endif
 #endif

@@ -21,4 +21,10 @@ int mpage_writepages(struct address_space *mapping,
 int mpage_writepage(struct page *page, get_block_t *get_block,
 		struct writeback_control *wbc);
 
+/*selp patch : mpage_alloc, mpage_bio_submit */
+struct bio *mpage_alloc(struct block_device *bdev,
+		sector_t first_sector, int nr_vecs, gfp_t gfp_flags);
+struct bio *mpage_bio_submit(int rw, struct bio *bio);
+
+
 #endif

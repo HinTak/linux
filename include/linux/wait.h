@@ -15,7 +15,12 @@ int default_wake_function(wait_queue_t *wait, unsigned mode, int flags, void *ke
 struct __wait_queue {
 	unsigned int flags;
 #define WQ_FLAG_EXCLUSIVE	0x01
+
+#ifdef __cplusplus
+	void *_private;
+#else
 	void *private;
+#endif
 	wait_queue_func_t func;
 	struct list_head task_list;
 };
@@ -81,7 +86,11 @@ extern void __init_waitqueue_head(wait_queue_head_t *q, const char *name, struct
 static inline void init_waitqueue_entry(wait_queue_t *q, struct task_struct *p)
 {
 	q->flags = 0;
+#ifdef __cplusplus
+	q->_private = p;
+#else
 	q->private = p;
+#endif
 	q->func = default_wake_function;
 }
 
@@ -89,7 +98,11 @@ static inline void init_waitqueue_func_entry(wait_queue_t *q,
 					wait_queue_func_t func)
 {
 	q->flags = 0;
+#ifdef __cplusplus
+	q->_private = NULL;
+#else
 	q->private = NULL;
+#endif
 	q->func = func;
 }
 
@@ -102,9 +115,9 @@ extern void add_wait_queue(wait_queue_head_t *q, wait_queue_t *wait);
 extern void add_wait_queue_exclusive(wait_queue_head_t *q, wait_queue_t *wait);
 extern void remove_wait_queue(wait_queue_head_t *q, wait_queue_t *wait);
 
-static inline void __add_wait_queue(wait_queue_head_t *head, wait_queue_t *new)
+static inline void __add_wait_queue(wait_queue_head_t *head, wait_queue_t *_new)
 {
-	list_add(&new->task_list, &head->task_list);
+	list_add(&_new->task_list, &head->task_list);
 }
 
 /*
@@ -118,9 +131,9 @@ static inline void __add_wait_queue_exclusive(wait_queue_head_t *q,
 }
 
 static inline void __add_wait_queue_tail(wait_queue_head_t *head,
-					 wait_queue_t *new)
+					 wait_queue_t *_new)
 {
-	list_add_tail(&new->task_list, &head->task_list);
+	list_add_tail(&_new->task_list, &head->task_list);
 }
 
 static inline void __add_wait_queue_tail_exclusive(wait_queue_head_t *q,

@@ -159,7 +159,12 @@ extern s32 i2c_smbus_write_i2c_block_data(const struct i2c_client *client,
  * not allowed.
  */
 struct i2c_driver {
+
+#ifdef __cplusplus
+	unsigned int _class;
+#else
 	unsigned int class;
+#endif
 
 	/* Notifies the driver that a new bus has appeared. You should avoid
 	 * using this, it will be removed in a near future.
@@ -421,6 +426,9 @@ struct i2c_adapter {
 
 	int timeout;			/* in jiffies */
 	int retries;
+#if defined(CONFIG_ARCH_SDP)
+	int byte_delay;
+#endif
 	struct device dev;		/* the adapter device */
 
 	int nr;

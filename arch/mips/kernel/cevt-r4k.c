@@ -54,6 +54,29 @@ irqreturn_t c0_compare_interrupt(int irq, void *dev_id)
 	struct clock_event_device *cd;
 	int cpu = smp_processor_id();
 
+	/* VDLinux 3.x , based VDLP.4.2.1.x default patch No.12,
+	detect kernel stack overflow, SP Team 2010-02-08 */
+#ifdef CONFIG_DEBUG_STACKOVERFLOW
+#ifndef STACK_WARN
+#define STACK_WARN (THREAD_SIZE/8)
+#endif
+	extern void show_regs(struct pt_regs *);
+
+	/* Debugging check for stack overflow */
+	{
+		register unsigned long sp __asm__("sp");
+		register unsigned long ti __asm__("$28");
+		extern void print_modules(void);
+
+		if (unlikely(sp < ti + sizeof(struct thread_info) + STACK_WARN)) {
+			printk(KERN_ERR "stack overflow: 0x%lx\n", sp);
+			print_modules();
+			show_regs(get_irq_regs());
+			dump_stack();
+		}
+	}
+#endif
+
 	/*
 	 * Suckage alert:
 	 * Before R2 of the architecture there was no way to see if a

@@ -31,6 +31,8 @@
 
 
 #define DMX_FILTER_SIZE 16
+#define DMX_BIG_SECTION_BUFFER_SIZE 	(128*1024)
+#define DMX_SMALL_SECTION_BUFFER_SIZE	(8*1024)
 
 typedef enum
 {
@@ -49,6 +51,12 @@ typedef enum
 	DMX_IN_FRONTEND, /* Input from a front-end device.  */
 	DMX_IN_DVR       /* Input from the logical DVR device.  */
 } dmx_input_t;
+
+
+typedef enum {
+	DMX_REC_MODE_DIGITAL,
+	DMX_REC_MODE_ANALOG,
+}record_mode_t;
 
 
 typedef enum dmx_ts_pes
@@ -79,6 +87,19 @@ typedef enum dmx_ts_pes
 
 	DMX_PES_OTHER
 } dmx_pes_type_t;
+
+typedef enum dmx_ca_type
+{
+	DMX_CA_BYPASS = 0,
+	DMX_CA_DES_ECB,
+	DMX_CA_3DES_CBC,
+	DMX_CA_3DES_ECB,
+	DMX_CA_AES_ECB,
+	DMX_CA_AES_CBC,
+	DMX_CA_MULTI2,
+	DMX_CA_DVB_CSA,
+	DMX_CA_AES_CTR,
+} dmx_ca_type_t;
 
 #define DMX_PES_AUDIO    DMX_PES_AUDIO0
 #define DMX_PES_VIDEO    DMX_PES_VIDEO0
@@ -123,15 +144,28 @@ typedef struct dmx_caps {
 } dmx_caps_t;
 
 typedef enum {
-	DMX_SOURCE_FRONT0 = 0,
-	DMX_SOURCE_FRONT1,
-	DMX_SOURCE_FRONT2,
-	DMX_SOURCE_FRONT3,
+	DMX_SOURCE_FRONT0,	/*Default Tuner*/
+	DMX_SOURCE_FRONT1,	/*First Parallel*/
+	DMX_SOURCE_FRONT2,	/*Not used in samsung soc*/
+	DMX_SOURCE_FRONT3,	/*Second Parallel*/
+	DMX_SOURCE_FRONT4,	/*First Serial*/
+	DMX_SOURCE_FRONT5,	/*Second Serial*/
 	DMX_SOURCE_DVR0   = 16,
 	DMX_SOURCE_DVR1,
 	DMX_SOURCE_DVR2,
-	DMX_SOURCE_DVR3
+	DMX_SOURCE_DVR3,
 } dmx_source_t;
+
+typedef enum {
+	DMX_OUTPUT_NONE,
+	DMX_OUTPUT_EXT1,
+	DMX_OUTPUT_EXT2,
+	DMX_OUTPUT_EXT3,
+	DMX_OUTPUT_EXT4,
+	DMX_OUTPUT_EXT5,
+	DMX_OUTPUT_PVR1,
+	DMX_OUTPUT_PVR2,
+} dmx_redirect_t;
 
 struct dmx_stc {
 	unsigned int num;	/* input : which STC? 0..N */
@@ -139,6 +173,98 @@ struct dmx_stc {
 	__u64 stc;		/* output: stc in 'base'*90 kHz units */
 };
 
+enum dmx_status_cmd {
+	DEMUX_STATUS_TSDLOCK
+};
+
+struct dmx_status {
+	__u32 cmd;
+	__u32 data;
+};
+
+#define DRY_CRYPT_KEY_LEN 16
+typedef struct dvr_key_info
+{
+    __u8  key_table[DRY_CRYPT_KEY_LEN];    // < [in] key value (in little endian and in the order of first key,second key, etc.)
+    __u32 key_len;    // < [in] Length of the key (in number of bytes)
+    __u8* iv;     // < [in] IV (Initial Vector) value used only in CBC mode
+    __u32 iv_len;     // < [in] IV length used only in CBC mode
+    __u8* modulo;///< [in] Pointer of 256bytes Modulo values. used only in RSA mode
+    __u32 modulo_len; ///< [in] Length of 256bytes Modulo values. used only in RSA mode
+}dvr_key_info_t;
+    
+typedef struct dvr_key
+{
+   __s32 odd_key; /* 1: odd, 0: even */
+   dvr_key_info_t key;
+}dvr_scr_t;
+
+
+typedef enum {
+    DVR_PIC_TYPE_I, ///< I Picture
+    DVR_PIC_TYPE_B, ///< B Picture
+    DVR_PIC_TYPE_P, ///< P Picture
+    DVR_SEQ_HDR, ///< Sequence Header
+    DVR_PIC_TYPE_NULL,
+} dvr_pic_type_t;
+
+
+typedef struct
+{
+    dvr_pic_type_t pic_type;  
+    __u64 pkg_count;          
+    __u32 time;            
+    __u64 pts;   //added for PVR_PTS           
+} dvr_index_info_t;
+
+typedef enum {
+    DVR_VIDEO_FAMAT_MPEG,
+    DVR_VIDEO_FAMAT_H264,
+    DVR_VIDEO_FAMAT_AVS,
+    DVR_VIDEO_FAMAT_HEVC,
+    DVR_VIDEO_FAMAT_NONE, /* audio only channel */
+} dvr_video_format_t;
+
+typedef struct {
+    dvr_video_format_t video_format;
+ __u32 interval; /* time in ms between index events for audio only channel. */
+} dvr_index_config_t;
+
+/* Parameter for DVR_SET_DATA_TYPE */
+#define DVR_DATA_TYPE_NORMAL        0
+#define DVR_DATA_TYPE_SCRAMBLED     1
+
+
+typedef struct dvr_hdr {
+	__u64 pkg_count;
+	__u64 pts;
+	__u32 picture_type;
+#define DVR_PIC_TYPE_I		0
+#define DVR_PIC_TYPE_P		1
+#define DVR_PIC_TYPE_B		2
+#define DVR_SEQ_HDR		3
+#define DVR_PIC_TYPE_NULL	4
+	__u32 time;
+} dvr_hdr_t;
+
+typedef struct dvr_play_buff {
+	int level;
+	int total;
+} dvr_play_buff_t;
+
+typedef struct ca_config {
+	int mode;
+	dmx_ca_type_t ca_type;
+} ca_config_t;
+
+typedef enum dvr_play_state
+{
+	DVR_PLAY_STATE_STOP,
+	DVR_PLAY_STATE_PLAY,
+	DVR_PLAY_STATE_PAUSE,
+	DVR_PLAY_STATE_RESUME,
+	DVR_PLAY_STATE_MAX
+} dvr_play_state_t;
 
 #define DMX_START                _IO('o', 41)
 #define DMX_STOP                 _IO('o', 42)
@@ -151,5 +277,24 @@ struct dmx_stc {
 #define DMX_GET_STC              _IOWR('o', 50, struct dmx_stc)
 #define DMX_ADD_PID              _IOW('o', 51, __u16)
 #define DMX_REMOVE_PID           _IOW('o', 52, __u16)
+
+
+//#define DVR_SET_DATA_TYPE        _IOW('o', 53, __u32) /* set weather the dvr record data encrypted */
+#define DVR_SET_DESCR            _IOW('o', 53, dvr_scr_t) /* set dvr decrypt key for playback scrambled data */
+#define DVR_SET_SCR              _IOW('o', 54, dvr_scr_t) /* set dvr encrypt key */
+#define DVR_IDX_SET_BUFFER_SIZE  _IO('o', 55) /* set dvr index data buffer size */
+#define DMX_GET_STATUS           _IOR('o', 57, struct dmx_status)
+#define DMX_SET_RECORD_MODE      _IO('o', 58)
+
+/* IOCTL numbers From 80 are private */
+#define DMX_IOCTL_BASE		96
+#define SDP_SET_TSD_SOURCE		_IOW('o', 97, dmx_source_t)
+#define SDP_SET_TSD_REDIRECT    _IOW('o', 98, dmx_redirect_t)
+#define DVR_IDX_SET_CONFIG      _IOWR('o', 99, dvr_index_config_t) /* set dvr recording config. */
+#define DVR_GET_PLAY_BUFFER     _IOWR('o', 100, dvr_play_buff_t) /* get pvr play buffer level */
+#define SDP_SET_CA_CONFIG       _IOW('o', 101, __u32)		/* set descrambler on/off */
+#define SDP_SET_CA_CTRL         _IOW('o', 102, ca_config_t)		/* set descrambler on/off, ca_type */
+#define DVR_SET_PLAY_STATE      _IOW('o', 103, dvr_play_state_t)  /* set PVR play state */
+#define DMX_IOCTL_END		127
 
 #endif /* _UAPI_DVBDMX_H_ */

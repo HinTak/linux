@@ -35,6 +35,8 @@
 #include <linux/pagemap.h>
 #include <linux/buffer_head.h>
 #include <linux/aio.h>
+#include <linux/slab.h>
+#include <linux/vmalloc.h>
 
 #include "udf_i.h"
 #include "udf_sb.h"
@@ -230,22 +232,100 @@ out:
 	return result;
 }
 
+int udf_extent_descriptor_cache_release(udf_extent_descriptor_cache *p_this);
 static int udf_release_file(struct inode *inode, struct file *filp)
 {
+#ifdef CONFIG_SSIF_EXT_CACHE
+	struct udf_inode_info *iinfo = UDF_I(inode);
+	atomic_dec(&(iinfo->extent_desc_cache.ref_count));
+	if (atomic_read(&(iinfo->extent_desc_cache.ref_count)) == 0)
+	udf_extent_descriptor_cache_release(&(iinfo->extent_desc_cache));
+#endif
 	if (filp->f_mode & FMODE_WRITE) {
 		down_write(&UDF_I(inode)->i_data_sem);
 		udf_discard_prealloc(inode);
 		udf_truncate_tail_extent(inode);
 		up_write(&UDF_I(inode)->i_data_sem);
 	}
+#ifdef CONFIG_SSIF_EXT_CACHE
+	iinfo->recent_access.sanity = ~(UDF3D_MAGIC_NUM);
+#endif
 	return 0;
 }
+
+#ifdef CONFIG_SSIF_EXT_CACHE
+void udf_extent_descriptor_cache_clear(udf_extent_descriptor_cache *p_this)
+{
+	int n;
+	p_this->sanity = ~UDF3D_MAGIC_NUM;
+	p_this->n_descriptors = 0;
+	for(n = 0; n < UDF3D_MAXN_PRELOAD_BLOCKS; n++){
+		p_this->descriptor_blocks[n] = (void*)0;
+	}
+	return;
+}
+
+void udf_release_data(struct buffer_head *bh);
+int udf_extent_descriptor_cache_release(udf_extent_descriptor_cache *p_this)
+{
+	int n=0;
+	if(p_this->sanity != UDF3D_MAGIC_NUM){
+		printk("udf_extent_descriptor_cache_release::Error-1\n");
+		return -1;
+	}
+	if(p_this->descriptor_blocks != NULL){
+		for(n = 0; n < p_this->n_descriptors; n++){
+			if(p_this->descriptor_blocks[n] != NULL){
+				udf_release_data((struct buffer_head*)p_this->descriptor_blocks[n]);
+				p_this->descriptor_blocks[n] = NULL;
+			}
+		}
+		vfree(p_this->descriptor_blocks);
+		p_this->descriptor_blocks=NULL;
+	}
+	p_this->sanity = ~(UDF3D_MAGIC_NUM);
+	p_this->n_descriptors = 0;
+	return n;
+}
+
+int8_t inode_bmap_preload_extent_blocks(struct inode *inode,
+				 struct kernel_lb_addr *bloc,
+				 uint32_t *extoffset,
+				 uint32_t *elen,
+				 struct buffer_head **bh,
+				 udf_extent_descriptor_cache *p_ext_desc_cache);
+
+int udf_extent_descriptor_cache_open_inode(
+       udf_extent_descriptor_cache* p_this, struct inode *inode)
+{
+	int n_blocks;
+	struct kernel_lb_addr bloc;
+	uint32_t extoffset;
+	uint32_t elen;
+	struct buffer_head *bh = NULL;
+	atomic_inc(&p_this->ref_count);
+	if (atomic_read(&p_this->ref_count) == 1) {
+		n_blocks = inode_bmap_preload_extent_blocks(inode, &bloc, &extoffset, &elen, &bh, p_this);
+		p_this->sanity = UDF3D_MAGIC_NUM;
+		return n_blocks;
+	} else
+		return 0;
+}
+
+static int udf_file_open(struct inode *inode, struct file *filp)
+{
+	struct udf_inode_info *iinfo = UDF_I(inode);
+	
+	udf_extent_descriptor_cache_open_inode(&(iinfo->extent_desc_cache), inode);
+	return generic_file_open(inode, filp);
+}
+#endif
 
 const struct file_operations udf_file_operations = {
 	.read			= do_sync_read,
 	.aio_read		= generic_file_aio_read,
 	.unlocked_ioctl		= udf_ioctl,
-	.open			= generic_file_open,
+	.open                   = udf_file_open,
 	.mmap			= generic_file_mmap,
 	.write			= do_sync_write,
 	.aio_write		= udf_file_aio_write,

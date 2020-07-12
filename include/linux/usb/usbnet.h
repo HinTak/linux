@@ -30,8 +30,11 @@ struct usbnet {
 	struct driver_info	*driver_info;
 	const char		*driver_name;
 	void			*driver_priv;
-	wait_queue_head_t	*wait;
+	wait_queue_head_t	wait;
 	struct mutex		phy_mutex;
+#ifdef CONFIG_SAMSUNG_HOST_USBNET_COMMON
+	u32			intf_id;
+#endif
 	unsigned char		suspend_count;
 	unsigned char		pkt_cnt, pkt_err;
 

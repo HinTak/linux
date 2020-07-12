@@ -78,6 +78,7 @@ static const char	hcd_name [] = "ohci_hcd";
 #include "ohci.h"
 #include "pci-quirks.h"
 
+static void host_dump(struct ohci_hcd *ohci);
 static void ohci_dump (struct ohci_hcd *ohci, int verbose);
 static int ohci_init (struct ohci_hcd *ohci);
 static void ohci_stop (struct usb_hcd *hcd);
@@ -287,6 +288,29 @@ fail:
 	return retval;
 }
 
+#ifdef SAMSUNG_PATCH_OHCI_HANG_RECOVERY_DURING_KILL_URB
+static int ohci_unlink_pending_urb (struct usb_hcd *hcd, struct urb *urb, int status)
+{
+	struct ohci_hcd         *ohci = hcd_to_ohci (hcd);
+	unsigned long           flags;
+
+	printk(KERN_EMERG"\n%s: starts..%p\n",__func__,urb);
+	spin_lock_irqsave (&ohci->lock, flags);
+	if (ohci->ed_rm_list) {
+		printk(KERN_EMERG"\n%s: call finish_unlinks..%p\n",__func__,urb);
+		finish_unlinks (ohci, ohci_frame_no(ohci));
+		printk(KERN_EMERG"\n%s: call finish_unlinks ends..%p\n",__func__,urb);
+	}
+	if (urb->hcpriv)
+		finish_urb(ohci, urb, status);
+	spin_unlock_irqrestore (&ohci->lock, flags);
+	printk(KERN_EMERG"\n%s: ends..%p\n", __func__,urb);
+	return 0;
+}
+#else
+#define		ohci_unlink_pending_urb		NULL
+#endif
+
 /*
  * decouple the URB from the HC queues (TDs, urb_priv).
  * reporting is always done
@@ -304,6 +328,11 @@ static int ohci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 #endif
 
 	spin_lock_irqsave (&ohci->lock, flags);
+#ifdef SAMSUNG_PATCH_RMB_WMB_AT_UNLINK
+	/* Making sure that all data of urb are proper and used only for full speed devices.*/
+	if ((urb != NULL) && (urb->dev != NULL) && (urb->dev->speed <= USB_SPEED_FULL))
+		 rmb();
+#endif
 	rc = usb_hcd_check_unlink_urb(hcd, urb, status);
 	if (rc) {
 		;	/* Do nothing */
@@ -773,7 +802,6 @@ retry:
 
 	return 0;
 }
-
 /*-------------------------------------------------------------------------*/
 
 /* an interrupt happens */
@@ -819,7 +847,12 @@ static irqreturn_t ohci_irq (struct usb_hcd *hcd)
 
 			schedule_work (&ohci->nec_work);
 		} else {
+		#ifdef CONFIG_DEBUG_KERNEL
+			host_dump(ohci);
 			ohci_err (ohci, "OHCI Unrecoverable Error, disabled\n");
+			ohci_err (ohci, "PLZ DO NOT TURN OFF!!!!! KEEP THE STATUS AND CONTACT sssol.lee or kiok7157.shin \n");
+			panic("PLZ DO NOT TURN OFF!!!!! KEEP THE STATUS AND CONTACT sssol.lee or kiok7157.shin \n");
+		#endif
 			ohci->rh_state = OHCI_RH_HALTED;
 			usb_hc_died(hcd);
 		}
@@ -1095,6 +1128,11 @@ static int __maybe_unused ohci_resume(struct usb_hcd *hcd, bool hibernated)
 MODULE_AUTHOR (DRIVER_AUTHOR);
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE ("GPL");
+
+#if defined(CONFIG_ARCH_SDP) && (defined(CONFIG_OF)||defined(CONFIG_ARCH_SDP1207))
+#include "ohci-sdp.c"
+#define PLATFORM_DRIVER		sdp_ohci_driver
+#endif
 
 #ifdef CONFIG_PCI
 #include "ohci-pci.c"

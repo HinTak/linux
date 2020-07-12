@@ -1116,6 +1116,12 @@ config MFD_WM8994
 	  core support for the WM8994, in order to use the actual
 	  functionaltiy of the device other drivers must be enabled.
 
+config MFD_SDP_MICOM
+	bool "Support for SDP MICOM"
+	select MFD_CORE
+	help
+	  Support for the SDP MICOM
+
 endmenu
 endif
 

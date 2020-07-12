@@ -49,6 +49,8 @@
 #ifndef __LINUX_V4L2_CONTROLS_H
 #define __LINUX_V4L2_CONTROLS_H
 
+#include <linux/types.h>
+
 /* Control classes */
 #define V4L2_CTRL_CLASS_USER		0x00980000	/* Old-style 'user' controls */
 #define V4L2_CTRL_CLASS_MPEG		0x00990000	/* MPEG-compression controls */
@@ -60,6 +62,9 @@
 #define V4L2_CTRL_CLASS_IMAGE_PROC	0x009f0000	/* Image processing controls */
 #define V4L2_CTRL_CLASS_DV		0x00a00000	/* Digital Video controls */
 #define V4L2_CTRL_CLASS_FM_RX		0x00a10000	/* Digital Video controls */
+#define V4L2_CTRL_CLASS_CODEC		0x00a20000
+#define V4L2_CTRL_CLASS_TUNER		0x00a30000	/* Tuner Video controls */
+#define V4L2_CTRL_CLASS_SDPAUD		0x00a40000	/* Tuner Video controls */
 
 /* User-class control IDs */
 
@@ -140,6 +145,21 @@ enum v4l2_colorfx {
 
 /* last CID + 1 */
 #define V4L2_CID_LASTP1                         (V4L2_CID_BASE+43)
+
+/* AVD Status  */
+#define V4L2_CID_SYNC_LOCK                      (V4L2_CID_BASE+44)
+#define V4L2_CID_MACROVISION                    (V4L2_CID_BASE+45)
+#define V4L2_CID_CGMS                           (V4L2_CID_BASE+46)
+#define V4L2_CID_NOISE                          (V4L2_CID_BASE+47)
+#define V4L2_CID_ALLOW_3DCOMB                   (V4L2_CID_BASE+48)
+#define V4L2_CID_50HZ                           (V4L2_CID_BASE+49)
+#define V4L2_CID_STANDARD                       (V4L2_CID_BASE+50)
+#define V4L2_CID_SCART                          (V4L2_CID_BASE+51)
+#define V4L2_CID_DETECT_BURST                   (V4L2_CID_BASE+52)
+#define V4L2_CID_AUTO_PRGM_LOCK                 (V4L2_CID_BASE+53)
+#define V4L2_CID_PAL_SWING                      (V4L2_CID_BASE+54)
+#define V4L2_CID_QPI_STATUS                     (V4L2_CID_BASE+55)
+#define V4L2_CID_BURST_EW                   (V4L2_CID_BASE+56)
 
 /* USER-class private control IDs */
 
@@ -841,6 +861,43 @@ enum v4l2_dv_rgb_range {
 #define	V4L2_CID_DV_RX_POWER_PRESENT		(V4L2_CID_DV_CLASS_BASE + 100)
 #define V4L2_CID_DV_RX_RGB_RANGE		(V4L2_CID_DV_CLASS_BASE + 101)
 
+#define V4L2_CID_DV_G_RESOLUTION		(V4L2_CID_DV_CLASS_BASE + 102)
+#define V4L2_CID_DV_G_HDMI_STATUS		(V4L2_CID_DV_CLASS_BASE + 103)
+#define V4L2_CID_DV_G_SIGNAL_INFO		(V4L2_CID_DV_CLASS_BASE + 104)
+#define V4L2_CID_DV_G_BLACKLEVEL    		(V4L2_CID_DV_CLASS_BASE + 105)
+#define V4L2_CID_DV_S_RESOLUTION		(V4L2_CID_DV_CLASS_BASE + 106)
+#define V4L2_CID_DV_S_BLACKLEVEL		(V4L2_CID_DV_CLASS_BASE + 107)
+#define V4L2_CID_DV_S_PC_MODE 			(V4L2_CID_DV_CLASS_BASE + 108)
+#define V4L2_CID_DV_S_VBILINE    		(V4L2_CID_DV_CLASS_BASE + 109)
+#define V4L2_CID_DV_S_VBI_ONOFF    		(V4L2_CID_DV_CLASS_BASE + 110)
+#define V4L2_CID_DV_G_WSS_INFO    		(V4L2_CID_DV_CLASS_BASE + 111)
+#define V4L2_CID_DV_G_VPS_INFO    		(V4L2_CID_DV_CLASS_BASE + 112)
+#define V4L2_CID_DV_S_INT_PATTERN       (V4L2_CID_DV_CLASS_BASE + 113)
+#define V4L2_CID_DV_S_CONNECT_MODE      (V4L2_CID_DV_CLASS_BASE + 114)
+#define V4L2_CID_DV_G_HDCP_STATUS       (V4L2_CID_DV_CLASS_BASE + 115)
+
+/* added by dijj ,for Samsung DTV */
+#define V4L2_CID_DV_S_ARC               (V4L2_CID_DV_CLASS_BASE + 102 +50)
+#define V4L2_CID_DV_S_HOTPLUG           (V4L2_CID_DV_CLASS_BASE + 103 +50)
+#define V4L2_CID_DV_MHL_SENSE           (V4L2_CID_DV_CLASS_BASE + 104 +50)
+#define V4L2_CID_DV_G_ARC_PORT          (V4L2_CID_DV_CLASS_BASE + 105 +50)
+#define V4L2_CID_DV_G_MHL_PORT          (V4L2_CID_DV_CLASS_BASE + 106 +50)
+#define V4L2_CID_DV_S_CLK_TERM          (V4L2_CID_DV_CLASS_BASE + 107 +50)
+#define V4L2_CID_DV_G_CLK_TERM_DURATION (V4L2_CID_DV_CLASS_BASE + 108 +50)
+#define V4L2_CID_DV_G_SWITCH_INFO       (V4L2_CID_DV_CLASS_BASE + 109 +50)
+#define V4L2_CID_DV_S_CONDITION         (V4L2_CID_DV_CLASS_BASE + 110 +50)
+#define V4L2_CID_DV_S_PATTERN           (V4L2_CID_DV_CLASS_BASE + 111 +50)
+#define V4L2_CID_DV_S_FACTORY_ITEM      (V4L2_CID_DV_CLASS_BASE + 112 +50)
+#define V4L2_CID_DV_S_DEPENDENCE        (V4L2_CID_DV_CLASS_BASE + 113 +50)
+#define V4L2_CID_DV_S_FAKE_RESOLUTION   (V4L2_CID_DV_CLASS_BASE + 114 +50)
+#define V4L2_CID_DV_T_LOOPBACK          (V4L2_CID_DV_CLASS_BASE + 115 +50)
+#define V4L2_CID_DV_CONVERT_VAL         (V4L2_CID_DV_CLASS_BASE + 116 +50)
+#define V4L2_CID_DV_G_HDMI_INFO         (V4L2_CID_DV_CLASS_BASE + 121 +50)  
+#define V4L2_CID_DV_G_EDID              (V4L2_CID_DV_CLASS_BASE + 124 +50)
+#define V4L2_CID_DV_SEND_CMD            (V4L2_CID_DV_CLASS_BASE + 125 +50)
+#define V4L2_CID_DV_G_BUS_DATA          (V4L2_CID_DV_CLASS_BASE + 126 +50)
+
+
 #define V4L2_CID_FM_RX_CLASS_BASE		(V4L2_CTRL_CLASS_FM_RX | 0x900)
 #define V4L2_CID_FM_RX_CLASS			(V4L2_CTRL_CLASS_FM_RX | 1)
 
@@ -852,5 +909,176 @@ enum v4l2_deemphasis {
 };
 
 #define V4L2_CID_RDS_RECEPTION			(V4L2_CID_FM_RX_CLASS_BASE + 2)
+
+
+/* Codec class controls */
+
+#define V4L2_CID_SET_PARSE_INFO					(V4L2_CTRL_CLASS_CODEC + 1)
+#define V4L2_CID_SET_EXTRA_DATA					(V4L2_CTRL_CLASS_CODEC + 3)
+
+#define V4L2_CID_GET_USERDATA_CC				 	(V4L2_CTRL_CLASS_CODEC + 4)
+/* REMIND : these ext. API is obsolate */
+/* #define V4L2_CID_EVENT_STATUS_UNMUTE				(V4L2_CTRL_CLASS_CODEC + 5)
+#define V4L2_CID_EVENT_STATUS_LOCK				(V4L2_CTRL_CLASS_CODEC + 6)*/
+
+/* REMIND : these ext. API is obsolate */
+/*#define V4L2_CID_USERDATA_FILTERING_START		(V4L2_CTRL_CLASS_CODEC + 7)
+#define V4L2_CID_USERDATA_FILTERING_STOP			(V4L2_CTRL_CLASS_CODEC + 8)*/
+
+#define V4L2_CID_GET_VIDEO_INFO					(V4L2_CTRL_CLASS_CODEC + 9)
+#define V4L2_CID_GET_PTS							(V4L2_CTRL_CLASS_CODEC + 10)
+
+
+#define V4L2_CID_GET_DISPLAY_FRAME_INFO			(V4L2_CTRL_CLASS_CODEC + 20)
+
+#define V4L2_CID_SET_DIMENSION 				(V4L2_CTRL_CLASS_CODEC + 21)
+#define V4L2_CID_SET_TRICK				       	(V4L2_CTRL_CLASS_CODEC + 22)
+/* REMIND : these ext. API is obsolate */
+/*#define V4L2_CID_SET_VIRTUAL_STOP		       	(V4L2_CTRL_CLASS_CODEC + 23)
+#define V4L2_CID_SET_VIRTUAL_START		       (V4L2_CTRL_CLASS_CODEC + 24)*/
+#define V4L2_CID_DECORDER_FLUSH				(V4L2_CTRL_CLASS_CODEC + 23)
+#define V4L2_CID_SET_STEP_PAUSE		       	(V4L2_CTRL_CLASS_CODEC + 25)
+
+/* REMIND : these ext. API is obsolate */
+/* #define V4L2_CID_EVENT_INFO					(V4L2_CTRL_CLASS_CODEC + 30) */
+#define V4L2_CID_GET_USERDATA_FPA			(V4L2_CTRL_CLASS_CODEC + 31)
+#define V4L2_CID_GET_USERDATA_AFD			(V4L2_CTRL_CLASS_CODEC + 32)
+
+/* for SDP_HEN control id */
+#define V4L2_CID_SET_BITRATE				(V4L2_CTRL_CLASS_CODEC + 100)
+
+#define V4L2_CID_INPUT_SOURCE		((V4L2_CTRL_CLASS_MPEG | 0x1200) + 1)
+#define V4L2_CID_SECURE_SUBMIT	((V4L2_CTRL_CLASS_MPEG | 0x1200) + 2)
+
+#define V4L2_CID_GET_SLICE_ERR_CNT	((V4L2_CTRL_CLASS_MPEG | 0x1200) + 4)
+#define V4L2_CID_INPUT_EXT		((V4L2_CTRL_CLASS_MPEG | 0x1200) + 5)
+#define V4L2_CID_GET_BITRATE	((V4L2_CTRL_CLASS_MPEG | 0x1200) + 6)
+
+
+/*  Tuner-class control IDs defined by V4L2 */
+#define V4L2_CID_TUNER_CLASS_BASE	(V4L2_CTRL_CLASS_TUNER | 0x900)
+#define V4L2_CID_TUNER_CLASS		(V4L2_CTRL_CLASS_TUNER | 1)
+#define	V4L2_CID_TUNER_LOCK_TIME	(V4L2_CID_TUNER_CLASS_BASE + 1)
+#define	V4L2_CID_TUNER_G_FINE_TUNE 	(V4L2_CID_TUNER_CLASS_BASE + 2)
+#define	V4L2_CID_TUNER_S_FINE_TUNE 	(V4L2_CID_TUNER_CLASS_BASE + 3)
+#define	V4L2_CID_TUNER_G_TUNE_TYPE 	(V4L2_CID_TUNER_CLASS_BASE + 4)
+
+enum TUNER_RF_MODE
+{
+	TUNER_RF_AIR = 0,
+	TUNER_RF_CABLE,
+	TUNER_RF_POD,
+	TUNER_RF_SATELLITE
+};
+#define	V4L2_CID_TUNER_S_RF_MODE 	(V4L2_CID_TUNER_CLASS_BASE + 5)
+#define	V4L2_CID_TUNER_SCAN_MODE	(V4L2_CID_TUNER_CLASS_BASE + 6) /* Scan mode enable, 1:Enable scan mode, 0:Normal tune mode. */
+#define V4L2_CID_TUNER_S_SOUNDSYSTEM_MODE (V4L2_CID_TUNER_CLASS_BASE + 7) /* SoundSystem Mode v4l2_soundsystem_mode_t defined in videodev2.h */
+#define V4L2_CID_TUNER_G_SUPPORT_CROSSTALK_NOISE_REDUCTION (V4L2_CID_TUNER_CLASS_BASE + 8) /* For Analog Channel Clean View. return : 0 - Not supported , 1 - Supported. */
+#define V4L2_CID_TUNER_S_CROSSTALK_NOISE_REDUCTION (V4L2_CID_TUNER_CLASS_BASE + 9) /* Set Crosstalk Noise Reduction true : On, false : Off */
+#define V4L2_CID_TUNER_S_CROSSTALK_NOISE_REDUCTION_DEMO (V4L2_CID_TUNER_CLASS_BASE + 10) /* Set Crosstalk Noise Reduction Demo true : On, false : Off */
+#define V4L2_CID_TUNER_G_ATV_AUTOSEARCH_TYPE (V4L2_CID_TUNER_CLASS_BASE + 11) /* Atv Auto Search Type AFT FAST :0 , HW SIMPLE TUNE :1 ,SW SIMPLE TUNE :2 */
+
+enum v4l2_userdata_type {
+	SDP_MFC_USERDATA_CC		= 0x01,	/* Closed Caption Data(Only from Picture User Data)*/
+	SDP_MFC_USERDATA_AFD	= 0x02,	/* Digital Active Format Descriptor */
+	SDP_MFC_USERDATA_FPA	= 0x04,	/* Frame Packing Arrangement in H.264 SEI */
+}; 
+
+enum  v4l2_sdp_not_support_type {
+	SDP_SUPPORT =0,     
+	SDP_NOT_SUPPORT_FORMAT = 1,  
+	SDP_NOT_SUPPORT_SIZE = 2 ,  
+	SDP_NOT_SUPPORT_FRAME_RATE = 3, 
+	SDP_NOT_SUPPORT_PROFILE = 4,  
+	SDP_NOT_SUPPORT_DECODING = 5,  
+	SDP_NOT_SUPPORT_TRICK = 6,  
+	SDP_NOT_DETECTED = 255,  
+};
+
+struct v4l2_parse_info {
+	__u32 divx_version;
+	__u32 rv_version;
+	__u32 width;
+	__u32 height;
+	__u32 dividend;
+	__u32 divisor;
+	__u32 container;
+	__u32 short_header;
+	__u32 use_pts;
+	__u32 rcv_format;
+};
+
+struct v4l2_sdp_vbi_format {
+	__u32 data_type;				// 0x1 : DTV_CC, 0x2 : DTV_AFD, 0x4 : DTV_FPA
+	__u32 picture_structure;		// for digital CC
+	__u32 top_field_first;			// for digital CC
+	__u32 temporal_reference;	// for digital CC
+	__u32 pts;					// for digital CC
+	__u32 vbi_line;				// source VBI Line Number, for analog
+	__u32 valid;					// 0 : invalid, 1:valid 
+	__u32 payload_size;			// byte
+	__u8  payload[128];
+	__u32 reserved[2]; 
+};
+
+struct v4l2_vbi_onoff{
+        __u16 linestd;
+        __u8 onoff;
+};
+
+struct v4l2_vbi_lines {
+       __u16 linestd;
+       __u16 startline;
+       __u16 endline;
+};
+
+/* v4l2 sdpmfc specific */
+enum v4l2_sdpmfc_dimension_type {
+	V4L2_SDPMFC_DIMENSION_2D_MODE				= 0, 	///< 2D Frame
+	V4L2_SDPMFC_DIMENSION_KR3D_MODE				= 1,	///< 3D Left Frame
+	V4L2_SDPMFC_DIMENSION_HYBRID3D_MODE			= 2,	///< 3D Right Frame
+	V4L2_SDPMFC_DIMENSION_SEQUENTIAL_3D_MODE	= 3,	///< For SVAF	// W0000127061
+	V4L2_SDPMFC_DIMENSION_MAX,
+};
+
+enum v4l2_sdpmfc_dec_mode {
+	V4L2_SDPMFD_DECMODE_I = 0,				/*!< decoding I picture */
+	V4L2_SDPMFD_DECMODE_IP,					/*!< decoding I and P picture */
+	V4L2_SDPMFD_DECMODE_IPB,				/*!< decoding all picture */
+	V4L2_SDPMFD_DECMODE_MAX	
+};
+
+enum v4l2_sdpmfc_speed {
+	V4L2_SDPMFD_SPEED_2X = 0,				/*!< 2X */
+	V4L2_SDPMFD_SPEED_1X,					/*!< normal speed */
+	V4L2_SDPMFD_SPEED_0_5X,					/*!< 0.5	=> 1/2 */
+	V4L2_SDPMFD_SPEED_0_33X,				/*!< 0.33	=> 1/3 */
+	V4L2_SDPMFD_SPEED_0_25X,				/*!< 0.25	=> 1/4 */
+	V4L2_SDPMFD_SPEED_0_125X,				/*!< 0.125	=> 1/8 */
+	V4L2_SDPMFD_SPEED_0_0625X,				/*!< 0.0625	=> 1/16 */
+	V4L2_SDPMFD_SPEED_0_0312X,              /*!< 0.0625	=> 1/32 */
+    V4L2_SDPMFD_SPEED_0_0156X,              /*!< 0.0625 => 1/64 */
+	V4L2_SDPMFD_SPEED_0,					/*!< stop */
+	//TV/BD Common
+	V4L2_SDPMFD_SPEED_PTS,					/*!< stop */
+	V4L2_SDPMFD_SPEED_CNT,
+	V4L2_SDPMFD_SPEED_MAX	
+};
+
+struct v4l2_sdpmfc_trick_setting {
+	enum v4l2_sdpmfc_dec_mode dec_mode;
+	enum v4l2_sdpmfc_speed dec_speed;
+	unsigned int repeat_count;	
+};
+
+
+enum v4l2_sdpmfc_input_type {
+	V4L2_SDPMFC_INPUT_AIR		= 0,
+	V4L2_SDPMFC_INPUT_MM		= 1,
+	V4L2_SDPMFC_INPUT_AIR_CLIP	= 2,
+	V4L2_SDPMFC_INPUT_MM_CLIP	= 3,
+	V4L2_SDPMFC_INPUT_PVR		= 4,
+	V4L2_SDPMFC_INPUT_NDEC		= 5,
+};
 
 #endif

@@ -53,6 +53,9 @@ static void file_free_rcu(struct rcu_head *head)
 
 static inline void file_free(struct file *f)
 {
+#ifdef CONFIG_FD_PID
+	put_pid(f->f_pid);
+#endif
 	percpu_counter_dec(&nr_files);
 	file_check_state(f);
 	call_rcu(&f->f_u.fu_rcuhead, file_free_rcu);
@@ -140,6 +143,10 @@ struct file *get_empty_filp(void)
 	spin_lock_init(&f->f_lock);
 	eventpoll_init_file(f);
 	/* f->f_version: 0 */
+#ifdef CONFIG_FD_PID
+	if (current)
+		f->f_pid = get_task_pid(current, PIDTYPE_PID);
+#endif
 	return f;
 
 over:
@@ -211,10 +218,10 @@ static void drop_file_write_access(struct file *file)
 	struct dentry *dentry = file->f_path.dentry;
 	struct inode *inode = dentry->d_inode;
 
-	put_write_access(inode);
-
 	if (special_file(inode->i_mode))
 		return;
+
+	put_write_access(inode);
 	if (file_check_writeable(file) != 0)
 		return;
 	__mnt_drop_write(mnt);
@@ -435,6 +442,23 @@ void file_sb_list_del(struct file *file)
 }
 
 #endif
+
+int iterate_sb_files(struct super_block *sb,
+		     int (*func)(struct file *, void *),
+		     void *arg)
+{
+	struct file *f;
+	int res = 0;
+
+	lg_global_lock(&files_lglock);
+	do_file_list_for_each_entry(sb, f) {
+		res = func(f, arg);
+		if (res)
+			break;
+	} while_file_list_for_each_entry;
+	lg_global_unlock(&files_lglock);
+	return res;
+}
 
 /**
  *	mark_files_ro - mark all files read-only

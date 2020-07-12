@@ -34,6 +34,10 @@ int __read_mostly watchdog_thresh = 10;
 static int __read_mostly watchdog_disabled;
 static u64 __read_mostly sample_period;
 
+#ifdef CONFIG_IRQ_TIME
+extern void show_irq(void);
+#endif
+
 static DEFINE_PER_CPU(unsigned long, watchdog_touch_ts);
 static DEFINE_PER_CPU(struct task_struct *, softlockup_watchdog);
 static DEFINE_PER_CPU(struct hrtimer, watchdog_hrtimer);
@@ -130,9 +134,29 @@ static void set_sample_period(void)
 	sample_period = get_softlockup_thresh() * ((u64)NSEC_PER_SEC / 5);
 }
 
+#ifdef CONFIG_IRQ_TIME
+struct irq_desc_debug{
+        long            last_time;
+        long            last_time_kth;
+        long            last_time_tint;
+        const char      *name;
+        unsigned int    irq;
+        unsigned int    irq_run;
+};
+extern struct irq_desc_debug irq_desc_last[4];
+#endif
+
 /* Commands for resetting the watchdog */
 static void __touch_watchdog(void)
 {
+#ifdef CONFIG_IRQ_TIME
+        int this_cpu = smp_processor_id();
+        struct timeval now;
+
+        do_gettimeofday(&now);
+        irq_desc_last[this_cpu].last_time_kth=(now.tv_sec*1000000) + now.tv_usec;
+#endif
+
 	__this_cpu_write(watchdog_touch_ts, get_timestamp());
 }
 
@@ -322,6 +346,10 @@ static enum hrtimer_restart watchdog_timer_fn(struct hrtimer *hrtimer)
 			show_regs(regs);
 		else
 			dump_stack();
+
+#ifdef CONFIG_IRQ_TIME
+                show_irq();
+#endif
 
 		if (softlockup_panic)
 			panic("softlockup: hung tasks");

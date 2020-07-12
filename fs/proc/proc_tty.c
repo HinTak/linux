@@ -136,6 +136,32 @@ static const struct file_operations proc_tty_drivers_operations = {
 	.release	= seq_release,
 };
 
+#ifdef CONFIG_UART_BROADCAST
+extern void broadcast_tty_flip_buffer_push(void);
+extern void push_char_delayed_tty( unsigned char ch );
+
+static ssize_t broadcast_write(struct file *file, const char __user *buf,
+		size_t count, loff_t *ppos)
+{
+	size_t i;
+
+	if (!count)
+		return (ssize_t)count;
+
+	// refer static void receive_chars() logic .... in tty/serial/8250.c
+	for( i=0; i<count; i++)
+		push_char_delayed_tty(buf[i]);
+	broadcast_tty_flip_buffer_push();
+
+	return (ssize_t)count;
+}
+
+static const struct file_operations proc_tty_broadcast_operations = {
+	.write  = broadcast_write,
+};
+#endif
+
+
 /*
  * This function is called by tty_register_driver() to handle
  * registering the driver's /proc handler into /proc/tty/driver/<foo>
@@ -169,6 +195,42 @@ void proc_tty_unregister_driver(struct tty_driver *driver)
 	driver->proc_entry = NULL;
 }
 
+#ifdef CONFIG_PRINT_MSG_PID_NAME_TAG
+#define PRINT_MSG_PID_NAME_TAG_SIZE     2
+int pid_name_tag;
+static ssize_t print_msg_tag_read(struct file *file, char __user *buf,
+		size_t count, loff_t *ppos)
+{
+	char buffer[PRINT_MSG_PID_NAME_TAG_SIZE];
+	int len;
+
+	len = snprintf(buffer, sizeof(buffer), "%d", get_pid_name_tag());
+
+	return simple_read_from_buffer(buf, count, ppos, buffer, len);
+}
+
+static ssize_t print_msg_tag_write(struct file *file, const char __user *buf,
+		size_t count, loff_t *ppos)
+{
+	char buffer[PRINT_MSG_PID_NAME_TAG_SIZE];
+	int tag_status;
+
+	if (count != PRINT_MSG_PID_NAME_TAG_SIZE)
+		return -EINVAL;
+	if (copy_from_user(buffer, buf, count))
+		return -EFAULT;
+
+	tag_status = (buffer[0] == '0') ? 0 : 1;
+	set_pid_name_tag(tag_status);
+	return count;
+}
+
+static const struct file_operations proc_print_msg_tag_operations = {
+	.read           = print_msg_tag_read,
+	.write          = print_msg_tag_write,
+};
+#endif
+
 /*
  * Called by proc_root_init() to initialize the /proc/tty subtree
  */
@@ -186,4 +248,13 @@ void __init proc_tty_init(void)
 	proc_tty_driver = proc_mkdir_mode("tty/driver", S_IRUSR|S_IXUSR, NULL);
 	proc_create("tty/ldiscs", 0, NULL, &tty_ldiscs_proc_fops);
 	proc_create("tty/drivers", 0, NULL, &proc_tty_drivers_operations);
+#ifdef CONFIG_UART_BROADCAST
+	proc_create("tty/broadcast", S_IRUSR | S_IWUSR, NULL, &proc_tty_broadcast_operations);
+#endif
+
+#ifdef CONFIG_PRINT_MSG_PID_NAME_TAG
+	proc_create("tty/print_msg_tag", S_IRUGO|S_IWUSR, NULL ,
+			&proc_print_msg_tag_operations);
+#endif
+
 }

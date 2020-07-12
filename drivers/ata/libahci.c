@@ -1175,13 +1175,34 @@ void ahci_fill_cmd_slot(struct ahci_port_priv *pp, unsigned int tag,
 			u32 opts)
 {
 	dma_addr_t cmd_tbl_dma;
-
+#if IS_ENABLED(CONFIG_SATA_AHCI_SDP)
+	volatile int tmp;
+#endif
 	cmd_tbl_dma = pp->cmd_tbl_dma + tag * AHCI_CMD_TBL_SZ;
 
 	pp->cmd_slot[tag].opts = cpu_to_le32(opts);
+#if IS_ENABLED(CONFIG_SATA_AHCI_SDP)	
+	wmb();
+	tmp = pp->cmd_slot[tag].opts;
+#endif
+
 	pp->cmd_slot[tag].status = 0;
+#if IS_ENABLED(CONFIG_SATA_AHCI_SDP)
+	wmb();
+	tmp = pp->cmd_slot[tag].status;
+#endif
+
 	pp->cmd_slot[tag].tbl_addr = cpu_to_le32(cmd_tbl_dma & 0xffffffff);
+#if IS_ENABLED(CONFIG_SATA_AHCI_SDP)
+	wmb();
+	tmp = pp->cmd_slot[tag].tbl_addr;
+#endif
+
 	pp->cmd_slot[tag].tbl_addr_hi = cpu_to_le32((cmd_tbl_dma >> 16) >> 16);
+#if IS_ENABLED(CONFIG_SATA_AHCI_SDP)	
+	wmb();
+	tmp = pp->cmd_slot[tag].tbl_addr_hi;
+#endif
 }
 EXPORT_SYMBOL_GPL(ahci_fill_cmd_slot);
 
@@ -1468,6 +1489,9 @@ static unsigned int ahci_fill_sg(struct ata_queued_cmd *qc, void *cmd_tbl)
 	struct scatterlist *sg;
 	struct ahci_sg *ahci_sg = cmd_tbl + AHCI_CMD_TBL_HDR_SZ;
 	unsigned int si;
+#if IS_ENABLED(CONFIG_SATA_AHCI_SDP)
+	volatile int tmp;
+#endif
 
 	VPRINTK("ENTER\n");
 
@@ -1479,8 +1503,22 @@ static unsigned int ahci_fill_sg(struct ata_queued_cmd *qc, void *cmd_tbl)
 		u32 sg_len = sg_dma_len(sg);
 
 		ahci_sg[si].addr = cpu_to_le32(addr & 0xffffffff);
+#if IS_ENABLED(CONFIG_SATA_AHCI_SDP)
+		wmb();
+		tmp = ahci_sg[si].addr;
+#endif
+
 		ahci_sg[si].addr_hi = cpu_to_le32((addr >> 16) >> 16);
+#if IS_ENABLED(CONFIG_SATA_AHCI_SDP)
+		wmb();
+		tmp = ahci_sg[si].addr_hi;
+#endif
+
 		ahci_sg[si].flags_size = cpu_to_le32(sg_len - 1);
+#if IS_ENABLED(CONFIG_SATA_AHCI_SDP)
+		wmb();
+		tmp = ahci_sg[si].flags_size;
+#endif		
 	}
 
 	return si;
@@ -1506,6 +1544,9 @@ static void ahci_qc_prep(struct ata_queued_cmd *qc)
 	u32 opts;
 	const u32 cmd_fis_len = 5; /* five dwords */
 	unsigned int n_elem;
+#if IS_ENABLED(CONFIG_SATA_AHCI_SDP)
+	volatile u32 tmp;
+#endif
 
 	/*
 	 * Fill in command table information.  First, the header,
@@ -1514,10 +1555,19 @@ static void ahci_qc_prep(struct ata_queued_cmd *qc)
 	cmd_tbl = pp->cmd_tbl + qc->tag * AHCI_CMD_TBL_SZ;
 
 	ata_tf_to_fis(&qc->tf, qc->dev->link->pmp, 1, cmd_tbl);
+#if IS_ENABLED(CONFIG_SATA_AHCI_SDP)
+	wmb();
+	tmp = *(u32*)(cmd_tbl + AHCI_CMD_TBL_CDB);
+#endif	
 	if (is_atapi) {
 		memset(cmd_tbl + AHCI_CMD_TBL_CDB, 0, 32);
 		memcpy(cmd_tbl + AHCI_CMD_TBL_CDB, qc->cdb, qc->dev->cdb_len);
 	}
+
+#if IS_ENABLED(CONFIG_SATA_AHCI_SDP)
+	wmb();
+	tmp = *(u32*)(cmd_tbl + AHCI_CMD_TBL_CDB);
+#endif
 
 	n_elem = 0;
 	if (qc->flags & ATA_QCFLAG_DMAMAP)
@@ -1865,6 +1915,10 @@ irqreturn_t ahci_interrupt(int irq, void *dev_instance)
 	u32 irq_stat, irq_masked;
 
 	VPRINTK("ENTER\n");
+
+#if IS_ENABLED(CONFIG_SATA_AHCI_SDP)
+	udelay(10);
+#endif
 
 	hpriv = host->private_data;
 	mmio = hpriv->mmio;

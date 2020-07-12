@@ -471,15 +471,17 @@ static ssize_t logger_aio_write(struct kiocb *iocb, const struct iovec *iov,
 	struct logger_log *log = file_get_log(iocb->ki_filp);
 	size_t orig;
 	struct logger_entry header;
-	struct timespec now;
+	unsigned long nsec;
+	u64 ts;
 	ssize_t ret = 0;
 
-	now = current_kernel_time();
+	ts = local_clock();
+	nsec = do_div(ts, 1000000000);
 
 	header.pid = current->tgid;
 	header.tid = current->pid;
-	header.sec = now.tv_sec;
-	header.nsec = now.tv_nsec;
+	header.sec = ts;
+	header.nsec = nsec;
 	header.euid = current_euid();
 	header.len = min_t(size_t, iocb->ki_left, LOGGER_ENTRY_MAX_PAYLOAD);
 	header.hdr_size = sizeof(struct logger_entry);
@@ -742,6 +744,7 @@ static const struct file_operations logger_fops = {
 	.release = logger_release,
 };
 
+
 /*
  * Log size must must be a power of two, and greater than
  * (LOGGER_ENTRY_MAX_PAYLOAD + sizeof(struct logger_entry)).
@@ -804,23 +807,35 @@ out_free_buffer:
 	return ret;
 }
 
+#ifdef CONFIG_TIZEN_TV_DLOG_DEBUG
+#define LOGGER_LOG_MAIN_SIZE		(8*1024*1024)
+#define LOGGER_LOG_EVENTS_SIZE		(256*1024)
+#define LOGGER_LOG_RADIO_SIZE		(256*1024)
+#define LOGGER_LOG_SYSTEM_SIZE		(2*1024*1024)
+#else 
+#define LOGGER_LOG_MAIN_SIZE		(1024*1024)
+#define LOGGER_LOG_EVENTS_SIZE		(256*1024)
+#define LOGGER_LOG_RADIO_SIZE		(256*1024)
+#define LOGGER_LOG_SYSTEM_SIZE		(512*1024)
+#endif
+
 static int __init logger_init(void)
 {
 	int ret;
 
-	ret = create_log(LOGGER_LOG_MAIN, 256*1024);
+	ret = create_log(LOGGER_LOG_MAIN, LOGGER_LOG_MAIN_SIZE);
 	if (unlikely(ret))
 		goto out;
 
-	ret = create_log(LOGGER_LOG_EVENTS, 256*1024);
+	ret = create_log(LOGGER_LOG_EVENTS, LOGGER_LOG_EVENTS_SIZE);
 	if (unlikely(ret))
 		goto out;
 
-	ret = create_log(LOGGER_LOG_RADIO, 256*1024);
+	ret = create_log(LOGGER_LOG_RADIO, LOGGER_LOG_RADIO_SIZE);
 	if (unlikely(ret))
 		goto out;
 
-	ret = create_log(LOGGER_LOG_SYSTEM, 256*1024);
+	ret = create_log(LOGGER_LOG_SYSTEM, LOGGER_LOG_SYSTEM_SIZE);
 	if (unlikely(ret))
 		goto out;
 

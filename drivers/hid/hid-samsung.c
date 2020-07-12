@@ -18,6 +18,9 @@
  *	several key mappings used from the consumer usage page
  *	deviate from the USB HUT 1.12 standard.
  *
+ *  [04E8:2075] Samsung Smart remote
+ *
+ *  [04E8:2080] Samsung Combo Keyboard
  */
 
 /*
@@ -31,6 +34,7 @@
 #include <linux/usb.h>
 #include <linux/hid.h>
 #include <linux/module.h>
+#include <linux/hidraw.h>
 
 #include "hid-ids.h"
 
@@ -151,11 +155,66 @@ static int samsung_input_mapping(struct hid_device *hdev, struct hid_input *hi,
 	return ret;
 }
 
+static int samsung_raw_event(struct hid_device *hdev, struct hid_report *report,
+	u8 *data, int size)
+{
+	int ret = 0;
+	u8 buf[1000]; /* Max data size = 1000 */
+
+	if (USB_DEVICE_ID_SAMSUNG_SMART_RC != hdev->product &&
+	     USB_DEVICE_ID_SAMSUNG_COMBO_KEYBOARD != hdev->product &&
+	      USB_DEVICE_ID_SAMSUNG_PXD != hdev->product)
+		return 0;
+
+	memset(buf, 0x00, sizeof(buf));
+	if (size > (sizeof(buf) - 2)) {
+		size = sizeof(buf) - 2;
+		hid_err(hdev, "Truncated data size to %d", size);
+	}
+
+	buf[0] = size; /* data len low byte */
+	buf[1] = (size >> 8); /* data len high byte */
+	memcpy((buf + 2), data, size);
+	ret = hidraw_report_event(hdev, buf, (size + 2));
+	if (0 > ret)
+		return ret;
+
+	switch (report->id) {
+	case 0x21:
+	case 0x33:
+	case 0xF5:
+	case 0xF7:
+	case 0xF8:
+	case 0xF9:
+		ret = 1;
+		break;
+	default:
+		ret = 0;
+	}
+
+	return ret;
+}
+
 static int samsung_probe(struct hid_device *hdev,
 		const struct hid_device_id *id)
 {
 	int ret;
+	struct hid_report *report;
 	unsigned int cmask = HID_CONNECT_DEFAULT;
+
+	if (hdev->product == USB_DEVICE_ID_SAMSUNG_SMART_RC &&
+		strncmp("Samsung Wireless Keyboard",
+			hdev->name, strlen(hdev->name))) {
+		/* If connected device is smart rc, create hidraw device only */
+		cmask = HID_CONNECT_HIDRAW;
+		goto hw_start;
+	} else if (!strncmp("Samsung Wireless Keyboard",
+			hdev->name, strlen(hdev->name)) ||
+		    !strncmp("Samsung DTV Companion Device",
+                        hdev->name, strlen(hdev->name))) {
+		strncpy(hdev->name, "Samsung Wireless Combo",
+				strlen(hdev->name));
+	}
 
 	ret = hid_parse(hdev);
 	if (ret) {
@@ -171,20 +230,100 @@ static int samsung_probe(struct hid_device *hdev,
 		}
 	}
 
+hw_start:
 	ret = hid_hw_start(hdev, cmask);
 	if (ret) {
 		hid_err(hdev, "hw start failed\n");
 		goto err_free;
 	}
 
+	if (hdev->product == USB_DEVICE_ID_SAMSUNG_SMART_RC ||
+	     hdev->product == USB_DEVICE_ID_SAMSUNG_COMBO_KEYBOARD ||
+	      hdev->product == USB_DEVICE_ID_SAMSUNG_PXD) {
+		hdev->claimed &= ~HID_CLAIMED_HIDRAW;
+
+		report = hid_register_report(hdev, HID_INPUT_REPORT, 0xF7);
+		if (!report) {
+			hid_err(hdev, "unable to register report id: 0xF7\n");
+			ret = -ENOMEM;
+			goto err_stop_hw;
+		}
+		report->size = 10;
+
+		report = hid_register_report(hdev, HID_INPUT_REPORT, 0xF8);
+		if (!report) {
+			hid_err(hdev, "unable to register report id: 0xF8\n");
+			ret = -ENOMEM;
+			goto err_stop_hw;
+		}
+		report->size = 10;
+
+		report = hid_register_report(hdev, HID_INPUT_REPORT, 0x33);
+		if (!report) {
+			hid_err(hdev, "unable to register report id: 0x33\n");
+			ret = -ENOMEM;
+			goto err_stop_hw;
+		}
+		report->size = 19;
+
+		report = hid_register_report(hdev, HID_INPUT_REPORT, 0xF5);
+		if (!report) {
+			hid_err(hdev, "unable to register report id :0xF5\n");
+			ret = -ENOMEM;
+			goto err_stop_hw;
+		}
+		report->size = 500;
+
+		report = hid_register_report(hdev, HID_INPUT_REPORT, 0x21);
+		if (!report) {
+			hid_err(hdev, "unable to register report id: 0x21\n");
+			ret = -ENOMEM;
+			goto err_stop_hw;
+		}
+		report->size = 255;
+
+		report = hid_register_report(hdev, HID_INPUT_REPORT, 0xF9);
+		if (!report) {
+			hid_err(hdev, "unable to register report id: 0xF9\n");
+			ret = -ENOMEM;
+			goto err_stop_hw;
+		}
+		report->size = 19;
+	}
+
 	return 0;
+
+err_stop_hw:
+	hid_hw_stop(hdev);
+
 err_free:
 	return ret;
+}
+
+static void samsung_remove(struct hid_device *hdev)
+{
+	/*
+	 * In samsung_probe, HIDRAW is created for smart rc and combo keyboard
+	 * but HIDRAW was disabled to prevent raw reports to be sent to HIDINPUT
+	 * Re-enable HIDRAW, to be cleaned at time of device removal.
+	 */
+	if (hdev->product == USB_DEVICE_ID_SAMSUNG_SMART_RC ||
+	     hdev->product == USB_DEVICE_ID_SAMSUNG_COMBO_KEYBOARD ||
+	      hdev->product == USB_DEVICE_ID_SAMSUNG_PXD)
+		hdev->claimed |= HID_CLAIMED_HIDRAW;
+
+	hid_hw_stop(hdev);
 }
 
 static const struct hid_device_id samsung_devices[] = {
 	{ HID_USB_DEVICE(USB_VENDOR_ID_SAMSUNG, USB_DEVICE_ID_SAMSUNG_IR_REMOTE) },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_SAMSUNG, USB_DEVICE_ID_SAMSUNG_WIRELESS_KBD_MOUSE) },
+	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_SAMSUNG_RC,
+			USB_DEVICE_ID_SAMSUNG_SMART_RC) },
+	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_SAMSUNG_RC,
+			USB_DEVICE_ID_SAMSUNG_COMBO_KEYBOARD) },
+	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_SAMSUNG_RC,
+			USB_DEVICE_ID_SAMSUNG_PXD) },
 	{ }
 };
 MODULE_DEVICE_TABLE(hid, samsung_devices);
@@ -195,6 +334,8 @@ static struct hid_driver samsung_driver = {
 	.report_fixup = samsung_report_fixup,
 	.input_mapping = samsung_input_mapping,
 	.probe = samsung_probe,
+	.remove = samsung_remove,
+	.raw_event = samsung_raw_event,
 };
 module_hid_driver(samsung_driver);
 

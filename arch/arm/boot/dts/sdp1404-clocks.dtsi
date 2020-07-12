@@ -1,0 +1,109 @@
+/*
+ * Copyright (C) 2013 Samsung Electronics Co.Ltd
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
+/ {
+	clock: clock-controller@11250800 {
+		apb_pclk: apb_pclk {
+			sdp,clock;
+			#clock-cells = <0>;
+		};
+		
+		emmc_clk: emmc_clk {
+			sdp,clock;
+			#clock-cells = <0>;
+		};
+
+		dma_clk: dma_clk {
+			sdp,clock;
+			#clock-cells = <0>;
+		};
+
+		rstn_i2c: rstn_i2c {
+			sdp,clock;
+			#clock-cells = <0>;
+		};
+		pcie_clk: pcie_clk {
+			sdp,clock;
+			#clock-cells = <0>;
+		};
+		pcie_gpr_clk: pcie_gpr_clk {
+			sdp,clock;
+			#clock-cells = <0>;
+		};		
+		usb3a_phy: usb3a_phy {
+			sdp,clock;
+			#clock-cells = <0>;
+		};
+
+		usb3a_phy_usb2: usb3a_phy_usb2 {
+			sdp,clock;
+			#clock-cells = <0>;
+		};		
+		
+		usb3a: usb3a {
+			sdp,clock;
+			#clock-cells = <0>;
+		};	
+
+		pcie_sata_phy_clk: pcie_sata_phy_clk {
+			sdp,clock;
+			#clock-cells = <0>;
+		};	
+		pcie_mask: pcie_mask {
+			sdp,clock;
+			#clock-cells = <0>;
+		};	
+		sata_clk: sata_clk {
+			sdp,clock;
+			#clock-cells = <0>;
+		};		
+		
+		sata_rst_clk: sata_rst_clk {
+			sdp,clock;
+			#clock-cells = <0>;
+		};		
+
+		disp_pclk_nr: disp_pclk_nr {
+			sdp,clock;
+			#clock-cells = <0>;
+		};	
+
+		disp_pclk_dcar: disp_pclk_dcar {
+			sdp,clock;
+			#clock-cells = <0>;
+		};	
+
+		disp_pclk_ipc: disp_pclk_ipc {
+			sdp,clock;
+			#clock-cells = <0>;
+		};	
+
+		disp_pclk_ucar: disp_pclk_ucar {
+			sdp,clock;
+			#clock-cells = <0>;
+		};	
+
+		dp_scl_sub_clk: dp_scl_sub_clk {
+			sdp,clock;
+			#clock-cells = <0>;
+		};	
+
+		dp_scl_pclk: dp_scl_pclk {
+			sdp,clock;
+			#clock-cells = <0>;
+		};			
+		gzip_rst: gzip_rst {
+			sdp,clock;
+			#clock-cells = <0>;
+		};			
+		gzip_clk: gzip_clk {
+			sdp,clock;
+			#clock-cells = <0>;
+		};			
+	};
+};

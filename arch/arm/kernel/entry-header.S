@@ -41,6 +41,9 @@
 	ldr	\rtemp, .LCcralign
 	ldr	\rtemp, [\rtemp]
 	mcr	p15, 0, \rtemp, c1, c0
+#ifdef CONFIG_ARCH_SDP1406
+	isb
+#endif
 #endif
 	.endm
 
@@ -126,8 +129,8 @@
 	.endm
 
 	.macro	get_thread_info, rd
-	mov	\rd, sp, lsr #13
-	mov	\rd, \rd, lsl #13
+	mov	\rd, sp, lsr #THREAD_SIZE_ORDER + PAGE_SHIFT
+	mov	\rd, \rd, lsl #THREAD_SIZE_ORDER + PAGE_SHIFT
 	.endm
 
 	@
@@ -184,8 +187,8 @@
 
 	.macro	get_thread_info, rd
 	mov	\rd, sp
-	lsr	\rd, \rd, #13
-	mov	\rd, \rd, lsl #13
+	lsr	\rd, \rd, #THREAD_SIZE_ORDER + PAGE_SHIFT
+	mov	\rd, \rd, lsl #THREAD_SIZE_ORDER + PAGE_SHIFT
 	.endm
 
 	@

@@ -258,7 +258,7 @@ int fat_get_cluster(struct inode *inode, int cluster, int *fclus, int *dclus)
 			goto out;
 		}
 
-		nr = fat_ent_read(inode, &fatent, *dclus);
+		nr = fat_ent_read(sb, &fatent, *dclus);
 		if (nr < 0)
 			goto out;
 		else if (nr == FAT_ENT_FREE) {

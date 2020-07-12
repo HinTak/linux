@@ -111,6 +111,7 @@ EXPORT_SYMBOL(drm_get_platform_dev);
 
 static int drm_platform_get_irq(struct drm_device *dev)
 {
+	if( !dev || !dev->platformdev ) return 0;
 	return platform_get_irq(dev->platformdev, 0);
 }
 

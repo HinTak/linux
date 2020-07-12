@@ -20,6 +20,9 @@
 #include <linux/usb.h>
 #include <linux/usb/hcd.h>
 #include "usb.h"
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+extern struct instant_resume_control instant_ctrl;
+#endif
 
 static inline const char *plural(int n)
 {
@@ -198,7 +201,10 @@ static void generic_disconnect(struct usb_device *udev)
 static int generic_suspend(struct usb_device *udev, pm_message_t msg)
 {
 	int rc;
-
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+        struct resume_devnode *dev;
+        dev = udev->devnode;
+#endif
 	/* Normal USB devices suspend through their upstream port.
 	 * Root hubs don't have upstream ports to suspend,
 	 * so we have to shut down their downstream HC-to-USB
@@ -212,7 +218,15 @@ static int generic_suspend(struct usb_device *udev, pm_message_t msg)
 		rc = 0;
 	else
 		rc = usb_port_suspend(udev, msg);
-
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+	if((dev != NULL) && (dev->is_instant_point)){
+		dev->head->will_resume = 1;
+#ifdef PARALLEL_RESET_RESUME_USER_PORT_DEVICES
+		set_bit(dev->busnum, &instant_ctrl.instant_point_fail_count);
+		instant_ctrl.user_port_resume = true;
+#endif
+	}
+#endif
 	return rc;
 }
 
@@ -242,5 +256,5 @@ struct usb_device_driver usb_generic_driver = {
 	.suspend = generic_suspend,
 	.resume = generic_resume,
 #endif
-	.supports_autosuspend = 1,
+	.supports_autosuspend = 0,
 };

@@ -2,6 +2,10 @@
 # Makefile for the linux memory manager.
 #
 
+KASAN_SANITIZE_slab_common.o := n
+KASAN_SANITIZE_slub.o := n
+KASAN_SANITIZE_page_alloc.o := n
+
 mmu-y			:= nommu.o
 mmu-$(CONFIG_MMU)	:= fremap.o highmem.o madvise.o memory.o mincore.o \
 			   mlock.o mmap.o mprotect.o mremap.o msync.o rmap.o \
@@ -58,3 +62,7 @@ obj-$(CONFIG_DEBUG_KMEMLEAK) += kmemleak.o
 obj-$(CONFIG_DEBUG_KMEMLEAK_TEST) += kmemleak-test.o
 obj-$(CONFIG_CLEANCACHE) += cleancache.o
 obj-$(CONFIG_MEMORY_ISOLATION) += page_isolation.o
+obj-$(CONFIG_PAGE_OWNER) += pageowner.o
+obj-$(CONFIG_PROFILE_MEMORY_USAGE) += profile_memory_usage.o
+obj-$(CONFIG_OOM_RESCUER) += oom_rescuer.o
+obj-$(CONFIG_KASAN)	+= kasan/

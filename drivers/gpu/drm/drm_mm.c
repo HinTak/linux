@@ -49,6 +49,17 @@
 
 #define MM_UNUSED_TARGET 4
 
+/* Fix for mmap fail due to over run of drm hash key 
+   DRM_FILE_PAGE_OFFSET_MAXSIZE should be same as DRM_FILE_PAGE_OFFSET_SIZE
+   This change will not be required in newer version which is vma based. 
+*/
+#if BITS_PER_LONG == 64
+#define DRM_FILE_PAGE_OFFSET_MAXSIZE ((0xFFFFFFFFUL >> PAGE_SHIFT) * 16)
+#else
+#define DRM_FILE_PAGE_OFFSET_MAXSIZE ((0xFFFFFFFUL >> PAGE_SHIFT) * 16)
+#endif
+
+
 static struct drm_mm_node *drm_mm_kmalloc(struct drm_mm *mm, int atomic)
 {
 	struct drm_mm_node *child;
@@ -108,12 +119,17 @@ static void drm_mm_insert_helper(struct drm_mm_node *hole_node,
 				 unsigned long color)
 {
 	struct drm_mm *mm = hole_node->mm;
-	unsigned long hole_start = drm_mm_hole_node_start(hole_node);
-	unsigned long hole_end = drm_mm_hole_node_end(hole_node);
-	unsigned long adj_start = hole_start;
-	unsigned long adj_end = hole_end;
+	unsigned long hole_start;
+	unsigned long hole_end;
+	unsigned long adj_start;
+	unsigned long adj_end;
 
 	BUG_ON(node->allocated);
+//	spin_lock(&mm->unused_lock);
+	hole_start = drm_mm_hole_node_start(hole_node);
+	hole_end = drm_mm_hole_node_end(hole_node);
+	adj_start = hole_start;
+	adj_end = hole_end;
 
 	if (mm->color_adjust)
 		mm->color_adjust(hole_node, color, &adj_start, &adj_end);
@@ -125,8 +141,8 @@ static void drm_mm_insert_helper(struct drm_mm_node *hole_node,
 	}
 
 	if (adj_start == hole_start) {
-		hole_node->hole_follows = 0;
-		list_del(&hole_node->hole_stack);
+	    hole_node->hole_follows = 0;
+	    list_del(&hole_node->hole_stack);
 	}
 
 	node->start = adj_start;
@@ -142,9 +158,10 @@ static void drm_mm_insert_helper(struct drm_mm_node *hole_node,
 
 	node->hole_follows = 0;
 	if (__drm_mm_hole_node_start(node) < hole_end) {
-		list_add(&node->hole_stack, &mm->hole_stack);
-		node->hole_follows = 1;
+	    list_add(&node->hole_stack, &mm->hole_stack);
+	    node->hole_follows = 1;
 	}
+	//spin_unlock(&mm->unused_lock); 
 }
 
 struct drm_mm_node *drm_mm_create_block(struct drm_mm *mm,
@@ -402,6 +419,10 @@ EXPORT_SYMBOL(drm_mm_put_block);
 static int check_free_hole(unsigned long start, unsigned long end,
 			   unsigned long size, unsigned alignment)
 {
+	/* Validate start size to avoid drm hash key over run*/
+	if(start >= DRM_FILE_PAGE_OFFSET_MAXSIZE)
+		return 0;
+
 	if (end - start < size)
 		return 0;
 

@@ -49,6 +49,10 @@
 #include <linux/init_task.h>
 #include <linux/perf_event.h>
 #include <trace/events/sched.h>
+#ifdef CONFIG_KDEBUGD_THREAD_PROFILER
+#include <agent/endtask_trace.h>
+#include <trace/events/task.h>
+#endif
 #include <linux/hw_breakpoint.h>
 #include <linux/oom.h>
 #include <linux/writeback.h>
@@ -74,6 +78,7 @@ static void __unhash_process(struct task_struct *p, bool group_dead)
 		__this_cpu_dec(process_counts);
 	}
 	list_del_rcu(&p->thread_group);
+	list_del_rcu(&p->thread_node);
 }
 
 /*
@@ -446,6 +451,26 @@ assign_new_owner:
 }
 #endif /* CONFIG_MM_OWNER */
 
+#ifdef CONFIG_KNBD_SUPPORT
+static void (*knbd_mm_exit_callback)(void) = NULL;
+void register_knbd_mm_exit_callback(void (*callback)(void))
+{
+	knbd_mm_exit_callback = callback;
+}
+EXPORT_SYMBOL(register_knbd_mm_exit_callback);
+void unregister_knbd_mm_exit_callback(void)
+{
+	knbd_mm_exit_callback = NULL;
+}
+EXPORT_SYMBOL(unregister_knbd_mm_exit_callback);
+
+static void knbd_mm_exit(void)
+{
+	if (knbd_mm_exit_callback)
+		knbd_mm_exit_callback();
+}
+#endif
+
 /*
  * Turn us into a lazy TLB process if we
  * aren't already..
@@ -500,6 +525,10 @@ static void exit_mm(struct task_struct * tsk)
 	task_unlock(tsk);
 	mm_update_next_owner(mm);
 	mmput(mm);
+
+#ifdef CONFIG_KNBD_SUPPORT
+	knbd_mm_exit();
+#endif
 }
 
 /*
@@ -570,9 +599,6 @@ static void reparent_leader(struct task_struct *father, struct task_struct *p,
 				struct list_head *dead)
 {
 	list_move_tail(&p->sibling, &p->real_parent->children);
-
-	if (p->exit_state == EXIT_DEAD)
-		return;
 	/*
 	 * If this is a threaded reparent there is no need to
 	 * notify anyone anything has happened.
@@ -580,8 +606,18 @@ static void reparent_leader(struct task_struct *father, struct task_struct *p,
 	if (same_thread_group(p->real_parent, father))
 		return;
 
-	/* We don't want people slaying init.  */
+	/*
+	 * We don't want people slaying init.
+	 *
+	 * Note: we do this even if it is EXIT_DEAD, wait_task_zombie()
+	 * can change ->exit_state to EXIT_ZOMBIE. If this is the final
+	 * state, do_notify_parent() was already called and ->exit_signal
+	 * doesn't matter.
+	 */
 	p->exit_signal = SIGCHLD;
+
+	if (p->exit_state == EXIT_DEAD)
+		return;
 
 	/* If it has exited notify the new parent about this child's death. */
 	if (!p->ptrace &&
@@ -794,6 +830,8 @@ void do_exit(long code)
 	exit_shm(tsk);
 	exit_files(tsk);
 	exit_fs(tsk);
+	if (group_dead)
+		disassociate_ctty(1);
 	exit_task_namespaces(tsk);
 	exit_task_work(tsk);
 	check_stack_usage();
@@ -807,15 +845,16 @@ void do_exit(long code)
 	 */
 	perf_event_exit_task(tsk);
 
-	cgroup_exit(tsk, 1);
+#ifdef CONFIG_KDEBUGD_THREAD_PROFILER
+	/* trace the exit of task */
+	trace_task_endtask(tsk);
+#endif
 
-	if (group_dead)
-		disassociate_ctty(1);
+	cgroup_exit(tsk, 1);
 
 	module_put(task_thread_info(tsk)->exec_domain->module);
 
 	proc_exit_connector(tsk);
-
 	/*
 	 * FIXME: do that only when needed, using sched_exit tracepoint
 	 */

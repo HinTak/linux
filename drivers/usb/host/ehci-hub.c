@@ -546,6 +546,7 @@ static int check_reset_complete (
 
 	/* if reset finished and it's still not enabled -- handoff */
 	if (!(port_status & PORT_PE)) {
+		ehci->handshake_fail_cnt++;	/* ij.jang, just for monitoring */
 
 		/* with integrated TT, there's nobody to hand it to! */
 		if (ehci_is_TDI(ehci)) {
@@ -1050,14 +1051,21 @@ static int ehci_hub_control (
 			if ((temp & (PORT_PE|PORT_CONNECT)) == PORT_CONNECT
 					&& !ehci_is_TDI(ehci)
 					&& PORT_USB11 (temp)) {
+				ehci->handshake_fail_cnt++;
 				ehci_dbg (ehci,
 					"port %d low speed --> companion\n",
 					wIndex + 1);
 				temp |= PORT_OWNER;
 			} else {
 				ehci_vdbg (ehci, "port %d reset\n", wIndex + 1);
-				temp |= PORT_RESET;
-				temp &= ~PORT_PE;
+				if (ehci->has_synopsys_reset_bug) {
+					temp &= ~PORT_PE;
+					ehci_writel(ehci, temp, status_reg);
+					temp |= PORT_RESET;
+				} else {
+					temp |= PORT_RESET;
+					temp &= ~PORT_PE;
+				}
 
 				/*
 				 * caller must wait, then call GetPortStatus
@@ -1121,10 +1129,19 @@ error_exit:
 static void ehci_relinquish_port(struct usb_hcd *hcd, int portnum)
 {
 	struct ehci_hcd		*ehci = hcd_to_ehci(hcd);
-
+#if	defined(CONFIG_ARCH_SDP1404)
+	u32 	temp = 0;
+#endif
 	if (ehci_is_TDI(ehci))
 		return;
+#if	defined(CONFIG_ARCH_SDP1404)
+	temp = ehci_readl(ehci, &ehci->regs->port_status[portnum - 1]);
+	temp &=~PORT_OWNER;
+	ehci_writel(ehci, temp,&ehci->regs->port_status[portnum - 1]);
+	ehci_err (ehci, "PORT_OWNER set pass 0x%x\n",ehci_readl(ehci, &ehci->regs->port_status[portnum - 1]));
+#else 
 	set_owner(ehci, --portnum, PORT_OWNER);
+#endif
 }
 
 static int ehci_port_handed_over(struct usb_hcd *hcd, int portnum)

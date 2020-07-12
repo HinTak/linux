@@ -469,6 +469,11 @@ static long i2cdev_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		 */
 		client->adapter->timeout = msecs_to_jiffies(arg * 10);
 		break;
+#if  defined(CONFIG_ARCH_SDP)
+	case I2C_BYTE_DELAY: //support stretch device 
+		client->adapter->byte_delay=arg;
+		break;
+#endif
 	default:
 		/* NOTE:  returning a fault code here could cause trouble
 		 * in buggy userspace code.  Some old kernel bugs returned

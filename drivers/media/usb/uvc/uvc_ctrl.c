@@ -664,7 +664,11 @@ static struct uvc_control_mapping uvc_ctrl_mappings[] = {
 		.size		= 32,
 		.offset		= 0,
 		.v4l2_type	= V4L2_CTRL_TYPE_INTEGER,
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+		.data_type	= UVC_CTRL_DATA_TYPE_SIGNED,
+#else
 		.data_type	= UVC_CTRL_DATA_TYPE_UNSIGNED,
+#endif
 	},
 	{
 		.id		= V4L2_CID_TILT_ABSOLUTE,
@@ -674,7 +678,12 @@ static struct uvc_control_mapping uvc_ctrl_mappings[] = {
 		.size		= 32,
 		.offset		= 32,
 		.v4l2_type	= V4L2_CTRL_TYPE_INTEGER,
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+		.data_type	= UVC_CTRL_DATA_TYPE_SIGNED,
+#else
 		.data_type	= UVC_CTRL_DATA_TYPE_UNSIGNED,
+#endif
+
 	},
 	{
 		.id		= V4L2_CID_PRIVACY,
@@ -1781,6 +1790,29 @@ done:
 	mutex_unlock(&chain->ctrl_mutex);
 	return ret;
 }
+
+#ifdef CONFIG_USB_VIDEO_TV_CAMERA
+int uvc_xu_ctrl_tvcam_init(struct uvc_device *dev)
+{
+	struct uvc_xu_control_query xqry;
+	__u16 size = 16;
+	__u8 data[size];
+
+	memset(data, 0, size);
+	data[0] = 0x02;
+	data[1] = 0x02;
+	data[2] = 0x10;
+
+	xqry.unit = UVC_CTRL_TVCAM_UNIT;
+	xqry.selector = UVC_CTRL_TVCAM_SET_SELECTOR;
+	xqry.query = UVC_CTRL_FLAG_SET_CUR;
+	xqry.size = size;
+	xqry.data = data;
+
+	return uvc_query_ctrl(dev, xqry.query, xqry.unit, dev->intfnum,
+	                      xqry.selector, data, size);
+}
+#endif
 
 /* --------------------------------------------------------------------------
  * Suspend/resume

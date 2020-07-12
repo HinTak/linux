@@ -17,3 +17,24 @@ config USB_VIDEO_CLASS_INPUT_EVDEV
 	  to report button events.
 
 	  If you are in doubt, say Y.
+
+config USB_VIDEO_TV_CAMERA
+	bool "UVC driver for Samsung TV embedded camera"
+	depends on USB_VIDEO_CLASS
+	---help---
+          Support for the Samsung TV embedded camera. This option makes
+          USB Video Class devices to multiple streaming(main, sub)
+	  If you are in doubt, say N.
+
+config USB_VIDEO_TV_CAMERA_MAIN
+        int "Node number of Main stream(GRAY frame)"
+        depends on USB_VIDEO_TV_CAMERA
+        default 240
+        range 1 255
+
+config USB_VIDEO_TV_CAMERA_SUB
+        int "Node number of Sub stream(H.264 frame)"
+        depends on USB_VIDEO_TV_CAMERA
+        default 241
+        range 1 255
+

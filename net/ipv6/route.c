@@ -1202,6 +1202,27 @@ void ip6_redirect(struct sk_buff *skb, struct net *net, int oif, u32 mark)
 }
 EXPORT_SYMBOL_GPL(ip6_redirect);
 
+void ip6_redirect_no_header(struct sk_buff *skb, struct net *net, int oif,
+			    u32 mark)
+{
+	const struct ipv6hdr *iph = ipv6_hdr(skb);
+	const struct rd_msg *msg = (struct rd_msg *)icmp6_hdr(skb);
+	struct dst_entry *dst;
+	struct flowi6 fl6;
+
+	memset(&fl6, 0, sizeof(fl6));
+	fl6.flowi6_oif = oif;
+	fl6.flowi6_mark = mark;
+	fl6.flowi6_flags = 0;
+	fl6.daddr = msg->dest;
+	fl6.saddr = iph->daddr;
+
+	dst = ip6_route_output(net, NULL, &fl6);
+	if (!dst->error)
+		rt6_do_redirect(dst, NULL, skb);
+	dst_release(dst);
+}
+
 void ip6_sk_redirect(struct sk_buff *skb, struct sock *sk)
 {
 	ip6_redirect(skb, sock_net(sk), sk->sk_bound_dev_if, sk->sk_mark);
@@ -1236,7 +1257,7 @@ static unsigned int ip6_mtu(const struct dst_entry *dst)
 	unsigned int mtu = dst_metric_raw(dst, RTAX_MTU);
 
 	if (mtu)
-		return mtu;
+		goto out;
 
 	mtu = IPV6_MIN_MTU;
 
@@ -1246,7 +1267,8 @@ static unsigned int ip6_mtu(const struct dst_entry *dst)
 		mtu = idev->cnf.mtu6;
 	rcu_read_unlock();
 
-	return mtu;
+out:
+	return min_t(unsigned int, mtu, IP6_MAX_MTU);
 }
 
 static struct dst_entry *icmp6_dst_gc_list;
@@ -1428,7 +1450,7 @@ int ip6_route_add(struct fib6_config *cfg)
 	if (!table)
 		goto out;
 
-	rt = ip6_dst_alloc(net, NULL, DST_NOCOUNT, table);
+	rt = ip6_dst_alloc(net, NULL, (cfg->fc_flags & RTF_ADDRCONF) ? 0 : DST_NOCOUNT, table);
 
 	if (!rt) {
 		err = -ENOMEM;

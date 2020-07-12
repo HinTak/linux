@@ -358,6 +358,9 @@ struct hc_driver {
 	int	(*disable_usb3_lpm_timeout)(struct usb_hcd *,
 			struct usb_device *, enum usb3_link_state state);
 	int	(*find_raw_port_number)(struct usb_hcd *, int);
+#ifdef SAMSUNG_PATCH_OHCI_HANG_RECOVERY_DURING_KILL_URB
+	int	(*unlink_pending_urb)(struct usb_hcd *, struct urb*, int);
+#endif
 };
 
 extern int usb_hcd_link_urb_to_ep(struct usb_hcd *hcd, struct urb *urb);
@@ -367,6 +370,17 @@ extern void usb_hcd_unlink_urb_from_ep(struct usb_hcd *hcd, struct urb *urb);
 
 extern int usb_hcd_submit_urb(struct urb *urb, gfp_t mem_flags);
 extern int usb_hcd_unlink_urb(struct urb *urb, int status);
+#ifdef SAMSUNG_PATCH_OHCI_HANG_RECOVERY_DURING_KILL_URB
+extern int usb_unlink_pending_urbs(struct urb *urb);
+#endif
+
+#ifdef SAMSUNG_USB_FULL_SPEED_BT_MODIFY_GIVEBACK_URB
+extern void usb_hcd_prepare_urb_for_giveback(struct usb_hcd *hcd, struct urb *urb,
+                int status);
+extern void usb_hcd_full_speed_giveback_urb(struct usb_hcd *hcd, struct urb *urb,
+                int status);
+#endif
+
 extern void usb_hcd_giveback_urb(struct usb_hcd *hcd, struct urb *urb,
 		int status);
 extern int usb_hcd_map_urb_for_dma(struct usb_hcd *hcd, struct urb *urb,
@@ -601,6 +615,24 @@ static inline void usb_hcd_resume_root_hub(struct usb_hcd *hcd)
 	return;
 }
 #endif /* CONFIG_PM_RUNTIME */
+
+#ifdef CONFIG_USB_DEVICEFS
+
+/*
+ *  * these are expected to be called from the USB core/hub thread
+ *   * with the kernel lock held
+ *    */
+extern void usbfs_update_special(void);
+extern int usbfs_init(void);
+extern void usbfs_cleanup(void);
+
+#else /* CONFIG_USB_DEVICEFS */
+
+static inline void usbfs_update_special(void) {}
+static inline int usbfs_init(void) { return 0; }
+static inline void usbfs_cleanup(void) { }
+
+#endif /* CONFIG_USB_DEVICEFS */
 
 /*-------------------------------------------------------------------------*/
 

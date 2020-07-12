@@ -30,8 +30,19 @@
 #include <linux/usb/hcd.h>
 
 #include "usb.h"
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+#include <linux/priority_devconfig.h>
+#endif
 
+#ifdef CONFIG_USB_SERDES_LOCK
+#define SERDES_SLEEP		10
+#define SERDES_TIMEOUT		2000
+extern int is_serdes_locked(void);
+#endif
 
+#if defined (CONFIG_ARCH_SDP1404) && defined (CONFIG_MODULES)
+extern void enable_wifi_reset(void);
+#endif
 /*
  * Adds a new dynamic USBdevice ID to this driver,
  * and cause the driver to probe for all devices again.
@@ -798,6 +809,16 @@ static int usb_uevent(struct device *dev, struct kobj_uevent_env *env)
 		return -ENODEV;
 	}
 
+#ifdef  CONFIG_USB_DEVICEFS
+        /* If this is available, userspace programs can directly read
+ *          * all the device descriptors we don't tell them about.  Or
+ *                   * act as usermode drivers.
+ *                            */
+        if (add_uevent_var(env, "DEVICE=/proc/bus/usb/%03d/%03d",
+                           usb_dev->bus->busnum, usb_dev->devnum))
+                return -ENOMEM;
+#endif
+
 	/* per-device configurations are common */
 	if (add_uevent_var(env, "PRODUCT=%x/%x/%x",
 			   le16_to_cpu(usb_dev->descriptor.idVendor),
@@ -842,14 +863,14 @@ int usb_register_device_driver(struct usb_device_driver *new_udriver,
 
 	retval = driver_register(&new_udriver->drvwrap.driver);
 
-	if (!retval)
+	if (!retval){
 		pr_info("%s: registered new device driver %s\n",
 			usbcore_name, new_udriver->name);
-	else
+	} else{
 		printk(KERN_ERR "%s: error %d registering device "
 			"	driver %s\n",
 			usbcore_name, retval, new_udriver->name);
-
+	}
 	return retval;
 }
 EXPORT_SYMBOL_GPL(usb_register_device_driver);
@@ -867,6 +888,9 @@ void usb_deregister_device_driver(struct usb_device_driver *udriver)
 			usbcore_name, udriver->name);
 
 	driver_unregister(&udriver->drvwrap.driver);
+	
+	usbfs_update_special();
+
 }
 EXPORT_SYMBOL_GPL(usb_deregister_device_driver);
 
@@ -907,6 +931,8 @@ int usb_register_driver(struct usb_driver *new_driver, struct module *owner,
 	if (retval)
 		goto out;
 
+	usbfs_update_special();
+
 	retval = usb_create_newid_files(new_driver);
 	if (retval)
 		goto out_newid;
@@ -946,6 +972,8 @@ void usb_deregister(struct usb_driver *driver)
 	usb_remove_newid_files(driver);
 	driver_unregister(&driver->drvwrap.driver);
 	usb_free_dynids(driver);
+
+	usbfs_update_special();
 }
 EXPORT_SYMBOL_GPL(usb_deregister);
 
@@ -953,8 +981,7 @@ EXPORT_SYMBOL_GPL(usb_deregister);
  * it doesn't support pre_reset/post_reset/reset_resume or
  * because it doesn't support suspend/resume.
  *
- * The caller must hold @intf's device's lock, but not its pm_mutex
- * and not @intf->dev.sem.
+ * The caller must hold @intf's device's lock, but not @intf's lock.
  */
 void usb_forced_unbind_intf(struct usb_interface *intf)
 {
@@ -967,16 +994,37 @@ void usb_forced_unbind_intf(struct usb_interface *intf)
 	intf->needs_binding = 1;
 }
 
+/*
+ * Unbind drivers for @udev's marked interfaces.  These interfaces have
+ * the needs_binding flag set, for example by usb_resume_interface().
+ *
+ * The caller must hold @udev's device lock.
+ */
+static void unbind_marked_interfaces(struct usb_device *udev)
+{
+	struct usb_host_config	*config;
+	int			i;
+	struct usb_interface	*intf;
+
+	config = udev->actconfig;
+	if (config) {
+		for (i = 0; i < config->desc.bNumInterfaces; ++i) {
+			intf = config->interface[i];
+			if (intf->dev.driver && intf->needs_binding)
+				usb_forced_unbind_intf(intf);
+		}
+	}
+}
+
 /* Delayed forced unbinding of a USB interface driver and scan
  * for rebinding.
  *
- * The caller must hold @intf's device's lock, but not its pm_mutex
- * and not @intf->dev.sem.
+ * The caller must hold @intf's device's lock, but not @intf's lock.
  *
  * Note: Rebinds will be skipped if a system sleep transition is in
  * progress and the PM "complete" callback hasn't occurred yet.
  */
-void usb_rebind_intf(struct usb_interface *intf)
+static void usb_rebind_intf(struct usb_interface *intf)
 {
 	int rc;
 
@@ -991,6 +1039,41 @@ void usb_rebind_intf(struct usb_interface *intf)
 		if (rc < 0)
 			dev_warn(&intf->dev, "rebind failed: %d\n", rc);
 	}
+}
+
+/*
+ * Rebind drivers to @udev's marked interfaces.  These interfaces have
+ * the needs_binding flag set.
+ *
+ * The caller must hold @udev's device lock.
+ */
+static void rebind_marked_interfaces(struct usb_device *udev)
+{
+	struct usb_host_config	*config;
+	int			i;
+	struct usb_interface	*intf;
+
+	config = udev->actconfig;
+	if (config) {
+		for (i = 0; i < config->desc.bNumInterfaces; ++i) {
+			intf = config->interface[i];
+			if (intf->needs_binding)
+				usb_rebind_intf(intf);
+		}
+	}
+}
+
+/*
+ * Unbind all of @udev's marked interfaces and then rebind all of them.
+ * This ordering is necessary because some drivers claim several interfaces
+ * when they are first probed.
+ *
+ * The caller must hold @udev's device lock.
+ */
+void usb_unbind_and_rebind_marked_interfaces(struct usb_device *udev)
+{
+	unbind_marked_interfaces(udev);
+	rebind_marked_interfaces(udev);
 }
 
 #ifdef CONFIG_PM
@@ -1022,43 +1105,6 @@ static void unbind_no_pm_drivers_interfaces(struct usb_device *udev)
 	}
 }
 
-/* Unbind drivers for @udev's interfaces that failed to support reset-resume.
- * These interfaces have the needs_binding flag set by usb_resume_interface().
- *
- * The caller must hold @udev's device lock.
- */
-static void unbind_no_reset_resume_drivers_interfaces(struct usb_device *udev)
-{
-	struct usb_host_config	*config;
-	int			i;
-	struct usb_interface	*intf;
-
-	config = udev->actconfig;
-	if (config) {
-		for (i = 0; i < config->desc.bNumInterfaces; ++i) {
-			intf = config->interface[i];
-			if (intf->dev.driver && intf->needs_binding)
-				usb_forced_unbind_intf(intf);
-		}
-	}
-}
-
-static void do_rebind_interfaces(struct usb_device *udev)
-{
-	struct usb_host_config	*config;
-	int			i;
-	struct usb_interface	*intf;
-
-	config = udev->actconfig;
-	if (config) {
-		for (i = 0; i < config->desc.bNumInterfaces; ++i) {
-			intf = config->interface[i];
-			if (intf->needs_binding)
-				usb_rebind_intf(intf);
-		}
-	}
-}
-
 static int usb_suspend_device(struct usb_device *udev, pm_message_t msg)
 {
 	struct usb_device_driver	*udriver;
@@ -1082,7 +1128,11 @@ static int usb_suspend_device(struct usb_device *udev, pm_message_t msg)
 	return status;
 }
 
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+int usb_resume_device(struct usb_device *udev, pm_message_t msg)
+#else
 static int usb_resume_device(struct usb_device *udev, pm_message_t msg)
+#endif
 {
 	struct usb_device_driver	*udriver;
 	int				status = 0;
@@ -1135,8 +1185,13 @@ static int usb_suspend_interface(struct usb_device *udev,
 	return status;
 }
 
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+int usb_resume_interface(struct usb_device *udev,
+		struct usb_interface *intf, pm_message_t msg, int reset_resume)
+#else	
 static int usb_resume_interface(struct usb_device *udev,
 		struct usb_interface *intf, pm_message_t msg, int reset_resume)
+#endif
 {
 	struct usb_driver	*driver;
 	int			status = 0;
@@ -1276,6 +1331,11 @@ static int usb_suspend_both(struct usb_device *udev, pm_message_t msg)
 	dev_vdbg(&udev->dev, "%s: status %d\n", __func__, status);
 	return status;
 }
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+#ifdef PARALLEL_RESET_RESUME_USER_PORT_DEVICES
+extern struct instant_resume_control instant_ctrl;
+#endif
+#endif
 
 /**
  * usb_resume_both - resume a USB device and its interfaces
@@ -1295,16 +1355,53 @@ static int usb_suspend_both(struct usb_device *udev, pm_message_t msg)
  *
  * This routine can run only in process context.
  */
+
 static int usb_resume_both(struct usb_device *udev, pm_message_t msg)
 {
 	int			status = 0;
 	int			i;
 	struct usb_interface	*intf;
+#ifdef CONFIG_USB_SERDES_LOCK
+	int 			loop_count = 0;
+	int 			serdes_timeout = SERDES_TIMEOUT;
+#endif
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+	struct resume_devnode	*dev = udev->devnode;
+	if(dev != NULL && dev->skip_resume)
+		return 0;
 
+#endif
+#ifdef CONFIG_USB_SERDES_LOCK
+	/* Adding check for checking GPIO LOW condition in HawkP board */
+	if(IS_HAWKP && (udev->descriptor.idVendor ==  HUB11_VENDOR_ID) && (udev->descriptor.idProduct == HUB11_PRODUCT_ID) && (udev->bus->busnum == HUB11_BUSNO)){
+		while(!is_serdes_locked() && (serdes_timeout > 0)){
+			loop_count++;
+			serdes_timeout = SERDES_TIMEOUT - (loop_count * SERDES_SLEEP);
+			msleep(SERDES_SLEEP);
+		}
+		if(serdes_timeout <= 0){
+			dev_err(&udev->dev, "%s : serdes_timeout <%d>, serdes_lock <%d> \n", 
+							__func__, serdes_timeout, is_serdes_locked());
+		}else {
+			dev_err(&udev->dev, "%s : loop_count <%d>, serdes_lock <%d> \n",
+							__func__, loop_count, is_serdes_locked());
+		}
+	}
+#endif
 	if (udev->state == USB_STATE_NOTATTACHED) {
 		status = -ENODEV;
 		goto done;
 	}
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+#ifdef PARALLEL_RESET_RESUME_USER_PORT_DEVICES
+        if((udev->level) && (dev == NULL) && instant_ctrl.active) {
+		if(instant_ctrl.user_port_resume){
+			list_add_tail(&udev->other_dev_list, &instant_ctrl.other_dev_list);
+			return 0;
+		}
+	}
+#endif
+#endif
 	udev->can_submit = 1;
 
 	/* Resume the device */
@@ -1319,12 +1416,38 @@ static int usb_resume_both(struct usb_device *udev, pm_message_t msg)
 					udev->reset_resume);
 		}
 	}
+#if defined (CONFIG_SAMSUNG_USB_PARALLEL_RESUME) && defined (CONFIG_ARCH_SDP1404) && defined (CONFIG_MODULES)
+	if((udev->descriptor.idVendor ==  HUB11_VENDOR_ID) && (udev->descriptor.idProduct == HUB11_PRODUCT_ID) && (udev->bus->busnum == HUB11_BUSNO)){
+		// Enable Wifi nreset for NT14U, Golf_9000 in Hawk.P upgrade JP
+		enable_wifi_reset();
+	}
+#endif
+
 	usb_mark_last_busy(udev);
 
  done:
 	dev_vdbg(&udev->dev, "%s: status %d\n", __func__, status);
 	if (!status)
 		udev->reset_resume = 0;
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+	if(status) {
+		dev_err(&udev->dev, "%s: status %d\n", __func__, status);
+#ifdef PARALLEL_RESET_RESUME_USER_PORT_DEVICES
+		if((dev != NULL) && dev->is_instant_point)
+			/* Clear bit for priority device tree reset fail at a particular busnum*/
+			clear_bit(dev->busnum, &instant_ctrl.instant_point_fail_count);
+#endif
+		if((dev != NULL) && (dev->head != NULL)){
+			dev->head->will_resume = 0;
+#ifdef PARALLEL_RESET_RESUME_USER_PORT_DEVICES
+			if(instant_ctrl.instant_point_fail_count == 0) {
+				instant_ctrl.user_port_thread_info.wait_condition_flag = 1;
+				wake_up(&instant_ctrl.user_port_thread_info.waitQ);
+			}
+#endif
+		}
+	}
+#endif		
 	return status;
 }
 
@@ -1379,7 +1502,7 @@ int usb_resume_complete(struct device *dev)
 	 * whose needs_binding flag is set
 	 */
 	if (udev->state != USB_STATE_NOTATTACHED)
-		do_rebind_interfaces(udev);
+		rebind_marked_interfaces(udev);
 	return 0;
 }
 
@@ -1401,7 +1524,7 @@ int usb_resume(struct device *dev, pm_message_t msg)
 		pm_runtime_disable(dev);
 		pm_runtime_set_active(dev);
 		pm_runtime_enable(dev);
-		unbind_no_reset_resume_drivers_interfaces(udev);
+		unbind_marked_interfaces(udev);
 	}
 
 	/* Avoid PM error messages for devices disconnected while suspended
@@ -1736,10 +1859,13 @@ int usb_runtime_suspend(struct device *dev)
 	if (status == -EAGAIN || status == -EBUSY)
 		usb_mark_last_busy(udev);
 
-	/* The PM core reacts badly unless the return code is 0,
-	 * -EAGAIN, or -EBUSY, so always return -EBUSY on an error.
+	/*
+	 * The PM core reacts badly unless the return code is 0,
+	 * -EAGAIN, or -EBUSY, so always return -EBUSY on an error
+	 * (except for root hubs, because they don't suspend through
+	 * an upstream port like other USB devices).
 	 */
-	if (status != 0)
+	if (status != 0 && udev->parent)
 		return -EBUSY;
 	return status;
 }

@@ -30,7 +30,7 @@
  * ext4_ext_find_extent wrapper. Return 0 on success, or a negative error value
  * on failure.
  */
-static inline int
+int
 get_ext_path(struct inode *inode, ext4_lblk_t lblock,
 		struct ext4_ext_path **orig_path)
 {
@@ -42,8 +42,8 @@ get_ext_path(struct inode *inode, ext4_lblk_t lblock,
 		ret = PTR_ERR(path);
 	else if (path[ext_depth(inode)].p_ext == NULL)
 		ret = -ENODATA;
-	else
-		*orig_path = path;
+		
+	*orig_path = path;
 
 	return ret;
 }
@@ -1542,3 +1542,282 @@ out:
 
 	return ret;
 }
+
+#ifdef CONFIG_EXT4_FS_SPLIT_FILE
+
+/**
+ * ext4_split_file - Split File from offset orig_start, create a new file
+ *		with extents from orig_start to EOF of src file(o_filp).
+ *
+ * @o_filp:	src file descriptor
+ * @dest_file:	destination filename to create
+ * @orig_start:	split point, its a logical block number.
+ *
+ * ext4_split_pvr . Return 0 on success, or a negative error value
+ * on failure.
+ */
+int
+ext4_split_file(struct file *o_filp, char *dest_file, __u64 orig_start)
+{
+	int jblocks = 0;
+	handle_t *dhandle;
+	int err = 0;
+	struct inode *isrc;
+	struct inode *idest;
+	int depth;
+	struct file *dfilp = NULL;
+	__u64 start_offset = orig_start;
+
+	isrc = o_filp->f_dentry->d_inode;
+
+	/* Regular file check */
+	if (!S_ISREG(isrc->i_mode)) {
+		ext_debug("ext4 split file: The argument file should be "
+			"regular file [ino:orig %lu]\n", isrc->i_ino);
+		err = -EINVAL;
+		goto split_error;
+	}
+
+	/* check for offset within range */
+	if (orig_start >= isrc->i_size) {
+		ext_debug("Invalid offset split point\n");
+		return -EIO;
+	}
+
+	/* from here onword split happens on block level */
+	orig_start >>= isrc->i_sb->s_blocksize_bits;
+
+	/* create file of name */
+	if (dest_file) {
+		dfilp = filp_open(dest_file,
+		O_CREAT | O_RDWR | O_LARGEFILE, 0755);
+
+		if (IS_ERR(dfilp))
+			return PTR_ERR(dfilp);
+
+		idest = dfilp->f_dentry->d_inode;
+		if (idest->i_sb != isrc->i_sb) {
+			ext_debug("New file path is from different fs\n");
+			err = -EINVAL;
+			goto split_error;
+		}
+	} else {
+		ext_debug("No destination file specified\n");
+		return -EIO;
+	}
+
+	depth = ext_depth(isrc);
+
+	/* Reset dest file */
+	jblocks = ext4_writepage_trans_blocks(isrc);
+	dhandle = ext4_journal_start(idest, EXT4_HT_MOVE_EXTENTS, jblocks);
+	if (IS_ERR(dhandle)) {
+		err = -EIO;
+		goto split_error;
+	}
+
+	ext4_ext_tree_init(dhandle, idest);
+	ext4_journal_stop(dhandle);
+	mutex_lock(&idest->i_mutex);
+	ext4_flush_unwritten_io(idest);
+
+	/* flush IO before split operation */
+	ext4_flush_unwritten_io(isrc);
+
+	/*
+	 * Write out all dirty pages to avoid race conditions
+	 * Then release them.
+	 */
+	if (isrc->i_mapping->nrpages &&
+			mapping_tagged(isrc->i_mapping, PAGECACHE_TAG_DIRTY)) {
+
+		err = filemap_write_and_wait_range(isrc->i_mapping,
+							 orig_start, -1);
+		if (err) 
+			goto split_error;
+	}
+
+	/* Now release the pages */
+	truncate_inode_pages_range(isrc->i_mapping, orig_start, -1);
+
+	down_write(&EXT4_I(idest)->i_data_sem);
+	down_write(&EXT4_I(isrc)->i_data_sem);
+	ext4_discard_preallocations(isrc);
+	err = ext4_split_move_extents(isrc, orig_start, idest);
+	ext4_es_remove_extent(isrc, orig_start, EXT_MAX_BLOCKS - orig_start);
+	up_write(&EXT4_I(isrc)->i_data_sem);
+	up_write(&EXT4_I(idest)->i_data_sem);
+
+	mutex_unlock(&idest->i_mutex);
+
+	/* Since file-> pos keeps tracks of the seek pointer for a file,
+	 * so a read might have taken file->pos ahead of the split position.
+	 * After split adjust the file->pos so that seek does not return wrong
+	 * position even though I/O will not be allowed
+	 */
+       if (current->files && !err) {
+               struct files_struct *files = current->files;
+               struct fdtable *fdt = NULL;
+               unsigned int nr_open_fds = 0;
+
+               spin_lock(&files->file_lock);                                                    
+               fdt = files_fdtable(files); /* pointer to fd array */
+               nr_open_fds = fdt->max_fds; 
+
+               while (nr_open_fds > 0) {
+                       if (fdt->fd[nr_open_fds - 1]) {
+                               if ((GET_INODE_FROM_FILP(o_filp) 
+                                       == GET_INODE_FROM_FILP(fdt->fd[nr_open_fds - 1])) 
+                                       && (GET_SUPERDEV_FROM_FILP(o_filp) 
+                                       == GET_SUPERDEV_FROM_FILP(fdt->fd[nr_open_fds - 1]))) {
+                                               if (fdt->fd[nr_open_fds - 1]->f_pos > start_offset) {
+                                                       spin_lock(&fdt->fd[nr_open_fds - 1]->f_lock);
+                                                       fdt->fd[nr_open_fds - 1]->f_pos = start_offset;
+                                                       spin_unlock(&fdt->fd[nr_open_fds - 1]->f_lock);
+                                               }
+                               }
+                       }
+                       nr_open_fds--;
+               }
+               spin_unlock(&files->file_lock);
+       }
+
+split_error:
+	if (dfilp)
+		filp_close(dfilp, NULL);
+
+	if (err) {
+		ext_debug("SPLIT operation failed\n");
+		return err;
+	}
+
+	return 0; /* success */
+}
+#endif /* CONFIG_EXT4_FS_SPLIT_FILE */
+
+#ifdef CONFIG_EXT4_FS_MERGE_FILE
+#include <linux/mount.h>
+/*
+ * ersae_file  - unlink file after merge
+ *		decrement counter as required
+ * @file:	file descriptor to unlink
+ */
+void erase_file(struct file *file)
+{
+	if (file->f_mode & FMODE_WRITE){
+		struct vfsmount *mnt = file->f_path.mnt;
+		struct dentry *dentry = file->f_path.dentry;
+		struct inode *inode = dentry->d_inode;
+		put_write_access(inode);
+		if (file_check_writeable(file) != 0)
+			goto skip;
+		mnt_drop_write(mnt);
+		file_release_write(file);
+	}
+
+skip:	mutex_lock(&file->f_dentry->d_parent->d_inode->i_mutex);
+	vfs_unlink(file->f_dentry->d_parent->d_inode,
+					 file->f_dentry);
+	dput(file->f_path.dentry);
+	mntput(file->f_path.mnt);
+	mutex_unlock(&file->f_dentry->d_parent->d_inode->i_mutex);
+
+	return;
+}
+
+/**
+ * ext4_merge_file - Merge File from offset 0, to destination file
+ *		and remove source file
+ *
+ * @o_filp:	src file descriptor
+ * @dest_file:	destination filename
+ *
+ * ext4_merge_pvr . Return 0 on success, or a negative error value
+ * on failure.
+ */
+int
+ext4_merge_file(struct file *o_filp, char *dest_file)
+{
+	int err = 0;
+	struct inode *isrc;
+	struct inode *idest;
+	struct file *dfilp = NULL;
+
+	isrc = o_filp->f_dentry->d_inode;
+
+	/* open/create file of name */
+	if (dest_file) {
+		dfilp = filp_open(dest_file,
+		O_RDWR | O_LARGEFILE, 0755);
+
+		if (IS_ERR(dfilp))
+			return PTR_ERR(dfilp);
+
+		idest = dfilp->f_dentry->d_inode;
+	} else {
+		ext_debug("No destination file specified\n");
+		return -EIO;
+	}
+
+	/* Regular file check */
+	if (!S_ISREG(isrc->i_mode) || !S_ISREG(idest->i_mode)) {
+		ext_debug("ext4 merge file: The argument files should be "
+			"regular file [ino:orig %lu, target %lu]\n",
+			isrc->i_ino, idest->i_ino);
+		err = -EINVAL;
+		goto merge_error;
+	}
+
+	/* src and dest should be different file */
+	if (isrc->i_ino == idest->i_ino) {
+		ext4_debug("ext4 merge file: The argument files should not "
+			"be same file [ino:src %lu, dest %lu]\n",
+			isrc->i_ino, idest->i_ino);
+		return -EINVAL;
+	}
+
+	mutex_lock(&idest->i_mutex);
+
+	/* flush IO before merge operation */
+	ext4_flush_unwritten_io(isrc);
+	ext4_flush_unwritten_io(idest);
+
+	/*
+	 * Write out all dirty pages to avoid race conditions
+	 * Then release them.
+	 */
+	if (idest->i_mapping->nrpages &&
+			mapping_tagged(idest->i_mapping, PAGECACHE_TAG_DIRTY)) {
+
+		err = filemap_write_and_wait_range(idest->i_mapping, 0, -1);
+		if (err)
+			goto merge_error;
+	}
+
+	/* Now release the pages */
+	truncate_inode_pages_range(idest->i_mapping, 0, -1);
+
+	down_write(&EXT4_I(idest)->i_data_sem);
+	down_write(&EXT4_I(isrc)->i_data_sem);
+	err = ext4_split_move_extents(idest, 0, isrc);
+	ext4_es_remove_extent(idest, 0, EXT_MAX_BLOCKS);
+	ext4_discard_preallocations(idest);
+	up_write(&EXT4_I(isrc)->i_data_sem);
+	up_write(&EXT4_I(idest)->i_data_sem);
+
+	mutex_unlock(&idest->i_mutex);
+
+merge_error:
+
+	if (err) {
+		ext_debug("MERGE operation failed\n");
+		filp_close(dfilp, NULL);
+		return err;
+	} else {
+		/* this will erase the destination file */
+		erase_file(dfilp);
+	}
+
+	return 0; /* success */
+}
+#endif /* CONFIG_EXT4_FS_MERGE_FILE */

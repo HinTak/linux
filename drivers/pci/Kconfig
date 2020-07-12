@@ -30,6 +30,15 @@ config PCI_DEBUG
 
 	  When in doubt, say N.
 
+config SDP_PCI
+	tristate "Samsung PCIe RC Driver"
+	depends on PCI 
+	help
+	  Say Y or M here if you want be able to reserve a PCI device
+	  when it is going to be assigned to a guest operating system.
+
+	  When in doubt, say N.
+
 config PCI_REALLOC_ENABLE_AUTO
 	bool "Enable PCI resource re-allocation detection"
 	depends on PCI

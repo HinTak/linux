@@ -179,6 +179,8 @@ static ssize_t name##_show(struct device *dev,				\
 {									\
 	struct backing_dev_info *bdi = dev_get_drvdata(dev);		\
 									\
+	if(!bdi) return 0;						\
+									\
 	return snprintf(page, PAGE_SIZE-1, "%lld\n", (long long)expr);	\
 }
 
@@ -222,6 +224,28 @@ static ssize_t max_ratio_store(struct device *dev,
 }
 BDI_SHOW(max_ratio, bdi->max_ratio)
 
+static ssize_t dirty_background_bytes_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct backing_dev_info *bdi = dev_get_drvdata(dev);
+	unsigned long bytes;
+	ssize_t ret = 0;
+
+	if(!bdi)
+		return ret;
+
+	ret = kstrtoul(buf, 10, &bytes);
+	if (ret < 0)
+		return ret;
+
+	bdi->dirty_background_bytes = bytes;
+	if (over_dirty_bground_bytes(bdi))
+		bdi_start_background_writeback(bdi);
+
+	return count;
+}
+BDI_SHOW(dirty_background_bytes, bdi->dirty_background_bytes)
+
 static ssize_t stable_pages_required_show(struct device *dev,
 					  struct device_attribute *attr,
 					  char *page)
@@ -238,6 +262,7 @@ static struct device_attribute bdi_dev_attrs[] = {
 	__ATTR_RW(read_ahead_kb),
 	__ATTR_RW(min_ratio),
 	__ATTR_RW(max_ratio),
+	__ATTR_RW(dirty_background_bytes),
 	__ATTR_RO(stable_pages_required),
 	__ATTR_NULL,
 };
@@ -287,13 +312,19 @@ int bdi_has_dirty_io(struct backing_dev_info *bdi)
  * Note, we wouldn't bother setting up the timer, but this function is on the
  * fast-path (used by '__mark_inode_dirty()'), so we save few context switches
  * by delaying the wake-up.
+ *
+ * We have to be careful not to postpone flush work if it is scheduled for
+ * earlier. Thus we use queue_delayed_work().
  */
 void bdi_wakeup_thread_delayed(struct backing_dev_info *bdi)
 {
 	unsigned long timeout;
 
 	timeout = msecs_to_jiffies(dirty_writeback_interval * 10);
-	mod_delayed_work(bdi_wq, &bdi->wb.dwork, timeout);
+	spin_lock_bh(&bdi->wb_lock);
+	if (test_bit(BDI_registered, &bdi->state))
+		queue_delayed_work(bdi_wq, &bdi->wb.dwork, timeout);
+	spin_unlock_bh(&bdi->wb_lock);
 }
 
 /*
@@ -306,9 +337,6 @@ static void bdi_remove_from_list(struct backing_dev_info *bdi)
 	spin_unlock_bh(&bdi_lock);
 
 	synchronize_rcu_expedited();
-
-	/* bdi_list is now unused, clear it to mark @bdi dying */
-	INIT_LIST_HEAD(&bdi->bdi_list);
 }
 
 int bdi_register(struct backing_dev_info *bdi, struct device *parent,
@@ -358,6 +386,16 @@ static void bdi_wb_shutdown(struct backing_dev_info *bdi)
 	 * Make sure nobody finds us on the bdi_list anymore
 	 */
 	bdi_remove_from_list(bdi);
+
+	/* Make sure nobody queues further work */
+	spin_lock_bh(&bdi->wb_lock);
+	clear_bit(BDI_registered, &bdi->state);
+	spin_unlock_bh(&bdi->wb_lock);
+
+	if (check_freezing()) {
+		cancel_delayed_work(&bdi->wb.dwork);
+		return;
+	}
 
 	/*
 	 * Drain work list and shutdown the delayed_work.  At this point,
@@ -439,6 +477,7 @@ int bdi_init(struct backing_dev_info *bdi)
 	bdi->min_ratio = 0;
 	bdi->max_ratio = 100;
 	bdi->max_prop_frac = FPROP_FRAC_BASE;
+	bdi->dirty_background_bytes = 0;
 	spin_lock_init(&bdi->wb_lock);
 	INIT_LIST_HEAD(&bdi->bdi_list);
 	INIT_LIST_HEAD(&bdi->work_list);

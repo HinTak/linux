@@ -76,7 +76,16 @@ struct us_unusual_dev {
 #define US_FLIDX_SCAN_PENDING	6	/* scanning not yet done    */
 #define US_FLIDX_REDO_READ10	7	/* redo READ(10) command    */
 #define US_FLIDX_READ10_WORKED	8	/* previous READ(10) succeeded */
-
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+//VD_COMP_USB_PATCH
+// patch JAN-25-2007
+#define US_FLIDX_CONNRESET      24              /* 0x01000000  connection reset in progress */
+// patch JUN-18-2007
+#define US_FLIDX_IGNORE_RESPONSE_LENGTH 25      /* 0x02000000  Ignore INQUIRY response length */
+// patch for US_FLIDX_SCSI_MAX_32_BLOCK device
+//20070716
+#define US_FLIDX_SCSI_MAX_32_BLOCK      26      /* 0x04000000  send scsi request maximum 32 block */
+#endif
 #define USB_STOR_STRING_LEN 32
 
 /*
@@ -115,6 +124,12 @@ struct us_data {
 	unsigned int		send_ctrl_pipe;
 	unsigned int		recv_ctrl_pipe;
 	unsigned int		recv_intr_pipe;
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+        /* information about the device */
+        char                    vendor[USB_STOR_STRING_LEN];
+        char                    product[USB_STOR_STRING_LEN];
+        char                    serial[USB_STOR_STRING_LEN];
+#endif
 
 	/* information about the device */
 	char			*transport_name;

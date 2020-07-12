@@ -268,7 +268,9 @@ allocate_id_index_table:
 	}
 	next_table = le64_to_cpu(msblk->inode_lookup_table[0]);
 
+#ifdef CONFIG_ENABLE_SQUASHFS_EXPORT
 	sb->s_export_op = &squashfs_export_ops;
+#endif
 
 handle_fragments:
 	fragments = le32_to_cpu(sblk->fragments);
@@ -447,6 +449,13 @@ static int __init init_squashfs_fs(void)
 		return err;
 	}
 
+	err = squashfs_sysfs_init();
+	if (err) {
+		unregister_filesystem(&squashfs_fs_type);
+		destroy_inodecache();
+		return err;
+	}
+
 	printk(KERN_INFO "squashfs: version 4.0 (2009/01/31) "
 		"Phillip Lougher\n");
 
@@ -456,6 +465,7 @@ static int __init init_squashfs_fs(void)
 
 static void __exit exit_squashfs_fs(void)
 {
+	squashfs_sysfs_cleanup();
 	unregister_filesystem(&squashfs_fs_type);
 	destroy_inodecache();
 }

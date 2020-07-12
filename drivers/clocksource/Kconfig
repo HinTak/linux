@@ -85,3 +85,13 @@ config CLKSRC_SAMSUNG_PWM
 	  Samsung S3C, S5P and Exynos SoCs, replacing an earlier driver
 	  for all devicetree enabled platforms. This driver will be
 	  needed only on systems that do not have the Exynos MCT available.
+
+config CLKSRC_SDP_TIMER
+	def_bool y if ARCH_SDP
+	help
+	  Support for Samsung SDP basic timer.
+
+config CLKSRC_SDP12XX_TIMER
+	def_bool y if ARCH_SDP
+	help
+	  Support for Samsung SDP12XX basic timer.

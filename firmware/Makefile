@@ -135,6 +135,24 @@ fw-shipped-$(CONFIG_USB_SERIAL_XIRCOM) += keyspan_pda/xircom_pgs.fw
 fw-shipped-$(CONFIG_USB_VICAM) += vicam/firmware.fw
 fw-shipped-$(CONFIG_VIDEO_CPIA2) += cpia2/stv0672_vp4.bin
 fw-shipped-$(CONFIG_YAM) += yam/1200.bin yam/9600.bin
+#fw-shipped-y += sdp_audio/audio_dsp0.fw
+#fw-shipped-y += sdp_audio/audio_dsp1.fw
+#ifeq ($(CONFIG_ARCH_SDP1304), y)
+#fw-shipped-y += sdp_audio/audio_dsp0.fw
+#fw-shipped-y += sdp_audio/audio_dsp1.fw
+#else ifeq ($(CONFIG_ARCH_SDP1404), y)
+#	fw-shipped-y += sdp_audio/audio_dsp0_1404.fw
+#	fw-shipped-y += sdp_audio/audio_dsp1_1404.fw
+#else ifeq ($(CONFIG_ARCH_SDP1406), y)
+#	fw-shipped-y += sdp_audio/audio_dsp0_1406.fw
+#	fw-shipped-y += sdp_audio/audio_dsp1_1406.fw
+#else
+#endif
+
+
+#fw-shipped-y += sdp_mfd/ucode_mfd.fw
+#fw-shipped-y += sdp_tsd/tsd.fw
+#fw-shipped-y += sdp_tsd/tsd_dm.fw
 
 fw-shipped-all := $(fw-shipped-y) $(fw-shipped-m) $(fw-shipped-)
 

@@ -474,9 +474,191 @@ int show_interrupts(struct seq_file *p, void *v)
 			seq_printf(p, ", %s", action->name);
 	}
 
+#ifdef CONFIG_IRQ_TIME
+        seq_printf(p, "  (max %d usec)", desc->runtime);
+#endif
+
 	seq_putc(p, '\n');
 out:
 	raw_spin_unlock_irqrestore(&desc->lock, flags);
 	return 0;
 }
 #endif
+
+
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+static DEFINE_RAW_SPINLOCK(vd_irq_lock);
+static int vd_irq_trace[NR_IRQS]={0,};
+
+// no timer irq -> print debug message
+// // twd_local_timer_common_register() is referred to find out timer name"
+int check_timer_irq(struct irq_desc *desc)
+{
+        if( desc && desc->action )
+        {
+                if (strstr( desc->action->name, "twd") || strstr(desc->action->name, "arch_timer") || strstr(desc->action->name, "sdp_tick") )
+                        return 1;
+        }
+
+        return 0;
+}
+
+void vd_irq_set(int irq, struct irq_desc *desc )
+{
+        unsigned long flags;
+        raw_spin_lock_irqsave(&vd_irq_lock, flags);
+        if( unlikely(vd_irq_trace[irq] != 0 ) )
+        {
+                if(!check_timer_irq(desc))
+                        printk("[DEBUG:vd_irq_set()] maybe.. nested irq(CPU:%d, irq num:%d(name:%s)... previous irq checking is removed...\n", smp_processor_id(),  irq, desc->name);
+                vd_irq_trace[irq]=1;
+        }
+        else
+                vd_irq_trace[irq]++;
+        raw_spin_unlock_irqrestore(&vd_irq_lock, flags);
+}
+
+void vd_irq_unset(int irq, struct irq_desc *desc )
+{
+        unsigned long flags;
+
+        raw_spin_lock_irqsave(&vd_irq_lock, flags);
+        if( unlikely(vd_irq_trace[irq] != 1 ) )
+        {
+                if(!check_timer_irq(desc))
+                        printk("[DEBUG:vd_irq_unset()] maybe.. irq unset two times(CPU:%d, irq num:%d(name:%s))... previous irq checking is removed...\n", smp_processor_id(),  irq, desc->name);
+                vd_irq_trace[irq]=0;
+        }
+        else
+                vd_irq_trace[irq]--;
+        raw_spin_unlock_irqrestore(&vd_irq_lock, flags);
+}
+
+
+static DEFINE_RAW_SPINLOCK(show_irq_lock);
+#ifdef CONFIG_IRQ_TIME
+int irq_show_count=0;
+#endif
+void show_irq(void)
+{
+        static int prec;
+        int i, j;
+        struct irq_desc *desc=NULL;
+        struct irqaction *action;
+        unsigned long flags,flags2;
+
+#ifdef CONFIG_IRQ_TIME
+        unsigned int cu_cpu = smp_processor_id();
+        struct timeval now;
+	irq_show_count++;
+	if(irq_show_count>10)
+	{
+		if((irq_show_count%100)!=0)return;
+	}
+#endif
+
+        raw_spin_lock_irqsave(&show_irq_lock, flags2);
+
+        printk( KERN_ALERT "=============================================================\n");
+        printk( KERN_ALERT "NR_IRQS : %d\n", NR_IRQS);
+        printk( KERN_ALERT "incomplete irq list....\n");
+        printk( KERN_ALERT "-------------------------------------------------------------\n");
+
+
+        for(i=0; i<NR_IRQS;i++)
+        {
+                if(vd_irq_trace[i])
+                {
+                        printk( "[%3d] : %5d ", i, vd_irq_trace[i]);
+                        desc = irq_to_desc((unsigned int)i);
+                        if (desc)
+                        {
+                                action = desc->action;
+                                while(action)
+                                {
+                                        printk( "%s ", action->name);
+                                        action = action->next;
+                                }
+                                printk("\n");
+                        }
+                        else
+                                printk( "  => There is no desc!!\n");
+                }
+        }
+        printk( KERN_ALERT "-------------------------------------------------------------\n");
+        /* print header and calculate the width of the first column */
+        for (prec = 3, j = 1000; prec < 10 && j <= nr_irqs; ++prec)
+                j *= 10;
+
+        printk("%*s", prec + 8, "");
+        for_each_online_cpu(j)
+                printk("CPU%-8d", j);
+        printk("\n");
+
+        for(i=0; i<nr_irqs;i++)
+        {
+                desc = irq_to_desc((unsigned int)i);
+                if (!desc)
+                        continue;
+
+                raw_spin_lock_irqsave(&desc->lock, flags);
+                action = desc->action;
+                if (!action)
+                        goto out;
+
+                printk("%*d: ", prec, i);
+                for_each_online_cpu(j)
+                        printk("%10u ", kstat_irqs_cpu((unsigned int)i, j));
+
+                if (desc->irq_data.chip) {
+                        if (desc->irq_data.chip->name)
+                                printk(" %8s", desc->irq_data.chip->name);
+                        else
+                                printk(" %8s", "-");
+                } else {
+                        printk(" %8s", "None");
+                }
+#ifdef CONFIG_GENERIC_IRQ_SHOW_LEVEL
+                printk(" %-8s", irqd_is_level_type(&desc->irq_data) ? "Level" : "Edge");
+#endif
+                if (desc->name)
+                        printk("-%-8s", desc->name);
+
+                if (action) {
+                        printk("  %s", action->name);
+                        while ((action = action->next) != NULL)
+                                printk(", %s", action->name);
+                }
+
+#ifdef CONFIG_IRQ_TIME
+                printk("  (max %d usec)", desc->runtime);
+#endif
+
+                printk("\n");
+out:
+                raw_spin_unlock_irqrestore(&desc->lock, flags);
+        }
+#ifdef CONFIG_IRQ_TIME
+        do_gettimeofday(&now);
+        printk( KERN_ALERT "=============================================================\n");
+        printk(KERN_ERR"IRQ : %d CPU : %d\n",irq_desc_last[cu_cpu].irq,cu_cpu);
+        printk(KERN_ERR"LAST IRQ TIME : %ld usec ",irq_desc_last[cu_cpu].last_time);
+        printk(KERN_ERR" NOW : %ld usec\n",(now.tv_sec*1000000) + now.tv_usec);
+        printk(KERN_ERR"IRQ WATCHDOG : %ld usec\n",((now.tv_sec*1000000) + now.tv_usec) - irq_desc_last[cu_cpu].last_time);
+        printk(KERN_ERR"LAST WATCHDOG THREAD TIME : %ld usec \n",irq_desc_last[cu_cpu].last_time_kth);
+        printk(KERN_ERR"LAST TIMER INTERRUPT TIME : %ld usec \n",irq_desc_last[cu_cpu].last_time_tint);
+        printk(KERN_ERR"PREEMPT COUNT : 0x%x irq_show_count : %d\n", preempt_count(),irq_show_count);
+        printk( KERN_ALERT "=============================================================\n");
+        for_each_online_cpu(j)
+                printk("CPU%d : [%d] ", j, irq_desc_last[j].irq_run);
+	printk("\n");
+        printk( KERN_ALERT "=============================================================\n");
+#endif
+
+        raw_spin_unlock_irqrestore(&show_irq_lock, flags2);
+}
+#endif
+
+ 
+ 
+

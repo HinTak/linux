@@ -40,6 +40,10 @@
 #include <linux/swapops.h>
 #include <linux/page_cgroup.h>
 
+#ifdef CONFIG_KNBD_SWAP_EXTENSION
+#define MAX_KILL_ATTEMPTS 100
+#endif
+
 static bool swap_count_continued(struct swap_info_struct *, pgoff_t,
 				 unsigned char);
 static void free_swap_count_continuations(struct swap_info_struct *);
@@ -50,7 +54,14 @@ static unsigned int nr_swapfiles;
 atomic_long_t nr_swap_pages;
 /* protected with swap_lock. reading in vm_swap_full() doesn't need lock */
 long total_swap_pages;
+
+#ifdef CONFIG_KNBD_SWAP_EXTENSION
+static int max_neg_priority;
+static int min_neg_pritority = SHRT_MIN;
+#else
 static int least_priority;
+#endif
+
 static atomic_t highest_priority_index = ATOMIC_INIT(-1);
 
 static const char Bad_file[] = "Bad swap file entry ";
@@ -1107,8 +1118,13 @@ static unsigned int find_next_to_unuse(struct swap_info_struct *si,
  * if the boolean frontswap is true, only unuse pages_to_unuse pages;
  * pages_to_unuse==0 means all pages; ignored if frontswap is false
  */
+#ifdef CONFIG_KNBD_SWAP_EXTENSION
+int try_to_unuse(unsigned int type, bool frontswap, bool partial,
+		 unsigned long pages_to_unuse)
+#else
 int try_to_unuse(unsigned int type, bool frontswap,
 		 unsigned long pages_to_unuse)
+#endif
 {
 	struct swap_info_struct *si = swap_info[type];
 	struct mm_struct *start_mm;
@@ -1308,15 +1324,25 @@ int try_to_unuse(unsigned int type, bool frontswap,
 		 * interactive performance.
 		 */
 		cond_resched();
+#ifdef CONFIG_KNBD_SWAP_EXTENSION
+		if ((frontswap || partial) && pages_to_unuse > 0) {
+			if (!--pages_to_unuse)
+				break;
+		}
+#else
 		if (frontswap && pages_to_unuse > 0) {
 			if (!--pages_to_unuse)
 				break;
 		}
+#endif
 	}
 
 	mmput(start_mm);
 	return retval;
 }
+#ifdef CONFIG_KNBD_SUPPORT
+EXPORT_SYMBOL(try_to_unuse);
+#endif
 
 /*
  * After a successful try_to_unuse, if no swap is now in use, we know
@@ -1515,8 +1541,16 @@ static void _enable_swap_info(struct swap_info_struct *p, int prio,
 
 	if (prio >= 0)
 		p->prio = prio;
+#ifdef CONFIG_KNBD_SWAP_EXTENSION
+	else if (prio == SHRT_MIN)
+		p->prio = min_neg_pritority++;
+#endif
 	else
+#ifdef CONFIG_KNBD_SWAP_EXTENSION
+		p->prio = --max_neg_priority;
+#else
 		p->prio = --least_priority;
+#endif
 	p->swap_map = swap_map;
 	p->flags |= SWP_WRITEOK;
 	atomic_long_add(p->pages, &nr_swap_pages);
@@ -1557,6 +1591,23 @@ static void reinsert_swap_info(struct swap_info_struct *p)
 	spin_unlock(&swap_lock);
 }
 
+#ifdef CONFIG_KNBD_SWAP_EXTENSION
+/* kill_task invokes oom-killer until it will be enough memory. */
+static int kill_tasks(const int pages, int nattempts)
+{
+	extern int min_free_kbytes;
+	do {
+		if (global_page_state(NR_FREE_PAGES)
+			> (pages + (min_free_kbytes>>PAGE_SHIFT)))
+			break;
+
+		pagefault_out_of_memory();
+		schedule_timeout_interruptible(HZ);
+	} while ((nattempts--) > 0);
+	return nattempts;
+}
+#endif
+
 SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 {
 	struct swap_info_struct *p = NULL;
@@ -1572,7 +1623,15 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
+	/*
+	 * Since usermode helpers are broken we have no other choice then
+	 * calling sys_swapoff directly from kernel.
+	 * With following BUG_ON it's not possible as kthreads doesn't have mm,
+	 * so remove it untill usermode helpers get fixed
+	 */
+#ifndef CONFIG_KNBD_SWAP_EXTENSION
 	BUG_ON(!current->mm);
+#endif
 
 	pathname = getname(specialfile);
 	if (IS_ERR(pathname))
@@ -1599,6 +1658,8 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 		spin_unlock(&swap_lock);
 		goto out_dput;
 	}
+
+#ifndef CONFIG_KNBD_SWAP_EXTENSION
 	if (!security_vm_enough_memory_mm(current->mm, p->pages))
 		vm_unacct_memory(p->pages);
 	else {
@@ -1606,6 +1667,19 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 		spin_unlock(&swap_lock);
 		goto out_dput;
 	}
+#else
+	if (current->mm) {
+		if (!security_vm_enough_memory_mm(current->mm, p->pages))
+			vm_unacct_memory(p->pages);
+	}
+	spin_unlock(&swap_lock);
+	if (!kill_tasks(p->inuse_pages, MAX_KILL_ATTEMPTS)) {
+		err = -ENOMEM;
+		goto out_dput;
+	}
+	spin_lock(&swap_lock);
+#endif
+
 	if (prev < 0)
 		swap_list.head = p->next;
 	else
@@ -1616,9 +1690,21 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 	}
 	spin_lock(&p->lock);
 	if (p->prio < 0) {
+#ifdef CONFIG_KNBD_SWAP_EXTENSION
+		if (p->prio < max_neg_priority) {
+			for (i = p->next; i >= 0; i = swap_info[i]->next)
+				swap_info[i]->prio = p->prio++;
+			min_neg_pritority--;
+		} else {
+			for (i = p->next; i >= 0; i = swap_info[i]->next)
+				swap_info[i]->prio = p->prio--;
+			max_neg_priority++;
+		}
+#else
 		for (i = p->next; i >= 0; i = swap_info[i]->next)
 			swap_info[i]->prio = p->prio--;
 		least_priority++;
+#endif
 	}
 	atomic_long_sub(p->pages, &nr_swap_pages);
 	total_swap_pages -= p->pages;
@@ -1626,9 +1712,17 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 	spin_unlock(&p->lock);
 	spin_unlock(&swap_lock);
 
+#ifndef CONFIG_KNBD_SWAP_EXTENSION
 	set_current_oom_origin();
+#endif
+#ifdef CONFIG_KNBD_SWAP_EXTENSION
+	err = try_to_unuse(type, false, false, 0); /* force all pages to be unused */
+#else
 	err = try_to_unuse(type, false, 0); /* force all pages to be unused */
+#endif
+#ifndef CONFIG_KNBD_SWAP_EXTENSION
 	clear_current_oom_origin();
+#endif
 
 	if (err) {
 		/* re-insert swap space back into swap_list */
@@ -1693,6 +1787,46 @@ out:
 	putname(pathname);
 	return err;
 }
+#ifdef CONFIG_KNBD_SUPPORT
+EXPORT_SYMBOL(sys_swapoff);
+#endif
+
+#ifdef CONFIG_SHOW_SWPINF_OOM
+#define SWAP_PATH_LEN 128
+void print_swaps(void)
+{
+	struct swap_info_struct *si;
+	struct file *file;
+	char path[SWAP_PATH_LEN];
+	int type;
+	char *p;
+
+	printk(KERN_INFO "Active swap partitions: \n");
+
+	mutex_lock(&swapon_mutex);
+	for (type = 0; type < nr_swapfiles; type++) {
+		smp_rmb();
+		si = swap_info[type];
+		if (!(si->flags & SWP_USED) || !si->swap_map)
+			continue;
+
+		file = si->swap_file;
+		p = d_path(&file->f_path, path, SWAP_PATH_LEN);
+		if (!IS_ERR(p)) {
+			printk(KERN_INFO "Filename: %s\n", p);
+			printk(KERN_INFO "Type: %s\n",
+			S_ISBLK(file->f_path.dentry->d_inode->i_mode) ?
+				"partition" : "file");
+			printk(KERN_INFO "Pages: %u\nUsed: %u\nPrio: %d\n\n",
+					si->pages << (PAGE_SHIFT - 10),
+					si->inuse_pages << (PAGE_SHIFT - 10),
+					si->prio);
+		}
+	}
+	mutex_unlock(&swapon_mutex);
+}
+#undef SWAP_PATH_LEN
+#endif
 
 #ifdef CONFIG_PROC_FS
 static unsigned swaps_poll(struct file *file, poll_table *wait)
@@ -2015,8 +2149,15 @@ static int setup_swap_map_and_extents(struct swap_info_struct *p,
 
 	return nr_extents;
 }
-
-SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
+/**
+ * Sets swap area to the file or block device
+ * @specialfile - path to file or block device
+ * @swap_flags - swap flags
+ * @lowest_prio - if 1 swap's priority will grow from the lowest priority
+ *                otherwise it will decrease from -1.
+ * @return - 0 - OK, < 0 - error.
+ */
+int swapon(const char __user * specialfile, int swap_flags, int lowest_prio)
 {
 	struct swap_info_struct *p;
 	struct filename *name;
@@ -2128,7 +2269,11 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 	}
 
 	mutex_lock(&swapon_mutex);
+#ifdef CONFIG_KNBD_SWAP_EXTENSION
+	prio = lowest_prio ? SHRT_MIN : -1;
+#else
 	prio = -1;
+#endif
 	if (swap_flags & SWAP_FLAG_PREFER)
 		prio =
 		  (swap_flags & SWAP_FLAG_PRIO_MASK) >> SWAP_FLAG_PRIO_SHIFT;
@@ -2179,6 +2324,14 @@ out:
 	if (inode && S_ISREG(inode->i_mode))
 		mutex_unlock(&inode->i_mutex);
 	return error;
+}
+#ifdef CONFIG_KNBD_SWAP_EXTENSION
+EXPORT_SYMBOL(swapon);
+#endif
+
+SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
+{
+	return swapon(specialfile, swap_flags, 0);
 }
 
 void si_swapinfo(struct sysinfo *val)
@@ -2548,3 +2701,21 @@ static void free_swap_count_continuations(struct swap_info_struct *si)
 		}
 	}
 }
+
+#ifdef CONFIG_KNBD_SWAP_EXTENSION
+struct swap_info_struct *block_device_to_swap_info(struct block_device *bdev)
+{
+	int type;
+
+	spin_lock(&swap_lock);
+	for (type = 0; type < nr_swapfiles; type++) {
+		if (swap_info[type]->bdev == bdev) {
+			spin_unlock(&swap_lock);
+			return swap_info[type];
+		}
+	}
+	spin_unlock(&swap_lock);
+	return NULL;
+}
+EXPORT_SYMBOL(block_device_to_swap_info);
+#endif

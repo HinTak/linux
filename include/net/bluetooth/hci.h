@@ -116,7 +116,7 @@ enum {
 	HCI_SSP_ENABLED,
 	HCI_HS_ENABLED,
 	HCI_LE_ENABLED,
-	HCI_LE_PERIPHERAL,
+	HCI_ADVERTISING,
 	HCI_CONNECTABLE,
 	HCI_DISCOVERABLE,
 	HCI_LINK_SECURITY,
@@ -344,6 +344,7 @@ enum {
 #define EIR_SSP_HASH_C		0x0E /* Simple Pairing Hash C */
 #define EIR_SSP_RAND_R		0x0F /* Simple Pairing Randomizer R */
 #define EIR_DEVICE_ID		0x10 /* device ID */
+#define EIR_GAP_APPEARANCE      0x19 /* GAP appearance */
 
 /* Low Energy Advertising Flags */
 #define LE_AD_LIMITED		0x01 /* Limited Discoverable */
@@ -352,6 +353,8 @@ enum {
 #define LE_AD_SIM_LE_BREDR_CTRL	0x08 /* Simultaneous LE & BR/EDR Controller */
 #define LE_AD_SIM_LE_BREDR_HOST	0x10 /* Simultaneous LE & BR/EDR Host */
 
+#define EIR_3D_SYNC	0x3D /* 3D information */
+#define EIR_LEGACY_3D_SYNC	0xFF /* Legacy 3D information */
 /* -----  HCI Commands ---- */
 #define HCI_OP_NOP			0x0000
 
@@ -820,6 +823,11 @@ struct hci_rp_read_inq_rsp_tx_power {
 	__s8     tx_power;
 } __packed;
 
+#define HCI_OP_SET_EVENT_MASK_PAGE2	0x0c63
+struct hci_cp_set_event_mask_page2 {
+	__u8	 mask[8];
+} __packed;
+
 #define HCI_OP_READ_FLOW_CONTROL_MODE	0x0c66
 struct hci_rp_read_flow_control_mode {
 	__u8     status;
@@ -969,6 +977,20 @@ struct hci_rp_le_read_local_features {
 	__u8     features[8];
 } __packed;
 
+#define HCI_OP_LE_SET_RANDOM_ADDR	0x2005
+
+#define HCI_OP_LE_SET_ADV_PARAM		0x2006
+struct hci_cp_le_set_adv_param {
+	__le16   min_interval;
+	__le16   max_interval;
+	__u8     type;
+	__u8     own_address_type;
+	__u8     direct_addr_type;
+	bdaddr_t direct_addr;
+	__u8     channel_map;
+	__u8     filter_policy;
+} __packed;
+
 #define HCI_OP_LE_READ_ADV_TX_POWER	0x2007
 struct hci_rp_le_read_adv_tx_power {
 	__u8	status;
@@ -979,6 +1001,12 @@ struct hci_rp_le_read_adv_tx_power {
 
 #define HCI_OP_LE_SET_ADV_DATA		0x2008
 struct hci_cp_le_set_adv_data {
+	__u8	length;
+	__u8	data[HCI_MAX_AD_LENGTH];
+} __packed;
+
+#define HCI_OP_LE_SET_SCAN_RSP_DATA	0x2009
+struct hci_cp_le_set_scan_rsp_data {
 	__u8	length;
 	__u8	data[HCI_MAX_AD_LENGTH];
 } __packed;
@@ -995,6 +1023,20 @@ struct hci_cp_le_set_scan_param {
 	__le16  window;
 	__u8    own_address_type;
 	__u8    filter_policy;
+} __packed;
+
+#define HCI_OP_LE_CLEAR_DEV_WHITE_LIST	0x2010
+
+#define HCI_OP_LE_ADD_DEV_WHITE_LIST	0x2011
+struct hci_cp_le_add_dev_white_list {
+	__u8 bdaddr_type;
+	bdaddr_t bdaddr;
+} __packed;
+
+#define HCI_OP_LE_REMOVE_FROM_DEV_WHITE_LIST	0x2012
+struct hci_cp_le_remove_dev_from_white_list {
+	__u8 bdaddr_type;
+	bdaddr_t bdaddr;
 } __packed;
 
 #define LE_SCAN_DISABLE			0x00
@@ -1074,6 +1116,211 @@ struct hci_rp_le_ltk_neg_reply {
 struct hci_rp_le_read_supported_states {
 	__u8	status;
 	__u8	le_states[8];
+} __packed;
+
+#define HCI_OP_TRUNCATE_PAGE 0x043f
+struct hci_cp_truncated_page {
+	bdaddr_t bd_addr;
+	__u8 page_scan_resp_mode;
+	__le16 clock_offset;
+} __packed;
+
+#define HCI_OP_TRUNCATE_PAGE_CANCEL 0x0440
+struct hci_cp_truncated_page_cancel {
+	bdaddr_t bd_addr;
+} __packed;
+struct hci_rp_truncated_page_cancel {
+	bdaddr_t bd_addr;
+} __packed;
+
+#define HCI_OP_SET_CONNECTIONLESS_SLAVE_BROADCAST 0x0441
+struct hci_cp_set_connectionless_slave_broadcast {
+	__u8 enable;
+	__u8 lt_addr;
+	__u8 lpo_allowed;
+	__le16 packet_types;
+	__le16 csb_int_min;
+	__le16 csb_int_max;
+	__le16 csb_sv_tout;
+} __packed;
+struct hci_rp_set_connectionless_slave_broadcast {
+	__u8 status;
+	__u8 lt_addr;
+	__le16 csb_int;
+} __packed;
+
+#define HCI_OP_SET_CONNECTIONLESS_SLAVE_BROADCAST_RECEIVE 0x0442
+struct hci_cp_set_connectionless_slave_broadcast_receive {
+	__u8 enable;
+	bdaddr_t bd_addr;
+	__u8 lt_addr;
+	__le16 interval;
+	__le32 clock_offset;
+	__le32 nxt_clb_clock;
+	__le16 csb_tout;
+	__u8 remote_timimg_accuracy;
+	__u8 skip;
+	__le16 packet_type;
+	__u8 afh_channel_map[10];
+} __packed;
+struct hci_rp_set_connectionless_slave_broadcast_receive {
+	bdaddr_t bd_addr;
+	__u8 lt_addr;
+} __packed;
+
+#define HCI_OP_START_SYNC_TRAIN 0x0443
+
+#define HCI_OP_RECEIVE_SYNC_TRAIN 0x0444
+struct hci_cp_receive_sync_train {
+	bdaddr_t bd_addr;
+	__le16 sync_tout;
+	__le16 sync_window;
+	__le16 sync_train_scan_interval;
+} __packed;
+#define HCI_OP_SET_RESERVED_LT_ADDR 0x0c74
+struct hci_cp_set_reserved_lt_addr {
+	__u8 lt_addr;
+} __packed;
+struct hci_rp_set_reserved_lt_addr {
+	__u8 status;
+	__u8 lt_addr;
+} __packed;
+
+#define HCI_OP_DELETE_RESERVED_LT_ADDR 0x0c75
+struct hci_cp_delete_reserved_lt_addr {
+	__u8 lt_addr;
+} __packed;
+struct hci_rp_delete_reserved_lt_addr {
+	__u8 status;
+	__u8 lt_addr;
+} __packed;
+
+#define HCI_OP_SET_CONNECTIONLESS_SLAVE_BROADCAST_DATA 0x0c76
+struct hci_cp_set_connectionless_slave_broadcast_data {
+	__u8 lt_addr;
+	__u8 fragment;
+	__u8 data_length;
+	__u8 data[16];
+} __packed;
+struct hci_rp_set_connectionless_slave_broadcast_data {
+	__u8 status;
+	__u8 lt_addr;
+} __packed;
+
+#define HCI_OP_READ_SYNC_TRAIN_PARAMS 0x0c77
+struct hci_rp_read_sync_train_params {
+	__u8 status;
+	__le16 sync_train_int;
+	__le32 sync_train_tout;
+	__u8 service_data;
+} __packed;
+
+#define HCI_OP_WRITE_SYNC_TRAIN_PARAMS 0x0c78
+struct hci_cp_write_sync_train_params {
+	__le16 sync_int_min;
+	__le16 sync_int_max;
+	__le32 sync_train_tout;
+	__u8 service_data;
+} __packed;
+struct hci_rp_write_sync_train_params {
+	__u8 status;
+	__le16 sync_train_int;
+} __packed;
+
+
+#define HCI_OP_SET_TRIGGERED_CLOCK_CAPTURE 0x140d
+struct hci_cp_set_triggered_clock_capture {
+	__le16 conn_handle;
+	__u8 enable;
+	__u8 which_clock;
+	__u8 lpo_allowed;
+	__u8 num_clk_cap_to_filter;
+} __packed;
+struct hci_rp_set_triggered_clock_capture {
+	__u8 status;
+} __packed;
+
+#define HCI_OP_VSPEC_SET_3D_CTRL	0xFCB7
+struct hci_cp_vspec_set_3d_ctrl {
+	__u8 mode;
+	__u8 bd_addr[6];
+} __packed;
+
+#define HCI_OP_VSPEC_SET_3D_DELAY	0xFCD6
+struct hci_cp_vspec_set_3d_delay {
+	__u8 display_id;
+	__le16 left_open;
+	__le16 left_close;
+	__le16 right_open;
+	__le16 right_close;
+	__le16 delay;
+	__u8 dual_view;
+} __packed;
+
+#define HCI_OP_VSPEC_VSYNC_DETECT	0xFCE3
+struct hci_cp_vspec_sync_detect {
+	__u8 enable;
+} __packed;
+
+#define HCI_OP_VSPEC_SET_TX_POWER	0xFC7D
+struct hci_cp_vspec_set_tx_power {
+	__u8 tx_power[36];
+} __packed;
+
+#define HCI_OP_VSPEC_SET_HEADLESS_MODE	0xFC3B
+struct hci_cp_vspec_set_headless_mode {
+	__u8 enable;
+} __packed;
+
+#define HCI_OP_VSPEC_SET_HEADLESS_SCAN_MODE	0xFD34
+struct hci_cp_vspec_set_headless_scan_mode {
+	__u8 page_scan_enable;
+	__u8 llr_scan_enable;
+} __packed;
+
+#define HCI_OP_VSPEC_ADD_HEADLESS_DEVICE	0xFC37
+struct hci_cp_vspec_add_headless_device {
+	bdaddr_t bd_addr;
+	__u8 link_key[16];
+	__u8 hexclass[3];
+} __packed;
+
+#define HCI_OP_VSPEC_GET_ALL_HEADLESS_DEVICE_LIST	0xFC36
+struct hci_rp_vspec_get_all_headless_device_list {
+	__u8 status;
+	__u8 headless_dev_count;
+	__u8 data[0];
+} __packed;
+
+#define HCI_OP_VSPEC_DELETE_HEADLESS_DEVICE_BY_ADDRESS	0xFC39
+struct hci_cp_vspec_delete_headless_device_by_address {
+	bdaddr_t bd_addr;
+} __packed;
+
+#define HCI_OP_SET_AFH_CHANNEL_CLASSIFICATION	0x0C3F
+struct hci_cp_set_afh_channel_classification {
+	__u8 afh_channel_map[10];
+} __packed;
+
+#define HCI_OP_VSPEC_WRITE_LLR_SCAN_PARAMS	0xFCC2
+struct hci_cp_vspec_write_llr_scan_params {
+	__u8 data[14];
+} __packed;
+
+#define HCI_OP_VSPEC_READ_LLR_SCAN_PARAMS	0xFCC3
+struct hci_rp_vspec_read_llr_scan_params {
+	__u8 status;
+	__u8 data[14];
+} __packed;
+
+#define HCI_OP_VSPEC_SET_LLR_WRITE_SCAN_MODE	0xFCFA
+struct hci_cp_vspec_set_llr_write_scan_mode {
+	__u8 enable;
+} __packed;
+
+#define HCI_OP_VSPEC_SET_HEADLESS_ADV_DATA	0xFD72
+struct hci_cp_vspec_set_headless_adv_data {
+	__u8 data[HCI_MAX_AD_LENGTH];
 } __packed;
 
 /* ---- HCI Events ---- */
@@ -1495,6 +1742,77 @@ struct hci_ev_si_security {
 	__u8     incoming;
 } __packed;
 
+#define HCI_EV_TRIGGERED_CLOCK_CAPTURE 0x4E
+struct hci_ev_triggered_clock_capture {
+	__u16 conn_handle;
+	__u8 which_clk;
+	__u32 clk;
+	__u16 slot_offset;
+} __packed;
+
+#define HCI_EV_SYNC_TRAIN_COMPLETE 0x4F
+struct hci_ev_sync_train_complete {
+	__u8 status;
+} __packed;
+
+#define HCI_EV_SYNC_TRAIN_RECEIVE 0x50
+struct hci_ev_sync_train_receive {
+	__u8 status;
+	bdaddr_t addr;
+	__le32 clock_offset;
+	__u8 afh_channel_map[10];
+	__u8 lt_addr;
+	__le32 next_broadcast_instant;
+	__le16 slave_broadcast_interval;
+	__u8 service_data;
+} __packed;
+
+#define HCI_EV_SLAVE_BROADCAST_RECIVE 0x51
+struct hci_ev_slave_broadcast_receive {
+	bdaddr_t bd_addr;
+	__u8 lt_addr;
+	__le32 clock;
+	__le32 offset;
+	__u8 status;
+	__u8 fragment;
+	__u8 data_length;
+	__u8 data[0];
+} __packed;
+
+#define HCI_EV_SLAVE_BROADCAST_TIMEOUT 0x52
+struct hci_ev_slave_broadcast_timeout {
+	bdaddr_t bd_addr;
+	__u8 lt_addr;
+} __packed;
+
+#define HCI_EV_TRUNCATED_PAGE_COMPLETE 0x53
+struct hci_ev_truncated_page_complete {
+	__u8 status;
+	bdaddr_t bd_addr;
+} __packed;
+
+#define HCI_EV_CLB_CHANNEL_MAP_CHANGE 0x55
+struct hci_ev_clb_channel_map_change {
+	__u8 channel_map[10];
+} __packed;
+
+#define HCI_EV_SLAVE_PAGE_RESP_TIMEOUT 0x54
+
+#define HCI_EV_INQUIRY_RESPONSE_NOTIFICATION 0x56
+struct hci_ev_inquiry_response_notification {
+	__u8 lap[3];
+	__s8 rssi;
+} __packed;
+
+#define HCI_EV_VENDOR_SPECIFIC	0xFF
+#define HCI_EV_VSPEC_3D_CODE_CHANGE 0x21
+
+#define HCI_EV_VSPEC_FRAME_PERIOD 0x22
+struct hci_ev_vspec_frame_period {
+	__u16 frame_period;
+	__u8 period_fraction;
+	__u8 init_measurement;
+} __packed;
 /* ---- HCI Packet structures ---- */
 #define HCI_COMMAND_HDR_SIZE 3
 #define HCI_EVENT_HDR_SIZE   2

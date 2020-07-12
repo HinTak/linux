@@ -796,6 +796,9 @@ static inline void armv7_pmnc_write(u32 val)
 	val &= ARMV7_PMNC_MASK;
 	isb();
 	asm volatile("mcr p15, 0, %0, c9, c12, 0" : : "r"(val));
+#ifdef CONFIG_ARCH_SDP1406
+	isb();
+#endif
 }
 
 static inline int armv7_pmnc_has_overflowed(u32 pmnc)
@@ -838,6 +841,10 @@ static inline u32 armv7pmu_read_counter(struct perf_event *event)
 	else if (armv7_pmnc_select_counter(idx) == idx)
 		asm volatile("mrc p15, 0, %0, c9, c13, 2" : "=r" (value));
 
+#ifdef CONFIG_ARCH_SDP1406
+	isb();
+#endif
+
 	return value;
 }
 
@@ -854,6 +861,10 @@ static inline void armv7pmu_write_counter(struct perf_event *event, u32 value)
 		asm volatile("mcr p15, 0, %0, c9, c13, 0" : : "r" (value));
 	else if (armv7_pmnc_select_counter(idx) == idx)
 		asm volatile("mcr p15, 0, %0, c9, c13, 2" : : "r" (value));
+
+#ifdef CONFIG_ARCH_SDP1406
+	isb();
+#endif
 }
 
 static inline void armv7_pmnc_write_evtsel(int idx, u32 val)
@@ -861,6 +872,9 @@ static inline void armv7_pmnc_write_evtsel(int idx, u32 val)
 	if (armv7_pmnc_select_counter(idx) == idx) {
 		val &= ARMV7_EVTYPE_MASK;
 		asm volatile("mcr p15, 0, %0, c9, c13, 1" : : "r" (val));
+#ifdef CONFIG_ARCH_SDP1406
+		isb();
+#endif
 	}
 }
 
@@ -868,6 +882,9 @@ static inline int armv7_pmnc_enable_counter(int idx)
 {
 	u32 counter = ARMV7_IDX_TO_COUNTER(idx);
 	asm volatile("mcr p15, 0, %0, c9, c12, 1" : : "r" (BIT(counter)));
+#ifdef CONFIG_ARCH_SDP1406
+	isb();
+#endif
 	return idx;
 }
 
@@ -875,6 +892,9 @@ static inline int armv7_pmnc_disable_counter(int idx)
 {
 	u32 counter = ARMV7_IDX_TO_COUNTER(idx);
 	asm volatile("mcr p15, 0, %0, c9, c12, 2" : : "r" (BIT(counter)));
+#ifdef CONFIG_ARCH_SDP1406
+	isb();
+#endif
 	return idx;
 }
 
@@ -882,6 +902,9 @@ static inline int armv7_pmnc_enable_intens(int idx)
 {
 	u32 counter = ARMV7_IDX_TO_COUNTER(idx);
 	asm volatile("mcr p15, 0, %0, c9, c14, 1" : : "r" (BIT(counter)));
+#ifdef CONFIG_ARCH_SDP1406
+	isb();
+#endif
 	return idx;
 }
 
@@ -907,6 +930,9 @@ static inline u32 armv7_pmnc_getreset_flags(void)
 	/* Write to clear flags */
 	val &= ARMV7_FLAG_MASK;
 	asm volatile("mcr p15, 0, %0, c9, c12, 3" : : "r" (val));
+#ifdef CONFIG_ARCH_SDP1406
+	isb();
+#endif
 
 	return val;
 }

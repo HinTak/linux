@@ -27,6 +27,14 @@ config COMPAT_BINFMT_ELF
 	bool
 	depends on COMPAT && BINFMT_ELF
 
+config BINFMT_ELF_COMP
+	bool "Kernel support for compressed ELF binaries(Ultimate Coredump)"
+	depends on BINFMT_ELF && CRYPTO_DEFLATE
+	default y
+	help
+	  Ultimate Coredump compress core file based ELF binary and create
+	  gzip file.
+
 config ARCH_BINFMT_ELF_RANDOMIZE_PIE
 	bool
 
@@ -186,3 +194,20 @@ config COREDUMP
 	  This option enables support for performing core dumps. You almost
 	  certainly want to say Y here. Not necessary on systems that never
 	  need debugging or only ever run flawless code.
+
+config COREDUMP_SIGKILL_BLOCKED
+	bool "If coredump is expected ignore SIGKILL"
+	default y
+	help
+	 In case some task group is expected to generate coredump, then
+	 any SIGKILL sent from any other process is ignored
+
+
+config ALLOW_ALL_USER_COREDUMP
+	bool "Allow all users to create coredump file for debugging"
+	default n
+
+config NOT_ALLOW_REBOOT_DURING_COREDUMP
+	bool "Reboot return -EBUSY if coredump is in progress"
+	depends on COREDUMP && PLAT_TIZEN
+	default y

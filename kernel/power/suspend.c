@@ -26,15 +26,21 @@
 #include <linux/syscore_ops.h>
 #include <linux/ftrace.h>
 #include <trace/events/power.h>
+#include <trace/early.h>
+
+#ifdef CONFIG_SDP_HW_CLOCK
+#include <mach/sdp_hwclock.h>
+#endif
 
 #include "power.h"
 
-const char *const pm_states[PM_SUSPEND_MAX] = {
-	[PM_SUSPEND_FREEZE]	= "freeze",
-	[PM_SUSPEND_STANDBY]	= "standby",
-	[PM_SUSPEND_MEM]	= "mem",
+struct pm_sleep_state pm_states[PM_SUSPEND_MAX] = {
+	[PM_SUSPEND_FREEZE] = { .label = "freeze", .state = PM_SUSPEND_FREEZE },
+	[PM_SUSPEND_STANDBY] = { .label = "standby", },
+	[PM_SUSPEND_MEM] = { .label = "mem", },
 };
 
+extern int micom_poweroff(void);
 static const struct platform_suspend_ops *suspend_ops;
 
 static bool need_suspend_ops(suspend_state_t state)
@@ -62,41 +68,33 @@ void freeze_wake(void)
 }
 EXPORT_SYMBOL_GPL(freeze_wake);
 
+static bool valid_state(suspend_state_t state)
+{
+	/*
+	 * PM_SUSPEND_STANDBY and PM_SUSPEND_MEM states need low level
+	 * support and need to be valid to the low level
+	 * implementation, no valid callback implies that none are valid.
+	 */
+	return suspend_ops && suspend_ops->valid && suspend_ops->valid(state);
+}
+
 /**
  * suspend_set_ops - Set the global suspend method table.
  * @ops: Suspend operations to use.
  */
 void suspend_set_ops(const struct platform_suspend_ops *ops)
 {
+	suspend_state_t i;
+
 	lock_system_sleep();
+
 	suspend_ops = ops;
+	for (i = PM_SUSPEND_STANDBY; i <= PM_SUSPEND_MEM; i++)
+		pm_states[i].state = valid_state(i) ? i : 0;
+
 	unlock_system_sleep();
 }
 EXPORT_SYMBOL_GPL(suspend_set_ops);
-
-bool valid_state(suspend_state_t state)
-{
-	if (state == PM_SUSPEND_FREEZE) {
-#ifdef CONFIG_PM_DEBUG
-		if (pm_test_level != TEST_NONE &&
-		    pm_test_level != TEST_FREEZER &&
-		    pm_test_level != TEST_DEVICES &&
-		    pm_test_level != TEST_PLATFORM) {
-			printk(KERN_WARNING "Unsupported pm_test mode for "
-					"freeze state, please choose "
-					"none/freezer/devices/platform.\n");
-			return false;
-		}
-#endif
-			return true;
-	}
-	/*
-	 * PM_SUSPEND_STANDBY and PM_SUSPEND_MEMORY states need lowlevel
-	 * support and need to be valid to the lowlevel
-	 * implementation, no valid callback implies that none are valid.
-	 */
-	return suspend_ops && suspend_ops->valid && suspend_ops->valid(state);
-}
 
 /**
  * suspend_valid_only_mem - Generic memory-only valid callback.
@@ -166,7 +164,10 @@ void __attribute__ ((weak)) arch_suspend_enable_irqs(void)
 {
 	local_irq_enable();
 }
-
+#ifdef CONFIG_PM_CRC_CHECK
+extern void save_suspend_crc(void);
+extern void compare_resume_crc(void);
+#endif
 /**
  * suspend_enter - Make the system enter the given sleep state.
  * @state: System sleep state to enter.
@@ -221,7 +222,13 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 	if (!error) {
 		*wakeup = pm_wakeup_pending();
 		if (!(suspend_test(TEST_CORE) || *wakeup)) {
+#ifdef CONFIG_PM_CRC_CHECK
+			save_suspend_crc();
+#endif
 			error = suspend_ops->enter(state);
+#ifdef CONFIG_PM_CRC_CHECK
+			compare_resume_crc();
+#endif
 			events_check_enabled = false;
 		}
 		syscore_resume();
@@ -232,6 +239,22 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 
  Enable_cpus:
 	enable_nonboot_cpus();
+
+#ifdef CONFIG_EARLY_TRACING
+	{
+#ifdef CONFIG_SDP_HW_CLOCK
+		char msg[64];
+		uint64_t ns = hwclock_raw_ns((uint32_t *)hwclock_get_va());
+		uint32_t rem = do_div(ns, 1000000);
+
+		snprintf(msg, sizeof(msg), "on resume: bare timestamp %llu.%06u",
+			 ns, rem);
+		trace_early_message(msg);
+#else
+		trace_early_message("on resume");
+#endif
+	}
+#endif
 
  Platform_wake:
 	if (need_suspend_ops(state) && suspend_ops->wake)
@@ -270,16 +293,26 @@ int suspend_devices_and_enter(suspend_state_t state)
 	error = dpm_suspend_start(PMSG_SUSPEND);
 	if (error) {
 		printk(KERN_ERR "PM: Some devices failed to suspend\n");
+		printk(KERN_ERR "System will be down - cold power off\n");
+#if defined (CONFIG_ARCH_SDP)
+		pm_power_off();
+#else
+		micom_poweroff();
+#endif
 		goto Recover_platform;
 	}
 	suspend_test_finish("suspend devices");
 	if (suspend_test(TEST_DEVICES))
 		goto Recover_platform;
 
+	kasan_suspend();
+
 	do {
 		error = suspend_enter(state, &wakeup);
 	} while (!error && !wakeup && need_suspend_ops(state)
 		&& suspend_ops->suspend_again && suspend_ops->suspend_again());
+
+	kasan_resume();
 
  Resume_devices:
 	suspend_test_start();
@@ -324,9 +357,17 @@ static int enter_state(suspend_state_t state)
 {
 	int error;
 
-	if (!valid_state(state))
-		return -ENODEV;
-
+	if (state == PM_SUSPEND_FREEZE) {
+#ifdef CONFIG_PM_DEBUG
+		if (pm_test_level != TEST_NONE && pm_test_level <= TEST_CPUS) {
+			pr_warning("PM: Unsupported test mode for freeze state,"
+				   "please choose none/freezer/devices/platform.\n");
+			return -EAGAIN;
+		}
+#endif
+	} else if (!valid_state(state)) {
+		return -EINVAL;
+	}
 	if (!mutex_trylock(&pm_mutex))
 		return -EBUSY;
 
@@ -337,7 +378,7 @@ static int enter_state(suspend_state_t state)
 	sys_sync();
 	printk("done.\n");
 
-	pr_debug("PM: Preparing system for %s sleep\n", pm_states[state]);
+	pr_debug("PM: Preparing system for %s sleep\n", pm_states[state].label);
 	error = suspend_prepare(state);
 	if (error)
 		goto Unlock;
@@ -345,7 +386,7 @@ static int enter_state(suspend_state_t state)
 	if (suspend_test(TEST_FREEZER))
 		goto Finish;
 
-	pr_debug("PM: Entering %s sleep\n", pm_states[state]);
+	pr_debug("PM: Entering %s sleep\n", pm_states[state].label);
 	pm_restrict_gfp_mask();
 	error = suspend_devices_and_enter(state);
 	pm_restore_gfp_mask();
@@ -371,13 +412,27 @@ int pm_suspend(suspend_state_t state)
 
 	if (state <= PM_SUSPEND_ON || state >= PM_SUSPEND_MAX)
 		return -EINVAL;
-
+#ifdef CONFIG_SCHED_HMP
+	set_hmp_boost(1);
+#endif
 	error = enter_state(state);
 	if (error) {
+#if defined (CONFIG_ARCH_SDP)
+		pm_power_off();
+#else
+		micom_poweroff();
+#endif
 		suspend_stats.fail++;
 		dpm_save_failed_errno(error);
+#ifdef CONFIG_SCHED_HMP
+		set_hmp_boost(0);
+#endif
 	} else {
 		suspend_stats.success++;
+#ifdef CONFIG_SCHED_HMP
+		set_hmp_boost(0);
+		set_hmp_boostpulse(180000000);
+#endif
 	}
 	return error;
 }

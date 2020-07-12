@@ -33,9 +33,31 @@
  * this governor will not work. All times here are in uS.
  */
 #define MIN_SAMPLING_RATE_RATIO			(2)
+#if defined(CONFIG_ARCH_SDP)
+#define LATENCY_MULTIPLIER			(100)
+#else
 #define LATENCY_MULTIPLIER			(1000)
+#endif
 #define MIN_LATENCY_MULTIPLIER			(20)
 #define TRANSITION_LATENCY_LIMIT		(10 * 1000 * 1000)
+
+#if defined(CONFIG_ARCH_SDP)
+#define dvfs_print(arg...) \
+		do { \
+			int len; \
+			char buf[100]; \
+			unsigned long long t; \
+			unsigned long nanosec_rem; \
+			t = cpu_clock(0); \
+			nanosec_rem = do_div(t, 1000000000); \
+			len = sprintf(buf, "[%5lu.%06lu] ",	(unsigned long) t, nanosec_rem / 1000); \
+			add_to_log_buf(buf, len); \
+			len = sprintf(buf, arg); \
+			add_to_log_buf(buf, len); \
+		} while(0)
+
+void add_to_log_buf(char *buf, int len);
+#endif
 
 /* Ondemand Sampling types */
 enum {OD_NORMAL_SAMPLE, OD_SUB_SAMPLE};
@@ -170,6 +192,10 @@ struct od_dbs_tuners {
 	unsigned int sampling_down_factor;
 	unsigned int up_threshold;
 	unsigned int adj_up_threshold;
+#if defined(CONFIG_ARCH_SDP)
+	unsigned int up_threshold_low;
+	unsigned int down_threshold_low;
+#endif	
 	unsigned int powersave_bias;
 	unsigned int io_is_busy;
 };
@@ -255,6 +281,8 @@ static ssize_t show_sampling_rate_min_gov_pol				\
 	struct dbs_data *dbs_data = policy->governor_data;		\
 	return sprintf(buf, "%u\n", dbs_data->min_sampling_rate);	\
 }
+
+extern struct mutex cpufreq_governor_lock;
 
 u64 get_cpu_idle_time(unsigned int cpu, u64 *wall, int io_busy);
 void dbs_check_cpu(struct dbs_data *dbs_data, int cpu);

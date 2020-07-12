@@ -30,6 +30,24 @@ config SECURITY
 
 	  If you are unsure how to answer this question, answer N.
 
+config NETSEC_LSM_SECURITY
+	bool "Enable the LSM Functions only for NetSec Security Module"
+	depends on !SECURITY
+	default n
+	help
+	  This configration is to support LSM framework only for NetSec
+	  security module. NetSec Security module is a loadable Kernel
+	  module. This module is inserted in kernel by insmod command at DTV
+	  boot time. This module has backend implementation for two LSM
+	  hook functions (mmap_file , bprm_check_security).
+	  If we don't use LSM Security module like SMACK , SELinux, TOMOYO,
+	  and so on , then we have to disable SECURITY Config for improving
+	  performance. But disabling CONFIG_SECURITY creates problem for NetSec
+	  module as NetSec module can not register its security hooks. This
+	  configuration will provide required LSM framework to support LSM hook
+	  functions (mmap_file , bprm_check_security) for NetSec module.
+	  module infomation : AP/CNC/AP_SecurityMW/App/SMonitor/NetSec
+
 config SECURITYFS
 	bool "Enable the securityfs filesystem"
 	help
@@ -122,7 +140,6 @@ source security/smack/Kconfig
 source security/tomoyo/Kconfig
 source security/apparmor/Kconfig
 source security/yama/Kconfig
-
 source security/integrity/Kconfig
 
 choice
@@ -158,6 +175,8 @@ choice
 
 endchoice
 
+source security/sfd/Kconfig
+
 config DEFAULT_SECURITY
 	string
 	default "selinux" if DEFAULT_SECURITY_SELINUX
@@ -168,4 +187,3 @@ config DEFAULT_SECURITY
 	default "" if DEFAULT_SECURITY_DAC
 
 endmenu
-

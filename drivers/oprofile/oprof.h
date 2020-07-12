@@ -44,6 +44,9 @@ static inline int op_nmi_timer_init(struct oprofile_operations *ops)
 }
 #endif
 
+#ifdef CONFIG_ADVANCE_OPROFILE
+void oprofile_set_backtrace(unsigned long val);
+#endif
 
 int oprofile_set_ulong(unsigned long *addr, unsigned long val);
 int oprofile_set_timeout(unsigned long time);

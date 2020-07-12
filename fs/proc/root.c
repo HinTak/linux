@@ -165,6 +165,10 @@ void __init proc_root_init(void)
 		return;
 
 	proc_self_init();
+
+#ifdef CONFIG_DEFERRED_INITCALL
+	proc_create("deferred_initcalls", 0, NULL, &deferred_initcalls_fops);
+#endif
 	proc_symlink("mounts", NULL, "self/mounts");
 
 	proc_net_init();

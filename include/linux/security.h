@@ -1848,6 +1848,7 @@ int security_inode_notifysecctx(struct inode *inode, void *ctx, u32 ctxlen);
 int security_inode_setsecctx(struct dentry *dentry, void *ctx, u32 ctxlen);
 int security_inode_getsecctx(struct inode *inode, void **ctx, u32 *ctxlen);
 #else /* CONFIG_SECURITY */
+
 struct security_mnt_opts {
 };
 
@@ -1859,6 +1860,22 @@ static inline void security_free_mnt_opts(struct security_mnt_opts *opts)
 {
 }
 
+
+#ifdef CONFIG_NETSEC_LSM_SECURITY
+struct security_operations {
+	int (*mmap_file) (struct file *file,
+				unsigned long reqprot, unsigned long prot,
+				unsigned long flags);
+	int (*bprm_check_security) (struct linux_binprm *bprm);
+};
+
+int security_mmap_file(struct file *file, unsigned long prot,
+			unsigned long flags);
+int security_bprm_check(struct linux_binprm *bprm);
+extern int security_init(void);
+
+#else
+
 /*
  * This is the default capabilities functionality.  Most of these functions
  * are just stubbed out, but a few must call the proper capable code.
@@ -1868,6 +1885,19 @@ static inline int security_init(void)
 {
 	return 0;
 }
+
+static inline int security_mmap_file(struct file *file, unsigned long prot,
+					unsigned long flags)
+{
+	return 0;
+}
+
+static inline int security_bprm_check(struct linux_binprm *bprm)
+{
+	return 0;
+}
+
+#endif
 
 static inline int security_ptrace_access_check(struct task_struct *child,
 					     unsigned int mode)
@@ -1938,11 +1968,6 @@ static inline int security_vm_enough_memory_mm(struct mm_struct *mm, long pages)
 static inline int security_bprm_set_creds(struct linux_binprm *bprm)
 {
 	return cap_bprm_set_creds(bprm);
-}
-
-static inline int security_bprm_check(struct linux_binprm *bprm)
-{
-	return 0;
 }
 
 static inline void security_bprm_committing_creds(struct linux_binprm *bprm)
@@ -2208,12 +2233,6 @@ static inline void security_file_free(struct file *file)
 
 static inline int security_file_ioctl(struct file *file, unsigned int cmd,
 				      unsigned long arg)
-{
-	return 0;
-}
-
-static inline int security_mmap_file(struct file *file, unsigned long prot,
-				     unsigned long flags)
 {
 	return 0;
 }

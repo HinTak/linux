@@ -99,6 +99,9 @@ static inline void __cpuinit arch_counter_set_user_access(void)
 	cntkctl &= ~((3 << 8) | (7 << 0));
 
 	asm volatile("mcr p15, 0, %0, c14, c1, 0" : : "r" (cntkctl));
+#ifdef CONFIG_ARCH_SDP1406
+	isb();
+#endif
 }
 #endif
 

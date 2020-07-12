@@ -669,6 +669,10 @@ struct device {
 	struct mutex		mutex;	/* mutex to synchronize calls to
 					 * its driver.
 					 */
+	struct mutex		udev_mutex; /* mutex to synchronize dev_uevent
+					     * to get driver details and
+					     * unregister
+					     */
 
 	struct bus_type	*bus;		/* type of bus device is on */
 	struct device_driver *driver;	/* which driver has allocated this

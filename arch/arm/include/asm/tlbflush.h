@@ -314,6 +314,7 @@ extern struct cpu_tlb_fns cpu_tlb;
 			    "mcrne " insnarg				\
 			    : : "r" (arg), "r" (__tlb_flag), "Ir" (f)	\
 			    : "cc");					\
+		isb();							\
 	} while (0)
 
 #define tlb_op(f, regs, arg)	__tlb_op(f, "p15, 0, %0, " regs, arg)
@@ -385,8 +386,10 @@ local_flush_tlb_page(struct vm_area_struct *vma, unsigned long uaddr)
 		tlb_op(TLB_V4_U_PAGE, "c8, c7, 1", uaddr);
 		tlb_op(TLB_V4_D_PAGE, "c8, c6, 1", uaddr);
 		tlb_op(TLB_V4_I_PAGE, "c8, c5, 1", uaddr);
-		if (!tlb_flag(TLB_V4_I_PAGE) && tlb_flag(TLB_V4_I_FULL))
+		if (!tlb_flag(TLB_V4_I_PAGE) && tlb_flag(TLB_V4_I_FULL)) {
 			asm("mcr p15, 0, %0, c8, c5, 0" : : "r" (zero) : "cc");
+			isb();
+		}
 	}
 
 	tlb_op(TLB_V6_U_PAGE, "c8, c7, 1", uaddr);
@@ -415,8 +418,10 @@ static inline void local_flush_tlb_kernel_page(unsigned long kaddr)
 	tlb_op(TLB_V4_U_PAGE, "c8, c7, 1", kaddr);
 	tlb_op(TLB_V4_D_PAGE, "c8, c6, 1", kaddr);
 	tlb_op(TLB_V4_I_PAGE, "c8, c5, 1", kaddr);
-	if (!tlb_flag(TLB_V4_I_PAGE) && tlb_flag(TLB_V4_I_FULL))
+	if (!tlb_flag(TLB_V4_I_PAGE) && tlb_flag(TLB_V4_I_FULL)) {
 		asm("mcr p15, 0, %0, c8, c5, 0" : : "r" (zero) : "cc");
+		isb();
+	}
 
 	tlb_op(TLB_V6_U_PAGE, "c8, c7, 1", kaddr);
 	tlb_op(TLB_V6_D_PAGE, "c8, c6, 1", kaddr);
@@ -434,10 +439,13 @@ static inline void local_flush_bp_all(void)
 	const int zero = 0;
 	const unsigned int __tlb_flag = __cpu_tlb_flags;
 
-	if (tlb_flag(TLB_V7_UIS_BP))
+	if (tlb_flag(TLB_V7_UIS_BP)) {
 		asm("mcr p15, 0, %0, c7, c1, 6" : : "r" (zero));
-	else if (tlb_flag(TLB_V6_BP))
+		isb();
+	} else if (tlb_flag(TLB_V6_BP)) {
 		asm("mcr p15, 0, %0, c7, c5, 6" : : "r" (zero));
+		isb();
+	}
 
 	if (tlb_flag(TLB_BARRIER))
 		isb();
@@ -451,6 +459,7 @@ static inline void dummy_flush_tlb_a15_erratum(void)
 	 */
 	asm("mcr p15, 0, %0, c8, c3, 1" : : "r" (0));
 	dsb();
+	isb();
 }
 #else
 static inline void dummy_flush_tlb_a15_erratum(void)

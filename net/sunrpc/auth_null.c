@@ -108,6 +108,7 @@ const struct rpc_authops authnull_ops = {
 	.destroy	= nul_destroy,
 	.lookup_cred	= nul_lookup_cred,
 };
+EXPORT_SYMBOL(authnull_ops);
 
 static
 struct rpc_auth null_auth = {

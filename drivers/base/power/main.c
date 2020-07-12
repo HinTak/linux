@@ -32,6 +32,12 @@
 #include "../base.h"
 #include "power.h"
 
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME) 
+#include <linux/priority_devconfig.h>
+struct instant_resume_control instant_ctrl;
+EXPORT_SYMBOL_GPL(instant_ctrl);
+#endif
+
 typedef int (*pm_callback_t)(struct device *);
 
 /*
@@ -359,7 +365,11 @@ static void dpm_show_time(ktime_t starttime, pm_message_t state, char *info)
 	usecs = usecs64;
 	if (usecs == 0)
 		usecs = 1;
+#if !defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
 	pr_info("PM: %s%s%s of devices complete after %ld.%03ld msecs\n",
+#else
+	printk(KERN_EMERG"PM: %s%s%s of devices complete after %ld.%03ld msecs\n",
+#endif
 		info ?: "", info ? " " : "", pm_verb(state.event),
 		usecs / USEC_PER_MSEC, usecs % USEC_PER_MSEC);
 }
@@ -712,6 +722,11 @@ void dpm_resume(pm_message_t state)
 	}
 	mutex_unlock(&dpm_list_mtx);
 	async_synchronize_full();
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+#ifdef PARALLEL_RESET_RESUME_USER_PORT_DEVICES
+	complete(&instant_ctrl.user_dev);
+#endif
+#endif
 	dpm_show_time(starttime, state, NULL);
 }
 
@@ -1324,6 +1339,9 @@ int dpm_prepare(pm_message_t state)
 int dpm_suspend_start(pm_message_t state)
 {
 	int error;
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+        int i = 0;
+#endif
 
 	error = dpm_prepare(state);
 	if (error) {
@@ -1331,6 +1349,13 @@ int dpm_suspend_start(pm_message_t state)
 		dpm_save_failed_step(SUSPEND_PREPARE);
 	} else
 		error = dpm_suspend(state);
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+        for(i = 0; i < MAX_INSTANT_TREES; i++){
+		if(instant_ctrl.instant_tree[i]){
+			instant_ctrl.instant_tree[i]->state = INSTANT_STATE_COLDBOOT;
+		}
+        }
+#endif
 	return error;
 }
 EXPORT_SYMBOL_GPL(dpm_suspend_start);

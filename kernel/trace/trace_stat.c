@@ -388,3 +388,8 @@ void unregister_stat_tracer(struct tracer_stat *trace)
 	}
 	mutex_unlock(&all_stat_sessions_mutex);
 }
+
+#ifdef CONFIG_KDEBUGD_FTRACE
+/* Let kdebugd have access to static functions in this file */
+#include "../kdebugd/trace/kdbg_ftrace_stat_helper.c"
+#endif /* CONFIG_KDEBUGD_FTRACE */

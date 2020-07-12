@@ -149,4 +149,9 @@
 
 #define PR_GET_TID_ADDRESS	40
 
+/*
+ * Inject a trace event into the current tracing context:
+ */
+#define PR_TASK_PERF_USER_TRACE	666
+
 #endif /* _LINUX_PRCTL_H */

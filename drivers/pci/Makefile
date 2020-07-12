@@ -20,7 +20,8 @@ obj-$(CONFIG_HOTPLUG_PCI) += hotplug/
 ifdef CONFIG_HOTPLUG_PCI
 obj-y += hotplug-pci.o
 endif
-
+# samsung PCIe RC Driver
+obj-$(CONFIG_SDP_PCI) +=pcie-sdp.o hawko-pci.o
 # Build the PCI MSI interrupt support
 obj-$(CONFIG_PCI_MSI) += msi.o
 

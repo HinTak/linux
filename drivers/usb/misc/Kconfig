@@ -200,6 +200,18 @@ config USB_TEST
 	  See <http://www.linux-usb.org/usbtest/> for more information,
 	  including sample test device firmware and "how to use it".
 
+config USB_TEST_NEW
+	tristate "USB testing driver support interrupt xfers"
+	help
+	  This driver is for testing host controller software.  It is used
+	  with specialized device firmware for regression and stress testing,
+	  to help prevent problems from cropping up with "real" drivers.
+	  2013.06 V. K. Raveendra in SISO.
+
+	  See <http://www.linux-usb.org/usbtest/> for more information,
+	  including sample test device firmware and "how to use it".
+
+
 config USB_ISIGHTFW
 	tristate "iSight firmware loading support"
 	select FW_LOADER

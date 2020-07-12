@@ -151,6 +151,22 @@ int drm_open(struct inode *inode, struct file *filp)
 	retcode = drm_open_helper(inode, filp, dev);
 	if (retcode)
 		goto err_undo;
+
+#ifdef CONFIG_PLAT_TIZEN
+#define __ALLOW_MASTER_XONLY__
+#ifdef  __ALLOW_MASTER_XONLY__
+			// X can try to be a master before pre occupied process's "drop master" then X crashes
+			// therefore, allow master X only in DRM open itself.
+			if(strcmp(current->comm, "Xorg") == 0
+			   || strcmp(current->comm, "fastboot") == 0
+			   || strcmp(current->comm, "t2dtester") == 0){
+			}else{
+					//printk("%s: drop master [pid:%d,%s]\n", __FUNCTION__, current->pid, current->comm);
+					drm_dropmaster_ioctl(dev, NULL, (struct drm_file *)filp->private_data); // rany.kwon: drop master
+			}
+#endif // __ALLOW_MASTER_XONLY__
+#endif // CONFIG_PLAT_TIZEN
+	
 	atomic_inc(&dev->counts[_DRM_STAT_OPENS]);
 	if (need_setup) {
 		retcode = drm_setup(dev);

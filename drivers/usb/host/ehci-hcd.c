@@ -75,19 +75,27 @@ static const char	hcd_name [] = "ehci_hcd";
 #undef EHCI_URB_TRACE
 
 /* magic numbers that can affect system performance */
-#define	EHCI_TUNE_CERR		3	/* 0-3 qtd retries; 0 == don't stop */
+#define	EHCI_TUNE_CERR_DEF	3	/* 0-3 qtd retries; 0 == don't stop */
 #define	EHCI_TUNE_RL_HS		4	/* nak throttle; see 4.9 */
 #define	EHCI_TUNE_RL_TT		0
 #define	EHCI_TUNE_MULT_HS	1	/* 1-3 transactions/uframe; 4.10.3 */
 #define	EHCI_TUNE_MULT_TT	1
+
+/* tune CERR at run-time */
+int EHCI_TUNE_CERR = EHCI_TUNE_CERR_DEF;
+
 /*
  * Some drivers think it's safe to schedule isochronous transfers more than
  * 256 ms into the future (partly as a result of an old bug in the scheduling
  * code).  In an attempt to avoid trouble, we will use a minimum scheduling
  * length of 512 frames instead of 256.
  */
+//hongyabi patch for enlarge async frame list length
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+#define         EHCI_TUNE_FLS   0       /* 1024 frame schedule */
+#else
 #define	EHCI_TUNE_FLS		1	/* (medium) 512-frame schedule */
-
+#endif
 /* Initial IRQ latency:  faster than hw default */
 static int log2_irq_thresh = 0;		// 0 to 6
 module_param (log2_irq_thresh, int, S_IRUGO);
@@ -680,14 +688,57 @@ int ehci_setup(struct usb_hcd *hcd)
 EXPORT_SYMBOL_GPL(ehci_setup);
 
 /*-------------------------------------------------------------------------*/
+#ifdef CONFIG_DEBUG_KERNEL
+static void host_dump(struct ehci_hcd*ehci)
+{
+	/**/
+	static void __iomem * vbase;
+	struct ehci_regs __iomem *regs = ehci->regs;
+	void __iomem *base = &regs->command;
+	struct ehci_qh		*qh_scan_next = ehci->qh_scan_next;
+	struct ehci_qh		*async = ehci->async;
+	struct ehci_qh		*dummy = ehci->dummy;
+	int i;
+	
+	if(qh_scan_next!=NULL)	dbg_qh ("qh_scan_next",ehci,qh_scan_next);
+	if(async!=NULL) dbg_qh ("async",ehci,async);
+	if(dummy!=NULL) dbg_qh ("dummy",ehci,dummy);
 
+	ehci_err(ehci, "EHCI HOST DUMP.....\n");
+	for(i = 0 ; i < 15 ; i++)
+	{
+		ehci_err(ehci, "0x%02x: 0x%08x 0x%08x 0x%08x 0x%08x",0x10*i,readl(base + 0x10*i),readl(base + 0x10*i +0x4),readl(base +0x10*i +0x8),readl(base + 0x10*i +0xc));
+	}
+
+	ehci_err(ehci,"BUS_MON reg DUMP\n");
+
+	vbase = ioremap(0x11740000,0x100);
+	for(i = 0 ; i < 16 ; i++)
+	{
+		ehci_err(ehci, "0x%02x: 0x%08x 0x%08x 0x%08x 0x%08x",0x10*i,readl(vbase + 0x10*i),readl(vbase + 0x10*i +0x4),readl(vbase +0x10*i +0x8),readl(vbase + 0x10*i +0xc));
+	}
+	iounmap(vbase);
+
+	ehci_err(ehci,"SW_RESET reg DUMP\n");
+	vbase = ioremap (0x112508b4,0x10);
+	ehci_err(ehci, "0x%08x \n",readl(vbase));
+
+}
+#endif
 static irqreturn_t ehci_irq (struct usb_hcd *hcd)
 {
 	struct ehci_hcd		*ehci = hcd_to_ehci (hcd);
 	u32			status, masked_status, pcd_status = 0, cmd;
 	int			bh;
+	unsigned long		flags;
 
-	spin_lock (&ehci->lock);
+	/*
+	 * For threadirqs option we use spin_lock_irqsave() variant to prevent
+	 * deadlock with ehci hrtimer callback, because hrtimer callbacks run
+	 * in interrupt context even when threadirqs is specified. We can go
+	 * back to spin_lock() variant when hrtimer callbacks become threaded.
+	 */
+	spin_lock_irqsave(&ehci->lock, flags);
 
 	status = ehci_readl(ehci, &ehci->regs->status);
 
@@ -705,7 +756,7 @@ static irqreturn_t ehci_irq (struct usb_hcd *hcd)
 
 	/* Shared IRQ? */
 	if (!masked_status || unlikely(ehci->rh_state == EHCI_RH_HALTED)) {
-		spin_unlock(&ehci->lock);
+		spin_unlock_irqrestore(&ehci->lock, flags);
 		return IRQ_NONE;
 	}
 
@@ -804,6 +855,12 @@ static irqreturn_t ehci_irq (struct usb_hcd *hcd)
 	/* PCI errors [4.15.2.4] */
 	if (unlikely ((status & STS_FATAL) != 0)) {
 		ehci_err(ehci, "fatal error\n");
+	#ifdef CONFIG_DEBUG_KERNEL
+	/*	HC died dump for HawkM /P	*/	
+		host_dump(ehci);
+		ehci_err (ehci, "PLZ DO NOT TURN OFF!!!!! KEEP THE STATUS AND CONTACT sssol.lee or kiok7157.shin \n");
+		panic("PLZ DO NOT TURN OFF!!!!! KEEP THE STATUS AND CONTACT sssol.lee or kiok7157.shin \n");
+	#endif
 		dbg_cmd(ehci, "fatal", cmd);
 		dbg_status(ehci, "fatal", status);
 dead:
@@ -823,7 +880,7 @@ dead:
 
 	if (bh)
 		ehci_work (ehci);
-	spin_unlock (&ehci->lock);
+	spin_unlock_irqrestore(&ehci->lock, flags);
 	if (pcd_status)
 		usb_hcd_poll_rh_status(hcd);
 	return IRQ_HANDLED;
@@ -892,10 +949,16 @@ static int ehci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 	int			rc;
 
 	spin_lock_irqsave (&ehci->lock, flags);
+	if(unlikely(urb == NULL))
+		goto done;
+#ifdef SAMSUNG_PATCH_RMB_WMB_AT_UNLINK	
+  	 /* Making sure that all data of urb are proper and used only for full speed devices.*/ 
+	if ((urb->dev != NULL) && (urb->dev->speed <= USB_SPEED_FULL))
+		rmb();
+#endif	 
 	rc = usb_hcd_check_unlink_urb(hcd, urb, status);
 	if (rc)
 		goto done;
-
 	if (usb_pipetype(urb->pipe) == PIPE_ISOCHRONOUS) {
 		/*
 		 * We don't expedite dequeue for isochronous URBs.
@@ -904,6 +967,9 @@ static int ehci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 		 */
 	} else {
 		qh = (struct ehci_qh *) urb->hcpriv;
+		if(unlikely(qh == NULL)) {
+			goto done;
+		}
 		qh->exception = 1;
 		switch (qh->qh_state) {
 		case QH_STATE_LINKED:
@@ -924,6 +990,7 @@ static int ehci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 			qh_completions(ehci, qh);
 			break;
 		}
+			
 	}
 done:
 	spin_unlock_irqrestore (&ehci->lock, flags);
@@ -965,8 +1032,6 @@ rescan:
 	}
 
 	qh->exception = 1;
-	if (ehci->rh_state < EHCI_RH_RUNNING)
-		qh->qh_state = QH_STATE_IDLE;
 	switch (qh->qh_state) {
 	case QH_STATE_LINKED:
 	case QH_STATE_COMPLETING:
@@ -1220,6 +1285,11 @@ EXPORT_SYMBOL_GPL(ehci_init_driver);
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_AUTHOR (DRIVER_AUTHOR);
 MODULE_LICENSE ("GPL");
+
+#if defined(CONFIG_ARCH_SDP) && (defined(CONFIG_OF)||defined(CONFIG_ARCH_SDP1207))
+#include "ehci-sdp.c"
+#define PLATFORM_DRIVER		sdp_ehci_driver
+#endif
 
 #ifdef CONFIG_USB_EHCI_FSL
 #include "ehci-fsl.c"

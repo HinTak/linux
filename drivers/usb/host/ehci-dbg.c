@@ -106,13 +106,13 @@ static inline void dbg_hcc_params (struct ehci_hcd *ehci, char *label) {}
 static void __maybe_unused
 dbg_qtd (const char *label, struct ehci_hcd *ehci, struct ehci_qtd *qtd)
 {
-	ehci_dbg(ehci, "%s td %p n%08x %08x t%08x p0=%08x\n", label, qtd,
+	ehci_err(ehci, "%s td %p n%08x %08x t%08x p0=%08x\n", label, qtd,
 		hc32_to_cpup(ehci, &qtd->hw_next),
 		hc32_to_cpup(ehci, &qtd->hw_alt_next),
 		hc32_to_cpup(ehci, &qtd->hw_token),
 		hc32_to_cpup(ehci, &qtd->hw_buf [0]));
 	if (qtd->hw_buf [1])
-		ehci_dbg(ehci, "  p1=%08x p2=%08x p3=%08x p4=%08x\n",
+		ehci_err(ehci, "  p1=%08x p2=%08x p3=%08x p4=%08x\n",
 			hc32_to_cpup(ehci, &qtd->hw_buf[1]),
 			hc32_to_cpup(ehci, &qtd->hw_buf[2]),
 			hc32_to_cpup(ehci, &qtd->hw_buf[3]),
@@ -124,7 +124,7 @@ dbg_qh (const char *label, struct ehci_hcd *ehci, struct ehci_qh *qh)
 {
 	struct ehci_qh_hw *hw = qh->hw;
 
-	ehci_dbg (ehci, "%s qh %p n%08x info %x %x qtd %x\n", label,
+	ehci_err (ehci, "%s qh %p n%08x info %x %x qtd %x\n", label,
 		qh, hw->hw_next, hw->hw_info1, hw->hw_info2, hw->hw_current);
 	dbg_qtd("overlay", ehci, (struct ehci_qtd *) &hw->hw_qtd_next);
 }

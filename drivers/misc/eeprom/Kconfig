@@ -1,5 +1,12 @@
 menu "EEPROM support"
 
+config EEPROM_S24C512C
+	tristate "I2C EEPROMs for s24c512c eeprom chip"
+	depends on I2C && SYSFS
+	help
+	  Say Y to enable the support of eeprom chip into kernel. The
+	  driver supports s24c512c eeprom chip.
+
 config EEPROM_AT24
 	tristate "I2C EEPROMs / RAMs / ROMs from most vendors"
 	depends on I2C && SYSFS

@@ -36,7 +36,7 @@ static int major = CONFIG_SND_MAJOR;
 int snd_major;
 EXPORT_SYMBOL(snd_major);
 
-static int cards_limit = 1;
+static int cards_limit = SNDRV_CARDS;
 
 MODULE_AUTHOR("Jaroslav Kysela <perex@perex.cz>");
 MODULE_DESCRIPTION("Advanced Linux Sound Architecture driver for soundcards.");
@@ -51,7 +51,7 @@ MODULE_ALIAS_CHARDEV_MAJOR(CONFIG_SND_MAJOR);
  * as default, it's identical with cards_limit option.  when more
  * modules are loaded manually, this limit number increases, too.
  */
-int snd_ecards_limit;
+int snd_ecards_limit = SNDRV_CARDS;
 EXPORT_SYMBOL(snd_ecards_limit);
 
 static struct snd_minor *snd_minors[SNDRV_OS_MINORS];

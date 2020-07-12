@@ -47,6 +47,11 @@
 #include <linux/kernel.h>
 #include <linux/pm_runtime.h>
 
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_MODEMLOG
+#include <linux/proc_fs.h>
+#include <linux/vmalloc.h>
+#endif    //CONFIG_SAMSUNG_PATCH_WITH_USB_MODEMLOG
+
 #define DRIVER_VERSION		"22-Aug-2005"
 
 
@@ -63,7 +68,11 @@
  * let the USB host controller be busy for 5msec or more before an irq
  * is required, under load.  Jumbograms change the equation.
  */
+#ifdef CONFIG_SAMSUNG_HOST_USBNET_MTU_CHANGE
+#define RX_MAX_QUEUE_MEMORY (60 * ((dev)->hard_mtu))
+#else
 #define RX_MAX_QUEUE_MEMORY (60 * 1518)
+#endif
 #define	RX_QLEN(dev) (((dev)->udev->speed == USB_SPEED_HIGH) ? \
 			(RX_MAX_QUEUE_MEMORY/(dev)->rx_urb_size) : 4)
 #define	TX_QLEN(dev) (((dev)->udev->speed == USB_SPEED_HIGH) ? \
@@ -151,6 +160,10 @@ int usbnet_get_endpoints(struct usbnet *dev, struct usb_interface *intf)
 			return tmp;
 	}
 
+#ifdef CONFIG_SAMSUNG_HOST_USBNET_COMMON
+	dev->intf_id = alt->desc.bInterfaceNumber;
+#endif
+
 	dev->in = usb_rcvbulkpipe (dev->udev,
 			in->desc.bEndpointAddress & USB_ENDPOINT_NUMBER_MASK);
 	dev->out = usb_sndbulkpipe (dev->udev,
@@ -205,7 +218,10 @@ static void intr_complete (struct urb *urb)
 		netdev_dbg(dev->net, "intr status %d\n", status);
 		break;
 	}
-
+#ifdef CONFIG_SAMSUNG_HOST_USBNET_COMMON
+	if (!netif_running (dev->net))
+		return;
+#endif
 	status = usb_submit_urb (urb, GFP_ATOMIC);
 	if (status != 0)
 		netif_err(dev, timer, dev->net,
@@ -231,9 +247,17 @@ static int init_status (struct usbnet *dev, struct usb_interface *intf)
 	period = max ((int) dev->status->desc.bInterval,
 		(dev->udev->speed == USB_SPEED_HIGH) ? 7 : 3);
 
+#ifdef CONFIG_OOM_RESCUER
+	buf = kmalloc (maxp, GFP_KERNEL|__GFP_NORESCUE);
+#else
 	buf = kmalloc (maxp, GFP_KERNEL);
+#endif
 	if (buf) {
+#ifdef CONFIG_OOM_RESCUER
+		dev->interrupt = usb_alloc_urb (0, GFP_KERNEL|__GFP_NORESCUE);
+#else
 		dev->interrupt = usb_alloc_urb (0, GFP_KERNEL);
+#endif
 		if (!dev->interrupt) {
 			kfree (buf);
 			return -ENOMEM;
@@ -517,19 +541,25 @@ static inline void rx_process (struct usbnet *dev, struct sk_buff *skb)
 	}
 	// else network stack removes extra byte if we forced a short packet
 
-	if (skb->len) {
-		/* all data was already cloned from skb inside the driver */
-		if (dev->driver_info->flags & FLAG_MULTI_PACKET)
-			dev_kfree_skb_any(skb);
-		else
-			usbnet_skb_return(dev, skb);
+	/* all data was already cloned from skb inside the driver */
+	if (dev->driver_info->flags & FLAG_MULTI_PACKET)
+		goto done;
+
+	if (skb->len < ETH_HLEN) {
+		dev->net->stats.rx_errors++;
+		dev->net->stats.rx_length_errors++;
+		netif_dbg(dev, rx_err, dev->net, "rx length %d\n", skb->len);
+	} else {
+		usbnet_skb_return(dev, skb);
 		return;
 	}
 
-	netif_dbg(dev, rx_err, dev->net, "drop\n");
-	dev->net->stats.rx_errors++;
 done:
 	skb_queue_tail(&dev->done, skb);
+#ifdef CONFIG_SAMSUNG_HOST_USBNET_BOTTOM_HALF
+	if(dev->intf_id)
+		tasklet_schedule(&dev->bh);
+#endif
 }
 
 /*-------------------------------------------------------------------------*/
@@ -549,13 +579,40 @@ static void rx_complete (struct urb *urb)
 	switch (urb_status) {
 	/* success */
 	case 0:
+#ifdef CONFIG_SAMSUNG_HOST_USBNET_COMMON
 		if (skb->len < dev->net->hard_header_len) {
 			state = rx_cleanup;
 			dev->net->stats.rx_errors++;
 			dev->net->stats.rx_length_errors++;
 			netif_dbg(dev, rx_err, dev->net,
 				  "rx length %d\n", skb->len);
+			break;
 		}
+#endif
+#ifdef CONFIG_SAMSUNG_HOST_USBNET_BOTTOM_HALF
+	if(dev->intf_id) {
+		unsigned long	flags;	//// USB1 Crash BUGFIX patch
+
+		if(dev->driver_info->rx_fixup && !dev->driver_info->rx_fixup(dev, skb))
+		  goto error_usb1;
+		if(skb->len)
+		{
+		  spin_lock_irqsave(&dev->rxq.lock, flags);
+		  __skb_unlink(skb, &dev->rxq);
+		  spin_unlock_irqrestore(&dev->rxq.lock, flags);
+		  usbnet_skb_return(dev, skb);
+		}
+		else
+		{
+		  netif_dbg(dev, rx_err, dev->net, "drop\n");
+error_usb1:
+		  dev->net->stats.rx_errors++;
+		  entry->state = rx_cleanup;
+		  state = rx_cleanup;	
+		}
+	}	
+#endif
+
 		break;
 
 	/* stalls need manual reset. this is rare ... except that
@@ -616,8 +673,14 @@ block:
 		if (dev->pkt_err > 20)
 			set_bit(EVENT_RX_KILL, &dev->flags);
 	}
-
+#ifdef CONFIG_SAMSUNG_HOST_USBNET_BOTTOM_HALF
+	if(!dev->intf_id)
+	   state = defer_bh(dev, skb, &dev->rxq, state);
+	else if(state == rx_cleanup)
+	   state = defer_bh(dev, skb, &dev->rxq, state);
+#else	
 	state = defer_bh(dev, skb, &dev->rxq, state);
+#endif
 
 	if (urb) {
 		if (netif_running (dev->net) &&
@@ -732,14 +795,12 @@ EXPORT_SYMBOL_GPL(usbnet_unlink_rx_urbs);
 // precondition: never called in_interrupt
 static void usbnet_terminate_urbs(struct usbnet *dev)
 {
-	DECLARE_WAIT_QUEUE_HEAD_ONSTACK(unlink_wakeup);
 	DECLARE_WAITQUEUE(wait, current);
 	int temp;
 
 	/* ensure there are no more active urbs */
-	add_wait_queue(&unlink_wakeup, &wait);
+	add_wait_queue(&dev->wait, &wait);
 	set_current_state(TASK_UNINTERRUPTIBLE);
-	dev->wait = &unlink_wakeup;
 	temp = unlink_urbs(dev, &dev->txq) +
 		unlink_urbs(dev, &dev->rxq);
 
@@ -753,15 +814,14 @@ static void usbnet_terminate_urbs(struct usbnet *dev)
 				  "waited for %d urb completions\n", temp);
 	}
 	set_current_state(TASK_RUNNING);
-	dev->wait = NULL;
-	remove_wait_queue(&unlink_wakeup, &wait);
+	remove_wait_queue(&dev->wait, &wait);
 }
 
 int usbnet_stop (struct net_device *net)
 {
 	struct usbnet		*dev = netdev_priv(net);
 	struct driver_info	*info = dev->driver_info;
-	int			retval;
+	int			retval, pm;
 
 	clear_bit(EVENT_DEV_OPEN, &dev->flags);
 	netif_stop_queue (net);
@@ -771,6 +831,8 @@ int usbnet_stop (struct net_device *net)
 		   net->stats.rx_packets, net->stats.tx_packets,
 		   net->stats.rx_errors, net->stats.tx_errors);
 
+	/* to not race resume */
+	pm = usb_autopm_get_interface(dev->intf);
 	/* allow minidriver to stop correctly (wireless devices to turn off
 	 * radio etc) */
 	if (info->stop) {
@@ -797,6 +859,9 @@ int usbnet_stop (struct net_device *net)
 	dev->flags = 0;
 	del_timer_sync (&dev->delay);
 	tasklet_kill (&dev->bh);
+	if (!pm)
+		usb_autopm_put_interface(dev->intf);
+
 	if (info->manage_power &&
 	    !test_and_clear_bit(EVENT_NO_RUNTIME_PM, &dev->flags))
 		info->manage_power(dev, 0);
@@ -848,7 +913,11 @@ int usbnet_open (struct net_device *net)
 
 	/* start any status interrupt transfer */
 	if (dev->interrupt) {
+#ifdef CONFIG_OOM_RESCUER
+		retval = usbnet_status_start(dev, GFP_KERNEL|__GFP_NORESCUE);
+#else
 		retval = usbnet_status_start(dev, GFP_KERNEL);
+#endif
 		if (retval < 0) {
 			netif_err(dev, ifup, dev->net,
 				  "intr submit %d\n", retval);
@@ -1079,7 +1148,11 @@ fail_halt:
 		int resched = 1;
 
 		if (netif_running (dev->net))
+#ifdef CONFIG_OOM_RESCUER
+			urb = usb_alloc_urb (0, GFP_KERNEL|__GFP_NORESCUE);
+#else
 			urb = usb_alloc_urb (0, GFP_KERNEL);
+#endif
 		else
 			clear_bit (EVENT_RX_MEMORY, &dev->flags);
 		if (urb != NULL) {
@@ -1089,7 +1162,11 @@ fail_halt:
 				usb_free_urb(urb);
 				goto fail_lowmem;
 			}
+#ifdef CONFIG_OOM_RESCUER
+			if (rx_submit (dev, urb, GFP_KERNEL|__GFP_NORESCUE) == -ENOLINK)
+#else
 			if (rx_submit (dev, urb, GFP_KERNEL) == -ENOLINK)
+#endif
 				resched = 0;
 			usb_autopm_put_interface(dev->intf);
 fail_lowmem:
@@ -1365,11 +1442,12 @@ static void usbnet_bh (unsigned long param)
 	/* restart RX again after disabling due to high error rate */
 	clear_bit(EVENT_RX_KILL, &dev->flags);
 
-	// waiting for all pending urbs to complete?
-	if (dev->wait) {
-		if ((dev->txq.qlen + dev->rxq.qlen + dev->done.qlen) == 0) {
-			wake_up (dev->wait);
-		}
+	/* waiting for all pending urbs to complete?
+	 * only then can we forgo submitting anew
+	 */
+	if (waitqueue_active(&dev->wait)) {
+		if (dev->txq.qlen + dev->rxq.qlen + dev->done.qlen == 0)
+			wake_up_all(&dev->wait);
 
 	// or are we maybe short a few urbs?
 	} else if (netif_running (dev->net) &&
@@ -1394,6 +1472,216 @@ static void usbnet_bh (unsigned long param)
 	}
 }
 
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_MODEMLOG
+
+#define MAX_MODEM_INFO_LEN	800
+static struct proc_dir_entry *proc_entry;
+static char *modem_port_data_info;
+static struct mutex shared_obj_lock;
+
+/**
+ * usb_modem_log_show -> Function to defines what is displayed when /proc/usbmodemlog is listed
+ * Parameters
+ * seq_file *input_file -> sequential buffer we write to
+ * void *ptr -> not used
+ */
+static int usb_modem_log_show(struct seq_file *input_file, void *ptr)
+{
+	mutex_lock(&shared_obj_lock);
+	seq_printf(input_file, "%s", &modem_port_data_info[0]);
+	mutex_unlock(&shared_obj_lock);
+	return 0;
+}
+
+/**
+ * usb_modem_log_open -> Function to open the /proc/usbmodemlog
+ * Parameters
+ * struct inode *inode -> not used
+ * struct file *file -> buffer
+ */
+static int usb_modem_log_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, usb_modem_log_show, NULL);
+}
+
+/**
+ * usb_modem_log_fops -> Structures which defines the file operation on the proc entry
+ */
+static const struct file_operations usb_modem_log_fops =
+{
+		.owner	= THIS_MODULE,
+		.open	= usb_modem_log_open,
+		.read	= seq_read,
+		.llseek	= seq_lseek,
+		.release	= single_release
+};
+
+/**
+ * create_modem_log_entry -> Function to write the attached modem information in /proc/usbmodemlog
+ * Parameters
+ * char *serial -> buffer having the serial number of the device
+ * u32 vendorId -> vendor Id of the device
+ * u32 productId-> product Id of the device
+ * const char *interface -> buffer which stores the name of the interface exposed by the device
+ */
+static void create_modem_log_entry( char *serial, u32 vendorId, u32 productId, const char *interface)
+{
+	char data[MAX_MODEM_INFO_LEN];
+	size_t len,write_index;
+	int data_written;
+
+	if(strncmp(interface,"usbx",3)!=0 && strncmp(interface,"ethx",3)!=0)
+		return;
+
+	data_written = snprintf ( data, MAX_MODEM_INFO_LEN, "V:%04x\nP:%04x\nI:%s\n", vendorId, productId, interface);
+	if(data_written<0)
+		return;
+
+	data[data_written]='\0';
+
+	if (proc_entry == NULL)
+	{
+		mutex_init(&shared_obj_lock);
+		mutex_lock(&shared_obj_lock);
+		modem_port_data_info = (char *)vmalloc( MAX_MODEM_INFO_LEN );
+		memset( modem_port_data_info, 0, MAX_MODEM_INFO_LEN );
+
+		proc_entry = proc_create("usbmodemlog", 0, NULL, &usb_modem_log_fops);
+		if (proc_entry == NULL) {
+			vfree(modem_port_data_info);
+			modem_port_data_info = NULL;
+		}
+		mutex_unlock(&shared_obj_lock);
+	}
+
+	if (proc_entry != NULL && modem_port_data_info != NULL)
+	{
+		mutex_lock(&shared_obj_lock);
+		len = strlen(data);
+		write_index = strlen(modem_port_data_info);
+		if(len < (MAX_MODEM_INFO_LEN - write_index - 2))
+		{
+			memcpy ( &modem_port_data_info[write_index], data, len );
+			write_index += len;
+			modem_port_data_info[write_index] = '\0';
+		}
+		mutex_unlock(&shared_obj_lock);
+	}
+}
+
+/**
+ * delete_modem_log_entry -> Function to delete the detached modem log entry from /proc/usbmodemlog
+ * Parameters
+ * char *serial -> buffer having the serial number of the device
+ * u32 vendorId -> vendor Id of the device
+ * u32 productId-> product Id of the device
+ * const char *interface -> buffer which stores the name of the interface exposed by the device
+ */
+static void delete_modem_log_entry( char *serial, u32 vId, u32 pId, const char *interface)
+{
+	char vendorId[5], productId[5], start_char;
+	size_t write_index, count, start=0, end=0, match=0;
+	char p_data[10];
+	size_t p_len, is_modem_detected=0;
+	char data[MAX_MODEM_INFO_LEN];
+
+	if(strncmp(interface,"usbx",3)!=0 && strncmp(interface,"ethx",3)!=0)
+		return;
+
+	if(!modem_port_data_info)
+		return;
+
+	mutex_lock(&shared_obj_lock);
+
+	snprintf ( vendorId, 5, "%04x", vId);
+	vendorId[4] = '\0';
+	snprintf ( productId, 5, "%04x", pId);
+	productId[4] = '\0';
+
+	write_index = strlen(modem_port_data_info);
+	for(count=0;count<write_index;count++)
+	{
+		// Get the first character of the line
+		start_char = modem_port_data_info[count];
+		switch(start_char) {
+		case 'V' : //Vendor ID
+			// New node starts, Initializing variables
+			match=1;
+			start=count;
+
+			// Reading after the 'V:' characters
+			count=count+2;
+			p_len = strlen(vendorId);
+
+			// Copy the vendor ID found in the line
+			memcpy ( p_data, &modem_port_data_info[count], p_len);
+			p_data[p_len]='\0';
+			if(strcmp(p_data,vendorId)!=0)
+				match=0;
+
+			// Increment count till the end of the line
+			count=count+p_len;
+			break;
+		case 'P' : // Product ID
+			// Reading after the 'P:' characters
+			count=count+2;
+			p_len = strlen(productId);
+
+			// Copy the product ID found in the line
+			memcpy ( p_data, &modem_port_data_info[count], p_len);
+			p_data[p_len]='\0';
+			if(strcmp(p_data,productId)!=0)
+				match=0;
+
+			// Increment count till the end of the line
+			count=count+p_len;
+			break;
+		case 'I' : // Interface
+			// Reading after the 'I:' characters
+			count=count+2;
+			p_len = strlen(interface);
+
+			// Copy the Interface found in the line
+			memcpy ( p_data, &modem_port_data_info[count], p_len);
+			p_data[p_len]='\0';
+
+			// Increment till the end of the line
+			count=count+p_len;
+			end=count;
+
+			if(strcmp(p_data,interface)==0 && match)
+			{
+				// Data Matched. Removing entry from index -> start to end
+				data[0] = '\0';
+				memcpy ( data, &modem_port_data_info[0], start );
+				memcpy ( &data[start], &modem_port_data_info[end+1],MAX_MODEM_INFO_LEN-end);
+				memset( modem_port_data_info, 0,MAX_MODEM_INFO_LEN);
+				memcpy ( modem_port_data_info,data,MAX_MODEM_INFO_LEN);
+				is_modem_detected = 1;
+			}
+			break;
+		default :
+			break;
+		}
+
+		// Checking whether the modem entry is detected yet ?
+		if(is_modem_detected)
+			break;
+	}
+
+	write_index = strlen(modem_port_data_info);
+	if(write_index==0)
+	{
+		// Remove the proc entry when no modem info is present
+		vfree(modem_port_data_info);
+		modem_port_data_info = NULL;
+		remove_proc_entry( "usbmodemlog", NULL );
+		proc_entry = NULL;
+	}
+	mutex_unlock(&shared_obj_lock);
+}
+
+#endif  //CONFIG_SAMSUNG_PATCH_WITH_USB_MODEMLOG
 
 /*-------------------------------------------------------------------------
  *
@@ -1420,6 +1708,11 @@ void usbnet_disconnect (struct usb_interface *intf)
 		   intf->dev.driver->name,
 		   xdev->bus->bus_name, xdev->devpath,
 		   dev->driver_info->description);
+
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_MODEMLOG
+	//"delete_modem_log_entry" Added for Cellular support
+	delete_modem_log_entry(dev->udev->serial, le16_to_cpu(xdev->descriptor.idVendor), le16_to_cpu(xdev->descriptor.idProduct), dev->net->name);
+#endif  //CONFIG_SAMSUNG_PATCH_WITH_USB_MODEMLOG
 
 	net = dev->net;
 	unregister_netdev (net);
@@ -1507,6 +1800,7 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 	dev->driver_name = name;
 	dev->msg_enable = netif_msg_init (msg_level, NETIF_MSG_DRV
 				| NETIF_MSG_PROBE | NETIF_MSG_LINK);
+	init_waitqueue_head(&dev->wait);
 	skb_queue_head_init (&dev->rxq);
 	skb_queue_head_init (&dev->txq);
 	skb_queue_head_init (&dev->done);
@@ -1524,7 +1818,12 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 
 	dev->net = net;
 	strcpy (net->name, "usb%d");
+
+#ifdef CONFIG_SAMSUNG_HOST_USBNET_COMMON
+	random_ether_addr(net->dev_addr);
+#else
 	memcpy (net->dev_addr, node_id, sizeof node_id);
+#endif
 
 	/* rx and tx sides can use different message sizes;
 	 * bind() should set rx_urb_size in that case.
@@ -1605,6 +1904,11 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 		   xdev->bus->bus_name, xdev->devpath,
 		   dev->driver_info->description,
 		   net->dev_addr);
+
+#ifdef CONFIG_SAMSUNG_PATCH_WITH_USB_MODEMLOG
+	//"create_modem_log_entry" Added for Cellular support
+	create_modem_log_entry(dev->udev->serial, le16_to_cpu(xdev->descriptor.idVendor), le16_to_cpu(xdev->descriptor.idProduct), dev->net->name);
+#endif    //CONFIG_SAMSUNG_PATCH_WITH_USB_MODEMLOG
 
 	// ok, it's ready to go.
 	usb_set_intfdata (udev, dev);
@@ -1699,9 +2003,10 @@ int usbnet_resume (struct usb_interface *intf)
 		spin_unlock_irq(&dev->txq.lock);
 
 		if (test_bit(EVENT_DEV_OPEN, &dev->flags)) {
-			/* handle remote wakeup ASAP */
-			if (!dev->wait &&
-				netif_device_present(dev->net) &&
+			/* handle remote wakeup ASAP
+			 * we cannot race against stop
+			 */
+			if (netif_device_present(dev->net) &&
 				!timer_pending(&dev->delay) &&
 				!test_bit(EVENT_RX_HALT, &dev->flags))
 					rx_alloc_submit(dev, GFP_NOIO);

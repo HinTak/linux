@@ -37,6 +37,24 @@ config BT_HCIUART
 	  Say Y here to compile support for Bluetooth UART devices into the
 	  kernel or say M to compile it as module (hci_uart).
 
+config BT_HCISBC
+	tristate "HCI SBC Driver"
+	help
+	  Bluetooth HCI SBC driver.
+	  This driver is required if you want to encode BT PCM samples to SBC
+	  encoded form and send this encoded data to BTUSB.
+
+	  Say Y here to compile support for Bluetooth SBC into the
+	  kernel or say M to compile it as module (btsbc).
+
+config BT_HCIPCM
+	tristate "HCI PCM Driver"
+	help
+	  Bluetooth HCI PCM driver.
+
+	  Say Y here to compile support for Bluetooth PCM into the
+	  kernel or say M to compile it as module (btpcm).
+
 config BT_HCIUART_H4
 	bool "UART (H4) protocol support"
 	depends on BT_HCIUART

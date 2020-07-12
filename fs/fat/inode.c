@@ -292,6 +292,23 @@ static void dir_hash_init(struct super_block *sb)
 		INIT_HLIST_HEAD(&sbi->dir_hashtable[i]);
 }
 
+static int ipos_list_init(struct super_block *sb)
+{
+	struct msdos_sb_info *sbi = MSDOS_SB(sb);
+
+	sbi->ipos_list_head = kzalloc(sizeof(struct ipos_busy_list),
+					GFP_KERNEL);
+	if (!sbi->ipos_list_head) {
+		fat_msg(sb, KERN_ERR,
+			"Failed to allocate memory for ipos list head");
+		return -ENOMEM;
+	}
+	spin_lock_init(&sbi->ipos_busy_lock);
+	INIT_LIST_HEAD(sbi->ipos_list_head);
+
+	return 0;
+}
+
 void fat_attach(struct inode *inode, loff_t i_pos)
 {
 	struct msdos_sb_info *sbi = MSDOS_SB(inode->i_sb);
@@ -384,6 +401,18 @@ static int fat_calc_dir_size(struct inode *inode)
 	return 0;
 }
 
+void fat_set_nfs_clnt_open_count(struct inode *inode, u32 clnt_open_count)
+{
+	atomic_set(&MSDOS_I(inode)->i_clnt_open_count, clnt_open_count);
+}
+EXPORT_SYMBOL(fat_set_nfs_clnt_open_count);
+
+int fat_get_nfs_clnt_open_count(struct inode *inode)
+{
+	return atomic_read(&MSDOS_I(inode)->i_clnt_open_count);
+}
+EXPORT_SYMBOL(fat_get_nfs_clnt_open_count);
+
 /* doesn't deal with root inode */
 int fat_fill_inode(struct inode *inode, struct msdos_dir_entry *de)
 {
@@ -424,6 +453,9 @@ int fat_fill_inode(struct inode *inode, struct msdos_dir_entry *de)
 		inode->i_mapping->a_ops = &fat_aops;
 		MSDOS_I(inode)->mmu_private = inode->i_size;
 	}
+
+	atomic_set(&MSDOS_I(inode)->i_clnt_open_count, -1);
+
 	if (de->attr & ATTR_SYS) {
 		if (sbi->options.sys_immutable)
 			inode->i_flags |= S_IMMUTABLE;
@@ -471,7 +503,10 @@ struct inode *fat_build_inode(struct super_block *sb,
 		inode = ERR_PTR(-ENOMEM);
 		goto out;
 	}
-	inode->i_ino = iunique(sb, MSDOS_ROOT_INO);
+	if (MSDOS_SB(sb)->options.nfs)
+		inode->i_ino = i_pos;
+	else
+		inode->i_ino = iunique(sb, MSDOS_ROOT_INO);
 	inode->i_version = 1;
 	err = fat_fill_inode(inode, de);
 	if (err) {
@@ -488,8 +523,64 @@ out:
 
 EXPORT_SYMBOL_GPL(fat_build_inode);
 
+int
+fat_entry_busy(struct msdos_sb_info *sbi, loff_t ipos, struct buffer_head *bh)
+{
+	struct list_head *pos, *q;
+	struct ipos_busy_list *plist;
+	int offset;
+	loff_t curpos;
+
+	if (list_empty(sbi->ipos_list_head))
+		return 0;
+
+	offset = (ipos - sizeof(struct msdos_dir_entry)) >> MSDOS_DIR_BITS;
+	curpos = ((bh->b_blocknr) << sbi->dir_per_block_bits) | offset;
+
+	spin_lock(&sbi->ipos_busy_lock);
+	list_for_each_safe(pos, q, sbi->ipos_list_head) {
+		plist = list_entry(pos, struct ipos_busy_list, ipos_list);
+		if (plist) {
+			if ((curpos > (plist->i_pos - plist->nr_slots)) &&
+				(curpos <= plist->i_pos)) {
+				spin_unlock(&sbi->ipos_busy_lock);
+				return 1;
+			}
+		}
+	}
+	spin_unlock(&sbi->ipos_busy_lock);
+	return 0;
+}
+
+void fat_remove_busy_entry(struct inode *inode)
+{
+
+	struct super_block *sb = inode->i_sb;
+	struct msdos_sb_info *sbi = MSDOS_SB(sb);
+	struct list_head *pos, *q;
+	struct ipos_busy_list *plist;
+
+	spin_lock(&sbi->ipos_busy_lock);
+		list_for_each_safe(pos, q, sbi->ipos_list_head) {
+			plist = list_entry(pos, struct ipos_busy_list,
+					 ipos_list);
+			if (plist) {
+				if (plist->i_pos == inode->i_ino) {
+					list_del(pos);
+					kfree(plist);
+					break;
+				}
+			}
+		}
+	spin_unlock(&sbi->ipos_busy_lock);
+
+}
+
 static void fat_evict_inode(struct inode *inode)
 {
+
+	if (MSDOS_SB(inode->i_sb)->options.nfs)
+		fat_remove_busy_entry(inode);
 	truncate_inode_pages(&inode->i_data, 0);
 	if (!inode->i_nlink) {
 		inode->i_size = 0;
@@ -501,58 +592,9 @@ static void fat_evict_inode(struct inode *inode)
 	fat_detach(inode);
 }
 
-static void fat_set_state(struct super_block *sb,
-			unsigned int set, unsigned int force)
-{
-	struct buffer_head *bh;
-	struct fat_boot_sector *b;
-	struct msdos_sb_info *sbi = sb->s_fs_info;
-
-	/* do not change any thing if mounted read only */
-	if ((sb->s_flags & MS_RDONLY) && !force)
-		return;
-
-	/* do not change state if fs was dirty */
-	if (sbi->dirty) {
-		/* warn only on set (mount). */
-		if (set)
-			fat_msg(sb, KERN_WARNING, "Volume was not properly "
-				"unmounted. Some data may be corrupt. "
-				"Please run fsck.");
-		return;
-	}
-
-	bh = sb_bread(sb, 0);
-	if (bh == NULL) {
-		fat_msg(sb, KERN_ERR, "unable to read boot sector "
-			"to mark fs as dirty");
-		return;
-	}
-
-	b = (struct fat_boot_sector *) bh->b_data;
-
-	if (sbi->fat_bits == 32) {
-		if (set)
-			b->fat32.state |= FAT_STATE_DIRTY;
-		else
-			b->fat32.state &= ~FAT_STATE_DIRTY;
-	} else /* fat 16 and 12 */ {
-		if (set)
-			b->fat16.state |= FAT_STATE_DIRTY;
-		else
-			b->fat16.state &= ~FAT_STATE_DIRTY;
-	}
-
-	mark_buffer_dirty(bh);
-	sync_dirty_buffer(bh);
-	brelse(bh);
-}
-
 static void fat_put_super(struct super_block *sb)
 {
 	struct msdos_sb_info *sbi = MSDOS_SB(sb);
-
-	fat_set_state(sb, 0, 0);
 
 	iput(sbi->fsinfo_inode);
 	iput(sbi->fat_inode);
@@ -564,6 +606,8 @@ static void fat_put_super(struct super_block *sb)
 		kfree(sbi->options.iocharset);
 
 	sb->s_fs_info = NULL;
+	if (sbi->options.nfs)
+		kfree(sbi->ipos_list_head);
 	kfree(sbi);
 }
 
@@ -628,18 +672,9 @@ static void __exit fat_destroy_inodecache(void)
 
 static int fat_remount(struct super_block *sb, int *flags, char *data)
 {
-	int new_rdonly;
 	struct msdos_sb_info *sbi = MSDOS_SB(sb);
 	*flags |= MS_NODIRATIME | (sbi->options.isvfat ? 0 : MS_NOATIME);
 
-	/* make sure we update state on remount. */
-	new_rdonly = *flags & MS_RDONLY;
-	if (new_rdonly != (sb->s_flags & MS_RDONLY)) {
-		if (new_rdonly)
-			fat_set_state(sb, 0, 0);
-		else
-			fat_set_state(sb, 1, 1);
-	}
 	return 0;
 }
 
@@ -1274,6 +1309,7 @@ int fat_fill_super(struct super_block *sb, void *data, int silent, int isvfat,
 	sb->s_flags |= MS_NODIRATIME;
 	sb->s_magic = MSDOS_SUPER_MAGIC;
 	sb->s_op = &fat_sops;
+	mutex_init(&sbi->nfs_build_inode_lock);
 	sb->s_export_op = &fat_export_ops;
 	mutex_init(&sbi->nfs_build_inode_lock);
 	ratelimit_state_init(&sbi->ratelimit, DEFAULT_RATELIMIT_INTERVAL,
@@ -1440,12 +1476,6 @@ int fat_fill_super(struct super_block *sb, void *data, int silent, int isvfat,
 	if (sbi->fat_bits != 32)
 		sbi->fat_bits = (total_clusters > MAX_FAT12) ? 16 : 12;
 
-	/* some OSes set FAT_STATE_DIRTY and clean it on unmount. */
-	if (sbi->fat_bits == 32)
-		sbi->dirty = b->fat32.state & FAT_STATE_DIRTY;
-	else /* fat 16 or 12 */
-		sbi->dirty = b->fat16.state & FAT_STATE_DIRTY;
-
 	/* check that FAT table does not overflow */
 	fat_clusters = calc_fat_clusters(sb);
 	total_clusters = min(total_clusters, fat_clusters - FAT_START_ENT);
@@ -1472,6 +1502,8 @@ int fat_fill_super(struct super_block *sb, void *data, int silent, int isvfat,
 	fat_hash_init(sb);
 	dir_hash_init(sb);
 	fat_ent_access_init(sb);
+	if (sbi->options.nfs  && ipos_list_init(sb) < 0)
+		goto out_fail;
 
 	/*
 	 * The low byte of FAT's first entry must have same value with
@@ -1540,7 +1572,6 @@ int fat_fill_super(struct super_block *sb, void *data, int silent, int isvfat,
 					"the device does not support discard");
 	}
 
-	fat_set_state(sb, 1, 0);
 	return 0;
 
 out_invalid:

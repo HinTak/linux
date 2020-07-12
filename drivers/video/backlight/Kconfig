@@ -425,6 +425,12 @@ config BACKLIGHT_AS3711
 	  If you have an Austrian Microsystems AS3711 say Y to enable the
 	  backlight driver.
 
+config BACKLIGHT_SDP
+	tristate "SDP Backlight"
+	depends on ARCH_SDP && MFD_SDP_MICOM
+	help
+	  If you have an SDP SoCs say Y to enable the backlight driver.
+
 endif # BACKLIGHT_CLASS_DEVICE
 
 endif # BACKLIGHT_LCD_SUPPORT

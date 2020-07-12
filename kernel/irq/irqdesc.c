@@ -23,10 +23,17 @@
 static struct lock_class_key irq_desc_lock_class;
 
 #if defined(CONFIG_SMP)
+#ifdef CONFIG_SCHED_HMP
+extern struct cpumask hmp_slow_cpu_mask;
+#endif
 static void __init init_irq_default_affinity(void)
 {
 	alloc_cpumask_var(&irq_default_affinity, GFP_NOWAIT);
+#ifdef CONFIG_SCHED_HMP
+	cpumask_copy(irq_default_affinity, &hmp_slow_cpu_mask);
+#else
 	cpumask_setall(irq_default_affinity);
+#endif
 }
 #else
 static void __init init_irq_default_affinity(void)
@@ -274,6 +281,7 @@ struct irq_desc *irq_to_desc(unsigned int irq)
 {
 	return (irq < NR_IRQS) ? irq_desc + irq : NULL;
 }
+EXPORT_SYMBOL(irq_to_desc);
 
 static void free_desc(unsigned int irq)
 {
@@ -299,6 +307,11 @@ static int irq_expand_nr_irqs(unsigned int nr)
 }
 
 #endif /* !CONFIG_SPARSE_IRQ */
+
+#ifdef CONFIG_IRQ_TIME
+struct irq_desc_debug irq_desc_last[NR_CPUS];
+EXPORT_SYMBOL(irq_desc_last);
+#endif
 
 /**
  * generic_handle_irq - Invoke the handler for a particular irq

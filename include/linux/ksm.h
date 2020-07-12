@@ -16,6 +16,15 @@
 struct stable_node;
 struct mem_cgroup;
 
+#ifdef CONFIG_KSM_KERNEL_MADVISE
+void ksm_set_vm_mergeable_if_possible(unsigned long *vm_flags);
+#else
+static inline void ksm_set_vm_mergeable_if_possible(unsigned long *vm_flags)
+{
+	return;
+}
+#endif
+
 #ifdef CONFIG_KSM
 int ksm_madvise(struct vm_area_struct *vma, unsigned long start,
 		unsigned long end, int advice, unsigned long *vm_flags);
@@ -72,13 +81,41 @@ static inline void set_page_stable_node(struct page *page,
  */
 struct page *ksm_might_need_to_copy(struct page *page,
 			struct vm_area_struct *vma, unsigned long address);
-
+#ifndef CONFIG_KSM_ZERO_PAGE_MERGE_ONLY
 int page_referenced_ksm(struct page *page,
 			struct mem_cgroup *memcg, unsigned long *vm_flags);
 int try_to_unmap_ksm(struct page *page, enum ttu_flags flags);
 int rmap_walk_ksm(struct page *page, int (*rmap_one)(struct page *,
 		  struct vm_area_struct *, unsigned long, void *), void *arg);
 void ksm_migrate_page(struct page *newpage, struct page *oldpage);
+
+static inline int PageKzm(struct page *page)
+{
+	return 0;
+}
+#else
+static inline int page_referenced_ksm(struct page *page,
+			struct mem_cgroup *memcg, unsigned long *vm_flags)
+{
+	return 0;
+}
+static inline int try_to_unmap_ksm(struct page *page, enum ttu_flags flags)
+{
+	return 0;
+}
+static inline int rmap_walk_ksm(struct page *page, int (*rmap_one)(struct page*,
+		struct vm_area_struct *, unsigned long, void *), void *arg)
+{
+	return 0;
+}
+static inline void ksm_migrate_page(struct page *newpage, struct page *oldpage)
+{
+}
+static inline int PageKzm(struct page *page)
+{
+	return (page == ZERO_PAGE(0));
+}
+#endif
 
 #else  /* !CONFIG_KSM */
 
@@ -92,6 +129,11 @@ static inline void ksm_exit(struct mm_struct *mm)
 }
 
 static inline int PageKsm(struct page *page)
+{
+	return 0;
+}
+
+static inline int PageKzm(struct page *page)
 {
 	return 0;
 }

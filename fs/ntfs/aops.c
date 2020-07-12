@@ -30,6 +30,9 @@
 #include <linux/buffer_head.h>
 #include <linux/writeback.h>
 #include <linux/bit_spinlock.h>
+/* selp readpages patch : include headers */
+#include <linux/bio.h>
+#include <linux/mpage.h>
 
 #include "aops.h"
 #include "attrib.h"
@@ -522,6 +525,304 @@ done:
 err_out:
 	unlock_page(page);
 	return err;
+}
+
+/**
+ * selp patch : existing ntfs_read_block was modified to read multi pages.
+ * do_ntfs_read_block - fill a @page of an address space with data
+ * @file:       open file to which the page @page belongs or NULL
+ * @bio:        bio vector used for input output.
+ * @page:       page cache page to fill with data
+ * @nr_pages:   number of pages
+ * @last_block_in_bio: last block of the nth bio when (n+1)th  iteration
+ *			is going on.
+ * @bh:         buffer head pointer used for block mapping.
+ *
+ * map the block to the buffer heads in the page and then fill the page
+ * with data.Keep on returning bio pointer so that bio vector keeps on
+ * growing for contiguous blocks. In case blocks are not contiguous just
+ * submit bio for input and start all over again.
+ *
+ * Return bio pointer
+ */
+static struct bio *do_ntfs_read_block(struct file *file, struct bio *bio,
+	struct page *page, unsigned nr_pages, sector_t *last_block_in_bio,
+	struct buffer_head *bh)
+{
+	loff_t i_size;
+	VCN vcn;
+	LCN lcn;
+	s64 init_size;
+	struct inode *vi;
+	ntfs_inode *ni;
+	ntfs_volume *vol;
+	/* in case goto confused, runlist should be NULL first. */
+	runlist_element *rl = NULL;
+	struct buffer_head *head, *arr[MAX_BUF_PER_PAGE] = {0, };
+	sector_t iblock, lblock, zblock;
+	unsigned long flags;
+	unsigned int blocksize, vcn_ofs;
+	int i, nr;
+	unsigned char blocksize_bits;
+	/* selp patch */
+	int length = 0;
+	unsigned blocks_per_page;
+	unsigned first_hole;
+	unsigned blkbits;
+	int ret = 0;
+	/* selp patch*/
+
+	vi = page->mapping->host;
+	ni = NTFS_I(vi);
+	vol = ni->vol;
+
+	/* $MFT/$DATA must have its complete runlist in memory at all times. */
+	BUG_ON(!ni->runlist.rl && !ni->mft_no && !NInoAttr(ni));
+
+	blocksize = vol->sb->s_blocksize;
+	blocksize_bits = vol->sb->s_blocksize_bits;
+
+	/* selp patch */
+
+	blkbits = vi->i_blkbits;
+	blocks_per_page = PAGE_CACHE_SIZE >> blkbits;
+	first_hole = blocks_per_page;
+	/* selp patch*/
+	if (!page_has_buffers(page)) {
+		create_empty_buffers(page, blocksize, 0);
+		if (unlikely(!page_has_buffers(page))) {
+			unlock_page(page);
+			goto confused;
+		}
+	}
+	bh = head = page_buffers(page);
+	BUG_ON(!bh);
+
+	/*
+	 * We may be racing with truncate.  To avoid some of the problems we
+	 * now take a snapshot of the various sizes and use those for the whole
+	 * of the function.  In case of an extending truncate it just means we
+	 * may leave some buffers unmapped which are now allocated.  This is
+	 * not a problem since these buffers will just get mapped when a write
+	 * occurs.  In case of a shrinking truncate, we will detect this later
+	 * on due to the runlist being incomplete and if the page is being
+	 * fully truncated, truncate will throw it away as soon as we unlock
+	 * it so no need to worry what we do with it.
+	 */
+	iblock = (s64)page->index << (PAGE_CACHE_SHIFT - blocksize_bits);
+	read_lock_irqsave(&ni->size_lock, flags);
+	lblock = (ni->allocated_size + blocksize - 1) >> blocksize_bits;
+	init_size = ni->initialized_size;
+	i_size = i_size_read(vi);
+	read_unlock_irqrestore(&ni->size_lock, flags);
+	if (unlikely(init_size > i_size)) {
+		/* Race with shrinking truncate. */
+		init_size = i_size;
+	}
+	zblock = (init_size + blocksize - 1) >> blocksize_bits;
+
+	/* selp patch: For files smaller than 4K readpages is not required */
+	if (ni->initialized_size < PAGE_CACHE_SIZE) {
+		ret = ntfs_readpage(file, page);
+		if (ret) {
+			ntfs_error(vol->sb, "Failed to read from inode 0x%lx, "
+			"attribute type 0x%x, (error code %i)", ni->mft_no,
+			ni->type, ret);
+		}
+		return NULL;
+	}
+
+	/* Loop through all the buffers in the page. */
+	rl = NULL;
+	nr = i = 0;
+	do {
+		int err;
+
+		if (unlikely(buffer_uptodate(bh)))
+			continue;
+		if (unlikely(buffer_mapped(bh))) {
+			arr[nr++] = bh;
+			continue;
+		}
+		err = 0;
+		bh->b_bdev = vol->sb->s_bdev;
+		/* Is the block within the allowed limits? */
+		if (iblock < lblock) {
+			bool is_retry = false;
+			/* Convert iblock into corresponding vcn and offset. */
+			vcn = (VCN)iblock << blocksize_bits >>
+				vol->cluster_size_bits;
+			vcn_ofs = ((VCN)iblock << blocksize_bits) &
+				vol->cluster_size_mask;
+			if (!rl) {
+lock_retry_remap:
+				down_read(&ni->runlist.lock);
+				rl = ni->runlist.rl;
+			}
+			if (likely(rl != NULL)) {
+				/* Seek to element containing target vcn. */
+				while (rl->length && rl[1].vcn <= vcn)
+					rl++;
+				lcn = ntfs_rl_vcn_to_lcn(rl, vcn);
+				} else
+				lcn = LCN_RL_NOT_MAPPED;
+			/* Successful remap. */
+			if (lcn >= 0) {
+				/* Setup buffer head to correct block. */
+				bh->b_blocknr = ((lcn << vol->cluster_size_bits)
+					+ vcn_ofs) >> blocksize_bits;
+				set_buffer_mapped(bh);
+				/* Only read initialized data blocks. */
+				if (iblock < zblock) {
+					arr[nr++] = bh;
+					continue;
+				}
+				/* Fully non-initialized data block, zero it. */
+				goto handle_zblock;
+			}
+			/* It is a hole, need to zero it. */
+			if (lcn == LCN_HOLE)
+				goto handle_hole;
+			/* If first try and runlist unmapped, map and retry. */
+			if (!is_retry && lcn == LCN_RL_NOT_MAPPED) {
+				is_retry = true;
+				/*
+				 * Attempt to map runlist, dropping lock for
+				 * the duration.
+				 */
+				up_read(&ni->runlist.lock);
+				err = ntfs_map_runlist(ni, vcn);
+				if (likely(!err))
+					goto lock_retry_remap;
+				rl = NULL;
+			} else if (!rl)
+				up_read(&ni->runlist.lock);
+			/*
+			 * If buffer is outside the runlist, treat it as a
+			 * hole.  This can happen due to concurrent truncate
+			 * for example.
+			 */
+			if (err == -ENOENT || lcn == LCN_ENOENT) {
+				err = 0;
+				goto handle_hole;
+			}
+			/* Hard error, zero out region. */
+			if (!err)
+				err = -EIO;
+			bh->b_blocknr = -1;
+			SetPageError(page);
+			ntfs_error(vol->sb, "Failed to read from inode 0x%lx, "
+					"attribute type 0x%x, vcn 0x%llx, "
+					"offset 0x%x because its location on "
+					"disk could not be determined%s "
+					"(error code %i).", ni->mft_no,
+					ni->type, (unsigned long long)vcn,
+					vcn_ofs, is_retry ? " even after "
+					"retrying" : "", err);
+			goto confused;
+		} else {
+			goto confused;
+		}
+	/*
+	 * Either iblock was outside lblock limits or
+	 * ntfs_rl_vcn_to_lcn() returned error.  Just zero that portion
+	 * of the page and set the buffer uptodate.
+	 */
+	} while (i++, iblock++, (bh = bh->b_this_page) != head);
+
+	/* Release the lock if we took it. */
+	if (rl)
+		up_read(&ni->runlist.lock);
+
+
+	/*
+	 * selp patch : Check if the last block in the previous call is
+	 * contigous to first block in the current call, if not then
+	 * submit the bio
+	 */
+	if (bio && nr && (*last_block_in_bio != arr[0]->b_blocknr - 1))
+		bio = mpage_bio_submit(READ, bio);
+alloc_new:
+	if (bio == NULL) {
+		bio = mpage_alloc(head->b_bdev, (head->b_blocknr *
+							 (head->b_size >> 9)),
+			min_t(int, nr_pages, bio_get_nr_vecs(head->b_bdev)),
+			GFP_KERNEL);
+		if (bio == NULL)
+			goto confused;
+	}
+
+	length = first_hole << blocksize_bits;
+	if (bio_add_page(bio, page, length, 0) < length) {
+		bio = mpage_bio_submit(READ, bio);
+		goto alloc_new;
+	}
+	/*
+	 * set_buffer_boundary needs to be called for this
+	 * condition to be true
+	 */
+	if (buffer_boundary(bh) || (first_hole != blocks_per_page))
+		bio = mpage_bio_submit(READ, bio);
+	else
+		*last_block_in_bio = arr[blocks_per_page - 1]->b_blocknr;
+out:
+	return bio;
+handle_hole:
+	bh->b_blocknr = -1UL;
+	clear_buffer_mapped(bh);
+handle_zblock:
+confused:
+	/* Jump back to normal buffer head implementation */
+	if (rl)
+		up_read(&ni->runlist.lock);
+
+	if (bio)
+		bio = mpage_bio_submit(READ, bio);
+
+	ret = ntfs_readpage(file, page);
+	if (ret) {
+		ntfs_error(vol->sb, "Failed to read from inode 0x%lx, "
+			"attribute type 0x%x, (error code %i)", ni->mft_no,
+			ni->type, ret);
+	}
+	goto out;
+}
+
+#define list_to_page(head) (list_entry((head)->prev, struct page, lru))
+
+/* selp patch : this ntfs_readpages was made to read muti pages */
+int ntfs_readpages(struct file *file, struct address_space *mapping,
+		struct list_head *pages, unsigned nr_pages)
+{
+	unsigned page_idx;
+	struct bio *bio = NULL;
+	sector_t last_block_in_bio = 0;
+	struct buffer_head map_bh;
+	ntfs_inode *ni;
+	struct inode *vi;
+
+	/* NInoNonResident() == NInoIndexAllocPresent() */
+	for (page_idx = 0; page_idx < nr_pages; page_idx++) {
+		struct page *page = list_to_page(pages);
+		list_del(&page->lru);
+		if (!add_to_page_cache_lru(page, mapping, page->index,
+							 GFP_KERNEL)) {
+			vi = page->mapping->host;
+			ni = NTFS_I(vi);
+
+			if (NInoNonResident(ni) &&
+				!NInoCompressed(ni) && !NInoEncrypted(ni))
+				bio = do_ntfs_read_block(file, bio, page,
+				nr_pages-page_idx, &last_block_in_bio, &map_bh);
+			else
+				mapping->a_ops->readpage(file, page);
+		}
+		page_cache_release(page);
+	}
+	if (bio)
+		mpage_bio_submit(READ, bio);
+
+	return 0;
 }
 
 #ifdef NTFS_RW
@@ -1543,6 +1844,8 @@ err_out:
  */
 const struct address_space_operations ntfs_aops = {
 	.readpage	= ntfs_readpage,	/* Fill page with data. */
+	/* selp patch : Add readpages*/
+	.readpages	= ntfs_readpages,	/* Fill pages with data. */
 #ifdef NTFS_RW
 	.writepage	= ntfs_writepage,	/* Write dirty page to disk. */
 #endif /* NTFS_RW */

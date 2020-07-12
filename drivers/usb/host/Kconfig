@@ -18,6 +18,7 @@ config USB_C67X00_HCD
 config USB_XHCI_HCD
 	tristate "xHCI HCD (USB 3.0) support"
 	depends on USB_ARCH_HAS_XHCI
+	select USB_XHCI_PLATFORM if ARCH_SDP
 	---help---
 	  The eXtensible Host Controller Interface (xHCI) is standard for USB 3.0
 	  "SuperSpeed" host controller hardware.
@@ -29,6 +30,10 @@ if USB_XHCI_HCD
 
 config USB_XHCI_PLATFORM
 	tristate
+
+config USB_XHCI_PLATFORM
+	tristate "xHCI platform support"
+	depends on USB_XHCI_HCD
 
 config USB_XHCI_HCD_DEBUGGING
 	bool "Debugging for the xHCI host controller"
@@ -62,6 +67,22 @@ config USB_EHCI_HCD
 
 	  To compile this driver as a module, choose M here: the
 	  module will be called ehci-hcd.
+
+config USB_ENABLE
+	tristate "USB Enable"
+	depends on USB && USB_ARCH_HAS_EHCI
+	default M
+	---help---
+	  Module to control USB Enable GPIO
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called usb_enable.ko.
+
+config USB_SERDES_LOCK
+	bool "USB Serdes Lock"
+	default y
+	---help---
+	  Module to check USB Serdes Lock GPIO
 
 config USB_EHCI_ROOT_HUB_TT
 	bool "Root Hub Transaction Translators"

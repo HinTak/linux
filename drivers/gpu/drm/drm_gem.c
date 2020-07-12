@@ -87,12 +87,21 @@
  * Initialize the GEM device fields
  */
 
+static bool gemInit_f = false;
+static struct mutex drm_mm_lock;
+
 int
 drm_gem_init(struct drm_device *dev)
 {
 	struct drm_gem_mm *mm;
 
 	spin_lock_init(&dev->object_name_lock);
+	if (gemInit_f == false)
+	{
+		mutex_init(&drm_mm_lock);
+		gemInit_f = true;
+	}
+
 	idr_init(&dev->object_name_idr);
 
 	mm = kzalloc(sizeof(struct drm_gem_mm), GFP_KERNEL);
@@ -123,10 +132,12 @@ drm_gem_destroy(struct drm_device *dev)
 {
 	struct drm_gem_mm *mm = dev->mm_private;
 
+	mutex_lock(&drm_mm_lock);
 	drm_mm_takedown(&mm->offset_manager);
 	drm_ht_remove(&mm->offset_hash);
 	kfree(mm);
 	dev->mm_private = NULL;
+	mutex_unlock(&drm_mm_lock);
 }
 
 /**
@@ -312,10 +323,12 @@ drm_gem_free_mmap_offset(struct drm_gem_object *obj)
 	struct drm_gem_mm *mm = dev->mm_private;
 	struct drm_map_list *list = &obj->map_list;
 
+	mutex_lock(&drm_mm_lock);
 	drm_ht_remove_item(&mm->offset_hash, &list->hash);
 	drm_mm_put_block(list->file_offset_node);
 	kfree(list->map);
 	list->map = NULL;
+	mutex_unlock(&drm_mm_lock);
 }
 EXPORT_SYMBOL(drm_gem_free_mmap_offset);
 
@@ -339,12 +352,17 @@ drm_gem_create_mmap_offset(struct drm_gem_object *obj)
 	struct drm_local_map *map;
 	int ret;
 
+	mutex_lock(&drm_mm_lock);
+
 	/* Set the object up for mmap'ing */
 	list = &obj->map_list;
 	list->map = kzalloc(sizeof(struct drm_map_list), GFP_KERNEL);
 	if (!list->map)
+	{
+		mutex_unlock(&drm_mm_lock);
 		return -ENOMEM;
-
+	}
+	
 	map = list->map;
 	map->type = _DRM_GEM;
 	map->size = obj->size;
@@ -374,6 +392,8 @@ drm_gem_create_mmap_offset(struct drm_gem_object *obj)
 		goto out_free_mm;
 	}
 
+	mutex_unlock(&drm_mm_lock);
+
 	return 0;
 
 out_free_mm:
@@ -381,6 +401,7 @@ out_free_mm:
 out_free_list:
 	kfree(list->map);
 	list->map = NULL;
+	mutex_unlock(&drm_mm_lock);
 
 	return ret;
 }
@@ -640,6 +661,59 @@ void drm_gem_vm_close(struct vm_area_struct *vma)
 }
 EXPORT_SYMBOL(drm_gem_vm_close);
 
+/**
+ * drm_gem_mmap_obj - memory map a GEM object
+ * @obj: the GEM object to map
+ * @obj_size: the object size to be mapped, in bytes
+ * @vma: VMA for the area to be mapped
+ *
+ * Set up the VMA to prepare mapping of the GEM object using the gem_vm_ops
+ * provided by the driver. Depending on their requirements, drivers can either
+ * provide a fault handler in their gem_vm_ops (in which case any accesses to
+ * the object will be trapped, to perform migration, GTT binding, surface
+ * register allocation, or performance monitoring), or mmap the buffer memory
+ * synchronously after calling drm_gem_mmap_obj.
+ *
+ * This function is mainly intended to implement the DMABUF mmap operation, when
+ * the GEM object is not looked up based on its fake offset. To implement the
+ * DRM mmap operation, drivers should use the drm_gem_mmap() function.
+ *
+ * NOTE: This function has to be protected with dev->struct_mutex
+ *
+ * Return 0 or success or -EINVAL if the object size is smaller than the VMA
+ * size, or if no gem_vm_ops are provided.
+ */
+int drm_gem_mmap_obj(struct drm_gem_object *obj, unsigned long obj_size,
+		     struct vm_area_struct *vma)
+{
+	struct drm_device *dev = obj->dev;
+
+	lockdep_assert_held(&dev->struct_mutex);
+
+	/* Check for valid size. */
+	if (obj_size < vma->vm_end - vma->vm_start)
+		return -EINVAL;
+
+	if (!dev->driver->gem_vm_ops)
+		return -EINVAL;
+
+	vma->vm_flags |= VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP;
+	vma->vm_ops = dev->driver->gem_vm_ops;
+	vma->vm_private_data = obj;
+	vma->vm_page_prot =  pgprot_writecombine(vm_get_page_prot(vma->vm_flags));
+
+	/* Take a ref for this mapping of the object, so that the fault
+	 * handler can dereference the mmap offset's pointer to the object.
+	 * This reference is cleaned up by the corresponding vm_close
+	 * (which should happen whether the vma was created by this call, or
+	 * by a vm_open due to mremap or partial unmap or whatever).
+	 */
+	drm_gem_object_reference(obj);
+
+	drm_vm_open_locked(dev, vma);
+	return 0;
+}
+EXPORT_SYMBOL(drm_gem_mmap_obj);
 
 /**
  * drm_gem_mmap - memory map routine for GEM objects
@@ -649,11 +723,9 @@ EXPORT_SYMBOL(drm_gem_vm_close);
  * If a driver supports GEM object mapping, mmap calls on the DRM file
  * descriptor will end up here.
  *
- * If we find the object based on the offset passed in (vma->vm_pgoff will
+ * Look up the GEM object based on the offset passed in (vma->vm_pgoff will
  * contain the fake offset we created when the GTT map ioctl was called on
- * the object), we set up the driver fault handler so that any accesses
- * to the object can be trapped, to perform migration, GTT binding, surface
- * register allocation, or performance monitoring.
+ * the object) and map it with a call to drm_gem_mmap_obj().
  */
 int drm_gem_mmap(struct file *filp, struct vm_area_struct *vma)
 {
@@ -661,7 +733,6 @@ int drm_gem_mmap(struct file *filp, struct vm_area_struct *vma)
 	struct drm_device *dev = priv->minor->dev;
 	struct drm_gem_mm *mm = dev->mm_private;
 	struct drm_local_map *map = NULL;
-	struct drm_gem_object *obj;
 	struct drm_hash_item *hash;
 	int ret = 0;
 
@@ -682,32 +753,7 @@ int drm_gem_mmap(struct file *filp, struct vm_area_struct *vma)
 		goto out_unlock;
 	}
 
-	/* Check for valid size. */
-	if (map->size < vma->vm_end - vma->vm_start) {
-		ret = -EINVAL;
-		goto out_unlock;
-	}
-
-	obj = map->handle;
-	if (!obj->dev->driver->gem_vm_ops) {
-		ret = -EINVAL;
-		goto out_unlock;
-	}
-
-	vma->vm_flags |= VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP;
-	vma->vm_ops = obj->dev->driver->gem_vm_ops;
-	vma->vm_private_data = map->handle;
-	vma->vm_page_prot =  pgprot_writecombine(vm_get_page_prot(vma->vm_flags));
-
-	/* Take a ref for this mapping of the object, so that the fault
-	 * handler can dereference the mmap offset's pointer to the object.
-	 * This reference is cleaned up by the corresponding vm_close
-	 * (which should happen whether the vma was created by this call, or
-	 * by a vm_open due to mremap or partial unmap or whatever).
-	 */
-	drm_gem_object_reference(obj);
-
-	drm_vm_open_locked(dev, vma);
+	ret = drm_gem_mmap_obj(map->handle, map->size, vma);
 
 out_unlock:
 	mutex_unlock(&dev->struct_mutex);

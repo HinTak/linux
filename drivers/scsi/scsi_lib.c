@@ -35,6 +35,12 @@
 
 #define SG_MEMPOOL_NR		ARRAY_SIZE(scsi_sg_pools)
 #define SG_MEMPOOL_SIZE		2
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+/* SELP.arm.3.x support A1 2007-10-22 */
+//hongyabi patch for US_FLIDX_SCSI_MAX_32_BLOCK device
+////20070716
+#define US_FLIDX_SCSI_MAX_32_BLOCK      26
+#endif
 
 struct scsi_host_sg_pool {
 	size_t		size;
@@ -228,7 +234,7 @@ void scsi_queue_insert(struct scsi_cmnd *cmd, int reason)
  */
 int scsi_execute(struct scsi_device *sdev, const unsigned char *cmd,
 		 int data_direction, void *buffer, unsigned bufflen,
-		 unsigned char *sense, int timeout, int retries, int flags,
+		 unsigned char *sense, int timeout, int retries, u64 flags,
 		 int *resid)
 {
 	struct request *req;
@@ -279,7 +285,7 @@ EXPORT_SYMBOL(scsi_execute);
 int scsi_execute_req_flags(struct scsi_device *sdev, const unsigned char *cmd,
 		     int data_direction, void *buffer, unsigned bufflen,
 		     struct scsi_sense_hdr *sshdr, int timeout, int retries,
-		     int *resid, int flags)
+		     int *resid, u64 flags)
 {
 	char *sense = NULL;
 	int result;
@@ -772,6 +778,7 @@ void scsi_io_completion(struct scsi_cmnd *cmd, unsigned int good_bytes)
 	enum {ACTION_FAIL, ACTION_REPREP, ACTION_RETRY,
 	      ACTION_DELAYED_RETRY} action;
 	char *description = NULL;
+	unsigned long flags;
 
 	if (result) {
 		sense_valid = scsi_command_normalize_sense(cmd, &sshdr);
@@ -815,6 +822,14 @@ void scsi_io_completion(struct scsi_cmnd *cmd, unsigned int good_bytes)
 			scsi_next_command(cmd);
 			return;
 		}
+	} else if (blk_rq_bytes(req) == 0 && result && !sense_deferred) {
+		/*
+		 * Certain non BLOCK_PC requests are commands that don't
+		 * actually transfer anything (FLUSH), so cannot use
+		 * good_bytes != blk_rq_bytes(req) as the signal for an error.
+		 * This sets the error explicitly for the problem case.
+		 */
+		error = __scsi_error_from_host_byte(cmd, result);
 	}
 
 	/* no bidi support for !REQ_TYPE_BLOCK_PC yet */
@@ -986,10 +1001,29 @@ void scsi_io_completion(struct scsi_cmnd *cmd, unsigned int good_bytes)
 				scsi_print_sense("", cmd);
 			scsi_print_command(cmd);
 		}
+
+		/* we can know there is bad sector in HDD by scsi timeout */
+		if (cmd->retries > cmd->allowed)
+			error = -EBADSEC;
 		if (blk_end_request_err(req, error))
 			scsi_requeue_command(q, cmd);
-		else
+		else{
+			/**
+			 * Fix write blocking problem from corrupted HDD.
+			 * We try to cancel requests in request queue to
+			 * avoid blocking by several scsi timeout.
+			 */
+			if (cmd->retries > cmd->allowed) {
+				spin_lock_irqsave(q->queue_lock, flags);
+				while (((req = blk_peek_request(q)) != NULL) &&
+						(rq_data_dir(req) == WRITE)) {
+					blk_start_request(req);
+					__blk_end_request_all(req, -EBADSEC);
+				}
+				spin_unlock_irqrestore(q->queue_lock, flags);
+			}
 			scsi_next_command(cmd);
+		}
 		break;
 	case ACTION_REPREP:
 		/* Unprep the request and put it back at the head of the queue.
@@ -1668,7 +1702,7 @@ u64 scsi_calculate_bounce_limit(struct Scsi_Host *shost)
 
 	host_dev = scsi_get_device(shost);
 	if (host_dev && host_dev->dma_mask)
-		bounce_limit = *host_dev->dma_mask;
+		bounce_limit = (u64)dma_max_pfn(host_dev) << PAGE_SHIFT;
 
 	return bounce_limit;
 }
@@ -1684,6 +1718,15 @@ struct request_queue *__scsi_alloc_queue(struct Scsi_Host *shost,
 	if (!q)
 		return NULL;
 
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+ /* VDLP.arm.3.x support A1 2007-10-22 */
+        //hongyabi patch for US_FLIDX_SCSI_MAX_32_BLOCK device
+        //        //20070716
+        if (test_bit(US_FLIDX_SCSI_MAX_32_BLOCK, &shost->flags))
+                blk_queue_max_segments(q, SCSI_MAX_PHYS_SEGMENTS_32);
+       else
+#endif
+        //
 	/*
 	 * this limit is imposed by hardware restrictions
 	 */

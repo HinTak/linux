@@ -107,6 +107,9 @@ static ssize_t state_show(struct device *dev, struct device_attribute *attr,
 	int i, count = 0;
 	struct extcon_dev *edev = (struct extcon_dev *) dev_get_drvdata(dev);
 
+	if (!edev)
+		return -EFAULT;
+
 	if (edev->print_state) {
 		int ret = edev->print_state(edev, buf);
 
@@ -137,6 +140,9 @@ static ssize_t state_store(struct device *dev, struct device_attribute *attr,
 	ssize_t ret = 0;
 	struct extcon_dev *edev = (struct extcon_dev *) dev_get_drvdata(dev);
 
+	if (!edev)
+		return -EFAULT;
+
 	ret = sscanf(buf, "0x%x", &state);
 	if (ret == 0)
 		ret = -EINVAL;
@@ -153,6 +159,9 @@ static ssize_t name_show(struct device *dev, struct device_attribute *attr,
 		char *buf)
 {
 	struct extcon_dev *edev = (struct extcon_dev *) dev_get_drvdata(dev);
+
+	if (!edev)
+		return -EFAULT;
 
 	/* Optional callback given by the user */
 	if (edev->print_name) {
@@ -223,7 +232,7 @@ static ssize_t cable_state_store(struct device *dev,
 int extcon_update_state(struct extcon_dev *edev, u32 mask, u32 state)
 {
 	char name_buf[120];
-	char state_buf[120];
+	char state_buf[150]; /* expanded to 150. confirmed by maintainer */
 	char *prop_buf;
 	char *envp[3];
 	int env_offset = 0;

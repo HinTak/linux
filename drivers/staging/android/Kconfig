@@ -48,6 +48,27 @@ config ANDROID_LOGGER
 	  optimized writes. This optimization avoids logging having too
 	  much overhead in the system.
 
+config TIZEN_TV_DLOG_MANAGER
+	bool "Managing for TIZEN TV Logging System(ANDROID_LOGGER)"
+	depends on ANDROID_LOGGER
+	default n
+	help
+	  Tizen TV use the logging system using this android logger driver.
+	  The user level utility is dlog, but now this logger driver
+	  have only 256K buffer, so it have some issue to disappear log
+	  because of buffer full( 256K ).
+	  So it need to control logs by user level process.
+	  This driver will support this functionality. 
+
+config TIZEN_TV_DLOG_DEBUG
+    bool "Managing for TIZEN TV Logging System buffer(ANDROID_LOGGER)"
+    depends on ANDROID_LOGGER
+    default n
+    help
+      Tizen TV use the logging system using this android logger driver.
+      The user level utility is dlog, but now this logger driver
+      have only 256K buffer, so This config to change buffer size bigger for each device.
+
 config ANDROID_TIMED_OUTPUT
 	bool "Timed output class driver"
 	default y
@@ -62,6 +83,20 @@ config ANDROID_LOW_MEMORY_KILLER
 	default N
 	---help---
 	  Registers processes to be killed when memory is low
+
+config VD_LOW_MEMORY_KILLER
+	bool "VD Low Memory Killer core"
+	default N
+	help
+		Core infrastructure for VD Low Memory Killer module
+
+config LMK_PRELOAD_APP
+	bool "LMK policy to kill Preloaded Applications"
+	depends on VD_LOW_MEMORY_KILLER
+	default y
+	help
+	  With this option enabled, LMK first kills tasks with highest
+	  preload_prio value.
 
 config ANDROID_INTF_ALARM_DEV
 	bool "Android alarm driver"

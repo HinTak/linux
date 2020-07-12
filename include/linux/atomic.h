@@ -115,12 +115,12 @@ static inline int atomic_dec_if_positive(atomic_t *v)
 static inline void atomic_or(int i, atomic_t *v)
 {
 	int old;
-	int new;
+	int _new;
 
 	do {
 		old = atomic_read(v);
-		new = old | i;
-	} while (atomic_cmpxchg(v, old, new) != old);
+		_new = old | i;
+	} while (atomic_cmpxchg(v, old, _new) != old);
 }
 #endif /* #ifndef CONFIG_ARCH_HAS_ATOMIC_OR */
 

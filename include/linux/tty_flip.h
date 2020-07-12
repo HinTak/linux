@@ -12,6 +12,9 @@ extern int tty_prepare_flip_string_flags(struct tty_port *port,
 		unsigned char **chars, char **flags, size_t size);
 extern void tty_flip_buffer_push(struct tty_port *port);
 void tty_schedule_flip(struct tty_port *port);
+extern void broadcast_tty_flip_buffer_push(void);
+
+extern void push_char_delayed_tty(unsigned char ch);
 
 static inline int tty_insert_flip_char(struct tty_port *port,
 					unsigned char ch, char flag)

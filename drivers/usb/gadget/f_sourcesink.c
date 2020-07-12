@@ -54,6 +54,8 @@ struct f_sourcesink {
 	struct usb_ep		*out_ep;
 	struct usb_ep		*iso_in_ep;
 	struct usb_ep		*iso_out_ep;
+	struct usb_ep		*int_in_ep;
+	struct usb_ep		*int_out_ep;
 	int			cur_alt;
 };
 
@@ -341,10 +343,15 @@ static void disable_ep(struct usb_composite_dev *cdev, struct usb_ep *ep)
 
 void disable_endpoints(struct usb_composite_dev *cdev,
 		struct usb_ep *in, struct usb_ep *out,
-		struct usb_ep *iso_in, struct usb_ep *iso_out)
+		struct usb_ep *iso_in, struct usb_ep *iso_out,
+		struct usb_ep *int_in, struct usb_ep *int_out)
 {
 	disable_ep(cdev, in);
 	disable_ep(cdev, out);
+	if (int_in)
+		disable_ep(cdev, int_in);
+	if (int_out)
+		disable_ep(cdev, int_out);
 	if (iso_in)
 		disable_ep(cdev, iso_in);
 	if (iso_out)
@@ -478,7 +485,7 @@ no_iso:
 	if (ret)
 		return ret;
 
-	DBG(cdev, "%s speed %s: IN/%s, OUT/%s, ISO-IN/%s, ISO-OUT/%s\n",
+	INFO(cdev, "%s speed %s: IN/%s, OUT/%s, ISO-IN/%s, ISO-OUT/%s\n",
 	    (gadget_is_superspeed(c->cdev->gadget) ? "super" :
 	     (gadget_is_dualspeed(c->cdev->gadget) ? "dual" : "full")),
 			f->name, ss->in_ep->name, ss->out_ep->name,
@@ -667,7 +674,7 @@ static void disable_source_sink(struct f_sourcesink *ss)
 
 	cdev = ss->function.config->cdev;
 	disable_endpoints(cdev, ss->in_ep, ss->out_ep, ss->iso_in_ep,
-			ss->iso_out_ep);
+			ss->iso_out_ep, ss->int_in_ep, ss->int_out_ep);
 	VDBG(cdev, "%s disabled\n", ss->function.name);
 }
 

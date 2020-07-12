@@ -22,6 +22,14 @@
 #include <linux/spinlock.h>
 #include <linux/rcupdate.h>
 #include <linux/workqueue.h>
+#ifdef CONFIG_KDEBUGD
+#include <kdebugd.h>
+#endif
+#ifdef CONFIG_MINCORE_RLIMIT_NOFILE
+#include <linux/mincore.h>
+#include <linux/string.h>
+LIST_HEAD(file_rlimit_list);
+#endif
 
 int sysctl_nr_open __read_mostly = 1024*1024;
 int sysctl_nr_open_min = BITS_PER_LONG;
@@ -34,7 +42,7 @@ static void *alloc_fdmem(size_t size)
 	 * vmalloc() if the allocation size will be considered "large" by the VM.
 	 */
 	if (size <= (PAGE_SIZE << PAGE_ALLOC_COSTLY_ORDER)) {
-		void *data = kmalloc(size, GFP_KERNEL|__GFP_NOWARN);
+		void *data = kmalloc(size, GFP_KERNEL|__GFP_NOWARN|__GFP_NORETRY);
 		if (data != NULL)
 			return data;
 	}
@@ -512,6 +520,95 @@ repeat:
 #endif
 
 out:
+
+#ifdef CONFIG_OPEN_FILE_CHECKER
+	if (error == -EMFILE) {
+		unsigned int i;
+#ifdef CONFIG_MINCORE_RLIMIT_NOFILE
+		int filelist_skip = 0;
+		struct open_file_info *file_open;
+		mutex_lock(&file_rlimit_mutex);
+		list_for_each_entry(file_open, &file_rlimit_list, node) {
+			if (current->tgid == file_open->overflow_tsk->tgid) {
+				filelist_skip = 1;
+				break;
+			}
+		}
+
+#endif
+		pr_emerg("=== [System Arch] File open checker v1.0 ========\n");
+		pr_emerg(" There are Too many open files.\n");
+		pr_emerg(" -- FILE LIST\n");
+
+		for (i = 0; i < fdt->max_fds; i++) {
+			char buf[256];
+			struct file *file;
+			const char *name, *tsk_name;
+			struct task_struct *tsk;
+
+			file = fdt->fd[i];
+			if (!file)
+				continue;
+
+			name = d_path(&file->f_path, buf, sizeof(buf));
+			if (IS_ERR(name))
+				name = "(error)";
+
+#ifdef CONFIG_FD_PID
+			rcu_read_lock();
+			tsk = pid_task(file->f_pid, PIDTYPE_PID);
+			tsk_name = (tsk ? tsk->comm : "task exited");
+#ifdef CONFIG_MINCORE_RLIMIT_NOFILE
+			if (filelist_skip)
+				goto done_add;
+			/* CONFIG_MINCORE_RLIMIT_NOFILE will add the tasks
+			 * which have opened files in a process, when the
+			 * number of files opened by the process exceeds
+			 * RLIMIT_NOFILE
+			 */
+			if (tsk)
+				get_task_struct(tsk);
+			else
+				tsk = &init_task;
+
+			file_open = kmalloc(sizeof(struct open_file_info),
+							GFP_KERNEL);
+			if (NULL == file_open) {
+				pr_rlimit("can't allocate memory\n");
+				if (tsk != &init_task)
+					put_task_struct(tsk);
+			} else {
+				file_open->fd = (int)i;
+				file_open->overflow_tsk = current;
+				file_open->f_mode = file->f_mode;
+				file_open->f_pos = file->f_pos;
+				file_open->owner_pid = pid_nr(file->f_pid);
+				file_open->owner_name = kstrdup(tsk_name,
+								GFP_KERNEL);
+				file_open->name = kstrdup(name, GFP_KERNEL);
+				file_open->tsk = tsk;
+				list_add(&file_open->node,
+						&file_rlimit_list);
+			}
+done_add:
+#endif
+			pr_emerg("%5d : %s - %s(%d)\n",
+				 i, name, tsk_name, pid_nr(file->f_pid));
+			rcu_read_unlock();
+#else
+			(void)tsk;
+			(void)tsk_name;
+			pr_emerg("%5d : %s\n", i, name);
+#endif
+		}
+#ifdef CONFIG_MINCORE_RLIMIT_NOFILE
+		file_rlimit_dump();
+		mutex_unlock(&file_rlimit_mutex);
+#endif
+		pr_emerg("================================================\n");
+	}
+#endif /* CONFIG_OPEN_FILE_CHECKER */
+
 	spin_unlock(&files->file_lock);
 	return error;
 }
@@ -591,6 +688,11 @@ int __close_fd(struct files_struct *files, unsigned fd)
 	struct file *file;
 	struct fdtable *fdt;
 
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+	struct inode *inode;
+	struct task_struct *p;
+#endif
+
 	spin_lock(&files->file_lock);
 	fdt = files_fdtable(files);
 	if (fd >= fdt->max_fds)
@@ -598,6 +700,28 @@ int __close_fd(struct files_struct *files, unsigned fd)
 	file = fdt->fd[fd];
 	if (!file)
 		goto out_unlock;
+
+#ifdef CONFIG_KDEBUGD_FD_DEBUG
+	if (kdbg_fd_debug_status()) {
+		inode = file->f_path.dentry->d_inode;
+		/*
+		 * Check if child1 is going to close a regular file opened by child2
+		 * where child1 and child 2 belongs to same parent of tgid
+		 */
+		if (file->f_pid != task_pid(current) && S_ISREG(inode->i_mode)) {
+			rcu_read_lock();
+			p = pid_task(file->f_pid, PIDTYPE_PID);
+			if (p && (p->tgid == current->tgid)) {
+				PRINT_KD(KERN_ERR "****************************************\n");
+				PRINT_KD(KERN_ERR "file [%s] open_thread [%s] pid[%u] close_thread[%s] pid[%u]\n ",
+						file->f_dentry->d_name.name, p->comm, p->pid, current->comm, current->pid);
+				PRINT_KD(KERN_ERR "****************************************\n");
+			}
+			rcu_read_unlock();
+		}
+	}
+#endif
+
 	rcu_assign_pointer(fdt->fd[fd], NULL);
 	__clear_close_on_exec(fd, fdt);
 	__put_unused_fd(files, fd);

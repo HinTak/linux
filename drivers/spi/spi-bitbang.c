@@ -52,11 +52,13 @@
 struct spi_bitbang_cs {
 	unsigned	nsecs;	/* (clock cycle time)/2 */
 	u32		(*txrx_word)(struct spi_device *spi, unsigned nsecs,
-					u32 word, u8 bits);
+				     unsigned flags,
+				     u32 word, u8 bits);
 	unsigned	(*txrx_bufs)(struct spi_device *,
 					u32 (*txrx_word)(
 						struct spi_device *spi,
 						unsigned nsecs,
+						unsigned flags,
 						u32 word, u8 bits),
 					unsigned, struct spi_transfer *);
 };
@@ -64,8 +66,9 @@ struct spi_bitbang_cs {
 static unsigned bitbang_txrx_8(
 	struct spi_device	*spi,
 	u32			(*txrx_word)(struct spi_device *spi,
-					unsigned nsecs,
-					u32 word, u8 bits),
+					     unsigned nsecs,
+					     unsigned flags,
+					     u32 word, u8 bits),
 	unsigned		ns,
 	struct spi_transfer	*t
 ) {
@@ -73,13 +76,15 @@ static unsigned bitbang_txrx_8(
 	unsigned		count = t->len;
 	const u8		*tx = t->tx_buf;
 	u8			*rx = t->rx_buf;
+	unsigned		flags = (tx ? 0 : SPI_MASTER_NO_TX) |
+					(rx ? 0 : SPI_MASTER_NO_RX);
 
 	while (likely(count > 0)) {
 		u8		word = 0;
 
 		if (tx)
 			word = *tx++;
-		word = txrx_word(spi, ns, word, bits);
+		word = txrx_word(spi, ns, flags, word, bits);
 		if (rx)
 			*rx++ = word;
 		count -= 1;
@@ -90,8 +95,9 @@ static unsigned bitbang_txrx_8(
 static unsigned bitbang_txrx_16(
 	struct spi_device	*spi,
 	u32			(*txrx_word)(struct spi_device *spi,
-					unsigned nsecs,
-					u32 word, u8 bits),
+					     unsigned nsecs,
+					     unsigned flags,
+					     u32 word, u8 bits),
 	unsigned		ns,
 	struct spi_transfer	*t
 ) {
@@ -99,13 +105,15 @@ static unsigned bitbang_txrx_16(
 	unsigned		count = t->len;
 	const u16		*tx = t->tx_buf;
 	u16			*rx = t->rx_buf;
+	unsigned		flags = (tx ? 0 : SPI_MASTER_NO_TX) |
+					(rx ? 0 : SPI_MASTER_NO_RX);
 
 	while (likely(count > 1)) {
 		u16		word = 0;
 
 		if (tx)
 			word = *tx++;
-		word = txrx_word(spi, ns, word, bits);
+		word = txrx_word(spi, ns, flags, word, bits);
 		if (rx)
 			*rx++ = word;
 		count -= 2;
@@ -116,8 +124,9 @@ static unsigned bitbang_txrx_16(
 static unsigned bitbang_txrx_32(
 	struct spi_device	*spi,
 	u32			(*txrx_word)(struct spi_device *spi,
-					unsigned nsecs,
-					u32 word, u8 bits),
+					     unsigned nsecs,
+					     unsigned flags,
+					     u32 word, u8 bits),
 	unsigned		ns,
 	struct spi_transfer	*t
 ) {
@@ -125,13 +134,15 @@ static unsigned bitbang_txrx_32(
 	unsigned		count = t->len;
 	const u32		*tx = t->tx_buf;
 	u32			*rx = t->rx_buf;
+	unsigned		flags = (tx ? 0 : SPI_MASTER_NO_TX) |
+					(rx ? 0 : SPI_MASTER_NO_RX);
 
 	while (likely(count > 3)) {
 		u32		word = 0;
 
 		if (tx)
 			word = *tx++;
-		word = txrx_word(spi, ns, word, bits);
+		word = txrx_word(spi, ns, flags, word, bits);
 		if (rx)
 			*rx++ = word;
 		count -= 4;

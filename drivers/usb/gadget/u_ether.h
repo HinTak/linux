@@ -40,6 +40,14 @@ struct gether {
 	/* updated by gether_{connect,disconnect} */
 	struct eth_dev			*ioport;
 
+#ifdef CONFIG_SAMSUNG_DEVICE_USBNET_COMMON
+	u8				devnum;
+	void*				dev_info;
+#endif
+#ifdef CONFIG_SAMSUNG_DEVICE_USBNET_USB1_PING_FIX
+	bool				is_enable;
+#endif
+
 	/* endpoints handle full and/or high speeds */
 	struct usb_ep			*in_ep;
 	struct usb_ep			*out_ep;
@@ -64,6 +72,20 @@ struct gether {
 	void				(*open)(struct gether *);
 	void				(*close)(struct gether *);
 };
+
+#ifdef CONFIG_SAMSUNG_DEVICE_USBNET_COMMON
+struct multi_eem_gadget {
+	u8 hostaddr1[ETH_ALEN];
+	u8 hostaddr2[ETH_ALEN];
+
+	u8 devaddr1[ETH_ALEN];
+	u8 devaddr2[ETH_ALEN];
+
+	struct eth_dev			*dev[2];
+	u32				eem_num;
+	struct usb_composite_dev 	*cdev;
+};
+#endif
 
 #define	DEFAULT_FILTER	(USB_CDC_PACKET_TYPE_BROADCAST \
 			|USB_CDC_PACKET_TYPE_ALL_MULTICAST \

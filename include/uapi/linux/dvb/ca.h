@@ -78,6 +78,58 @@ typedef struct ca_pid {
 	int index;		/* -1 == disable*/
 } ca_pid_t;
 
+
+typedef struct ca_reset
+{
+	unsigned int  slot;
+} ca_reset_t;
+
+typedef struct ca_get_attr_data {
+    __u32  slot;
+	__u8   cmd_id;        /*input  CISTPL_ID*/
+	__u8   buf[257];	  /*output CISTPL data buffer*/
+	__u32  buf_len;		  /*output CISTPL data lenth*/
+}ca_get_attr_data_t;
+
+
+typedef enum ca_set_frontend
+{
+    CA_SOURCE_FRONTEND0,
+	CA_SOURCE_FRONTEND1,
+}ca_set_frontend_t;
+
+typedef struct ca_set_source {
+    __u32  slot;
+	ca_set_frontend_t source;
+}ca_set_source_t;
+
+
+typedef enum ca_set_route_mode{
+    CA_TS_ROUTE_MODE_DISCONNECT = 0,
+	CA_TS_ROUTE_MODE_BYPASS,
+	CA_TS_ROUTE_MODE_THROUGH,
+}ca_set_route_mode_t;
+
+typedef struct ca_set_ts_route_mode {
+    __u32  slot;
+	ca_set_route_mode_t mode;
+}ca_set_ts_route_mode_t;
+
+
+
+#define CISTPL_DEVICE			0x01
+#define CISTPL_DEVICE_A			0x17
+#define CISTPL_DEVICE_0A		0x1d
+#define CISTPL_DEVICE_0C		0x1c
+#define CISTPL_VERS_1			0x15
+#define CISTPL_MANFID			0x20
+#define CISTPL_CONFIG			0x1a
+#define CISTPL_CFTABLE_ENTRY	0x1b
+#define CISTPL_NOLINK			0x14
+#define CISTPL_END				0xff
+
+
+
 #define CA_RESET          _IO('o', 128)
 #define CA_GET_CAP        _IOR('o', 129, ca_caps_t)
 #define CA_GET_SLOT_INFO  _IOR('o', 130, ca_slot_info_t)
@@ -86,5 +138,14 @@ typedef struct ca_pid {
 #define CA_SEND_MSG       _IOW('o', 133, ca_msg_t)
 #define CA_SET_DESCR      _IOW('o', 134, ca_descr_t)
 #define CA_SET_PID        _IOW('o', 135, ca_pid_t)
+
+#define CA_RESET_V2         _IOW('o', 139, ca_reset_t)
+#define CA_GET_ATTR_DATA    _IOR('o', 140, ca_get_attr_data_t)
+#define CA_SET_SOURCE       _IOR('o', 141, ca_set_source_t)
+#define CA_SET_TS_ROUTE_MODE  _IOR('o', 142, ca_set_ts_route_mode_t)
+
+#define CA_RESET_SLOT         _IOW('o', 143, ca_reset_t)
+#define CA_GET_TS_ROUTE_MODE  _IOR('o', 144, ca_set_ts_route_mode_t)
+
 
 #endif

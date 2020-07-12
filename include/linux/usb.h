@@ -22,9 +22,21 @@
 #include <linux/mutex.h>	/* for struct mutex */
 #include <linux/pm_runtime.h>	/* for runtime PM */
 
+#if defined(CONFIG_USB_SERDES_LOCK) \
+	|| defined(SAMSUNG_USB_BTWIFI_RESET_WAIT) \
+	|| defined(SAMSUNG_PATCH_OHCI_HANG_RECOVERY_DURING_KILL_URB)
+#include <mach/soc.h>          /* for board type details */
+#endif
+
 struct usb_device;
 struct usb_driver;
 struct wusb_dev;
+
+#if defined(SAMSUNG_PATCH_OHCI_HANG_RECOVERY_DURING_KILL_URB)
+
+#define IS_HAWKM_FHD	soc_is_sdp1406fhd()
+
+#endif
 
 /*-------------------------------------------------------------------------*/
 
@@ -358,6 +370,9 @@ struct usb_bus {
 	int bandwidth_isoc_reqs;	/* number of Isoc. requests */
 
 	unsigned resuming_ports;	/* bit array: resuming root-hub ports */
+#ifdef CONFIG_USB_DEVICEFS
+        struct dentry *usbfs_dentry;    /* usbfs dentry entry for the bus */
+#endif
 
 #if defined(CONFIG_USB_MON) || defined(CONFIG_USB_MON_MODULE)
 	struct mon_bus *mon_bus;	/* non-null when associated */
@@ -501,6 +516,9 @@ struct usb3_lpm_parameters {
 struct usb_device {
 	int		devnum;
 	char		devpath[16];
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+        char  devbusportpath [16];      /* Use in messages: /bus/port/... */    // 080507
+#endif
 	u32		route;
 	enum usb_device_state	state;
 	enum usb_device_speed	speed;
@@ -548,6 +566,12 @@ struct usb_device {
 	char *serial;
 
 	struct list_head filelist;
+#ifdef CONFIG_USB_DEVICE_CLASS
+        struct device *usb_classdev;
+#endif
+#ifdef CONFIG_USB_DEVICEFS
+        struct dentry *usbfs_dentry;
+#endif
 
 	int maxchild;
 
@@ -569,7 +593,43 @@ struct usb_device {
 	struct usb3_lpm_parameters u1_params;
 	struct usb3_lpm_parameters u2_params;
 	unsigned lpm_disable_count;
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+	struct resume_devnode	*devnode;
+	struct usb_hub		*hub;
+	unsigned int 		priority;
+	unsigned int		is_scanned:1;
+	unsigned int		skip_resume:1;
+        unsigned 		is_hub:1;
+	struct usb_device	*child[16];
+	unsigned int		connected_ports;
+	unsigned int            usb_family;
+#ifdef PARALLEL_RESET_RESUME_USER_PORT_DEVICES
+	struct list_head	other_dev_list;
+#endif
+#endif
+#ifdef CONFIG_SAMSUNG_USB_SHORT_DEBOUNCE
+        bool short_debounce;
+#endif
 };
+/* Important definitions used by SERDES and hub 1-1 reset implementation */
+#if defined(CONFIG_USB_SERDES_LOCK) || defined(SAMSUNG_USB_BTWIFI_RESET_WAIT) 
+#define HUB11_VENDOR_ID		0x05e3
+#define HUB11_PRODUCT_ID	0x0608
+#define HUB11_BUSNO		1
+#define QCA_VENDOR_ID			0x0A5C /*QCA - WIFI*/
+#define BCM_VENDOR_ID           0x0CF3 /*BCM - BT, WIFI, WIFICOMBO*/
+#define BTHUB_PRODUCT_ID		0x4500 /*BTHUB*/
+#define BTCOMBO_PRODUCT_ID		0x2045 /*BTCOMBO*/
+#define WIFI_BCM_PRODUCT_ID     0x1022 /*WIFI-BCM*/
+#define WIFI_QCA_PRODUCT_ID		0xBD1D /*WIFI-QCA*/
+#define WIFICOMBO_PRODUCT_ID	0XBD27 /*WIFI-COMBO*/
+
+#define PORT_RESET_WAIT_SLEEP		20
+#define PORT_RESET_WAIT_TIMEOUT		1000
+#define IS_HAWKP		soc_is_sdp1404()
+#define IS_HAWKM		soc_is_sdp1406()
+#endif
+
 #define	to_usb_device(d) container_of(d, struct usb_device, dev)
 
 static inline struct usb_device *interface_to_usbdev(struct usb_interface *intf)
@@ -1105,6 +1165,9 @@ struct usb_class_driver {
 	int minor_base;
 };
 
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)
+#include "priority_devconfig.h"
+#endif
 /*
  * use these in module_init()/module_exit()
  * and don't forget MODULE_DEVICE_TABLE(usb, ...)

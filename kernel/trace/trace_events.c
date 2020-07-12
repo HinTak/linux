@@ -27,12 +27,6 @@
 
 DEFINE_MUTEX(event_mutex);
 
-DEFINE_MUTEX(event_storage_mutex);
-EXPORT_SYMBOL_GPL(event_storage_mutex);
-
-char event_storage[EVENT_STORAGE_SIZE];
-EXPORT_SYMBOL_GPL(event_storage);
-
 LIST_HEAD(ftrace_events);
 static LIST_HEAD(ftrace_common_fields);
 
@@ -1860,6 +1854,16 @@ static void trace_module_add_events(struct module *mod)
 	struct ftrace_module_file_ops *file_ops = NULL;
 	struct ftrace_event_call **call, **start, **end;
 
+	if (!mod->num_trace_events)
+		return;
+
+	/* Don't add infrastructure for mods without tracepoints */
+	if (trace_module_has_bad_taint(mod)) {
+		pr_err("%s: module has bad taint, not creating trace events\n",
+		       mod->name);
+		return;
+	}
+
 	start = mod->trace_events;
 	end = mod->trace_events + mod->num_trace_events;
 
@@ -2508,6 +2512,14 @@ static __init int event_trace_memsetup(void)
 	return 0;
 }
 
+#ifdef CONFIG_EARLY_TRACING
+/*
+ * This is a hacky attempt to collect some early tracing messages
+ * and when ftrace is available - dump everything to it.
+ */
+extern void dump_early_events(void);
+#endif
+
 static __init int event_trace_enable(void)
 {
 	struct trace_array *tr = top_trace_array();
@@ -2548,6 +2560,11 @@ static __init int event_trace_enable(void)
 	trace_printk_start_comm();
 
 	register_event_cmds();
+
+#ifdef CONFIG_EARLY_TRACING
+	/* Dump all early events to ring buffer and switch to ftrace */
+	dump_early_events();
+#endif
 
 	return 0;
 }
@@ -2829,3 +2846,8 @@ static __init int event_trace_self_tests_init(void)
 late_initcall(event_trace_self_tests_init);
 
 #endif
+
+#ifdef CONFIG_KDEBUGD_FTRACE
+/* Let kdebugd have access to static functions in this file */
+#include "../kdebugd/trace/kdbg_ftrace_events_helper.c"
+#endif /* CONFIG_KDEBUGD_FTRACE */

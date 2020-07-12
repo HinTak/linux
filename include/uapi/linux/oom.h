@@ -7,7 +7,15 @@
  */
 #define OOM_SCORE_ADJ_MIN	(-1000)
 #define OOM_SCORE_ADJ_MAX	1000
-
+#ifdef CONFIG_SLP_LOWMEM_NOTIFY_VIPAPP
+#define IS_NOT_VIP 0
+#define IS_VIP 1
+#define LENGTH_OF_VIP 2
+#endif
+#ifdef CONFIG_SLP_LOWMEM_NOTIFY_PRELOAD
+/* writing -18 sets oom_adj to -17 and prevents changing it afterwards */
+#define OOM_DISABLE_FOREVER (-18)
+#endif
 /*
  * /proc/<pid>/oom_adj set to -17 protects from the oom killer for legacy
  * purposes.

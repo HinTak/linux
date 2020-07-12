@@ -662,6 +662,7 @@ static int __init bt_init(void)
 {
 	int err;
 
+	BT_INFO("[Subsystem]: Start HCI Bluetooth initialization");
 	BT_INFO("Core ver %s", VERSION);
 
 	err = bt_sysfs_init();
@@ -690,6 +691,7 @@ static int __init bt_init(void)
 		goto sock_err;
 	}
 
+	BT_INFO("[Subsystem]: Finished HCI Bluetooth initialization");
 	return 0;
 
 sock_err:
@@ -714,6 +716,8 @@ static void __exit bt_exit(void)
 	sock_unregister(PF_BLUETOOTH);
 
 	bt_sysfs_cleanup();
+
+	BT_INFO("[Subsystem]: Exited HCI Bluetooth");
 }
 
 subsys_initcall(bt_init);

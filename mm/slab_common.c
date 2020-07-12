@@ -21,6 +21,10 @@
 #include <linux/memcontrol.h>
 
 #include "slab.h"
+#ifdef CONFIG_KDML
+#include "kdml/kdml_packet.h"
+#include "kdml/kdml.h"
+#endif
 
 enum slab_state slab_state;
 LIST_HEAD(slab_caches);
@@ -55,6 +59,7 @@ static int kmem_cache_sanity_check(struct mem_cgroup *memcg, const char *name,
 			continue;
 		}
 
+#if !defined(CONFIG_SLUB)
 		/*
 		 * For simplicity, we won't check this in the list of memcg
 		 * caches. We have control over memcg naming, and if there
@@ -68,6 +73,7 @@ static int kmem_cache_sanity_check(struct mem_cgroup *memcg, const char *name,
 			s = NULL;
 			return -EINVAL;
 		}
+#endif
 	}
 
 	WARN_ON(strchr(name, ' '));	/* It confuses parsers */
@@ -497,6 +503,8 @@ void __init create_kmalloc_caches(unsigned long flags)
 
 
 #ifdef CONFIG_SLABINFO
+extern int seq_printk(struct seq_file *m, const char *f, ...);
+
 void print_slabinfo_header(struct seq_file *m)
 {
 	/*
@@ -504,20 +512,20 @@ void print_slabinfo_header(struct seq_file *m)
 	 * without _too_ many complaints.
 	 */
 #ifdef CONFIG_DEBUG_SLAB
-	seq_puts(m, "slabinfo - version: 2.1 (statistics)\n");
+	seq_printk(m, "slabinfo - version: 2.1 (statistics)\n");
 #else
-	seq_puts(m, "slabinfo - version: 2.1\n");
+	seq_printk(m, "slabinfo - version: 2.1\n");
 #endif
-	seq_puts(m, "# name            <active_objs> <num_objs> <objsize> "
-		 "<objperslab> <pagesperslab>");
-	seq_puts(m, " : tunables <limit> <batchcount> <sharedfactor>");
-	seq_puts(m, " : slabdata <active_slabs> <num_slabs> <sharedavail>");
-#ifdef CONFIG_DEBUG_SLAB
-	seq_puts(m, " : globalstat <listallocs> <maxobjs> <grown> <reaped> "
-		 "<error> <maxfreeable> <nodeallocs> <remotefrees> <alienoverflow>");
-	seq_puts(m, " : cpustat <allochit> <allocmiss> <freehit> <freemiss>");
+	seq_printk(m, "# name            <active_objs> <num_objs> <objsize> "
+		"<objperslab> <pagesperslab>");
+	seq_printk(m, " : tunables <limit> <batchcount> <sharedfactor>");
+	seq_printk(m, " : slabdata <active_slabs> <num_slabs> <sharedavail>");
+#ifdef CONFIprintkBUG_SLAB
+	seq_printk(m, " : globalstat <listallocs> <maxobjs> <grown> <reaped> "
+		"<error> <maxfreeable> <nodeallocs> <remotefrees> <alienoverflow>");
+	seq_printk(m, " : cpustat <allochit> <allocmiss> <freehit> <freemiss>");
 #endif
-	seq_putc(m, '\n');
+	seq_printk(m, "\n");
 }
 
 static void *s_start(struct seq_file *m, loff_t *pos)
@@ -576,16 +584,16 @@ int cache_show(struct kmem_cache *s, struct seq_file *m)
 
 	memcg_accumulate_slabinfo(s, &sinfo);
 
-	seq_printf(m, "%-17s %6lu %6lu %6u %4u %4d",
+	seq_printk(m, "%-17s %6lu %6lu %6u %4u %4d",
 		   cache_name(s), sinfo.active_objs, sinfo.num_objs, s->size,
 		   sinfo.objects_per_slab, (1 << sinfo.cache_order));
 
-	seq_printf(m, " : tunables %4u %4u %4u",
+	seq_printk(m, " : tunables %4u %4u %4u",
 		   sinfo.limit, sinfo.batchcount, sinfo.shared);
-	seq_printf(m, " : slabdata %6lu %6lu %6lu",
+	seq_printk(m, " : slabdata %6lu %6lu %6lu",
 		   sinfo.active_slabs, sinfo.num_slabs, sinfo.shared_avail);
 	slabinfo_show_stats(m, s);
-	seq_putc(m, '\n');
+	seq_printk(m, "\n");
 	return 0;
 }
 
@@ -596,6 +604,23 @@ static int s_show(struct seq_file *m, void *p)
 	if (!is_root_cache(s))
 		return 0;
 	return cache_show(s, m);
+}
+
+void print_slabinfo_oom(void)
+{
+	struct kmem_cache *s;
+
+	print_slabinfo_header(NULL);
+
+	if (mutex_trylock(&slab_mutex)) {
+		list_for_each_entry(s, &slab_caches, list) {
+			cache_show(s, NULL);
+		}
+		mutex_unlock(&slab_mutex);
+	} else {
+		pr_info("Unable to print slabinfo report because of "
+			"slab_mutex contention\n");
+	}
 }
 
 /*
@@ -637,4 +662,138 @@ static int __init slab_proc_init(void)
 	return 0;
 }
 module_init(slab_proc_init);
+
+#ifdef CONFIG_KDML
+int kdml_get_cache_list(struct kdml_slab_info_line *slabinfo_arr,
+		const int count, int *result)
+{
+	struct kmem_cache *s = NULL;
+	int i = 0;
+
+	mutex_lock(&slab_mutex);
+
+	list_for_each_entry(s, &slab_caches, list) {
+		struct slabinfo sinfo;
+
+		if (i == count)
+			break;
+
+		/* parse the list and print */
+		if (!is_root_cache(s))
+			continue;
+
+		memset(&sinfo, 0, sizeof(sinfo));
+		get_slabinfo(s, &sinfo);
+
+		memcg_accumulate_slabinfo(s, &sinfo);
+		/* fill the kdml_slab_info_line struct */
+		slabinfo_arr[i].active_objs = sinfo.active_objs;
+		slabinfo_arr[i].num_objs = sinfo.num_objs;
+		slabinfo_arr[i].obj_size = (uint32_t)s->size;
+		slabinfo_arr[i].objs_per_slab = sinfo.objects_per_slab;
+		slabinfo_arr[i].cache_order = sinfo.cache_order;
+		slabinfo_arr[i].num_slabs = sinfo.num_slabs;
+		strncpy(slabinfo_arr[i].name, cache_name(s), MAX_CACHE_NAME_LEN - 1);
+		slabinfo_arr[i].name[MAX_CACHE_NAME_LEN - 1] = '\0';
+		i++;
+	}
+	mutex_unlock(&slab_mutex);
+	*result = i;
+	return 0;
+}
+#endif
+
 #endif /* CONFIG_SLABINFO */
+
+static __always_inline void *__do_krealloc(const void *p, size_t new_size,
+					   gfp_t flags)
+{
+	void *ret;
+	size_t ks = 0;
+
+	if (p)
+		ks = __ksize(p);
+
+	if (ks >= new_size) {
+		kasan_krealloc((void *)p, new_size);
+		return (void *)p;
+	}
+
+	ret = kmalloc_track_caller(new_size, flags);
+	if (ret && p)
+		memcpy(ret, p, ks);
+
+	return ret;
+}
+
+/**
+ * __krealloc - like krealloc() but don't free @p.
+ * @p: object to reallocate memory for.
+ * @new_size: how many bytes of memory are required.
+ * @flags: the type of memory to allocate.
+ *
+ * This function is like krealloc() except it never frees the originally
+ * allocated buffer. Use this if you don't want to free the buffer immediately
+ * like, for example, with RCU.
+ */
+void *__krealloc(const void *p, size_t new_size, gfp_t flags)
+{
+	if (unlikely(!new_size))
+		return ZERO_SIZE_PTR;
+
+	return __do_krealloc(p, new_size, flags);
+
+}
+EXPORT_SYMBOL(__krealloc);
+
+/**
+ * krealloc - reallocate memory. The contents will remain unchanged.
+ * @p: object to reallocate memory for.
+ * @new_size: how many bytes of memory are required.
+ * @flags: the type of memory to allocate.
+ *
+ * The contents of the object pointed to are preserved up to the
+ * lesser of the new and old sizes.  If @p is %NULL, krealloc()
+ * behaves exactly like kmalloc().  If @new_size is 0 and @p is not a
+ * %NULL pointer, the object pointed to is freed.
+ */
+void *krealloc(const void *p, size_t new_size, gfp_t flags)
+{
+	void *ret;
+
+	if (unlikely(!new_size)) {
+		kfree(p);
+		return ZERO_SIZE_PTR;
+	}
+
+	ret = __do_krealloc(p, new_size, flags);
+	if (ret && p != ret)
+		kfree(p);
+
+	return ret;
+}
+EXPORT_SYMBOL(krealloc);
+
+/**
+ * kzfree - like kfree but zero memory
+ * @p: object to free memory of
+ *
+ * The memory of the object @p points to is zeroed before freed.
+ * If @p is %NULL, kzfree() does nothing.
+ *
+ * Note: this function zeroes the whole allocated buffer which can be a good
+ * deal bigger than the requested buffer size passed to kmalloc(). So be
+ * careful when using this function in performance sensitive code.
+ */
+void kzfree(const void *p)
+{
+	size_t ks;
+	void *mem = (void *)p;
+
+	if (unlikely(ZERO_OR_NULL_PTR(mem)))
+		return;
+	ks = __ksize(mem);
+	memset(mem, 0, ks);
+	kfree(mem);
+}
+EXPORT_SYMBOL(kzfree);

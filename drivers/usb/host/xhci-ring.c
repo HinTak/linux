@@ -426,6 +426,8 @@ void xhci_ring_ep_doorbell(struct xhci_hcd *xhci,
 	if ((ep_state & EP_HALT_PENDING) || (ep_state & SET_DEQ_PENDING) ||
 	    (ep_state & EP_HALTED))
 		return;
+
+        dsb();
 	xhci_writel(xhci, DB_VALUE(ep_index, stream_id), db_addr);
 	/* The CPU has better things to do at this point than wait for a
 	 * write-posting flush.  It'll get there soon enough.
@@ -2532,7 +2534,8 @@ static int handle_tx_event(struct xhci_hcd *xhci,
 		 * last TRB of the previous TD. The command completion handle
 		 * will take care the rest.
 		 */
-		if (!event_seg && trb_comp_code == COMP_STOP_INVAL) {
+		if (!event_seg && (trb_comp_code == COMP_STOP ||
+				   trb_comp_code == COMP_STOP_INVAL)) {
 			ret = 0;
 			goto cleanup;
 		}
@@ -2841,9 +2844,13 @@ static void queue_trb(struct xhci_hcd *xhci, struct xhci_ring *ring,
 
 	trb = &ring->enqueue->generic;
 	trb->field[0] = cpu_to_le32(field1);
+	wmb();
 	trb->field[1] = cpu_to_le32(field2);
+	wmb();
 	trb->field[2] = cpu_to_le32(field3);
+	wmb();
 	trb->field[3] = cpu_to_le32(field4);
+	wmb();
 	inc_enq(xhci, ring, more_trbs_coming);
 }
 
@@ -3049,6 +3056,8 @@ static void giveback_first_trb(struct xhci_hcd *xhci, int slot_id,
 		start_trb->field[3] |= cpu_to_le32(start_cycle);
 	else
 		start_trb->field[3] &= cpu_to_le32(~TRB_CYCLE);
+
+	xhci_readl(xhci, &start_trb->field[3]);
 	xhci_ring_ep_doorbell(xhci, slot_id, ep_index, stream_id);
 }
 
@@ -3590,7 +3599,7 @@ static unsigned int xhci_get_burst_count(struct xhci_hcd *xhci,
 		return 0;
 
 	max_burst = urb->ep->ss_ep_comp.bMaxBurst;
-	return roundup(total_packet_count, max_burst + 1) - 1;
+	return DIV_ROUND_UP(total_packet_count, max_burst + 1) - 1;
 }
 
 /*

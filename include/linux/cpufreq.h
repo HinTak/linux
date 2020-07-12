@@ -107,6 +107,7 @@ struct cpufreq_policy {
 	unsigned int		policy; /* see above */
 	struct cpufreq_governor	*governor; /* see below */
 	void			*governor_data;
+	bool			governor_enabled; /* governor start/stop flag */
 
 	struct work_struct	update; /* if update_policy() needs to be
 					 * called, but you're in IRQ context */
@@ -115,6 +116,10 @@ struct cpufreq_policy {
 
 	struct kobject		kobj;
 	struct completion	kobj_unregister;
+
+#if defined(CONFIG_ARCH_SDP)
+	unsigned int		load;   /* current cpu load */
+#endif
 };
 
 #define CPUFREQ_ADJUST			(0)
@@ -333,6 +338,7 @@ __ATTR(_name, 0644, show_##_name, store_##_name)
 struct cpufreq_policy *cpufreq_cpu_get(unsigned int cpu);
 void cpufreq_cpu_put(struct cpufreq_policy *data);
 const char *cpufreq_get_current_driver(void);
+struct kobject *get_governor_parent_kobj(struct cpufreq_policy *policy);
 
 /*********************************************************************
  *                        CPUFREQ 2.6. INTERFACE                     *
@@ -393,6 +399,24 @@ extern struct cpufreq_governor cpufreq_gov_ondemand;
 #elif defined(CONFIG_CPU_FREQ_DEFAULT_GOV_CONSERVATIVE)
 extern struct cpufreq_governor cpufreq_gov_conservative;
 #define CPUFREQ_DEFAULT_GOVERNOR	(&cpufreq_gov_conservative)
+#elif defined(CONFIG_CPU_FREQ_DEFAULT_GOV_FOXP)
+extern struct cpufreq_governor cpufreq_gov_foxp;
+#define CPUFREQ_DEFAULT_GOVERNOR	(&cpufreq_gov_foxp)
+#elif defined(CONFIG_CPU_FREQ_DEFAULT_GOV_GOLF)
+extern struct cpufreq_governor cpufreq_gov_golf;
+#define CPUFREQ_DEFAULT_GOVERNOR	(&cpufreq_gov_golf)
+#elif defined(CONFIG_CPU_FREQ_DEFAULT_GOV_GOLFP)
+extern struct cpufreq_governor cpufreq_gov_golfp;
+#define CPUFREQ_DEFAULT_GOVERNOR	(&cpufreq_gov_golfp)
+#elif defined(CONFIG_CPU_FREQ_DEFAULT_GOV_HAWKP)
+extern struct cpufreq_governor cpufreq_gov_hawkp;
+#define CPUFREQ_DEFAULT_GOVERNOR	(&cpufreq_gov_hawkp)
+#elif defined(CONFIG_CPU_FREQ_DEFAULT_GOV_HAWKM)
+extern struct cpufreq_governor cpufreq_gov_hawkm;
+#define CPUFREQ_DEFAULT_GOVERNOR	(&cpufreq_gov_hawkm)
+#elif defined(CONFIG_CPU_FREQ_DEFAULT_GOV_INTERACTIVE)
+extern struct cpufreq_governor cpufreq_gov_interactive;
+#define CPUFREQ_DEFAULT_GOVERNOR	(&cpufreq_gov_interactive)
 #endif
 
 
@@ -414,6 +438,7 @@ int cpufreq_frequency_table_cpuinfo(struct cpufreq_policy *policy,
 
 int cpufreq_frequency_table_verify(struct cpufreq_policy *policy,
 				   struct cpufreq_frequency_table *table);
+int cpufreq_generic_frequency_table_verify(struct cpufreq_policy *policy);
 
 int cpufreq_frequency_table_target(struct cpufreq_policy *policy,
 				   struct cpufreq_frequency_table *table,
@@ -425,6 +450,7 @@ int cpufreq_frequency_table_target(struct cpufreq_policy *policy,
 struct cpufreq_frequency_table *cpufreq_frequency_get_table(unsigned int cpu);
 
 /* the following are really really optional */
+extern struct freq_attr *cpufreq_generic_attr[];
 extern struct freq_attr cpufreq_freq_attr_scaling_available_freqs;
 
 void cpufreq_frequency_table_get_attr(struct cpufreq_frequency_table *table,
@@ -432,4 +458,13 @@ void cpufreq_frequency_table_get_attr(struct cpufreq_frequency_table *table,
 void cpufreq_frequency_table_update_policy_cpu(struct cpufreq_policy *policy);
 
 void cpufreq_frequency_table_put_attr(unsigned int cpu);
+int cpufreq_table_validate_and_show(struct cpufreq_policy *policy,
+				      struct cpufreq_frequency_table *table);
+
+static inline int cpufreq_generic_exit(struct cpufreq_policy *policy)
+{
+	cpufreq_frequency_table_put_attr(policy->cpu);
+	return 0;
+}
+
 #endif /* _LINUX_CPUFREQ_H */

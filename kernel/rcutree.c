@@ -841,6 +841,9 @@ static void rcu_dump_cpu_stacks(struct rcu_state *rsp)
 	}
 }
 
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+        extern void show_irq(void);
+#endif
 static void print_other_cpu_stall(struct rcu_state *rsp)
 {
 	int cpu;
@@ -860,6 +863,10 @@ static void print_other_cpu_stall(struct rcu_state *rsp)
 	}
 	rsp->jiffies_stall = jiffies + 3 * rcu_jiffies_till_stall_check() + 3;
 	raw_spin_unlock_irqrestore(&rnp->lock, flags);
+
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+        show_irq();
+#endif
 
 	/*
 	 * OK, time to rat on our buddy...

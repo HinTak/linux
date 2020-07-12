@@ -1025,7 +1025,7 @@ static u8 create_ad(struct hci_dev *hdev, u8 *ptr)
 	u8 ad_len = 0, flags = 0;
 	size_t name_len;
 
-	if (test_bit(HCI_LE_PERIPHERAL, &hdev->dev_flags))
+	if (test_bit(HCI_ADVERTISING, &hdev->dev_flags))
 		flags |= LE_AD_GENERAL;
 
 	if (!lmp_bredr_capable(hdev))
@@ -2108,10 +2108,12 @@ int hci_le_scan(struct hci_dev *hdev, u8 type, u16 interval, u16 window,
 	struct le_scan_params *param = &hdev->le_scan_params;
 
 	BT_DBG("%s", hdev->name);
-
-	if (test_bit(HCI_LE_PERIPHERAL, &hdev->dev_flags))
+/* BEGIN Tizen TV patch :: Support BLE advertising with BLE scanning */
+#if 0
+	if (test_bit(HCI_ADVERTISING, &hdev->dev_flags))
 		return -ENOTSUPP;
-
+#endif
+/* END Tizen TV patch */
 	if (work_busy(&hdev->le_scan))
 		return -EINPROGRESS;
 
@@ -2143,6 +2145,11 @@ struct hci_dev *hci_alloc_dev(void)
 
 	hdev->sniff_max_interval = 800;
 	hdev->sniff_min_interval = 80;
+
+        hdev->adv_min_interval = 0x0800;
+        hdev->adv_max_interval = 0x0800;
+        hdev->adv_filter_policy = 0x00;
+        hdev->adv_type = 0x00;
 
 	mutex_init(&hdev->lock);
 	mutex_init(&hdev->req_lock);

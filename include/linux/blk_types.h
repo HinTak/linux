@@ -121,6 +121,9 @@ struct bio {
 #define BIO_OWNS_VEC	13	/* bio_free() should free bvec */
 
 #define bio_flagged(bio, flag)	((bio)->bi_flags & (1 << (flag)))
+#if defined (CONFIG_BD_CACHE_ENABLED)
+#define BIO_DIRECT      14       /* direct IO from originating file request */
+#endif
 
 /*
  * top 4 bits of bio flags indicate the pool this bio came from
@@ -176,21 +179,26 @@ enum rq_flag_bits {
 	__REQ_FLUSH_SEQ,	/* request for flush sequence */
 	__REQ_IO_STAT,		/* account I/O stat */
 	__REQ_MIXED_MERGE,	/* merge of different types, fail separately */
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	__REQ_DIRECTIO,         /* original file-based request was O_DIRECT */
+//	__REQ_ISSUED,           /* request was issued by lower driver layers */
+#endif
 	__REQ_KERNEL, 		/* direct IO to kernel pages */
 	__REQ_PM,		/* runtime pm request */
 	__REQ_NR_BITS,		/* stops here */
 };
 
-#define REQ_WRITE		(1 << __REQ_WRITE)
-#define REQ_FAILFAST_DEV	(1 << __REQ_FAILFAST_DEV)
-#define REQ_FAILFAST_TRANSPORT	(1 << __REQ_FAILFAST_TRANSPORT)
-#define REQ_FAILFAST_DRIVER	(1 << __REQ_FAILFAST_DRIVER)
-#define REQ_SYNC		(1 << __REQ_SYNC)
-#define REQ_META		(1 << __REQ_META)
-#define REQ_PRIO		(1 << __REQ_PRIO)
-#define REQ_DISCARD		(1 << __REQ_DISCARD)
-#define REQ_WRITE_SAME		(1 << __REQ_WRITE_SAME)
-#define REQ_NOIDLE		(1 << __REQ_NOIDLE)
+#define REQ_WRITE		(1ULL << __REQ_WRITE)
+#define REQ_FAILFAST_DEV	(1ULL << __REQ_FAILFAST_DEV)
+#define REQ_FAILFAST_TRANSPORT	(1ULL << __REQ_FAILFAST_TRANSPORT)
+#define REQ_FAILFAST_DRIVER	(1ULL << __REQ_FAILFAST_DRIVER)
+#define REQ_SYNC		(1ULL << __REQ_SYNC)
+#define REQ_META		(1ULL << __REQ_META)
+#define REQ_PRIO		(1ULL << __REQ_PRIO)
+#define REQ_DISCARD		(1ULL << __REQ_DISCARD)
+#define REQ_WRITE_SAME		(1ULL << __REQ_WRITE_SAME)
+#define REQ_NOIDLE		(1ULL << __REQ_NOIDLE)
+#define REQ_DIRECTIO		(1ULL << __REQ_DIRECTIO)
 
 #define REQ_FAILFAST_MASK \
 	(REQ_FAILFAST_DEV | REQ_FAILFAST_TRANSPORT | REQ_FAILFAST_DRIVER)
@@ -206,28 +214,28 @@ enum rq_flag_bits {
 #define REQ_NOMERGE_FLAGS \
 	(REQ_NOMERGE | REQ_STARTED | REQ_SOFTBARRIER | REQ_FLUSH | REQ_FUA)
 
-#define REQ_RAHEAD		(1 << __REQ_RAHEAD)
-#define REQ_THROTTLED		(1 << __REQ_THROTTLED)
+#define REQ_RAHEAD		(1ULL << __REQ_RAHEAD)
+#define REQ_THROTTLED		(1ULL << __REQ_THROTTLED)
 
-#define REQ_SORTED		(1 << __REQ_SORTED)
-#define REQ_SOFTBARRIER		(1 << __REQ_SOFTBARRIER)
-#define REQ_FUA			(1 << __REQ_FUA)
-#define REQ_NOMERGE		(1 << __REQ_NOMERGE)
-#define REQ_STARTED		(1 << __REQ_STARTED)
-#define REQ_DONTPREP		(1 << __REQ_DONTPREP)
-#define REQ_QUEUED		(1 << __REQ_QUEUED)
-#define REQ_ELVPRIV		(1 << __REQ_ELVPRIV)
-#define REQ_FAILED		(1 << __REQ_FAILED)
-#define REQ_QUIET		(1 << __REQ_QUIET)
-#define REQ_PREEMPT		(1 << __REQ_PREEMPT)
-#define REQ_ALLOCED		(1 << __REQ_ALLOCED)
-#define REQ_COPY_USER		(1 << __REQ_COPY_USER)
-#define REQ_FLUSH		(1 << __REQ_FLUSH)
-#define REQ_FLUSH_SEQ		(1 << __REQ_FLUSH_SEQ)
-#define REQ_IO_STAT		(1 << __REQ_IO_STAT)
-#define REQ_MIXED_MERGE		(1 << __REQ_MIXED_MERGE)
-#define REQ_SECURE		(1 << __REQ_SECURE)
-#define REQ_KERNEL		(1 << __REQ_KERNEL)
-#define REQ_PM			(1 << __REQ_PM)
+#define REQ_SORTED		(1ULL << __REQ_SORTED)
+#define REQ_SOFTBARRIER		(1ULL << __REQ_SOFTBARRIER)
+#define REQ_FUA			(1ULL << __REQ_FUA)
+#define REQ_NOMERGE		(1ULL << __REQ_NOMERGE)
+#define REQ_STARTED		(1ULL << __REQ_STARTED)
+#define REQ_DONTPREP		(1ULL << __REQ_DONTPREP)
+#define REQ_QUEUED		(1ULL << __REQ_QUEUED)
+#define REQ_ELVPRIV		(1ULL << __REQ_ELVPRIV)
+#define REQ_FAILED		(1ULL << __REQ_FAILED)
+#define REQ_QUIET		(1ULL << __REQ_QUIET)
+#define REQ_PREEMPT		(1ULL << __REQ_PREEMPT)
+#define REQ_ALLOCED		(1ULL << __REQ_ALLOCED)
+#define REQ_COPY_USER		(1ULL << __REQ_COPY_USER)
+#define REQ_FLUSH		(1ULL << __REQ_FLUSH)
+#define REQ_FLUSH_SEQ		(1ULL << __REQ_FLUSH_SEQ)
+#define REQ_IO_STAT		(1ULL << __REQ_IO_STAT)
+#define REQ_MIXED_MERGE		(1ULL << __REQ_MIXED_MERGE)
+#define REQ_SECURE		(1ULL << __REQ_SECURE)
+#define REQ_KERNEL		(1ULL << __REQ_KERNEL)
+#define REQ_PM			(1ULL << __REQ_PM)
 
 #endif /* __LINUX_BLK_TYPES_H */

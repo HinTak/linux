@@ -8,6 +8,11 @@
 extern spinlock_t swap_lock;
 extern struct swap_list_t swap_list;
 extern struct swap_info_struct *swap_info[];
+
+#ifdef CONFIG_KNBD_SWAP_EXTENSION
+extern int try_to_unuse(unsigned int, bool, bool, unsigned long);
+#else
 extern int try_to_unuse(unsigned int, bool, unsigned long);
+#endif
 
 #endif /* _LINUX_SWAPFILE_H */

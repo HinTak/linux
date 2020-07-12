@@ -1,0 +1,8 @@
+config BT_HCIPCM
+	tristate "HCI PCM Driver"
+	help
+		Bluetooth HCI PCM driver.
+
+		Say Y here to compile support for Bluetooth PCM into the
+		kernel or say M to compile it as module (btpcm).
+

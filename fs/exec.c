@@ -66,6 +66,13 @@
 
 #include <trace/events/sched.h>
 
+/**
+* @brief Include Security Framework security operations
+* @author Maksym Koshel (m.koshel@samsung.com)
+* @date Sep 20, 2014
+*/
+#include <linux/sf_security.h>
+
 int suid_dumpable = 0;
 
 static LIST_HEAD(formats);
@@ -654,10 +661,10 @@ int setup_arg_pages(struct linux_binprm *bprm,
 	unsigned long rlim_stack;
 
 #ifdef CONFIG_STACK_GROWSUP
-	/* Limit stack size to 1GB */
+	/* Limit stack size */
 	stack_base = rlimit_max(RLIMIT_STACK);
-	if (stack_base > (1 << 30))
-		stack_base = 1 << 30;
+	if (stack_base > STACK_SIZE_MAX)
+		stack_base = STACK_SIZE_MAX;
 
 	/* Make sure we didn't let the argument array grow too large. */
 	if (vma->vm_end - vma->vm_start > stack_base)
@@ -1381,6 +1388,15 @@ int search_binary_handler(struct linux_binprm *bprm)
 	if (retval)
 		return retval;
 
+	/**
+	* @brief Call of the Security Framework routine for process start
+	* @author Maksym Koshel (m.koshel@samsung.com)
+	* @date Sep 20, 2014
+	*/
+	retval = sf_security_bprm_check(bprm);
+	if (retval)
+		return retval;
+
 	retval = audit_bprm(bprm);
 	if (retval)
 		return retval;
@@ -1451,6 +1467,17 @@ int search_binary_handler(struct linux_binprm *bprm)
 
 EXPORT_SYMBOL(search_binary_handler);
 
+
+#ifdef CONFIG_USE_ARS
+///////////////////////////////// MODIFY BY LKH (From here)  ////////////////////////////////////////
+bool exist_exec_verify_module = false;
+int (*verify_exec)(const char*, struct user_arg_ptr , struct user_arg_ptr, rwlock_t * const tasklist_lock) = NULL;
+
+EXPORT_SYMBOL(exist_exec_verify_module);
+EXPORT_SYMBOL(verify_exec);
+//////////////////////////////////// (End) ///////////////////////////////////////////////////////
+#endif // CONFIG_USE_ARS
+
 /*
  * sys_execve() executes a new program.
  */
@@ -1464,6 +1491,23 @@ static int do_execve_common(const char *filename,
 	bool clear_in_exec;
 	int retval;
 	const struct cred *cred = current_cred();
+
+#ifdef CONFIG_USE_ARS
+	if(__builtin_expect(exist_exec_verify_module, true))
+	{
+		//printk("Exec Verify Module is exist\n");
+		if(verify_exec != NULL)
+		{
+			retval = verify_exec(filename, argv, envp, &tasklist_lock);  
+			if(retval)
+				goto out_ret;
+		}
+	}
+	else
+	{
+		//printk("Exec Verify Module is *NOT* exist\n");
+	}
+#endif // CONFIG_USE_ARS
 
 	/*
 	 * We move the actual failure in case of RLIMIT_NPROC excess from

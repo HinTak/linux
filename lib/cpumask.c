@@ -26,6 +26,19 @@ int __next_cpu_nr(int n, const cpumask_t *srcp)
 EXPORT_SYMBOL(__next_cpu_nr);
 #endif
 
+#ifdef CONFIG_VD_GIC_SET_AFFINITY
+int cpumask_last_and(int n, const struct cpumask *src1p,
+		     const struct cpumask *src2p)
+{
+	struct cpumask mask;
+
+	if (likely(cpumask_and(&mask, src1p, src2p)))
+		return (int)cpumask_prev(n, &mask);
+	return n;
+}
+EXPORT_SYMBOL(cpumask_last_and);
+
+#endif
 /**
  * cpumask_next_and - get the next cpu in *src1p & *src2p
  * @n: the cpu prior to the place to search (ie. return will be > @n)

@@ -1,19 +1,6 @@
 #ifndef _UDF_I_H
 #define _UDF_I_H
 
-struct extent_position {
-	struct buffer_head *bh;
-	uint32_t offset;
-	struct kernel_lb_addr block;
-};
-
-struct udf_ext_cache {
-	/* Extent position */
-	struct extent_position epos;
-	/* Start logical offset in bytes */
-	loff_t lstart;
-};
-
 /*
  * The i_data_sem and i_mutex serve for protection of allocation information
  * of a regular files and symlinks. This includes all extents belonging to
@@ -25,6 +12,31 @@ struct udf_ext_cache {
  *
  * For directories i_mutex is used for all the necessary protection.
  */
+
+#ifdef CONFIG_SSIF_EXT_CACHE
+typedef struct _udf_extent_position_{
+	struct buffer_head* bh;
+	uint32_t offset;
+	struct kernel_lb_addr block;
+	int block_id;
+} udf_extent_position;
+
+typedef struct _udf_extent_cache_{
+	udf_extent_position udf_pos;
+	loff_t udf_lbcount;
+	int sanity;
+	struct kernel_lb_addr inode_location;
+} udf_extent_cache;
+
+#define UDF3D_MAGIC_NUM 0xcafe7788
+#define UDF3D_MAXN_PRELOAD_BLOCKS 512
+typedef struct _udf_extent_descriptor_cache_{
+	void **descriptor_blocks;
+	int n_descriptors;
+	int sanity;
+	atomic_t ref_count;
+} udf_extent_descriptor_cache;
+#endif
 
 struct udf_inode_info {
 	struct timespec		i_crtime;
@@ -48,9 +60,13 @@ struct udf_inode_info {
 		__u8		*i_data;
 	} i_ext;
 	struct rw_semaphore	i_data_sem;
-	struct udf_ext_cache cached_extent;
-	/* Spinlock for protecting extent cache */
-	spinlock_t i_extent_cache_lock;
+#ifdef CONFIG_SSIF_EXT_CACHE
+       udf_extent_cache recent_access; /*Key element : bgbak@samsung.com*/
+       udf_extent_descriptor_cache extent_desc_cache; /*Key element-2 : bgbak@samsung.com*/
+       /* Reserved for future optimization to do faster random access.*/
+       /* udf_extent_cache mid_points[UDF3D_SZ_EXT_CACHE]; */
+       /* Reserved for future optimization to do faster random access.*/
+#endif
 	struct inode vfs_inode;
 };
 

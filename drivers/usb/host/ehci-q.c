@@ -238,6 +238,17 @@ static int qtd_copy_status (
 				usb_pipein(urb->pipe) ? "in" : "out");
 			status = -EPROTO;
 		} else {	/* unknown */
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+                        /* 20070514, patch for STALL endpoint case with TP-U20W.
+                         * 20111228, patch for TT clear case with MicroSoft's wireless keyboard dongle.
+                         * unless we already know the urb's status through ping, update token's status.
+                         */
+			 if(!(token & QTD_STS_ACTIVE)
+                                        && !(token & QTD_STS_PING))
+                                urb->status = -EPIPE;
+                        else
+
+#endif
 			status = -EPROTO;
 		}
 
@@ -283,9 +294,27 @@ __acquires(ehci->lock)
 
 	/* complete() can reenter this HCD */
 	usb_hcd_unlink_urb_from_ep(ehci_to_hcd(ehci), urb);
+#ifdef SAMSUNG_PATCH_RMB_WMB_AT_UNLINK
+	/* Making sure that all data of urb are proper used only for full speed devices. */
+	if((urb->dev != NULL) && (urb->dev->speed <= USB_SPEED_FULL))
+		wmb();
+#endif
+
+#ifdef SAMSUNG_USB_FULL_SPEED_BT_MODIFY_GIVEBACK_URB
+   /* For HawkP and BT device only */
+   if((soc_is_sdp1404()) && (urb->dev != NULL) && (urb->dev->speed == USB_SPEED_FULL)){
+       usb_hcd_prepare_urb_for_giveback(ehci_to_hcd(ehci), urb, status);
+       spin_unlock (&ehci->lock);
+       usb_hcd_full_speed_giveback_urb(ehci_to_hcd(ehci), urb, status);
+   }else{
+       spin_unlock (&ehci->lock);
+       usb_hcd_giveback_urb(ehci_to_hcd(ehci), urb, status);
+   }
+#else
 	spin_unlock (&ehci->lock);
 	usb_hcd_giveback_urb(ehci_to_hcd(ehci), urb, status);
-	spin_lock (&ehci->lock);
+#endif
+    spin_lock (&ehci->lock);
 }
 
 static int qh_schedule (struct ehci_hcd *ehci, struct ehci_qh *qh);
@@ -382,7 +411,8 @@ qh_completions (struct ehci_hcd *ehci, struct ehci_qh *qh)
 						QTD_CERR(token) == 0 &&
 						++qh->xacterrs < QH_XACTERR_MAX &&
 						!urb->unlinked) {
-					ehci_dbg(ehci,
+						if (qh->xacterrs == 1 || qh->xacterrs == (QH_XACTERR_MAX - 1))
+							ehci_dbg(ehci,
 	"detected XactErr len %zu/%zu retry %d\n",
 	qtd->length - QTD_LENGTH(token), qtd->length, qh->xacterrs);
 
@@ -489,8 +519,20 @@ qh_completions (struct ehci_hcd *ehci, struct ehci_qh *qh)
 				 * is a violation of the spec.
 				 */
 				if (last_status != -EPIPE)
+				{
+				#ifdef	SAMSUNG_PATCH_WITH_USB_HID_DISCONNECT_BUGFIX
+				/* We already tried to clear xact error in the begining, if it has exceeded QH_XACTERR_MAX
+ 		                then tt command is not at fault, so don't burden the hub and EHC by sending too many clear tt comands */		 
+					if(last_status == -EPROTO)
+					{
+						if(qh->xacterrs < QH_XACTERR_MAX)
 					ehci_clear_tt_buffer(ehci, qh, urb,
 							token);
+					}
+					else
+				#endif
+						ehci_clear_tt_buffer(ehci, qh, urb, token);
+				}
 			}
 		}
 
@@ -1079,6 +1121,7 @@ static struct ehci_qh *qh_append_tds (
 			/* let the hc process these next qtds */
 			wmb ();
 			dummy->hw_token = token;
+			wmb ();
 
 			urb->hcpriv = qh;
 		}
@@ -1325,6 +1368,10 @@ static void scan_async (struct ehci_hcd *ehci)
 {
 	struct ehci_qh		*qh;
 	bool			check_unlinks_later = false;
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+         //20071218 for strength usb
+         udelay(50);
+#endif
 
 	ehci->qh_scan_next = ehci->async->qh_next.qh;
 	while (ehci->qh_scan_next) {

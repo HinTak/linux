@@ -34,6 +34,36 @@
 #include <linux/compat.h>
 #endif
 
+#if defined(CONFIG_EXT4_FS_TRUNCATE_RANGE) \
+	|| defined(CONFIG_EXT4_FS_SPLIT_FILE) \
+	|| defined(CONFIG_EXT4_FS_MERGE_FILE)
+#include <linux/fs.h>
+#include <linux/file.h>
+#include <linux/fdtable.h>
+#include <linux/rcupdate.h>
+#include <linux/pid_namespace.h>
+#include <linux/pvr_edit.h>
+
+#define GET_INODE_FROM_FILP(x) (x->f_path.dentry->d_inode->i_ino)
+#define GET_SUPERDEV_FROM_FILP(x) (x->f_path.dentry->d_inode->i_sb->s_dev)
+#endif
+
+/*
+ * Truncate range alias
+ */
+#ifdef CONFIG_EXT4_FS_TRUNCATE_RANGE
+#define EXT4_IOC_TRUNCATE_RANGE			FTRUNCATERANGE
+#define EXT4_IOC_TRUNCATE_ARRAY_RANGE	FTRUNCATE_ARRAY_RANGE
+#endif
+
+#ifdef CONFIG_EXT4_FS_SPLIT_FILE
+#define EXT4_IOC_SPLIT_FILE		FSPLIT
+#endif
+
+#ifdef CONFIG_EXT4_FS_MERGE_FILE
+#define EXT4_IOC_MERGE_FILE		FMERGE
+#endif
+
 /*
  * The fourth extended filesystem constants/structures
  */
@@ -774,6 +804,8 @@ do {									       \
 	if (EXT4_FITS_IN_INODE(raw_inode, einode, xtime))		       \
 		(einode)->xtime.tv_sec = 				       \
 			(signed)le32_to_cpu((raw_inode)->xtime);	       \
+	else								       \
+		(einode)->xtime.tv_sec = 0;				       \
 	if (EXT4_FITS_IN_INODE(raw_inode, einode, xtime ## _extra))	       \
 		ext4_decode_extra_time(&(einode)->xtime,		       \
 				       raw_inode->xtime ## _extra);	       \
@@ -1164,6 +1196,7 @@ struct ext4_super_block {
  * fourth extended-fs super-block data in memory
  */
 struct ext4_sb_info {
+	bool    is_case_insensitive;    /* Check if Ext4 is case insensitive */
 	unsigned long s_desc_size;	/* Size of a group descriptor in bytes */
 	unsigned long s_inodes_per_block;/* Number of inodes per block */
 	unsigned long s_blocks_per_group;/* Number of blocks in a group */
@@ -2613,6 +2646,9 @@ extern int ext4_ext_index_trans_blocks(struct inode *inode, int nrblocks,
 extern int ext4_ext_map_blocks(handle_t *handle, struct inode *inode,
 			       struct ext4_map_blocks *map, int flags);
 extern void ext4_ext_truncate(handle_t *, struct inode *);
+extern int ext4_ext_truncate_range(struct file *filp,
+				   loff_t start, loff_t end);
+
 extern int ext4_ext_remove_space(struct inode *inode, ext4_lblk_t start,
 				 ext4_lblk_t end);
 extern void ext4_ext_init(struct super_block *);
@@ -2645,6 +2681,7 @@ extern int ext4_find_delalloc_range(struct inode *inode,
 extern int ext4_find_delalloc_cluster(struct inode *inode, ext4_lblk_t lblk);
 extern int ext4_fiemap(struct inode *inode, struct fiemap_extent_info *fieinfo,
 			__u64 start, __u64 len);
+int ext4_cmp_offsets(const void *a, const void *b);
 
 
 /* move_extent.c */
@@ -2657,6 +2694,9 @@ void ext4_inode_double_unlock(struct inode *inode1, struct inode *inode2);
 extern int ext4_move_extents(struct file *o_filp, struct file *d_filp,
 			     __u64 start_orig, __u64 start_donor,
 			     __u64 len, __u64 *moved_len);
+
+extern int ext4_split_file(struct file *o_filp, char *dest_file, __u64 offset);
+extern int ext4_merge_file(struct file *o_filp, char *dest_file);
 
 /* page-io.c */
 extern int __init ext4_init_pageio(void);
@@ -2738,6 +2778,45 @@ extern struct mutex ext4__aio_mutex[EXT4_WQ_HASH_SZ];
 #define EXT4_RESIZING	0
 extern int ext4_resize_begin(struct super_block *sb);
 extern void ext4_resize_end(struct super_block *sb);
+
+static inline __u32 ext4_do_div(void *a, __u32 b, int n)
+{
+	__u32   mod;
+
+	switch (n) {
+	case 4:
+		mod = *(__u32 *)a % b;
+		*(__u32 *)a = *(__u32 *)a / b;
+		return mod;
+	case 8:
+		mod = do_div(*(__u64 *)a, b);
+		return mod;
+	}
+
+	/* NOTREACHED */
+	return 0;
+}
+
+static inline __u32 ext4_do_mod(void *a, __u32 b, int n)
+{
+	switch (n) {
+	case 4:
+		return *(__u32 *)a % b;
+	case 8:
+		{
+		__u64   c = *(__u64 *)a;
+		return do_div(c, b);
+		}
+	}
+
+	/* NOTREACHED */
+	return 0;
+}
+
+#undef do_div
+#define do_div(a, b)    ext4_do_div(&(a), (b), sizeof(a))
+#define do_mod(a, b)    ext4_do_mod(&(a), (b), sizeof(a))
+
 
 #endif	/* __KERNEL__ */
 

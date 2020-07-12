@@ -58,6 +58,9 @@ typedef unsigned long sigset_t;
 
 #define SIGSWI		32
 
+#ifndef CONFIG_VD_RELEASE
+#define USE_PROHIBIT_SIG (CONFIG_PROHIBIT_SIG < SIGRTMAX)
+#endif
 /*
  * SA_FLAGS values:
  *

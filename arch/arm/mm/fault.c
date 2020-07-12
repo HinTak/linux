@@ -164,6 +164,12 @@ __do_user_fault(struct task_struct *tsk, unsigned long addr,
 {
 	struct siginfo si;
 
+#ifdef CONFIG_ACCURATE_COREDUMP
+	early_coredump_wait(sig);
+#endif
+
+	set_flag_block_sigkill(current, sig);
+#ifndef CONFIG_SHOW_FAULT_TRACE_INFO
 #ifdef CONFIG_DEBUG_USER
 	if (((user_debug & UDBG_SEGV) && (sig == SIGSEGV)) ||
 	    ((user_debug & UDBG_BUS)  && (sig == SIGBUS))) {
@@ -173,7 +179,11 @@ __do_user_fault(struct task_struct *tsk, unsigned long addr,
 		show_regs(regs);
 	}
 #endif
-
+#else
+	printk(KERN_ALERT "%s: unhandled page fault (%d) at 0x%08lx, code 0x%03x\n",
+							tsk->comm, sig, addr, fsr);
+	dump_info(tsk, regs, addr);
+#endif
 	tsk->thread.address = addr;
 	tsk->thread.error_code = fsr;
 	tsk->thread.trap_no = 14;
@@ -546,6 +556,11 @@ do_DataAbort(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 	if (!inf->fn(addr, fsr & ~FSR_LNX_PF, regs))
 		return;
 
+#ifdef CONFIG_ACCURATE_COREDUMP
+	if (user_mode(regs))
+		early_coredump_wait(inf->sig);
+#endif
+
 	printk(KERN_ALERT "Unhandled fault: %s (0x%03x) at 0x%08lx\n",
 		inf->name, fsr, addr);
 
@@ -577,6 +592,11 @@ do_PrefetchAbort(unsigned long addr, unsigned int ifsr, struct pt_regs *regs)
 
 	if (!inf->fn(addr, ifsr | FSR_LNX_PF, regs))
 		return;
+
+#ifdef CONFIG_ACCURATE_COREDUMP
+	if (user_mode(regs))
+		early_coredump_wait(inf->sig);
+#endif
 
 	printk(KERN_ALERT "Unhandled prefetch abort: %s (0x%03x) at 0x%08lx\n",
 		inf->name, ifsr, addr);

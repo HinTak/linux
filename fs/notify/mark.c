@@ -101,6 +101,7 @@ struct srcu_struct fsnotify_mark_srcu;
 static DEFINE_SPINLOCK(destroy_lock);
 static LIST_HEAD(destroy_list);
 static DECLARE_WAIT_QUEUE_HEAD(destroy_waitq);
+static DEFINE_MUTEX(mark_destroy_mutex);
 
 void fsnotify_get_mark(struct fsnotify_mark *mark)
 {
@@ -110,8 +111,15 @@ void fsnotify_get_mark(struct fsnotify_mark *mark)
 void fsnotify_put_mark(struct fsnotify_mark *mark)
 {
 	if (atomic_dec_and_test(&mark->refcnt)) {
+		if (unlikely(mark->flags & FSNOTIFY_MARK_FLAG_ALIVE))
+			BUG();
+
 		if (mark->group)
 			fsnotify_put_group(mark->group);
+
+		if (unlikely(atomic_read(&mark->refcnt) != 0))
+			BUG();
+
 		mark->free_mark(mark);
 	}
 }
@@ -300,15 +308,18 @@ void fsnotify_clear_marks_by_group_flags(struct fsnotify_group *group,
 {
 	struct fsnotify_mark *lmark, *mark;
 
+	mutex_lock(&mark_destroy_mutex);
 	mutex_lock_nested(&group->mark_mutex, SINGLE_DEPTH_NESTING);
 	list_for_each_entry_safe(mark, lmark, &group->marks_list, g_list) {
-		if (mark->flags & flags) {
+		if ((mark->flags & flags) &&
+				(mark->flags & FSNOTIFY_MARK_FLAG_ALIVE)) {
 			fsnotify_get_mark(mark);
 			fsnotify_destroy_mark_locked(mark, group);
 			fsnotify_put_mark(mark);
 		}
 	}
 	mutex_unlock(&group->mark_mutex);
+	mutex_unlock(&mark_destroy_mutex);
 }
 
 /*
@@ -356,10 +367,12 @@ static int fsnotify_mark_destroy(void *ignored)
 
 		synchronize_srcu(&fsnotify_mark_srcu);
 
+		mutex_lock(&mark_destroy_mutex);
 		list_for_each_entry_safe(mark, next, &private_destroy_list, destroy_list) {
 			list_del_init(&mark->destroy_list);
 			fsnotify_put_mark(mark);
 		}
+		mutex_unlock(&mark_destroy_mutex);
 
 		wait_event_interruptible(destroy_waitq, !list_empty(&destroy_list));
 	}

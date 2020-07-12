@@ -21,6 +21,10 @@
 
 #define EEM_HLEN 2
 
+#ifdef CONFIG_SAMSUNG_DEVICE_USBNET_COMMON
+static struct multi_eem_gadget multi_eem;
+#endif
+
 /*
  * This function is a "CDC Ethernet Emulation Model" (CDC EEM)
  * Ethernet link.
@@ -29,6 +33,10 @@
 struct f_eem {
 	struct gether			port;
 	u8				ctrl_id;
+#ifdef CONFIG_SAMSUNG_DEVICE_USBNET_COMMON
+       void*           dev_info;
+       u8              devnum;
+#endif
 };
 
 static inline struct f_eem *func_to_eem(struct usb_function *f)
@@ -196,6 +204,9 @@ static int eem_set_alt(struct usb_function *f, unsigned intf, unsigned alt)
 		if (eem->port.in_ep->driver_data) {
 			DBG(cdev, "reset eem\n");
 			gether_disconnect(&eem->port);
+#ifdef CONFIG_SAMSUNG_DEVICE_USBNET_USB1_PING_FIX
+            		eem->port.is_enable = 1;
+#endif
 		}
 
 		if (!eem->port.in_ep->desc || !eem->port.out_ep->desc) {
@@ -233,7 +244,9 @@ static void eem_disable(struct usb_function *f)
 	struct usb_composite_dev *cdev = f->config->cdev;
 
 	DBG(cdev, "eem deactivated\n");
-
+#ifdef CONFIG_SAMSUNG_DEVICE_USBNET_USB1_PING_FIX
+	eem->port.is_enable = 0;
+#endif
 	if (eem->port.in_ep->driver_data)
 		gether_disconnect(&eem->port);
 }
@@ -563,6 +576,16 @@ int __init eem_bind_config(struct usb_configuration *c, struct eth_dev *dev)
 	eem->port.wrap = eem_wrap;
 	eem->port.unwrap = eem_unwrap;
 	eem->port.header_len = EEM_HLEN;
+
+#ifdef CONFIG_SAMSUNG_DEVICE_USBNET_COMMON
+   	eem->dev_info = &multi_eem;
+   	eem->devnum = multi_eem.eem_num;
+   	eem->port.dev_info = &multi_eem;
+   	eem->port.devnum = multi_eem.eem_num;
+#endif
+#ifdef CONFIG_SAMSUNG_DEVICE_USBNET_USB1_PING_FIX
+        eem->port.is_enable = 0;
+#endif
 
 	status = usb_add_function(c, &eem->port.func);
 	if (status)
