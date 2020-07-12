@@ -336,7 +336,9 @@ extern int of_count_phandle_with_args(const struct device_node *np,
 extern void of_alias_scan(void * (*dt_alloc)(u64 size, u64 align));
 extern int of_alias_get_id(struct device_node *np, const char *stem);
 extern int of_alias_get_highest_id(const char *stem);
-
+#ifdef CONFIG_ARCH_MXC
+extern int of_alias_max_index(const char *stem);
+#endif
 extern int of_machine_is_compatible(const char *compat);
 
 extern int of_add_property(struct device_node *np, struct property *prop);
@@ -611,6 +613,12 @@ static inline int of_alias_get_highest_id(const char *stem)
 {
 	return -ENOSYS;
 }
+#ifdef CONFIG_ARCH_MXC
+static inline int of_alias_max_index(const char *stem)
+{
+	return -ENODEV;
+}
+#endif
 
 static inline int of_machine_is_compatible(const char *compat)
 {

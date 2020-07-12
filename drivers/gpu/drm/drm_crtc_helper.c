@@ -568,6 +568,15 @@ int drm_crtc_helper_set_config(struct drm_mode_set *set)
 		drm_mode_debug_printmodeline(&set->crtc->mode);
 		drm_mode_debug_printmodeline(set->mode);
 		mode_changed = true;
+
+#ifdef CONFIG_BD_CACHE_ENABLED
+		/*
+		 * Even though drm_modes are equal, this flag makes kernel call set_mode().
+		 * The Crtc resettings is needed when CSC changes or ColorDepth changes in AV Tizen.
+		 * This flag shouldn't be saved.
+		 */
+		set->mode->flags &= ~(DRM_MODE_FLAG_FORCE_MODE_CHANGE);
+#endif
 	}
 
 	/* a) traverse passed in connector list and get encoders for them */

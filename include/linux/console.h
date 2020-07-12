@@ -149,6 +149,8 @@ extern int console_trylock(void);
 extern void console_unlock(void);
 extern void console_conditional_schedule(void);
 extern void console_unblank(void);
+extern void console_flush_on_panic(void);
+extern void console_flush_messages(void);
 extern struct tty_driver *console_device(int *);
 extern void console_stop(struct console *);
 extern void console_start(struct console *);
@@ -167,6 +169,8 @@ extern bool console_suspend_enabled;
 /* Suspend and resume console messages over PM events */
 extern void suspend_console(void);
 extern void resume_console(void);
+extern void console_forbid_async_printk(void);
+extern void console_permit_async_printk(void);
 
 int mda_console_init(void);
 void prom_con_init(void);

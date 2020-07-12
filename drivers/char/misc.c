@@ -273,6 +273,18 @@ static char *misc_devnode(struct device *dev, umode_t *mode)
 	return NULL;
 }
 
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+static int misc_get_smack64_label(struct device *dev, char* buf, int size)
+{
+	struct miscdevice *c = dev_get_drvdata(dev);
+
+	if (c->lab_smk64)
+		snprintf(buf, size, "%s", c->lab_smk64);
+
+	return 0;
+}
+#endif
+
 static int __init misc_init(void)
 {
 	int err;
@@ -289,6 +301,9 @@ static int __init misc_init(void)
 	if (register_chrdev(MISC_MAJOR,"misc",&misc_fops))
 		goto fail_printk;
 	misc_class->devnode = misc_devnode;
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+	misc_class->get_smack64_label = misc_get_smack64_label;
+#endif
 	return 0;
 
 fail_printk:

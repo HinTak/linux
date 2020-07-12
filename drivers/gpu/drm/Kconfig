@@ -165,6 +165,17 @@ config DRM_SAVAGE
 	  Choose this option if you have a Savage3D/4/SuperSavage/Pro/Twister
 	  chipset. If M is selected the module will be called savage.
 
+config DRM_SDP
+	tristate "DRM Support for Samsung SDP SoCs"
+	depends on DRM
+	select DRM_KMS_HELPER
+	select DRM_KMS_CMA_HELPER
+	select DRM_PANEL
+	select VIDEOMODE_HELPERS
+	help
+		Choose this option if you have a Samsung SDP SoC chipset.
+		If M is selected the module will be called sdpdrm.
+
 config DRM_VGEM
 	tristate "Virtual GEM provider"
 	depends on DRM
@@ -173,6 +184,16 @@ config DRM_VGEM
 	  as used by Mesa's software renderer for enhanced performance.
 	  If M is selected the module will be called vgem.
 
+config DRM_NVT
+	tristate "DRM Support for Novatek TV SoCs"
+	depends on DRM
+	select DRM_KMS_HELPER
+	select DRM_KMS_CMA_HELPER
+	select DRM_PANEL
+	select VIDEOMODE_HELPERS
+	help
+	  Choose this option if you have a Novatek TV chipset.
+	  If M is selected the module will be called nvtdrm.
 
 source "drivers/gpu/drm/exynos/Kconfig"
 

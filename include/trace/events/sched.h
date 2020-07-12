@@ -426,6 +426,133 @@ TRACE_EVENT(sched_pi_setprio,
 			__entry->comm, __entry->pid,
 			__entry->oldprio, __entry->newprio)
 );
+#ifdef CONFIG_SCHED_HMP
+/*
+ * Tracepoint for showing tracked load contribution.
+ */
+TRACE_EVENT(sched_task_load_contrib,
+
+	TP_PROTO(struct task_struct *tsk, unsigned long load_contrib),
+
+	TP_ARGS(tsk, load_contrib),
+
+	TP_STRUCT__entry(
+		__array(char, comm, TASK_COMM_LEN)
+		__field(pid_t, pid)
+		__field(unsigned long, load_contrib)
+	),
+
+	TP_fast_assign(
+		memcpy(__entry->comm, tsk->comm, TASK_COMM_LEN);
+		__entry->pid            = tsk->pid;
+		__entry->load_contrib   = load_contrib;
+	),
+
+	TP_printk("comm=%s pid=%d load_contrib=%lu",
+			__entry->comm, __entry->pid,
+			__entry->load_contrib)
+);
+
+/*
+ * Tracepoint for showing tracked task runnable ratio [0..1023].
+ */
+TRACE_EVENT(sched_task_runnable_ratio,
+
+	TP_PROTO(struct task_struct *tsk, unsigned long ratio),
+
+	TP_ARGS(tsk, ratio),
+
+	TP_STRUCT__entry(
+		__array(char, comm, TASK_COMM_LEN)
+		__field(pid_t, pid)
+		__field(unsigned long, ratio)
+	),
+
+	TP_fast_assign(
+	memcpy(__entry->comm, tsk->comm, TASK_COMM_LEN);
+		__entry->pid   = tsk->pid;
+		__entry->ratio = ratio;
+	),
+
+	TP_printk("comm=%s pid=%d ratio=%lu",
+			__entry->comm, __entry->pid,
+			__entry->ratio)
+);
+
+/*
+ * Tracepoint for showing tracked rq runnable ratio [0..1023].
+ */
+TRACE_EVENT(sched_rq_runnable_ratio,
+
+	TP_PROTO(int cpu, unsigned long ratio),
+
+	TP_ARGS(cpu, ratio),
+
+	TP_STRUCT__entry(
+		__field(int, cpu)
+		__field(unsigned long, ratio)
+	),
+
+	TP_fast_assign(
+		__entry->cpu   = cpu;
+		__entry->ratio = ratio;
+	),
+
+	TP_printk("cpu=%d ratio=%lu",
+			__entry->cpu,
+			__entry->ratio)
+);
+
+/*
+ * Tracepoint for showing tracked rq runnable load.
+ */
+TRACE_EVENT(sched_rq_runnable_load,
+
+	TP_PROTO(int cpu, u64 load),
+
+	TP_ARGS(cpu, load),
+
+	TP_STRUCT__entry(
+		__field(int, cpu)
+		__field(u64, load)
+	),
+
+	TP_fast_assign(
+		__entry->cpu  = cpu;
+		__entry->load = load;
+	),
+
+	TP_printk("cpu=%d load=%llu",
+			__entry->cpu,
+			__entry->load)
+);
+
+/*
+ * Tracepoint for showing tracked task cpu usage ratio [0..1023].
+ */
+TRACE_EVENT(sched_task_usage_ratio,
+
+	TP_PROTO(struct task_struct *tsk, unsigned long ratio),
+
+	TP_ARGS(tsk, ratio),
+
+	TP_STRUCT__entry(
+		__array(char, comm, TASK_COMM_LEN)
+		__field(pid_t, pid)
+		__field(unsigned long, ratio)
+	),
+
+	TP_fast_assign(
+	memcpy(__entry->comm, tsk->comm, TASK_COMM_LEN);
+		__entry->pid   = tsk->pid;
+		__entry->ratio = ratio;
+	),
+
+	TP_printk("comm=%s pid=%d ratio=%lu",
+			__entry->comm, __entry->pid,
+			__entry->ratio)
+);
+#endif
 
 #ifdef CONFIG_DETECT_HUNG_TASK
 TRACE_EVENT(sched_process_hang,
@@ -553,6 +680,135 @@ TRACE_EVENT(sched_wake_idle_without_ipi,
 
 	TP_printk("cpu=%d", __entry->cpu)
 );
+#ifdef CONFIG_SCHED_HMP
+/*
+ * Tracepoint for HMP (CONFIG_SCHED_HMP) task migrations,
+ * marking the forced transition of runnable or running tasks.
+ */
+TRACE_EVENT(sched_hmp_migrate_force_running,
+
+       TP_PROTO(struct task_struct *tsk, int running),
+
+       TP_ARGS(tsk, running),
+
+       TP_STRUCT__entry(
+               __array(char, comm, TASK_COMM_LEN)
+               __field(int, running)
+       ),
+
+       TP_fast_assign(
+               memcpy(__entry->comm, tsk->comm, TASK_COMM_LEN);
+               __entry->running = running;
+       ),
+
+       TP_printk("running=%d comm=%s",
+               __entry->running, __entry->comm)
+);
+
+/*
+ * Tracepoint for HMP (CONFIG_SCHED_HMP) task migrations,
+ * marking the forced transition of runnable or running
+ * tasks when a task is about to go idle.
+ */
+TRACE_EVENT(sched_hmp_migrate_idle_running,
+
+       TP_PROTO(struct task_struct *tsk, int running),
+
+       TP_ARGS(tsk, running),
+
+       TP_STRUCT__entry(
+               __array(char, comm, TASK_COMM_LEN)
+               __field(int, running)
+       ),
+
+       TP_fast_assign(
+               memcpy(__entry->comm, tsk->comm, TASK_COMM_LEN);
+               __entry->running = running;
+       ),
+
+       TP_printk("running=%d comm=%s",
+               __entry->running, __entry->comm)
+);
+
+/*
+ * Tracepoint for HMP (CONFIG_SCHED_HMP) task migrations.
+ */
+#define HMP_MIGRATE_WAKEUP	0
+#define HMP_MIGRATE_FORCE	1
+#define HMP_MIGRATE_OFFLOAD	2
+#define HMP_MIGRATE_IDLE_PULL	3
+
+TRACE_EVENT(sched_hmp_migrate,
+
+	TP_PROTO(struct task_struct *tsk, int dest, int force,unsigned long load),
+
+	TP_ARGS(tsk, dest, force, load),
+
+	TP_STRUCT__entry(
+		__array(char, comm, TASK_COMM_LEN)
+		__field(pid_t, pid)
+		__field(int,  dest)
+		__field(int,  force)
+		__field(unsigned long,  load)
+	),
+
+	TP_fast_assign(
+	memcpy(__entry->comm, tsk->comm, TASK_COMM_LEN);
+		__entry->pid   = tsk->pid;
+		__entry->dest  = dest;
+		__entry->force = force;
+		__entry->load = load;
+	),
+
+	TP_printk("comm=%s pid=%d dest=%d force=%d load=%lu",
+			__entry->comm, __entry->pid,
+			__entry->dest, __entry->force, __entry->load)
+);
+
+TRACE_EVENT(sched_hmp_offload_abort,
+
+	TP_PROTO(int cpu, int data, char *label),
+
+	TP_ARGS(cpu,data,label),
+
+	TP_STRUCT__entry(
+		__array(char, label, 64)
+		__field(int, cpu)
+		__field(int, data)
+	),
+
+	TP_fast_assign(
+		strlcpy(__entry->label, label, 64);
+		__entry->cpu   = cpu;
+		__entry->data = data;
+	),
+
+	TP_printk("cpu=%d data=%d label=%63s",
+		__entry->cpu, __entry->data,
+		__entry->label)
+);
+
+TRACE_EVENT(sched_hmp_offload_succeed,
+
+	TP_PROTO(int cpu, int dest_cpu),
+
+	TP_ARGS(cpu,dest_cpu),
+
+	TP_STRUCT__entry(
+		__field(int, cpu)
+		__field(int, dest_cpu)
+	),
+
+	TP_fast_assign(
+		__entry->cpu   = cpu;
+		__entry->dest_cpu = dest_cpu;
+	),
+
+	TP_printk("cpu=%d dest=%d",
+		__entry->cpu,
+		__entry->dest_cpu)
+);
+#endif
 #endif /* _TRACE_SCHED_H */
 
 /* This part must be outside protection */

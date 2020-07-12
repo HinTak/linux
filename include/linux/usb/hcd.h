@@ -102,6 +102,18 @@ struct usb_hcd {
 	 */
 	const struct hc_driver	*driver;	/* hw-specific hooks */
 
+#if defined(CONFIG_USB_NVT_EHCI_HCD)
+	unsigned long porcd;
+	unsigned long porcd2;
+	unsigned long modem_dongle;
+	unsigned long nvt_flag;
+#endif
+#if IS_ENABLED(CONFIG_USB_NVT_XHCI_HCD)
+	int	inactive_cnt;	/* for XHCI USB3.0 only */
+	int	loopback;		/* for XHCI USB3.0 only */
+	__le16	usb2_device_vid;
+	__le16	usb2_device_pid;
+#endif
 	/*
 	 * OTG and some Host controllers need software interaction with phys;
 	 * other external phys should be software-transparent
@@ -120,6 +132,9 @@ struct usb_hcd {
 #define HCD_FLAG_WAKEUP_PENDING		4	/* root hub is resuming? */
 #define HCD_FLAG_RH_RUNNING		5	/* root hub is running? */
 #define HCD_FLAG_DEAD			6	/* controller has died? */
+#if defined(CONFIG_USB_NVT_EHCI_HCD)
+#define HCD_FLAG_NRY			7
+#endif
 
 	/* The flags can be tested using these macros; they are likely to
 	 * be slightly faster than test_bit().
@@ -370,6 +385,11 @@ struct hc_driver {
 		 * address is set
 		 */
 	int	(*update_device)(struct usb_hcd *, struct usb_device *);
+#if defined(CONFIG_USB_NVT_EHCI_HCD)
+	void	(*port_nc)(struct usb_hcd *);
+	void	(*port_nc2)(struct usb_hcd *);
+	int	(*port_nc3)(struct usb_hcd *);
+#endif
 	int	(*set_usb2_hw_lpm)(struct usb_hcd *, struct usb_device *, int);
 	/* USB 3.0 Link Power Management */
 		/* Returns the USB3 hub-encoded value for the U1/U2 timeout. */
@@ -404,6 +424,14 @@ extern void usb_hcd_unlink_urb_from_ep(struct usb_hcd *hcd, struct urb *urb);
 
 extern int usb_hcd_submit_urb(struct urb *urb, gfp_t mem_flags);
 extern int usb_hcd_unlink_urb(struct urb *urb, int status);
+
+#ifdef SAMSUNG_USB_FULL_SPEED_BT_MODIFY_GIVEBACK_URB
+extern void usb_hcd_prepare_urb_for_giveback(struct usb_hcd *hcd, struct urb *urb,
+                int status);
+extern void usb_hcd_full_speed_giveback_urb(struct usb_hcd *hcd, struct urb *urb,
+                int status);
+#endif
+
 extern void usb_hcd_giveback_urb(struct usb_hcd *hcd, struct urb *urb,
 		int status);
 extern int usb_hcd_map_urb_for_dma(struct usb_hcd *hcd, struct urb *urb,

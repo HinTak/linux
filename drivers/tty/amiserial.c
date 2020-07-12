@@ -968,8 +968,7 @@ static void rs_throttle(struct tty_struct * tty)
 #ifdef SERIAL_DEBUG_THROTTLE
 	char	buf[64];
 
-	printk("throttle %s: %d....\n", tty_name(tty, buf),
-	       tty->ldisc.chars_in_buffer(tty));
+	printk("throttle %s ....\n", tty_name(tty, buf));
 #endif
 
 	if (serial_paranoia_check(info, tty->name, "rs_throttle"))
@@ -993,8 +992,7 @@ static void rs_unthrottle(struct tty_struct * tty)
 #ifdef SERIAL_DEBUG_THROTTLE
 	char	buf[64];
 
-	printk("unthrottle %s: %d....\n", tty_name(tty, buf),
-	       tty->ldisc.chars_in_buffer(tty));
+	printk("unthrottle %s ....\n", tty_name(tty, buf));
 #endif
 
 	if (serial_paranoia_check(info, tty->name, "rs_unthrottle"))

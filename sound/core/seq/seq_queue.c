@@ -139,11 +139,14 @@ static struct snd_seq_queue *queue_new(int owner, int locked)
 }
 
 /* delete queue (destructor) */
+/**[2017.11.30 SP.Audio] https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=3567eb6af614dac436c4b16a8d426f9faed639b3 **/
 static void queue_delete(struct snd_seq_queue *q)
 {
 	/* stop and release the timer */
+	mutex_lock(&q->timer_mutex);
 	snd_seq_timer_stop(q->timer);
 	snd_seq_timer_close(q);
+	mutex_unlock(&q->timer_mutex);
 	/* wait until access free */
 	snd_use_lock_sync(&q->use_lock);
 	/* release resources... */

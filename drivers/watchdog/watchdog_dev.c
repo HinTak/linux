@@ -217,6 +217,39 @@ out_timeout:
 	return err;
 }
 
+#ifdef CONFIG_ARCH_MXC
+/*
+ *	watchdog_set_pretimeout: set the watchdog timer pretimeout
+ *	@wddev: the watchdog device to set the timeout for
+ *	@timeout: pretimeout to set in seconds
+ */
+
+static int watchdog_set_pretimeout(struct watchdog_device *wddev,
+							unsigned int timeout)
+{
+	int err;
+
+	if ((wddev->ops->set_pretimeout == NULL) ||
+	    !(wddev->info->options & WDIOF_PRETIMEOUT))
+		return -EOPNOTSUPP;
+	if (watchdog_pretimeout_invalid(wddev, timeout))
+		return -EINVAL;
+
+	mutex_lock(&wddev->lock);
+
+	if (test_bit(WDOG_UNREGISTERED, &wddev->status)) {
+		err = -ENODEV;
+		goto out_timeout;
+	}
+
+	err = wddev->ops->set_pretimeout(wddev, timeout);
+
+out_timeout:
+	mutex_unlock(&wddev->lock);
+	return err;
+}
+#endif
+
 /*
  *	watchdog_get_timeleft: wrapper to get the time left before a reboot
  *	@wddev: the watchdog device to get the remaining time from
@@ -393,6 +426,15 @@ static long watchdog_ioctl(struct file *file, unsigned int cmd,
 		if (err)
 			return err;
 		return put_user(val, p);
+#ifdef CONFIG_ARCH_MXC
+	case WDIOC_SETPRETIMEOUT:
+		if (get_user(val, p))
+			return -EFAULT;
+		err = watchdog_set_pretimeout(wdd, val);
+		return err;
+	case WDIOC_GETPRETIMEOUT:
+		return put_user(wdd->pretimeout, p);
+#endif
 	default:
 		return -ENOTTY;
 	}

@@ -78,7 +78,9 @@ static struct usb_device_descriptor device_desc = {
 	/* .iProduct = DYNAMIC */
 	.bNumConfigurations =	1,
 };
-
+#ifdef CONFIG_ARCH_MXC
+static const struct usb_descriptor_header *otg_desc[2];
+#else
 static struct usb_otg_descriptor otg_descriptor = {
 	.bLength =		sizeof otg_descriptor,
 	.bDescriptorType =	USB_DT_OTG,
@@ -93,7 +95,7 @@ static const struct usb_descriptor_header *otg_desc[] = {
 	(struct usb_descriptor_header *) &otg_descriptor,
 	NULL,
 };
-
+#endif
 /*-------------------------------------------------------------------------*/
 
 /* Module */
@@ -191,6 +193,20 @@ static int gs_bind(struct usb_composite_dev *cdev)
 	serial_config_driver.iConfiguration = status;
 
 	if (gadget_is_otg(cdev->gadget)) {
+#ifdef CONFIG_ARCH_MXC
+		if (!otg_desc[0]) {
+			struct usb_descriptor_header *usb_desc;
+
+			usb_desc = usb_otg_descriptor_alloc(cdev->gadget);
+			if (!usb_desc) {
+				status = -ENOMEM;
+				goto fail;
+			}
+			usb_otg_descriptor_init(cdev->gadget, usb_desc);
+			otg_desc[0] = usb_desc;
+			otg_desc[1] = NULL;
+		}
+#endif
 		serial_config_driver.descriptors = otg_desc;
 		serial_config_driver.bmAttributes |= USB_CONFIG_ATT_WAKEUP;
 	}
@@ -208,13 +224,20 @@ static int gs_bind(struct usb_composite_dev *cdev)
 				"gser");
 	}
 	if (status < 0)
+#ifdef CONFIG_ARCH_MXC
+		goto fail1;
+#else
 		goto fail;
-
+#endif
 	usb_composite_overwrite_options(cdev, &coverwrite);
 	INFO(cdev, "%s\n", GS_VERSION_NAME);
 
 	return 0;
-
+#ifdef CONFIG_ARCH_MXC
+fail1:
+	kfree(otg_desc[0]);
+	otg_desc[0] = NULL;
+#endif
 fail:
 	return status;
 }
@@ -227,6 +250,10 @@ static int gs_unbind(struct usb_composite_dev *cdev)
 		usb_put_function(f_serial[i]);
 		usb_put_function_instance(fi_serial[i]);
 	}
+#ifdef CONFIG_ARCH_MXC
+	kfree(otg_desc[0]);
+	otg_desc[0] = NULL;
+#endif
 	return 0;
 }
 

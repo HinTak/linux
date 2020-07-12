@@ -561,7 +561,12 @@ static netdev_tx_t eth_start_xmit(struct sk_buff *skb,
 			/* Multi frame CDC protocols may store the frame for
 			 * later which is not a dropped frame.
 			 */
+#ifdef CONFIG_ARCH_MXC
+			if (dev->port_usb &&
+					dev->port_usb->supports_multi_frame)
+#else
 			if (dev->port_usb->supports_multi_frame)
+#endif
 				goto multiframe;
 			goto drop;
 		}

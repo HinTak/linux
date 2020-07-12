@@ -1777,6 +1777,73 @@ void usb_hcd_giveback_urb(struct usb_hcd *hcd, struct urb *urb, int status)
 }
 EXPORT_SYMBOL_GPL(usb_hcd_giveback_urb);
 
+#ifdef SAMSUNG_USB_FULL_SPEED_BT_MODIFY_GIVEBACK_URB
+
+/*-------------------------------------------------------------------------*/
+
+/**
+ * usb_hcd_prepare_urb_for_giveback - return URB from HCD to device driver
+ * @hcd: host controller returning the URB
+ * @urb: urb being returned to the USB device driver.
+ * @status: completion status code for the URB.
+ * Context: in_interrupt()
+ *
+ * This modifies the fields of urb in order to return the urb to its class driver
+ * This function is freeing the per urb resources. The main purpose is to complete
+ * all these operation are performed within a lock so that usb_kill_urb context can get updated data.
+ * If @urb was unlinked, the value of @status will be overridden by
+ * @urb->unlinked.  Erroneous short transfers are detected in case
+ * the HCD hasn't checked for them.
+ */
+
+void usb_hcd_prepare_urb_for_giveback(struct usb_hcd *hcd, struct urb *urb, int status)
+{
+   urb->hcpriv = NULL;
+   if (unlikely(urb->unlinked))
+       status = urb->unlinked;
+   else if (unlikely((urb->transfer_flags & URB_SHORT_NOT_OK) &&
+           urb->actual_length < urb->transfer_buffer_length &&
+           !status))
+       status = -EREMOTEIO;
+
+   urb->status = status;
+}
+EXPORT_SYMBOL_GPL(usb_hcd_prepare_urb_for_giveback);
+
+/*-------------------------------------------------------------------------*/
+
+/**
+ * usb_hcd_full_speed_giveback_urb - return URB from HCD to device driver
+ * @hcd: host controller returning the URB
+ * @urb: urb being returned to the USB device driver.
+ * @status: completion status code for the URB.
+ * Context: in_interrupt()
+ *
+ * This hands the URB from HCD to its USB device driver, using its
+ * completion function. It also released all HCD locks;
+ * the device driver won't cause problems if it frees, modifies,
+ * or resubmits this URB.
+ *
+ */
+void usb_hcd_full_speed_giveback_urb(struct usb_hcd *hcd, struct urb *urb, int status)
+{
+        unmap_urb_for_dma(hcd, urb);
+        usbmon_urb_complete(&hcd->self, urb, status);
+        usb_unanchor_urb(urb);
+
+        /* pass ownership to the completion handler */
+        urb->complete(urb);
+        atomic_dec(&urb->use_count);
+
+        if (unlikely(atomic_read(&urb->reject)))
+                wake_up(&usb_kill_urb_queue);
+        usb_put_urb(urb);
+}
+EXPORT_SYMBOL_GPL(usb_hcd_full_speed_giveback_urb);
+
+#endif
+
+
 /*-------------------------------------------------------------------------*/
 
 /* Cancel all URBs pending on this endpoint and wait for the endpoint's
@@ -2585,10 +2652,18 @@ static int usb_hcd_request_irqs(struct usb_hcd *hcd,
 			return retval;
 		}
 		hcd->irq = irqnum;
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 		dev_info(hcd->self.controller, "irq %d, %s 0x%08llx\n", irqnum,
 				(hcd->driver->flags & HCD_MEMORY) ?
 					"io mem" : "io base",
 					(unsigned long long)hcd->rsrc_start);
+#else
+		dev_info(hcd->self.controller, "irq %d, %s 0x%08llx mapped %p\n",
+			irqnum,
+			(hcd->driver->flags & HCD_MEMORY) ?
+			"io mem" : "io base",
+			(unsigned long long)hcd->rsrc_start, hcd->regs);
+#endif
 	} else {
 		hcd->irq = 0;
 		if (hcd->rsrc_start)

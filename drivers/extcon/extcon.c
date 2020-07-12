@@ -32,6 +32,7 @@
 #include <linux/of.h>
 #include <linux/slab.h>
 #include <linux/sysfs.h>
+#include <linux/sched.h>
 
 /*
  * extcon_cable_name suggests the standard cable names for commonly used
@@ -206,7 +207,7 @@ static ssize_t cable_state_show(struct device *dev,
 int extcon_update_state(struct extcon_dev *edev, u32 mask, u32 state)
 {
 	char name_buf[120];
-	char state_buf[120];
+	char state_buf[300]; /* expanded to 300. confirmed by maintainer */
 	char *prop_buf;
 	char *envp[3];
 	int env_offset = 0;
@@ -250,7 +251,7 @@ int extcon_update_state(struct extcon_dev *edev, u32 mask, u32 state)
 			envp[env_offset] = NULL;
 			/* Unlock early before uevent */
 			spin_unlock_irqrestore(&edev->lock, flags);
-
+			printk("extcon_update_state(pre:%x, now:%x) - %s\n", old_state, state, current->comm);
 			kobject_uevent_env(&edev->dev.kobj, KOBJ_CHANGE, envp);
 			free_page((unsigned long)prop_buf);
 		} else {
@@ -258,6 +259,7 @@ int extcon_update_state(struct extcon_dev *edev, u32 mask, u32 state)
 			spin_unlock_irqrestore(&edev->lock, flags);
 
 			dev_err(&edev->dev, "out of memory in extcon_set_state\n");
+			printk("extcon_update_state(pre:%x, now:%x) - %s\n", old_state, state, current->comm);
 			kobject_uevent(&edev->dev.kobj, KOBJ_CHANGE);
 		}
 	} else {

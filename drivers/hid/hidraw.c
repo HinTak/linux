@@ -580,6 +580,14 @@ void hidraw_disconnect(struct hid_device *hid)
 }
 EXPORT_SYMBOL_GPL(hidraw_disconnect);
 
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+static int dev_hidraw_class_get_smack64_label(struct device *dev, char *buf, int size)
+{
+    snprintf(buf, size, "%s", "*");
+    return 0;
+}
+#endif
+
 int __init hidraw_init(void)
 {
 	int result;
@@ -601,7 +609,11 @@ int __init hidraw_init(void)
 		goto error_cdev;
 	}
 
-        cdev_init(&hidraw_cdev, &hidraw_ops);
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+    hidraw_class->get_smack64_label = dev_hidraw_class_get_smack64_label;
+#endif
+
+    cdev_init(&hidraw_cdev, &hidraw_ops);
 	result = cdev_add(&hidraw_cdev, dev_id, HIDRAW_MAX_DEVICES);
 	if (result < 0)
 		goto error_class;

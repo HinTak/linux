@@ -30,7 +30,22 @@
 #include <linux/usb/hcd.h>
 
 #include "usb.h"
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+#include <linux/priority_devconfig.h>
+#ifdef PARALLEL_RESET_RESUME_USER_PORT_DEVICES
+extern struct instant_resume_control instant_ctrl;
+#endif
+#endif
 
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+#ifdef PARALLEL_RESET_RESUME_REMOVABLE_DEVICE
+extern product_info *ptr_userport_devinfo[PARALLEL_DEVICE_COUNT];
+extern struct userport_usb_info *ptr_userport_info;
+#endif
+#endif
+#if defined (CONFIG_ARCH_SDP1404) && defined (CONFIG_MODULES)
+extern void enable_wifi_reset(void);
+#endif
 
 /*
  * Adds a new dynamic USBdevice ID to this driver,
@@ -782,7 +797,9 @@ static int usb_device_match(struct device *dev, struct device_driver *drv)
 {
 	/* devices and interfaces are handled separately */
 	if (is_usb_device(dev)) {
-
+#ifdef USB_AMBIENTMODE
+		dev->is_usb = 1;
+#endif
 		/* interface drivers never match devices */
 		if (!is_usb_device_driver(drv))
 			return 0;
@@ -801,7 +818,9 @@ static int usb_device_match(struct device *dev, struct device_driver *drv)
 
 		intf = to_usb_interface(dev);
 		usb_drv = to_usb_driver(drv);
-
+#ifdef USB_AMBIENTMODE
+		dev->is_usb = 1;
+#endif
 		id = usb_match_id(intf, usb_drv->id_table);
 		if (id)
 			return 1;
@@ -819,11 +838,17 @@ static int usb_uevent(struct device *dev, struct kobj_uevent_env *env)
 	struct usb_device *usb_dev;
 
 	if (is_usb_device(dev)) {
+#ifdef USB_AMBIENTMODE
+		dev->is_usb = 1;
+#endif
 		usb_dev = to_usb_device(dev);
 	} else if (is_usb_interface(dev)) {
 		struct usb_interface *intf = to_usb_interface(dev);
 
 		usb_dev = interface_to_usbdev(intf);
+#ifdef USB_AMBIENTMODE
+		dev->is_usb = 1;
+#endif
 	} else {
 		return 0;
 	}
@@ -1141,8 +1166,11 @@ static int usb_suspend_device(struct usb_device *udev, pm_message_t msg)
 	dev_vdbg(&udev->dev, "%s: status %d\n", __func__, status);
 	return status;
 }
-
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+int usb_resume_device(struct usb_device *udev, pm_message_t msg)
+#else
 static int usb_resume_device(struct usb_device *udev, pm_message_t msg)
+#endif
 {
 	struct usb_device_driver	*udriver;
 	int				status = 0;
@@ -1194,9 +1222,13 @@ static int usb_suspend_interface(struct usb_device *udev,
 	dev_vdbg(&intf->dev, "%s: status %d\n", __func__, status);
 	return status;
 }
-
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+int usb_resume_interface(struct usb_device *udev,
+		struct usb_interface *intf, pm_message_t msg, int reset_resume)
+#else
 static int usb_resume_interface(struct usb_device *udev,
 		struct usb_interface *intf, pm_message_t msg, int reset_resume)
+#endif
 {
 	struct usb_driver	*driver;
 	int			status = 0;
@@ -1339,6 +1371,40 @@ static int usb_suspend_both(struct usb_device *udev, pm_message_t msg)
 	return status;
 }
 
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+#ifdef PARALLEL_RESET_RESUME_REMOVABLE_DEVICE
+static void invoke_resume_thread_userdevice(struct usb_device *udev)
+{
+    ptr_userport_info->udev[IOT_DEVICE] = udev;
+    ptr_userport_info->thread_info[IOT_DEVICE].wait_condition_flag = 1;
+    set_bit(USERPORT_RESUME_ID, &khubd_resume_flag);
+    wake_up(&ptr_userport_info->thread_info[IOT_DEVICE].waitQ);
+    dev_info(&udev->dev, "resume thread has been woken up for iot device\n");
+    return;
+}
+#endif
+static inline void report_resume_status(struct usb_device *udev, struct resume_devnode *dev, int status)
+{
+	if(status) {
+		dev_err(&udev->dev, "%s: status %d\n", __func__, status);
+#ifdef PARALLEL_RESET_RESUME_USER_PORT_DEVICES
+		if((dev != NULL) && dev->is_instant_point)
+			/* Clear bit for priority device tree reset fail at a particular busnum*/
+			clear_bit(dev->busnum, &instant_ctrl.instant_point_fail_count);
+#endif
+			if((dev != NULL) && (dev->head != NULL)){
+				dev->head->will_resume = 0;
+#ifdef PARALLEL_RESET_RESUME_USER_PORT_DEVICES
+				if(instant_ctrl.instant_point_fail_count == 0) {
+					instant_ctrl.user_port_thread_info.wait_condition_flag = 1;
+					wake_up(&instant_ctrl.user_port_thread_info.waitQ);
+				}
+#endif
+			}
+	}
+}
+#endif
+
 /**
  * usb_resume_both - resume a USB device and its interfaces
  * @udev: the usb_device to resume
@@ -1364,11 +1430,37 @@ static int usb_resume_both(struct usb_device *udev, pm_message_t msg)
 	int			status = 0;
 	int			i;
 	struct usb_interface	*intf;
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+	struct resume_devnode   *dev = udev->devnode;
+
+	if(dev != NULL && dev->skip_resume)
+		return 0;
+
+#endif
 
 	if (udev->state == USB_STATE_NOTATTACHED) {
 		status = -ENODEV;
 		goto done;
 	}
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+#ifdef PARALLEL_RESET_RESUME_REMOVABLE_DEVICE
+    if((udev->descriptor.idVendor ==  ptr_userport_devinfo[IOT_DEVICE]->idVendor) && (udev->descriptor.idProduct == ptr_userport_devinfo[IOT_DEVICE]->idProduct)){
+        invoke_resume_thread_userdevice(udev);
+		return 0;
+	}
+#endif
+#endif
+
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+#ifdef PARALLEL_RESET_RESUME_USER_PORT_DEVICES
+	if((udev->level) && (dev == NULL) && instant_ctrl.active) {
+		if(instant_ctrl.user_port_resume){
+			list_add_tail(&udev->other_dev_list, &instant_ctrl.other_dev_list);
+			return 0;
+		}
+	}
+#endif
+#endif
 	udev->can_submit = 1;
 
 	/* Resume the device */
@@ -1383,12 +1475,22 @@ static int usb_resume_both(struct usb_device *udev, pm_message_t msg)
 					udev->reset_resume);
 		}
 	}
+#if (defined (CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)) && defined (CONFIG_ARCH_SDP1404) && defined (CONFIG_MODULES)
+	if((udev->descriptor.idVendor ==  HUB11_VENDOR_ID) && (udev->descriptor.idProduct == HUB11_PRODUCT_ID) && (udev->bus->busnum == HUB11_BUSNO)){
+		// Enable Wifi nreset for NT14U, Golf_9000 in Hawk.P upgrade JP
+		enable_wifi_reset();
+	}
+#endif
+
 	usb_mark_last_busy(udev);
 
  done:
 	dev_vdbg(&udev->dev, "%s: status %d\n", __func__, status);
 	if (!status)
 		udev->reset_resume = 0;
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+	report_resume_status(udev, dev, status);
+#endif
 	return status;
 }
 

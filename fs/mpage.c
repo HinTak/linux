@@ -263,6 +263,14 @@ do_mpage_readpage(struct bio *bio, struct page *page, unsigned nr_pages,
 		goto confused;
 	}
 
+#ifdef CONFIG_BD_CACHE_ENABLED
+	if (bio && test_bit(AS_DIRECT, &page->mapping->flags)) {
+		/* printk("%s: AS_DIRECT, set_bit(BIO_DIRECT,
+			&bio->bi_flags)\n", __FUNCTION__); */
+		set_bit(BIO_DIRECT, &bio->bi_flags);
+	}
+#endif
+
 	/*
 	 * This page will go to BIO.  Do we need to send this BIO off first?
 	 */
@@ -283,6 +291,14 @@ alloc_new:
 			goto confused;
 	}
 
+#ifdef CONFIG_BD_CACHE_ENABLED
+	if (bio && test_bit(AS_DIRECT, &page->mapping->flags)) {
+		/* printk("%s: AS_DIRECT, set_bit(BIO_DIRECT,
+			&bio->bi_flags)\n", __FUNCTION__); */
+		set_bit(BIO_DIRECT, &bio->bi_flags);
+	}
+#endif
+
 	length = first_hole << blkbits;
 	if (bio_add_page(bio, page, length, 0) < length) {
 		bio = mpage_bio_submit(READ, bio);
@@ -300,6 +316,14 @@ out:
 	return bio;
 
 confused:
+
+#ifdef CONFIG_BD_CACHE_ENABLED
+	if (bio && test_bit(AS_DIRECT, &page->mapping->flags)) {
+		/* printk("%s: AS_DIRECT, set_bit(BIO_DIRECT,
+			&bio->bi_flags)\n", __FUNCTION__); */
+		set_bit(BIO_DIRECT, &bio->bi_flags);
+	}
+#endif
 	if (bio)
 		bio = mpage_bio_submit(READ, bio);
 	if (!PageUptodate(page))

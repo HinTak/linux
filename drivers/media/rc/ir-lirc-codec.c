@@ -20,7 +20,12 @@
 #include <media/rc-core.h>
 #include "rc-core-priv.h"
 
+#ifdef CONFIG_SDP_MICOM_IRB
+#define LIRCBUF_SIZE 512
+#else
 #define LIRCBUF_SIZE 256
+#endif
+
 
 /**
  * ir_lirc_decode() - Send raw IR data to lirc_dev to be relayed to the

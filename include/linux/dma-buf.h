@@ -31,6 +31,9 @@
 #include <linux/dma-mapping.h>
 #include <linux/fs.h>
 #include <linux/fence.h>
+#ifdef CONFIG_DMA_SHARED_BUFFER_USES_KDS
+#include <linux/kds.h>
+#endif
 #include <linux/wait.h>
 
 struct device;
@@ -133,6 +136,13 @@ struct dma_buf {
 	void *priv;
 	struct reservation_object *resv;
 
+#ifdef CONFIG_DMA_SHARED_BUFFER_USES_KDS
+	struct kds_resource kds;
+	wait_queue_head_t wq_exclusive;
+	wait_queue_head_t wq_shared;
+	struct kds_callback kds_cb;
+#endif
+
 	/* poll support */
 	wait_queue_head_t poll;
 
@@ -203,6 +213,14 @@ static inline void get_dma_buf(struct dma_buf *dmabuf)
 	get_file(dmabuf->file);
 }
 
+#ifdef CONFIG_DMA_SHARED_BUFFER_USES_KDS
+static inline struct kds_resource *
+	get_dma_buf_kds_resource(struct dma_buf *dmabuf)
+{
+	return &dmabuf->kds;
+}
+#endif
+
 struct dma_buf_attachment *dma_buf_attach(struct dma_buf *dmabuf,
 							struct device *dev);
 void dma_buf_detach(struct dma_buf *dmabuf,
@@ -233,4 +251,9 @@ void *dma_buf_vmap(struct dma_buf *);
 void dma_buf_vunmap(struct dma_buf *, void *vaddr);
 int dma_buf_debugfs_create_file(const char *name,
 				int (*write)(struct seq_file *));
+
+#ifdef CONFIG_DMA_SHARED_BUFFER_USES_KDS
+int kds_dma_buf_module_register(struct kds_dma_buf_register *kds_funcs);
+#endif
+
 #endif /* __DMA_BUF_H__ */

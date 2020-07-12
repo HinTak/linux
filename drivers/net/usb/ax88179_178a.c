@@ -190,6 +190,9 @@ struct ax88179_int_data {
 static const struct {
 	unsigned char ctrl, timer_l, timer_h, size, ifg;
 } AX88179_BULKIN_SIZE[] =	{
+#ifdef SAMSUNG_HYPERUART_SDB_PUSH_FIX
+	{7, 0x4f, 0,	0x04, 0xff},       // Setting AX_RX_BULKIN_QCTRL to 6K
+#endif
 	{7, 0x4f, 0,	0x12, 0xff},
 	{7, 0x20, 3,	0x16, 0xff},
 	{7, 0xae, 7,	0x18, 0xff},
@@ -1254,7 +1257,11 @@ static int ax88179_bind(struct usbnet *dev, struct usb_interface *intf)
 	memcpy(tmp, &AX88179_BULKIN_SIZE[0], 5);
 	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_RX_BULKIN_QCTRL, 5, 5, tmp);
 
+#ifdef SAMSUNG_HYPERUART_SDB_PUSH_FIX
+	dev->rx_urb_size = (1024 * (tmp[3] + 2));
+#else
 	dev->rx_urb_size = 1024 * 20;
+#endif
 
 	*tmp = 0x34;
 	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_PAUSE_WATERLVL_LOW, 1, 1, tmp);
@@ -1397,8 +1404,21 @@ static int ax88179_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 			skb_pull(skb, 2);
 			skb->len = pkt_len;
 			skb_set_tail_pointer(skb, pkt_len);
+#ifndef SAMSUNG_HYPERUART_PREALLOC_SUPPORT
 			skb->truesize = pkt_len + sizeof(struct sk_buff);
 			ax88179_rx_checksum(skb, pkt_hdr);
+#endif
+#ifdef SAMSUNG_HYPERUART_PREALLOC_SUPPORT
+			ax_skb = skb_clone(skb, GFP_ATOMIC);
+			if (!ax_skb)
+				return 0;
+			ax_skb->len = pkt_len;
+			ax_skb->data = skb->data;
+			skb_set_tail_pointer(ax_skb, pkt_len);
+			ax_skb->truesize = pkt_len + sizeof(struct sk_buff);
+			ax88179_rx_checksum(ax_skb, pkt_hdr);
+			usbnet_skb_return(dev, ax_skb);
+#endif
 			return 1;
 		}
 
@@ -1427,6 +1447,9 @@ ax88179_tx_fixup(struct usbnet *dev, struct sk_buff *skb, gfp_t flags)
 	int frame_size = dev->maxpacket;
 	int mss = skb_shinfo(skb)->gso_size;
 	int headroom;
+#ifdef SAMSUNG_HYPERUART_PREALLOC_SUPPORT
+	struct driver_info *info = dev->driver_info;
+#endif
 
 	tx_hdr1 = skb->len;
 	tx_hdr2 = mss;
@@ -1448,6 +1471,17 @@ ax88179_tx_fixup(struct usbnet *dev, struct sk_buff *skb, gfp_t flags)
 	skb_push(skb, 4);
 	cpu_to_le32s(&tx_hdr1);
 	skb_copy_to_linear_data(skb, &tx_hdr1, 4);
+
+#ifdef SAMSUNG_HYPERUART_PREALLOC_SUPPORT
+	/*  if FLAG_MULTI_PACKET is ON, ZLP is not handled by usbnet */
+	if ((info->flags & FLAG_MULTI_PACKET)
+			&& (skb->len % dev->maxpacket == 0)) {
+		if (skb_tailroom(skb)) {
+			skb->data[skb->len] = 0;
+			__skb_put(skb, 1);
+		}
+	}
+#endif
 
 	return skb;
 }
@@ -1508,6 +1542,14 @@ static int ax88179_link_reset(struct usbnet *dev)
 	}
 
 	/* RX bulk configuration */
+
+#ifdef SAMSUNG_HYPERUART_SDB_PUSH_FIX
+	/* Workaround: Rx memory allocation failure for 20k
+	 * Choose always lowest buffer size < 8k
+	 */
+        memcpy(tmp, &AX88179_BULKIN_SIZE[0], 5);
+#endif
+
 	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_RX_BULKIN_QCTRL, 5, 5, tmp);
 
 	dev->rx_urb_size = (1024 * (tmp[3] + 2));
@@ -1558,7 +1600,11 @@ static int ax88179_reset(struct usbnet *dev)
 	memcpy(tmp, &AX88179_BULKIN_SIZE[0], 5);
 	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_RX_BULKIN_QCTRL, 5, 5, tmp);
 
+#ifdef SAMSUNG_HYPERUART_SDB_PUSH_FIX
+	dev->rx_urb_size = (1024 * (tmp[3] + 2));
+#else
 	dev->rx_urb_size = 1024 * 20;
+#endif
 
 	*tmp = 0x34;
 	ax88179_write_cmd(dev, AX_ACCESS_MAC, AX_PAUSE_WATERLVL_LOW, 1, 1, tmp);
@@ -1638,7 +1684,11 @@ static const struct driver_info ax88179_info = {
 	.link_reset = ax88179_link_reset,
 	.reset = ax88179_reset,
 	.stop = ax88179_stop,
+#ifdef SAMSUNG_HYPERUART_PREALLOC_SUPPORT
+	.flags = FLAG_ETHER | FLAG_FRAMING_AX | FLAG_MULTI_PACKET,
+#else
 	.flags = FLAG_ETHER | FLAG_FRAMING_AX,
+#endif
 	.rx_fixup = ax88179_rx_fixup,
 	.tx_fixup = ax88179_tx_fixup,
 };

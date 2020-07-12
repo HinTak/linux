@@ -24,6 +24,9 @@
 #include <linux/usb/hcd.h>
 #include "usb.h"
 
+#define TIMEOUT_OCCURRED		0
+#define TIMEOUT_IN_MSECS		60*1000
+
 struct usb_hub {
 	struct device		*intfdev;	/* the "interface" device */
 	struct usb_device	*hdev;

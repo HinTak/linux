@@ -16,12 +16,25 @@
 
 #include <linux/init.h>
 #include <linux/mm.h>
-
+#ifdef CONFIG_ARCH_SDP
+#define INIT_MEMBLOCK_REGIONS	64
+#else
 #define INIT_MEMBLOCK_REGIONS	128
+#endif
 #define INIT_PHYSMEM_REGIONS	4
 
 /* Definition of memblock flags. */
 #define MEMBLOCK_HOTPLUG	0x1	/* hotpluggable region */
+
+#ifdef CONFIG_SPARSE_LOWMEM_EXT_MAP
+#define PAGETBL_SHIFT (pageblock_order + PAGE_SHIFT)
+#define PAGETBL_SIZE (1 << PAGETBL_SHIFT)
+#define PAGETBL_IDX(x) ((x)>> PAGETBL_SHIFT)
+#define PAGETBL_ADDR_MASK	((1 << (PAGETBL_SHIFT)) - 1)
+
+#define MAX_PADDR_TABLE_SIZE 256
+#define MAX_VADDR_TABLE_SIZE 1024
+#endif
 
 struct memblock_region {
 	phys_addr_t base;
@@ -44,6 +57,12 @@ struct memblock {
 	phys_addr_t current_limit;
 	struct memblock_type memory;
 	struct memblock_type reserved;
+#ifdef CONFIG_SPARSE_LOWMEM_EXT_MAP
+	struct memblock_type puremem;
+	struct memblock_type dmamem;
+	phys_addr_t phys_table[MAX_PADDR_TABLE_SIZE];     /* input virt addr  (max lowmem is 896 MB, 896 / PAGE_BLOCK_SIZE = 224.)*/
+	unsigned long virt_table[MAX_VADDR_TABLE_SIZE];    /* input phys addr (phys - PHYS_BASE_OFFSET vector- PAGE_OFFSET ~= 1GB  / PAGEBLOCL_SIZE = 256)*/
+#endif
 #ifdef CONFIG_HAVE_MEMBLOCK_PHYS_MAP
 	struct memblock_type physmem;
 #endif
@@ -75,7 +94,12 @@ int memblock_reserve(phys_addr_t base, phys_addr_t size);
 void memblock_trim_memory(phys_addr_t align);
 int memblock_mark_hotplug(phys_addr_t base, phys_addr_t size);
 int memblock_clear_hotplug(phys_addr_t base, phys_addr_t size);
-
+#ifdef CONFIG_SPARSE_LOWMEM_EXT_MAP
+int memblock_reserve_dma(phys_addr_t base, phys_addr_t size);  
+int memblock_remove_dma(phys_addr_t base, phys_addr_t size);
+int memblock_reserve_puremem(phys_addr_t base, phys_addr_t size);  
+int memblock_remove_puremem(phys_addr_t base, phys_addr_t size);
+#endif
 /* Low level functions */
 int memblock_add_range(struct memblock_type *type,
 		       phys_addr_t base, phys_addr_t size,

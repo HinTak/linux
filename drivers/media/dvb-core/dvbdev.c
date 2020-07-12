@@ -47,14 +47,15 @@ static DEFINE_MUTEX(dvbdev_register_lock);
 
 static const char * const dnames[] = {
 	"video", "audio", "sec", "frontend", "demux", "dvr", "ca",
-	"net", "osd"
+	"net", "osd", "dvr_hdr", "hcas", "atsc30dmx", "atsc30lmt", 
+	"temi"
 };
 
 #ifdef CONFIG_DVB_DYNAMIC_MINORS
 #define MAX_DVB_MINORS		256
 #define DVB_MAX_IDS		MAX_DVB_MINORS
 #else
-#define DVB_MAX_IDS		4
+#define DVB_MAX_IDS		6
 #define nums2minor(num,type,id)	((num << 6) | (id << 4) | type)
 #define MAX_DVB_MINORS		(DVB_MAX_ADAPTERS*64)
 #endif
@@ -107,19 +108,27 @@ int dvb_generic_open(struct inode *inode, struct file *file)
 {
 	struct dvb_device *dvbdev = file->private_data;
 
-	if (!dvbdev)
+	if (!dvbdev) {
+		pr_err("[%s][%d] error\n", __func__, __LINE__); 
 		return -ENODEV;
+	}
 
-	if (!dvbdev->users)
+	if (!dvbdev->users) {
+		pr_err("[%s][%d] error\n", __func__, __LINE__); 
 		return -EBUSY;
+	}
 
 	if ((file->f_flags & O_ACCMODE) == O_RDONLY) {
-		if (!dvbdev->readers)
+		if (!dvbdev->readers) {
+			pr_err("[%s][%d] error\n", __func__, __LINE__); 
 			return -EBUSY;
+		}
 		dvbdev->readers--;
 	} else {
-		if (!dvbdev->writers)
+		if (!dvbdev->writers) {
+			pr_err("[%s][%d] WR flag multi open error\n", __func__, __LINE__); 
 			return -EBUSY;
+		}
 		dvbdev->writers--;
 	}
 
@@ -283,6 +292,7 @@ int dvb_register_device(struct dvb_adapter *adap, struct dvb_device **pdvbdev,
 		mutex_unlock(&dvbdev_register_lock);
 		*pdvbdev = NULL;
 		printk(KERN_ERR "%s: couldn't find free device id\n", __func__);
+		printk("[JUR] %s %d, return ENFILE\n", __FUNCTION__, __LINE__);	
 		return -ENFILE;
 	}
 
@@ -290,6 +300,7 @@ int dvb_register_device(struct dvb_adapter *adap, struct dvb_device **pdvbdev,
 
 	if (!dvbdev){
 		mutex_unlock(&dvbdev_register_lock);
+		printk("[JUR] %s %d, return ENOMEM\n", __FUNCTION__, __LINE__);	
 		return -ENOMEM;
 	}
 
@@ -298,6 +309,7 @@ int dvb_register_device(struct dvb_adapter *adap, struct dvb_device **pdvbdev,
 	if (!dvbdevfops){
 		kfree (dvbdev);
 		mutex_unlock(&dvbdev_register_lock);
+		printk("[JUR] %s %d, return ENOMEM\n", __FUNCTION__, __LINE__);	
 		return -ENOMEM;
 	}
 
@@ -325,6 +337,7 @@ int dvb_register_device(struct dvb_adapter *adap, struct dvb_device **pdvbdev,
 		kfree(dvbdev);
 		up_write(&minor_rwsem);
 		mutex_unlock(&dvbdev_register_lock);
+		printk("[JUR] %s %d, return EINVAL\n", __FUNCTION__, __LINE__);
 		return -EINVAL;
 	}
 #else
@@ -343,6 +356,8 @@ int dvb_register_device(struct dvb_adapter *adap, struct dvb_device **pdvbdev,
 	if (IS_ERR(clsdev)) {
 		printk(KERN_ERR "%s: failed to create device dvb%d.%s%d (%ld)\n",
 		       __func__, adap->num, dnames[type], id, PTR_ERR(clsdev));
+
+		printk("[JUR] %s %d, return device_create\n", __FUNCTION__, __LINE__);	
 		return PTR_ERR(clsdev);
 	}
 	dprintk(KERN_DEBUG "DVB: register adapter%d/%s%d @ minor: %i (0x%02x)\n",
@@ -584,9 +599,22 @@ static int dvb_uevent(struct device *dev, struct kobj_uevent_env *env)
 	return 0;
 }
 
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+static int dvb_get_smack64_label(struct device *dev, char* buf, int size)
+{
+	snprintf(buf, size, "%s", "*");
+	return 0;
+}
+#endif
+
 static char *dvb_devnode(struct device *dev, umode_t *mode)
 {
 	struct dvb_device *dvbdev = dev_get_drvdata(dev);
+
+	if (mode)
+	{
+	    *mode = 0666;
+	}
 
 	return kasprintf(GFP_KERNEL, "dvb/adapter%d/%s%d",
 		dvbdev->adapter->num, dnames[dvbdev->type], dvbdev->id);
@@ -616,6 +644,10 @@ static int __init init_dvbdev(void)
 	}
 	dvb_class->dev_uevent = dvb_uevent;
 	dvb_class->devnode = dvb_devnode;
+
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+	dvb_class->get_smack64_label = dvb_get_smack64_label;
+#endif
 	return 0;
 
 error:

@@ -17,11 +17,6 @@
 void free_pgtables(struct mmu_gather *tlb, struct vm_area_struct *start_vma,
 		unsigned long floor, unsigned long ceiling);
 
-static inline void set_page_count(struct page *page, int v)
-{
-	atomic_set(&page->_count, v);
-}
-
 extern int __do_page_cache_readahead(struct address_space *mapping,
 		struct file *filp, pgoff_t offset, unsigned long nr_to_read,
 		unsigned long lookahead_size);
@@ -37,13 +32,13 @@ static inline unsigned long ra_submit(struct file_ra_state *ra,
 }
 
 /*
- * Turn a non-refcounted page (->_count == 0) into refcounted with
+ * Turn a non-refcounted page (->_refcount == 0) into refcounted with
  * a count of one.
  */
 static inline void set_page_refcounted(struct page *page)
 {
 	VM_BUG_ON_PAGE(PageTail(page), page);
-	VM_BUG_ON_PAGE(atomic_read(&page->_count), page);
+	VM_BUG_ON_PAGE(page_ref_count(page), page);
 	set_page_count(page, 1);
 }
 
@@ -51,19 +46,19 @@ static inline void __get_page_tail_foll(struct page *page,
 					bool get_page_head)
 {
 	/*
-	 * If we're getting a tail page, the elevated page->_count is
+	 * If we're getting a tail page, the elevated page->_refcount is
 	 * required only in the head page and we will elevate the head
-	 * page->_count and tail page->_mapcount.
+	 * page->_refcount and tail page->_mapcount.
 	 *
 	 * We elevate page_tail->_mapcount for tail pages to force
-	 * page_tail->_count to be zero at all times to avoid getting
+	 * page_tail->_refcount to be zero at all times to avoid getting
 	 * false positives from get_page_unless_zero() with
 	 * speculative page access (like in
 	 * page_cache_get_speculative()) on tail pages.
 	 */
-	VM_BUG_ON_PAGE(atomic_read(&page->first_page->_count) <= 0, page);
+	VM_BUG_ON_PAGE(page_ref_count(page->first_page) <= 0, page);
 	if (get_page_head)
-		atomic_inc(&page->first_page->_count);
+		page_ref_inc(page->first_page);
 	get_huge_page_tail(page);
 }
 
@@ -84,10 +79,10 @@ static inline void get_page_foll(struct page *page)
 	else {
 		/*
 		 * Getting a normal page or the head of a compound page
-		 * requires to already have an elevated page->_count.
+		 * requires to already have an elevated page->_refcount.
 		 */
-		VM_BUG_ON_PAGE(atomic_read(&page->_count) <= 0, page);
-		atomic_inc(&page->_count);
+		VM_BUG_ON_PAGE(page_ref_count(page) <= 0, page);
+		page_ref_inc(page);
 	}
 }
 
@@ -157,12 +152,25 @@ __find_buddy_index(unsigned long page_idx, unsigned int order)
 extern int __isolate_free_page(struct page *page, unsigned int order);
 extern void __free_pages_bootmem(struct page *page, unsigned int order);
 extern void prep_compound_page(struct page *page, unsigned long order);
+extern void post_alloc_hook(struct page *page, unsigned int order,
+					gfp_t gfp_flags);
 #ifdef CONFIG_MEMORY_FAILURE
 extern bool is_free_buddy_page(struct page *page);
 #endif
 extern int user_min_free_kbytes;
 
 #if defined CONFIG_COMPACTION || defined CONFIG_CMA
+struct cma_buffer {
+	unsigned long pfn;
+	unsigned long count;
+	pid_t pid;
+	char comm[TASK_COMM_LEN];
+	uint64_t latency;
+	unsigned long tick;
+	unsigned long trace_entries[16];
+	unsigned int nr_entries;
+	struct list_head list;
+};
 
 /*
  * in mm/compaction.c
@@ -202,7 +210,9 @@ isolate_migratepages_range(struct compact_control *cc,
 			   unsigned long low_pfn, unsigned long end_pfn);
 int find_suitable_fallback(struct free_area *area, unsigned int order,
 			int migratetype, bool only_stealable, bool *can_steal);
-
+#ifdef CONFIG_CMA_DEBUG_REFTRACE
+extern void get_log_from_pfn(unsigned long pfn);
+#endif
 #endif
 
 /*
@@ -430,7 +440,5 @@ unsigned long reclaim_clean_pages_from_list(struct zone *zone,
 #define ALLOC_HARDER		0x10 /* try to alloc harder */
 #define ALLOC_HIGH		0x20 /* __GFP_HIGH set */
 #define ALLOC_CPUSET		0x40 /* check for correct cpuset */
-#define ALLOC_CMA		0x80 /* allow allocations from CMA areas */
-#define ALLOC_FAIR		0x100 /* fair zone allocation */
 
 #endif	/* __MM_INTERNAL_H */

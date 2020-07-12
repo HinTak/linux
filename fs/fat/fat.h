@@ -99,7 +99,6 @@ struct msdos_sb_info {
 	spinlock_t dir_hash_lock;
 	struct hlist_head dir_hashtable[FAT_HASH_SIZE];
 
-	unsigned int dirty;           /* fs state before mount */
 	struct rcu_head rcu;
 };
 
@@ -342,6 +341,11 @@ static inline void fatent_brelse(struct fat_entry *fatent)
 	fatent->nr_bhs = 0;
 	fatent->bhs[0] = fatent->bhs[1] = NULL;
 	fatent->fat_inode = NULL;
+}
+
+static inline bool fat_valid_entry(struct msdos_sb_info *sbi, int entry)
+{
+	return FAT_START_ENT <= entry && entry < sbi->max_cluster;
 }
 
 extern void fat_ent_access_init(struct super_block *sb);

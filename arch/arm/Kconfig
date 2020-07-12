@@ -32,9 +32,13 @@ config ARM
 	select HAVE_ARCH_AUDITSYSCALL if (AEABI && !OABI_COMPAT)
 	select HAVE_ARCH_BITREVERSE if (CPU_32v7M || CPU_32v7) && !CPU_32v6
 	select HAVE_ARCH_JUMP_LABEL if !XIP_KERNEL
+	select HAVE_ARCH_KASAN
+	select ARCH_HAS_UBSAN_SANITIZE_ALL
 	select HAVE_ARCH_KGDB
 	select HAVE_ARCH_SECCOMP_FILTER if (AEABI && !OABI_COMPAT)
 	select HAVE_ARCH_TRACEHOOK
+	select HAVE_ARCH_VMAP_STACK
+	select HAVE_ARM_SMCCC if CPU_V7	
 	select HAVE_BPF_JIT
 	select HAVE_CC_STACKPROTECTOR
 	select HAVE_CONTEXT_TRACKING
@@ -60,7 +64,7 @@ config ARM
 	select HAVE_KPROBES if !XIP_KERNEL
 	select HAVE_KRETPROBES if (HAVE_KPROBES)
 	select HAVE_MEMBLOCK
-	select HAVE_MOD_ARCH_SPECIFIC if ARM_UNWIND
+	select HAVE_MOD_ARCH_SPECIFIC
 	select HAVE_OPROFILE if (HAVE_PERF_EVENTS)
 	select HAVE_OPTPROBES if !THUMB2_KERNEL
 	select HAVE_PERF_EVENTS
@@ -186,6 +190,9 @@ config ARCH_HAS_ILOG2_U64
 config ARCH_HAS_BANDGAP
 	bool
 
+config FIX_EARLYCON_MEM
+	def_bool y if MMU
+
 config GENERIC_HWEIGHT
 	bool
 	default y
@@ -298,6 +305,40 @@ source "kernel/Kconfig.freezer"
 
 menu "System Type"
 
+config KERNEL_STACK_SMALL
+	bool "4 KB kernel stack along with dynamic growth of stack upto 8KB"
+	depends on !KASAN
+	select IRQ_STACK
+	select VMAP_STACK
+	default n
+	help
+	 Select to store thread_info structure separately, not on thread kernel
+	 stack itself. Thread kernel stack is fixed at build time, so lets give
+	 more space to kernel stack and store thread_info separately.
+	 It will store only address of thread_info structure on kernel stack and
+	 while fetching thread info it will take one more derefer operation to
+	 access thread info. Enable this config for 4KB Kernel Stack with dynamic
+	 stack growth feature.
+
+config KERNEL_STACK_LARGE
+	bool "8KB kernel stack"
+	depends on !KASAN && !KERNEL_STACK_SMALL
+	select IRQ_STACK
+	default n
+	help
+	 This option enables base changes required for separate IRQ stack.
+	 It will store thread info pointer to base of kernel stack and same
+	 will be done in IRQ stack.
+
+config IRQ_STACK
+	default n
+	depends on (KERNEL_STACK_SMALL || KERNEL_STACK_LARGE) && FRAME_POINTER
+	bool "use separate stack for interrupts"
+	help
+	 This option enables use of selective dedicated per cpu stack for
+	 interrupts. This will help to avoid stack overflow issues on sharing
+	 same kernel stack with SVC and IRQ mode.
+
 config MMU
 	bool "MMU-based Paged Memory Management Support"
 	default y
@@ -314,6 +355,48 @@ choice
 	default ARCH_VERSATILE if !MMU
 	default ARCH_MULTIPLATFORM if MMU
 
+config ARCH_SDP
+	bool "Samsung DTV Platform"
+	select ARCH_HAS_HOLES_MEMORYMODEL
+	select ARCH_SPARSEMEM_ENABLE
+	select ARCH_FLATMEM_ENABLE
+	select ARM_AMBA
+	select ARM_GIC
+	select CPU_V7
+	select CLKDEV_LOOKUP
+	select COMMON_CLK
+	select GENERIC_CLOCKEVENTS
+	select HAVE_CLK
+	select HAVE_SMP
+	select NEED_MACH_MEMORY_H
+	select AUTO_ZRELADDR
+	select MIGHT_HAVE_CACHE_L2X0
+#	select HAVE_ARM_SCU if SMP
+#	select HAVE_ARM_TWD if LOCAL_TIMERS
+#	select PCI if ARCH_SDP1404
+	help
+	  Support for Samsung DTV platforms based on SDPxxxx.
+
+config ARCH_MEDIATEK
+	bool "Mediatek MT65xx & MT81xx SoC"
+	depends on MMU
+	select ARCH_WANT_OPTIONAL_GPIOLIB
+	select ARM_HAS_SG_CHAIN
+	select ARM_PATCH_PHYS_VIRT
+	select AUTO_ZRELADDR
+	select CLKSRC_OF
+	select COMMON_CLK
+	select GENERIC_CLOCKEVENTS
+	select MIGHT_HAVE_PCI
+	select MULTI_IRQ_HANDLER
+	select SPARSE_IRQ
+	select USE_OF
+	select ARM_GIC
+	select PINCTRL
+	select MTK_TIMER
+	help
+	  Support for Mediatek MT65xx & MT81xx SoCs
+
 config ARCH_MULTIPLATFORM
 	bool "Allow multiple platforms to be selected"
 	depends on MMU
@@ -328,6 +411,31 @@ config ARCH_MULTIPLATFORM
 	select MULTI_IRQ_HANDLER
 	select SPARSE_IRQ
 	select USE_OF
+
+config ARCH_NVT_V7
+	bool "Novatek DTV Platform"
+	depends on MMU
+	select ARCH_HAS_HOLES_MEMORYMODEL
+	select ARCH_FLATMEM_ENABLE
+	select ARCH_SPARSEMEM_ENABLE
+	select ARM_GIC
+	select ARM_GLOBAL_TIMER
+	select ARM_HAS_SG_CHAIN
+	select CLKDEV_LOOKUP
+	select CLKSRC_ARM_GLOBAL_TIMER_BROADCAST if ARM_GLOBAL_TIMER
+	select COMMON_CLK
+	select CPU_V7
+	select GENERIC_CLOCKEVENTS
+	select HAVE_ARM_SCU
+	select HAVE_ARM_TWD if SMP
+	select HAVE_CLK
+	select HAVE_SMP
+	select NEED_MACH_MEMORY_H
+	select MIGHT_HAVE_CACHE_L2X0
+	select PLAT_NOVATEK
+	select SERIAL_OF_PLATFORM
+	select USE_OF
+	select ARCH_REQUIRE_GPIOLIB
 
 config ARCH_REALVIEW
 	bool "ARM Ltd. RealView family"
@@ -913,6 +1021,8 @@ source "arch/arm/mach-rockchip/Kconfig"
 
 source "arch/arm/mach-sa1100/Kconfig"
 
+source "arch/arm/mach-sdp/Kconfig"
+
 source "arch/arm/mach-socfpga/Kconfig"
 
 source "arch/arm/mach-spear/Kconfig"
@@ -943,6 +1053,7 @@ source "arch/arm/mach-ux500/Kconfig"
 source "arch/arm/mach-versatile/Kconfig"
 
 source "arch/arm/mach-vexpress/Kconfig"
+source "arch/arm/mach-nvt72xxx/Kconfig"
 source "arch/arm/plat-versatile/Kconfig"
 
 source "arch/arm/mach-vt8500/Kconfig"
@@ -974,6 +1085,9 @@ config PLAT_PXA
 	bool
 
 config PLAT_VERSATILE
+	bool
+
+config PLAT_NOVATEK
 	bool
 
 config ARM_TIMER_SP804
@@ -1230,6 +1344,16 @@ config ARM_ERRATA_773022
 	  loop buffer may deliver incorrect instructions. This
 	  workaround disables the loop buffer to avoid the erratum.
 
+config ARM_ERRATA_814220
+	bool "ARM errata: Cache maintenance by set/way operations can execute out of order"
+	depends on CPU_V7
+	help
+	  The v7 ARM states that all cache and branch predictor maintenance operations
+	  that do not specify an address execute, relative to each other, in program order.
+	  However, because of this erratum, an L2 set/way cache maintenance operation can
+	  overtake an L1 set/way cache maintenance operation. This ERRATA only affected the
+	  Cortex-A7 and present in r0p2, r0p3, r0p4, r0p5.
+
 endmenu
 
 source "arch/arm/common/Kconfig"
@@ -1253,6 +1377,16 @@ config ISA_DMA
 # Select ISA DMA interface
 config ISA_DMA_API
 	bool
+
+config HOLES_IN_ZONE
+	bool "Manage holes in memory"
+	depends on SPARSEMEM
+	default y
+	help
+	  CONFIG_HOLES_IN_ZONE should be used when SPARSEMEM or
+	  ARCH_HAS_HOLES_MEMORYMODEL is enabled.This option should be
+	  enabled to avoid kernel crash when kernel memory is not aligned
+	  to SECTION_SIZE_BITS.
 
 config PCI
 	bool "PCI support" if MIGHT_HAVE_PCI
@@ -1362,6 +1496,125 @@ config SCHED_SMT
 	  MultiThreading at a cost of slightly increased overhead in some
 	  places. If unsure say N here.
 
+choice
+	prompt "HMP Scheduler"
+	default SCHED_HMP
+	help
+	  Which HMP scheduler needed
+
+
+config SCHED_HMP
+       bool "(EXPERIMENTAL) Heterogenous multiprocessor scheduling"
+       depends on FAIR_GROUP_SCHED && !SCHED_AUTOGROUP
+       select DISABLE_CPU_SCHED_DOMAIN_BALANCE
+       select SCHED_MC
+       help
+         Experimental scheduler optimizations for heterogeneous platforms.
+         Attempts to introspectively select task affinity to optimize power
+         and performance. Basic support for multiple (>2) cpu types is in place,
+         but it has only been tested with two types of cpus.
+         There is currently no support for migration of task groups, hence
+         !SCHED_AUTOGROUP. Furthermore, normal load-balancing must be disabled
+         between cpus of different type (DISABLE_CPU_SCHED_DOMAIN_BALANCE).
+
+config NO_HMP
+	bool "Don't use HMP Schedulers"
+endchoice
+
+config DISABLE_CPU_SCHED_DOMAIN_BALANCE
+	bool "(EXPERIMENTAL) Disable CPU level scheduler load-balancing"
+	depends on SCHED_HMP
+	help
+	  Disables scheduler load-balancing at CPU sched domain level.
+
+config SCHED_HMP_PRIO_FILTER
+       bool "(EXPERIMENTAL) Filter HMP migrations by task priority"
+       depends on SCHED_HMP
+       default n
+       help
+         Enables task priority based HMP migration filter. Any task with
+         a NICE value above the threshold will always be on low-power cpus
+         with less compute capacity.
+
+config SCHED_HMP_PRIO_FILTER_VAL
+       int "NICE priority threshold"
+       default 5
+       depends on SCHED_HMP_PRIO_FILTER
+
+config SCHED_HMP_FAST_CPU_MASK
+       string "HMP scheduler fast CPU mask"
+       depends on SCHED_HMP
+       default "2-3"
+       help
+	 Leave empty to use device tree information.
+         Specify the cpuids of the fast CPUs in the system as a list string,
+         e.g. cpuid 0+1 should be specified as 0-1.
+
+config SCHED_HMP_SLOW_CPU_MASK
+       string "HMP scheduler slow CPU mask"
+       depends on SCHED_HMP
+       default "0-1"
+       help
+	 Leave empty to use device tree information.
+         Specify the cpuids of the slow CPUs in the system as a list string,
+         e.g. cpuid 0+1 should be specified as 0-1.
+
+config HMP_VARIABLE_SCALE
+	bool "Allows changing the load tracking scale through sysfs"
+	depends on SCHED_HMP
+	default y
+	help
+	  When turned on, this option exports the thresholds and load average
+	  period value for the load tracking patches through sysfs.
+	  The values can be modified to change the rate of load accumulation
+	  and the thresholds used for HMP migration.
+	  The load_avg_period_ms is the time in ms to reach a load average of
+	  0.5 for an idle task of 0 load average ratio that start a busy loop.
+	  The up_threshold and down_threshold is the value to go to a faster
+	  CPU or to go back to a slower cpu.
+	  The {up,down}_threshold are devided by 1024 before being compared
+	  to the load average.
+	  For examples, with load_avg_period_ms = 128 and up_threshold = 512,
+	  a running task with a load of 0 will be migrated to a bigger CPU after
+	  128ms, because after 128ms its load_avg_ratio is 0.5 and the real
+	  up_threshold is 0.5.
+	  This patch has the same behavior as changing the Y of the load
+	  average computation to
+	        (1002/1024)^(LOAD_AVG_PERIOD/load_avg_period_ms)
+	  but it remove intermadiate overflows in computation.
+
+config HMP_FREQUENCY_INVARIANT_SCALE
+	bool "(EXPERIMENTAL) Frequency-Invariant Tracked Load for HMP"
+	depends on HMP_VARIABLE_SCALE && CPU_FREQ
+	default y
+	help
+	  Scales the current load contribution in line with the frequency
+	  of the CPU that the task was executed on.
+	  In this version, we use a simple linear scale derived from the
+	  maximum frequency reported by CPUFreq.
+	  Restricting tracked load to be scaled by the CPU's frequency
+	  represents the consumption of possible compute capacity
+	  (rather than consumption of actual instantaneous capacity as
+	  normal) and allows the HMP migration's simple threshold
+	  migration strategy to interact more predictably with CPUFreq's
+	  asynchronous compute capacity changes.
+
+config HMP_REAL_HEAVIEST_PICK
+	bool "Heaviest task searching change for HMP"
+	depends on SCHED_HMP
+	default y
+	help
+	Heaviest task search all of the cfs runqueues.
+	android basically 3 scheduling group.
+	previous checking only current se runqueue.
+
+config HMP_DEBUG
+	bool "Debug feature for HMP"
+	depends on SCHED_HMP
+	default n
+	help
+	Debug feature for HMP.
+
 config HAVE_ARM_SCU
 	bool
 	help
@@ -1463,6 +1716,16 @@ config HOTPLUG_CPU
 	  Say Y here to experiment with turning CPUs off and on.  CPUs
 	  can be controlled through /sys/devices/system/cpu.
 
+config PRESERVE_IRQ_AFFINITY
+        bool "Restore IRQ affinities when CPU comes online"
+        depends on HOTPLUG_CPU
+        default y
+        help
+          If some CPU goes offline, manually setted IRQ affinities could change.
+          When CPU comes online, all relevant IRQs will be re-affined to it
+          if you will say Y here.
+
+
 config ARM_PSCI
 	bool "Support for the ARM Power State Coordination Interface (PSCI)"
 	depends on CPU_V7
@@ -1486,6 +1749,7 @@ config ARCH_NR_GPIO
 	default 352 if ARCH_VT8500
 	default 288 if ARCH_ROCKCHIP
 	default 264 if MACH_H4700
+	default 512 if ARCH_SDP
 	default 0
 	help
 	  Maximum number of GPIOs in the system.
@@ -1629,6 +1893,9 @@ config ARCH_HAS_HOLES_MEMORYMODEL
 config ARCH_SPARSEMEM_ENABLE
 	bool
 
+config ARCH_FLATMEM_ENABLE
+	bool
+
 config ARCH_SPARSEMEM_DEFAULT
 	def_bool ARCH_SPARSEMEM_ENABLE
 
@@ -1663,6 +1930,23 @@ config HIGHPTE
 	bool "Allocate 2nd-level pagetables from highmem"
 	depends on HIGHMEM
 
+config MODULES_USE_LONG_CALLS
+	bool "Build modules with long-calls"
+	depends on MMU && MODULES
+	help
+	  By default, kernel modules use short-calls ("bl" instruction) which
+	  has limited jump distance (+/- 32MB). That's why modules are loaded
+	  just below kernel text.
+
+	  After enabling this option, kernel modules will be built using
+	  long-calls ("blx" instruction) and 32MB jump distance limitation
+	  will no longer apply.
+
+	  Currently this option is incompatible with CONFIG_FUNCTION_TRACER.
+	  Compiler emits short-calls to mcount() even with -mlong-calls.
+	  Most likely this is a bug in GCC, but anyway ftrace doesn't have
+	  support for patching long-calls of mcount.
+
 config HW_PERF_EVENTS
 	bool "Enable hardware performance counter support for perf events"
 	depends on PERF_EVENTS
@@ -1682,13 +1966,29 @@ config HAVE_ARCH_TRANSPARENT_HUGEPAGE
 config ARCH_WANT_GENERAL_HUGETLB
 	def_bool y
 
+config ARM_MODULE_PLTS
+	bool "Use PLTs to allow module memory to spill over into vmalloc area"
+	depends on MODULES
+	help
+	  Allocate PLTs when loading modules so that jumps and calls whose
+	  targets are too far away for their relative offsets to be encoded
+	  in the instructions themselves can be bounced via veneers in the
+	  module's PLT. This allows modules to be allocated in the generic
+	  vmalloc area after the dedicated module memory area has been
+	  exhausted. The modules will use slightly more memory, but after
+	  rounding up to page size, the actual memory footprint is usually
+	  the same.
+
+	  Say y if you are getting out of memory errors while loading modules
+
 source "mm/Kconfig"
 
 config FORCE_MAX_ZONEORDER
-	int "Maximum zone order" if ARCH_SHMOBILE_LEGACY
+	int "Maximum zone order" if (ARCH_SHMOBILE || ARCH_SDP)
 	range 11 64 if ARCH_SHMOBILE_LEGACY
 	default "12" if SOC_AM33XX
 	default "9" if SA1111 || ARCH_EFM32
+        default "14" if ARCH_MXC
 	default "11"
 	help
 	  The kernel memory allocator divides physically contiguous memory
@@ -2109,6 +2409,8 @@ source "drivers/firmware/Kconfig"
 source "fs/Kconfig"
 
 source "arch/arm/Kconfig.debug"
+
+source "arch/Kconfig.VDLP"
 
 source "security/Kconfig"
 

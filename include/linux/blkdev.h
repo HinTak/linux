@@ -209,6 +209,11 @@ struct request {
 
 	/* for bidi */
 	struct request *next_rq;
+
+#ifdef CONFIG_VDFS4_TRACE
+	unsigned int vdfs_trace_magic;
+	void *vdfs_trace_data;
+#endif
 };
 
 static inline unsigned short req_get_ioprio(struct request *req)
@@ -360,7 +365,7 @@ struct request_queue {
 	 */
 	struct delayed_work	delay_work;
 
-	struct backing_dev_info	backing_dev_info;
+	struct backing_dev_info	*backing_dev_info;
 
 	/*
 	 * The queue owner gets to use this for whatever they like.
@@ -828,7 +833,7 @@ extern int sg_scsi_ioctl(struct request_queue *, struct gendisk *, fmode_t,
  */
 static inline void blk_clear_queue_congested(struct request_queue *q, int sync)
 {
-	clear_bdi_congested(&q->backing_dev_info, sync);
+	clear_bdi_congested(q->backing_dev_info, sync);
 }
 
 /*
@@ -837,7 +842,7 @@ static inline void blk_clear_queue_congested(struct request_queue *q, int sync)
  */
 static inline void blk_set_queue_congested(struct request_queue *q, int sync)
 {
-	set_bdi_congested(&q->backing_dev_info, sync);
+	set_bdi_congested(q->backing_dev_info, sync);
 }
 
 extern void blk_start_queue(struct request_queue *q);
@@ -862,7 +867,12 @@ extern void blk_execute_rq_nowait(struct request_queue *, struct gendisk *,
 
 static inline struct request_queue *bdev_get_queue(struct block_device *bdev)
 {
-	return bdev->bd_disk->queue;	/* this is never NULL */
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+        // FEB-01-2007
+        if(bdev->bd_disk == NULL)
+                return NULL;
+#endif
+	return bdev->bd_disk->queue; /* this is never NULL */
 }
 
 /*
@@ -1044,7 +1054,6 @@ extern void blk_queue_rq_timed_out(struct request_queue *, rq_timed_out_fn *);
 extern void blk_queue_rq_timeout(struct request_queue *, unsigned int);
 extern void blk_queue_flush(struct request_queue *q, unsigned int flush);
 extern void blk_queue_flush_queueable(struct request_queue *q, bool queueable);
-extern struct backing_dev_info *blk_get_backing_dev_info(struct block_device *bdev);
 
 extern int blk_rq_map_sg(struct request_queue *, struct request *, struct scatterlist *);
 extern void blk_dump_rq_flags(struct request *, char *);
@@ -1156,6 +1165,7 @@ static inline struct request *blk_map_queue_find_tag(struct blk_queue_tag *bqt,
 }
 
 #define BLKDEV_DISCARD_SECURE  0x01    /* secure discard */
+#define BLKDEV_DISCARD_ZERO    0x02    /* zero fill */
 
 extern int blkdev_issue_flush(struct block_device *, gfp_t, sector_t *);
 extern int blkdev_issue_discard(struct block_device *bdev, sector_t sector,
@@ -1596,6 +1606,69 @@ static inline bool blk_integrity_is_initialized(struct gendisk *g)
 
 #endif /* CONFIG_BLK_DEV_INTEGRITY */
 
+#if defined(CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM)
+
+enum hw_iovec_comp_type {
+           HW_IOVEC_COMP_UNCOMPRESSED=1<<1,
+           HW_IOVEC_COMP_GZIP=1<<2,
+           HW_IOVEC_COMP_ZLIB=1<<3,
+           HW_IOVEC_COMP_LZO=1<<4,
+           HW_IOVEC_COMP_MAX=1<<5,
+};
+
+enum hw_iovec_hash_type {
+           HW_IOVEC_HASH_NONE=1<<1,
+           HW_IOVEC_HASH_SHA1=1<<2,
+           HW_IOVEC_HASH_SHA256=1<<3,
+           HW_IOVEC_HASH_MD5=1<<4,
+};
+
+#define HW_IOVEC_IVEC_SIZE 16
+
+struct req_hw {
+	enum hw_iovec_comp_type compr_type;
+	enum hw_iovec_hash_type hash_type;
+	u8 *hashdata;	// calculated hash data is saved
+};
+
+/*
+ * We decompress physically contiguous buffer, thus scattered
+ * hw IO vector has special requirements:
+ * 1. offset of the first element of hw IO vec must be at least
+ *    aligned on 8 bytes
+ * 2. all other offsets must be aligned on sector size
+ * 3. only length of last hw IO vec element can be equal to any size
+ *
+ * e.g.
+ *
+ * |===|===|===|===|===|===|===| physical disk (sectors)
+ *   ^-----|   ^-------|   ^-|   hw IO vec 3 elements
+ *  /  1   |   /   2   /   /3 \
+ * /       |  /       /   /   /
+ * |       | /       /   /   /
+ * |       |/       /   /   /
+ * |       |       /   /   /     mapping
+ * |       |       |  /   /
+ * |       |       | /   /
+ * |       |       |/   /
+ * |  1    |   2   | 3 |
+ * |...........|...........|.... physical pages of contigous buffer
+ *
+ */
+struct hw_iovec {
+	unsigned long long  phys_off;
+	unsigned int        len;
+};
+
+struct hw_capability {
+	unsigned int comp_type;
+	unsigned int hash_type;
+	int min_size;		// (1 << min_size) compressed size support
+	int max_size;		// (1 << max_size) compressed size support
+};
+#endif
+
+
 struct block_device_operations {
 	int (*open) (struct block_device *, fmode_t);
 	void (*release) (struct gendisk *, fmode_t);
@@ -1604,6 +1677,13 @@ struct block_device_operations {
 	int (*compat_ioctl) (struct block_device *, fmode_t, unsigned, unsigned long);
 	long (*direct_access)(struct block_device *, sector_t,
 					void **, unsigned long *pfn, long size);
+#if defined(CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM)
+	int (*hw_decompress_vec)(struct block_device *bdev,
+			const struct hw_iovec *vec,
+			unsigned int vec_cnt,
+			struct page **out_pages,
+			unsigned int out_cnt, struct req_hw *rq_hw);
+#endif
 	unsigned int (*check_events) (struct gendisk *disk,
 				      unsigned int clearing);
 	/* ->media_changed() is DEPRECATED, use ->check_events() instead */

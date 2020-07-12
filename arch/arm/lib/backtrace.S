@@ -12,6 +12,9 @@
  */
 #include <linux/linkage.h>
 #include <asm/assembler.h>
+#ifdef CONFIG_IRQ_STACK
+#include <asm/irq.h>
+#endif
 		.text
 
 @ fp is 0 or stack frame
@@ -93,6 +96,17 @@ for_each_frame:	tst	frame, mask		@ Check for address exceptions
 
 		teq	sv_fp, #0		@ zero saved fp means
 		beq	no_frame		@ no further frames
+
+#ifdef CONFIG_IRQ_STACK
+		this_cpu_ptr irq_stack_ptr r2 r3
+		ldr	r2, [r2]
+		mov	r3, r2
+		add	r2, r2, #IRQ_STACK_SIZE
+		cmp	sv_fp, r2
+		ldreq	sv_fp, [r3, #4]
+		moveq	frame, sv_fp
+		beq	for_each_frame
+#endif
 
 		cmp	sv_fp, frame		@ next frame must be
 		mov	frame, sv_fp		@ above the current frame

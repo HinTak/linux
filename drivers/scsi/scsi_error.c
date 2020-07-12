@@ -1237,7 +1237,13 @@ retry_tur:
 	case SUCCESS:
 		return 0;
 	default:
-		return 1;
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+		 /* SELP.arm.3.x support A1 2007-12-14 */
+                //20070919 for checking Test Unit Ready command inhancement speed of momory card remove from card-reader
+                 return rtn;
+#else //org
+                return 1;
+#endif
 	}
 }
 
@@ -1317,6 +1323,12 @@ static int scsi_eh_abort_cmds(struct list_head *work_q,
 	int rtn;
 	struct Scsi_Host *shost;
 
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+        /* SELP.arm.3.x support A1 2007-10-22 */
+        //20070919 for checking Test Unit Ready command inhancement speed of momory card remove from card-reader
+        int ret1= 0;
+        int ret2= 0;
+#endif
 	list_for_each_entry_safe(scmd, next, work_q, eh_entry) {
 		if (!(scmd->eh_eflags & SCSI_EH_CANCEL_CMD))
 			continue;
@@ -1342,10 +1354,21 @@ static int scsi_eh_abort_cmds(struct list_head *work_q,
 			return list_empty(work_q);
 		}
 		scmd->eh_eflags &= ~SCSI_EH_CANCEL_CMD;
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+                        /* SELP.arm.3.x support A1 2007-12-14 */
+                        //20070919 for checking Test Unit Ready command inhancement speed of momory card remove from card-reader
+                        ret1 = scsi_device_online(scmd->device);
+                        ret2 = scsi_eh_tur(scmd);
+                        if (!ret1 || !ret2)
+                                scsi_eh_finish_cmd(scmd, done_q);
+                        else if(ret2 == FAILED)
+                                scsi_eh_finish_cmd(scmd, done_q);
+#else //org
 		if (rtn == FAST_IO_FAIL)
 			scsi_eh_finish_cmd(scmd, done_q);
 		else
 			list_move_tail(&scmd->eh_entry, &check_list);
+#endif
 	}
 
 	return scsi_eh_test_devices(&check_list, work_q, done_q, 0);

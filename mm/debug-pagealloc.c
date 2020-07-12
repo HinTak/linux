@@ -6,6 +6,15 @@
 #include <linux/poison.h>
 #include <linux/ratelimit.h>
 
+#ifdef CONFIG_DEBUG_PAGEALLOC_PRINT_OWNER
+extern ssize_t print_one_page_owner( size_t count, unsigned long pfn,
+                struct page *page, struct page_ext *page_ext);
+#endif
+
+#ifdef CONFIG_VDLP_VERSION_INFO
+extern void show_kernel_patch_version(void);
+#endif
+
 static bool page_poisoning_enabled __read_mostly;
 
 static bool need_page_poisoning(void)
@@ -77,15 +86,16 @@ static bool single_bit_flip(unsigned char a, unsigned char b)
 	return error && !(error & (error - 1));
 }
 
-static void check_poison_mem(unsigned char *mem, size_t bytes)
+static int check_poison_mem(unsigned char *mem, size_t bytes)
 {
 	static DEFINE_RATELIMIT_STATE(ratelimit, 5 * HZ, 10);
 	unsigned char *start;
 	unsigned char *end;
+	int ret = 0;
 
 	start = memchr_inv(mem, PAGE_POISON, bytes);
 	if (!start)
-		return;
+		return ret;
 
 	for (end = mem + bytes - 1; end > start; end--) {
 		if (*end != PAGE_POISON)
@@ -93,26 +103,44 @@ static void check_poison_mem(unsigned char *mem, size_t bytes)
 	}
 
 	if (!__ratelimit(&ratelimit))
-		return;
-	else if (start == end && single_bit_flip(*start, PAGE_POISON))
+		return ret;
+	else if (start == end && single_bit_flip(*start, PAGE_POISON)) {
 		printk(KERN_ERR "pagealloc: single bit error\n");
-	else
+		ret = 1;
+	}
+	else {
 		printk(KERN_ERR "pagealloc: memory corruption\n");
+		ret = 1;
+	}
 
 	print_hex_dump(KERN_ERR, "", DUMP_PREFIX_ADDRESS, 16, 1, start,
 			end - start + 1, 1);
 	dump_stack();
+	return ret;
 }
 
 static void unpoison_page(struct page *page)
 {
 	void *addr;
+	int ret = 0;
 
 	if (!page_poison(page))
 		return;
 
 	addr = kmap_atomic(page);
-	check_poison_mem(addr, PAGE_SIZE);
+	ret = check_poison_mem(addr, PAGE_SIZE);
+	if(ret)	
+	{
+		pr_err("corrupted page:%p pfn:0x%lx is poisoned \n",
+				page, page_to_pfn(page));
+#ifdef CONFIG_DEBUG_PAGEALLOC_PRINT_OWNER
+		print_one_page_owner(1024, page_to_pfn(page), page, lookup_page_ext(page));
+#endif
+
+#ifdef CONFIG_VDLP_VERSION_INFO
+		show_kernel_patch_version();
+#endif
+	}
 	clear_page_poison(page);
 	kunmap_atomic(addr);
 }

@@ -15,9 +15,14 @@ extern int dump_skip(struct coredump_params *cprm, size_t nr);
 extern int dump_emit(struct coredump_params *cprm, const void *addr, int nr);
 extern int dump_align(struct coredump_params *cprm, int align);
 #ifdef CONFIG_COREDUMP
+struct coredump_params;
 extern void do_coredump(const siginfo_t *siginfo);
 #else
 static inline void do_coredump(const siginfo_t *siginfo) {}
+#endif
+
+#ifdef CONFIG_MINIMAL_CORE
+extern void do_minimal_core(struct coredump_params *cprm);
 #endif
 
 #endif /* _LINUX_COREDUMP_H */

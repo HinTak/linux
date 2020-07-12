@@ -44,6 +44,7 @@
 #include <trace/events/module.h>
 
 extern int max_threads;
+bool start_suspend = false;
 
 static struct workqueue_struct *khelper_wq;
 
@@ -253,6 +254,21 @@ static int ____call_usermodehelper(void *data)
 
 	commit_creds(new);
 
+#ifdef CONFIG_FORCE_EXEC_SHELL_N_SERIAL
+        /*
+         * the process executed by call_usermodehelper() is not set stdin,stdout.
+         * so have to open /dev/console just for "/bin/sh" 
+         */
+        if(strstr(sub_info->path,"sh"))
+        {
+                if (sys_open((const char __user *) "/dev/console", O_RDWR, 0) < 0)
+                        pr_err("Warning: unable to open an initial console.\n");
+
+                (void) sys_dup(0);
+                (void) sys_dup(0);
+        }
+#endif
+
 	retval = do_execve(getname_kernel(sub_info->path),
 			   (const char __user *const __user *)sub_info->argv,
 			   (const char __user *const __user *)sub_info->envp);
@@ -460,6 +476,7 @@ int __usermodehelper_disable(enum umh_disable_depth depth)
 		return 0;
 
 	__usermodehelper_set_disable_depth(UMH_ENABLED);
+	pr_err("RUNNING_HELPERS_TIMEOUT\n");
 	return -EAGAIN;
 }
 
@@ -571,7 +588,14 @@ int call_usermodehelper_exec(struct subprocess_info *sub_info, int wait)
 		/* fallthrough, umh_complete() was already called */
 	}
 
-	wait_for_completion(&done);
+	if(start_suspend || wait == UMH_WAIT_PROC)
+	{
+		pr_err("[call_usermodehelper_exec] %s(%d)", sub_info->path, wait);
+		wait_for_completion(&done);
+		pr_err("[call_usermodehelper_exec] %s done.\n", sub_info->path);
+	}
+	else
+		wait_for_completion(&done);
 wait_done:
 	retval = sub_info->retval;
 out:

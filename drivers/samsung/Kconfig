@@ -1,0 +1,9 @@
+menu "Samsung drivers"
+
+source drivers/samsung/background_recompress/Kconfig
+
+source drivers/samsung/smart_deadlock/Kconfig
+
+source drivers/samsung/bptime/Kconfig
+
+endmenu

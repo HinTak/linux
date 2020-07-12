@@ -597,8 +597,10 @@ void driver_detach(struct device_driver *drv)
 		if (dev->parent)	/* Needed for USB */
 			device_lock(dev->parent);
 		device_lock(dev);
+		mutex_lock(&dev->udev_mutex);
 		if (dev->driver == drv)
 			__device_release_driver(dev);
+		mutex_unlock(&dev->udev_mutex);
 		device_unlock(dev);
 		if (dev->parent)
 			device_unlock(dev->parent);

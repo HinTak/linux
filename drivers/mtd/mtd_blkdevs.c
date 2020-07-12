@@ -97,14 +97,13 @@ static int do_blktrans_request(struct mtd_blktrans_ops *tr,
 	if (req->cmd_flags & REQ_DISCARD)
 		return tr->discard(dev, block, nsect);
 
-	switch(rq_data_dir(req)) {
-	case READ:
+	if (rq_data_dir(req) == READ) {
 		for (; nsect > 0; nsect--, block++, buf += tr->blksize)
 			if (tr->readsect(dev, block, buf))
 				return -EIO;
 		rq_flush_dcache_pages(req);
 		return 0;
-	case WRITE:
+	} else {
 		if (!tr->writesect)
 			return -EIO;
 
@@ -113,9 +112,6 @@ static int do_blktrans_request(struct mtd_blktrans_ops *tr,
 			if (tr->writesect(dev, block, buf))
 				return -EIO;
 		return 0;
-	default:
-		printk(KERN_NOTICE "Unknown request %u\n", rq_data_dir(req));
-		return -EIO;
 	}
 }
 
@@ -196,9 +192,9 @@ static int blktrans_open(struct block_device *bdev, fmode_t mode)
 	if (!dev)
 		return -ERESTARTSYS; /* FIXME: busy loop! -arnd*/
 
-	mutex_lock(&dev->lock);
 	mutex_lock(&mtd_table_mutex);
-
+	mutex_lock(&dev->lock);
+	
 	if (dev->open)
 		goto unlock;
 
@@ -221,8 +217,8 @@ static int blktrans_open(struct block_device *bdev, fmode_t mode)
 
 unlock:
 	dev->open++;
-	mutex_unlock(&mtd_table_mutex);
 	mutex_unlock(&dev->lock);
+	mutex_unlock(&mtd_table_mutex);
 	blktrans_dev_put(dev);
 	return ret;
 
@@ -232,8 +228,8 @@ error_release:
 error_put:
 	module_put(dev->tr->owner);
 	kref_put(&dev->ref, blktrans_dev_release);
-	mutex_unlock(&mtd_table_mutex);
 	mutex_unlock(&dev->lock);
+	mutex_unlock(&mtd_table_mutex);
 	blktrans_dev_put(dev);
 	return ret;
 }
@@ -245,9 +241,9 @@ static void blktrans_release(struct gendisk *disk, fmode_t mode)
 	if (!dev)
 		return;
 
-	mutex_lock(&dev->lock);
 	mutex_lock(&mtd_table_mutex);
-
+	mutex_lock(&dev->lock);
+	
 	if (--dev->open)
 		goto unlock;
 
@@ -260,8 +256,8 @@ static void blktrans_release(struct gendisk *disk, fmode_t mode)
 		__put_mtd_device(dev->mtd);
 	}
 unlock:
-	mutex_unlock(&mtd_table_mutex);
 	mutex_unlock(&dev->lock);
+	mutex_unlock(&mtd_table_mutex);
 	blktrans_dev_put(dev);
 }
 

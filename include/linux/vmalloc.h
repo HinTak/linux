@@ -4,6 +4,7 @@
 #include <linux/spinlock.h>
 #include <linux/init.h>
 #include <linux/list.h>
+#include <linux/llist.h>
 #include <asm/page.h>		/* pgprot_t */
 #include <linux/rbtree.h>
 
@@ -18,6 +19,7 @@ struct vm_area_struct;		/* vma defining user mapping in mm_types.h */
 #define VM_UNINITIALIZED	0x00000020	/* vm_struct is not fully initialized */
 #define VM_NO_GUARD		0x00000040      /* don't add guard page */
 #define VM_KASAN		0x00000080      /* has allocated kasan shadow memory */
+#define VM_STACK		0x00000100	/* Allocate guard page before actual page */
 /* bits [20..32] reserved for arch specific ioremap internals */
 
 /*
@@ -45,7 +47,7 @@ struct vmap_area {
 	unsigned long flags;
 	struct rb_node rb_node;         /* address sorted rbtree */
 	struct list_head list;          /* address sorted list */
-	struct list_head purge_list;    /* "lazy purge" list */
+	struct llist_node purge_list;    /* "lazy purge" list */
 	struct vm_struct *vm;
 	struct rcu_head rcu_head;
 };
@@ -67,6 +69,7 @@ static inline void vmalloc_init(void)
 #endif
 
 extern void *vmalloc(unsigned long size);
+extern void *vmalloc_emem(unsigned long size);
 extern void *vzalloc(unsigned long size);
 extern void *vmalloc_user(unsigned long size);
 extern void *vmalloc_node(unsigned long size, int node);
@@ -185,6 +188,8 @@ pcpu_free_vm_areas(struct vm_struct **vms, int nr_vms)
 struct vmalloc_info {
 	unsigned long   used;
 	unsigned long   largest_chunk;
+	unsigned long	largest_chunk_addr;
+	unsigned long   largest_modules_chunk;
 };
 
 #ifdef CONFIG_MMU

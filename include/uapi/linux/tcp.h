@@ -156,6 +156,11 @@ struct tcp_info {
 	__u8	tcpi_options;
 	__u8	tcpi_snd_wscale : 4, tcpi_rcv_wscale : 4;
 
+	/* TCP Keep Alive Offload */
+	__u32	tcpi_snd_nxt;
+	__u32	tcpi_rcv_nxt;
+	__u32	tcpi_rcv_wnd;
+
 	__u32	tcpi_rto;
 	__u32	tcpi_ato;
 	__u32	tcpi_snd_mss;

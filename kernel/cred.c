@@ -244,8 +244,10 @@ struct cred *prepare_creds(void)
 	validate_process_creds();
 
 	new = kmem_cache_alloc(cred_jar, GFP_KERNEL);
-	if (!new)
+	if (!new) {
+		pr_alert("Allocating memory for struct cred failed..\n");
 		return NULL;
+	}
 
 	kdebug("prepare_creds() alloc %p", new);
 
@@ -269,8 +271,10 @@ struct cred *prepare_creds(void)
 	new->security = NULL;
 #endif
 
-	if (security_prepare_creds(new, old, GFP_KERNEL) < 0)
+	if (security_prepare_creds(new, old, GFP_KERNEL) < 0) {
+		pr_alert("security_prepare_creds() failed..\n");
 		goto error;
+	}
 	validate_creds(new);
 	return new;
 

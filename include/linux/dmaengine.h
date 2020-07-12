@@ -306,6 +306,8 @@ enum dma_slave_buswidth {
  * may or may not be applicable on memory sources.
  * @dst_maxburst: same as src_maxburst but for destination target
  * mutatis mutandis.
+ * @src_fifo_num: bit 0-7 is the fifo number, bit:8-11 is the fifo offset;
+ * @dst_fifo_num: same as src_fifo_num
  * @device_fc: Flow Controller Settings. Only valid for slave channels. Fill
  * with 'true' if peripheral should be flow controller. Direction will be
  * selected at Runtime.
@@ -333,6 +335,10 @@ struct dma_slave_config {
 	enum dma_slave_buswidth dst_addr_width;
 	u32 src_maxburst;
 	u32 dst_maxburst;
+#ifdef CONFIG_ARCH_MXC	
+	u32 src_fifo_num;
+	u32 dst_fifo_num;
+#endif	
 	bool device_fc;
 	unsigned int slave_id;
 };
@@ -675,7 +681,9 @@ struct dma_device {
 	int (*device_pause)(struct dma_chan *chan);
 	int (*device_resume)(struct dma_chan *chan);
 	int (*device_terminate_all)(struct dma_chan *chan);
-
+#ifdef CONFIG_ARCH_MXC
+	enum dma_status (*device_wait_tasklet)(struct dma_chan *chan);
+#endif	
 	enum dma_status (*device_tx_status)(struct dma_chan *chan,
 					    dma_cookie_t cookie,
 					    struct dma_tx_state *txstate);
@@ -1025,6 +1033,9 @@ dma_set_tx_state(struct dma_tx_state *st, dma_cookie_t last, dma_cookie_t used, 
 		st->residue = residue;
 	}
 }
+#ifdef CONFIG_ARCH_MXC
+enum dma_status dma_sync_wait_tasklet(struct dma_chan *chan);
+#endif
 
 #ifdef CONFIG_DMA_ENGINE
 struct dma_chan *dma_find_channel(enum dma_transaction_type tx_type);

@@ -223,13 +223,15 @@ extern int blk_update_nr_requests(struct request_queue *, unsigned int);
  *
  *	a) it's attached to a gendisk, and
  *	b) the queue had IO stats enabled when this request was started, and
- *	c) it's a file system request
+ *	c) it's a file system request and
+ *	d) it's not DISCARD command
  */
 static inline int blk_do_io_stat(struct request *rq)
 {
 	return rq->rq_disk &&
 	       (rq->cmd_flags & REQ_IO_STAT) &&
-		(rq->cmd_type == REQ_TYPE_FS);
+		(rq->cmd_type == REQ_TYPE_FS) &&
+		!(rq->cmd_flags & REQ_DISCARD);
 }
 
 /*

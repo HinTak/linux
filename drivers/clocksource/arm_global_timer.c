@@ -22,7 +22,9 @@
 #include <linux/of_irq.h>
 #include <linux/of_address.h>
 #include <linux/sched_clock.h>
-
+#ifdef CONFIG_NVT_HW_CLOCK
+#include <mach/nvt_hwclock.h>
+#endif
 #include <asm/cputype.h>
 
 #define GT_COUNTER0	0x00
@@ -169,8 +171,12 @@ static int gt_clockevents_init(struct clock_event_device *clk)
 	int cpu = smp_processor_id();
 
 	clk->name = "arm_global_timer";
+#ifdef CONFIG_CLKSRC_ARM_GLOBAL_TIMER_BROADCAST
+	clk->features = CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT;
+#else
 	clk->features = CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT |
 		CLOCK_EVT_FEAT_PERCPU;
+#endif
 	clk->set_mode = gt_clockevent_set_mode;
 	clk->set_next_event = gt_clockevent_set_next_event;
 	clk->cpumask = cpumask_of(cpu);
@@ -211,6 +217,9 @@ static u64 notrace gt_sched_clock_read(void)
 static void __init gt_clocksource_init(void)
 {
 	writel(0, gt_base + GT_CONTROL);
+#ifdef CONFIG_NVT_HW_CLOCK
+	hwclock_early_boot_time();
+#endif
 	writel(0, gt_base + GT_COUNTER0);
 	writel(0, gt_base + GT_COUNTER1);
 	/* enables timer on all the cores */
@@ -302,7 +311,11 @@ static void __init global_timer_of_register(struct device_node *np)
 	}
 
 	/* Immediately configure the timer on the boot CPU */
+#ifdef CONFIG_PLAT_NOVATEK
+#ifndef CONFIG_CLKSRC_NVT_TIMER
 	gt_clocksource_init();
+#endif
+#endif
 	gt_clockevents_init(this_cpu_ptr(gt_evt));
 
 	return;

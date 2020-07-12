@@ -7,6 +7,7 @@
 #include <linux/pm.h>
 #include <linux/mm.h>
 #include <linux/freezer.h>
+#include <linux/console.h>
 #include <asm/errno.h>
 
 #ifdef CONFIG_VT
@@ -23,11 +24,13 @@ extern void pm_restore_console(void);
 #else
 static inline int pm_prepare_console(void)
 {
+	console_forbid_async_printk();
 	return 0;
 }
 
 static inline void pm_restore_console(void)
 {
+	console_permit_async_printk();
 }
 #endif
 

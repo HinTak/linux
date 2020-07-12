@@ -1,0 +1,32 @@
+#
+# SIM (System Integrity Monitor) built-in module
+#
+
+config SECURITY_SIM
+	bool "SIM built-in module"
+	default y
+	help
+		SIM built-in module support SIM(System Integrity Monitor). 
+		SIM checks integrity of kernel, file.
+
+config SECURITY_SIM_DEBUG
+	bool "print for debugging"
+	depends on SECURITY_SIM && !VD_RELEASE
+	default y
+	help
+		If it is y, Print both debug and error logs.
+		If it is n, Print error logs only.
+
+
+#
+# SIM Watchdog
+#
+
+config SECURITY_SIM_WATCHDOG
+	bool "SIM Watchdog"
+	depends on SECURITY_SIM && SECURITY_SFD && SECURITY_SFD_DISPATCHER_LOAD_KERNEL_MODULE
+	default y
+	help
+		SIM Watchdog checks integrity of important files of SIM.
+		SIM Watchdog use sfd verification function to check integrity.
+

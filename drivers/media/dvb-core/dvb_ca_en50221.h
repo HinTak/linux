@@ -23,6 +23,7 @@
 
 #include <linux/list.h>
 #include <linux/dvb/ca.h>
+#include <linux/dvb/ca_tztv.h>
 
 #include "dvbdev.h"
 
@@ -62,12 +63,26 @@ struct dvb_ca_en50221 {
 	int (*slot_reset)(struct dvb_ca_en50221* ca, int slot);
 	int (*slot_shutdown)(struct dvb_ca_en50221* ca, int slot);
 	int (*slot_ts_enable)(struct dvb_ca_en50221* ca, int slot);
+	void (*slot_set_frontend_source)(struct dvb_ca_en50221 *sdp_ca, int slot,ca_set_frontend_t source);
+	void (*slot_set_ts_route_mode)(struct dvb_ca_en50221 *sdp_ca, int slot,ca_set_route_mode_t mode);
 
 	/*
 	* Poll slot status.
 	* Only necessary if DVB_CA_FLAG_EN50221_IRQ_CAMCHANGE is not set
 	*/
 	int (*poll_slot_status)(struct dvb_ca_en50221* ca, int slot, int open);
+
+
+	/* functions for CI+ 1.4 MSPU */
+	int (*mspu_set_ltsid)(struct dvb_ca_en50221* ca, ca_set_mspu_t* setting);
+	int (*mspu_clear_ltsid)(struct dvb_ca_en50221* ca, ca_set_mspu_t* setting);
+	int (*mspu_clear_all)(struct dvb_ca_en50221* ca, ca_set_frontend_t* source);
+	int (*mspu_start)(struct dvb_ca_en50221* ca, ca_set_frontend_t* source);
+	int (*mspu_stop)(struct dvb_ca_en50221* ca, ca_set_frontend_t* source);
+	int (*mspu_start_ltsid)(struct dvb_ca_en50221* ca, u16 ltsid);
+	int (*mspu_stop_ltsid)(struct dvb_ca_en50221* ca, u16 ltsid);
+	int (*mspu_clear_all_ltsid)(struct dvb_ca_en50221* ca, u16 ltsid);
+
 
 	/* private data, used by caller */
 	void* data;

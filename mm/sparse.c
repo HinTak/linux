@@ -369,6 +369,9 @@ static void __init sparse_early_usemaps_alloc_node(void *data,
 }
 
 #ifndef CONFIG_SPARSEMEM_VMEMMAP
+#ifdef CONFIG_SPARSE_LOWMEM_EXT_MAP
+#include <linux/memblock.h>
+#endif
 struct page __init *sparse_mem_map_populate(unsigned long pnum, int nid)
 {
 	struct page *map;
@@ -380,7 +383,11 @@ struct page __init *sparse_mem_map_populate(unsigned long pnum, int nid)
 
 	size = PAGE_ALIGN(sizeof(struct page) * PAGES_PER_SECTION);
 	map = memblock_virt_alloc_try_nid(size,
+#ifdef CONFIG_SPARSE_LOWMEM_EXT_MAP
+					  PAGE_SIZE, memblock_end_of_DRAM(),
+#else
 					  PAGE_SIZE, __pa(MAX_DMA_ADDRESS),
+#endif
 					  BOOTMEM_ALLOC_ACCESSIBLE, nid);
 	return map;
 }

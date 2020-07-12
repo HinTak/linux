@@ -295,6 +295,18 @@ static inline int ll_new_hw_segment(struct request_queue *q,
 	if (blk_integrity_merge_bio(q, req, bio) == false)
 		goto no_merge;
 
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	/* Cannot merge directIO to non-directIO requests */
+	if (q->last_merge) {
+		if ((q->last_merge->cmd_flags & REQ_DIRECTIO) !=
+				(req->cmd_flags & REQ_DIRECTIO)) {
+			/*printk(KERN_DEBUG "%s: Cannot merge __REQ_DIRECTIO
+				to non-directIO request\n", __FUNCTION__);*/
+			goto no_merge;
+		}
+	}
+#endif
+
 	/*
 	 * This will form the start of a new hw segment.  Bump both
 	 * counters.
@@ -381,6 +393,16 @@ static int ll_merge_requests_fn(struct request_queue *q, struct request *req,
 	if (test_bit(QUEUE_FLAG_SG_GAPS, &q->queue_flags) &&
 	    req_gap_to_prev(req, next))
 		return 0;
+
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	/* Cannot merge directIO to non-directIO requests */
+	if ((req->cmd_flags & REQ_DIRECTIO) !=
+			(next->cmd_flags & REQ_DIRECTIO)) {
+		/*printk(KERN_DEBUG "%s: Cannot merge __REQ_DIRECTIO
+			to non-directIO request\n", __FUNCTION__);*/
+		return 0;
+	}
+#endif
 
 	/*
 	 * Will it become too large?
@@ -491,6 +513,16 @@ static int attempt_merge(struct request_queue *q, struct request *req,
 	 */
 	if (!ll_merge_requests_fn(q, req, next))
 		return 0;
+
+#if defined (CONFIG_BD_CACHE_ENABLED)
+	/* Cannot merge directIO to non-directO requests */
+	if ((req->cmd_flags & REQ_DIRECTIO) !=
+			(next->cmd_flags & REQ_DIRECTIO)) {
+		/*printk(KERN_DEBUG "%s: Cannot merge __REQ_DIRECTIO
+			to non-directIO request\n", __FUNCTION__);*/
+		return 0;
+	}
+#endif
 
 	/*
 	 * If failfast settings disagree or any of the two is already

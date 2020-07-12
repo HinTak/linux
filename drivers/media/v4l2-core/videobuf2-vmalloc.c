@@ -56,7 +56,7 @@ static void *vb2_vmalloc_alloc(void *alloc_ctx, unsigned long size,
 		kfree(buf);
 		return NULL;
 	}
-
+	printk(KERN_INFO "[VB2_BUF]Video Buf Alloc  [%p][Vaddr:%p] [%d:%s]\n",buf,buf->vaddr,current->pid, current->comm);
 	atomic_inc(&buf->refcount);
 	return buf;
 }
@@ -66,6 +66,7 @@ static void vb2_vmalloc_put(void *buf_priv)
 	struct vb2_vmalloc_buf *buf = buf_priv;
 
 	if (atomic_dec_and_test(&buf->refcount)) {
+		printk(KERN_INFO "[VB2_BUF]Video Buf Putbuf [%p][Vaddr:%p] [%d:%s]\n",buf,buf->vaddr,current->pid, current->comm);
 		vfree(buf->vaddr);
 		kfree(buf);
 	}

@@ -36,6 +36,7 @@
 #include <linux/completion.h>
 #include <linux/of.h>
 #include <linux/irq_work.h>
+#include <linux/nmi.h>
 
 #include <asm/alternative.h>
 #include <asm/atomic.h>
@@ -68,6 +69,11 @@ enum ipi_msg_type {
 	IPI_CPU_STOP,
 	IPI_TIMER,
 	IPI_IRQ_WORK,
+	/*
+	* CPU_BACKTRACE is special and not included in NR_IPI
+	* or tracable with trace_ipi_*
+	*/
+	IPI_CPU_BACKTRACE,
 };
 
 /*
@@ -178,6 +184,8 @@ asmlinkage void secondary_start_kernel(void)
 	 */
 	set_cpu_online(cpu, true);
 	complete(&cpu_running);
+
+	local_restore_irq_affinities();
 
 	local_dbg_enable();
 	local_irq_enable();
@@ -508,6 +516,23 @@ void show_ipi_list(struct seq_file *p, int prec)
 	}
 }
 
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+void print_ipi_list(void)
+{
+	unsigned int cpu, i;
+	static int prec = 0;
+
+	for (i = 0; i < NR_IPI; i++) {
+		printk("%*s%u:%s", prec - 1, "IPI", i,
+		       prec >= 4 ? " " : "");
+		for_each_online_cpu(cpu)
+			printk("%10u ",
+			       __get_irq_stat(cpu, ipi_irqs[i]));
+		printk("      %s\n", ipi_types[i]);
+	}
+}
+#endif
+
 u64 smp_irq_stat_cpu(unsigned int cpu)
 {
 	u64 sum = 0;
@@ -538,16 +563,22 @@ void arch_irq_work_raise(void)
 #endif
 
 static DEFINE_RAW_SPINLOCK(stop_lock);
-
+extern void __show_regs(struct pt_regs *);
 /*
  * ipi_cpu_stop - handle IPI from smp_send_stop()
  */
-static void ipi_cpu_stop(unsigned int cpu)
+static void ipi_cpu_stop(unsigned int cpu, struct pt_regs *regs)
 {
+	struct thread_info *thread = current_thread_info();
+
 	if (system_state == SYSTEM_BOOTING ||
 	    system_state == SYSTEM_RUNNING) {
 		raw_spin_lock(&stop_lock);
 		pr_crit("CPU%u: stopping\n", cpu);
+		printk(KERN_CRIT "Process %.*s (pid: %d, stack limit = 0x%p)\n",
+				TASK_COMM_LEN, thread->task->comm, task_pid_nr(thread->task), thread + 1);
+
+		__show_regs(regs);
 		dump_stack();
 		raw_spin_unlock(&stop_lock);
 	}
@@ -586,7 +617,7 @@ void handle_IPI(int ipinr, struct pt_regs *regs)
 
 	case IPI_CPU_STOP:
 		irq_enter();
-		ipi_cpu_stop(cpu);
+		ipi_cpu_stop(cpu, regs);
 		irq_exit();
 		break;
 
@@ -605,6 +636,12 @@ void handle_IPI(int ipinr, struct pt_regs *regs)
 		irq_exit();
 		break;
 #endif
+
+	case IPI_CPU_BACKTRACE:
+		irq_enter();
+		nmi_cpu_backtrace(regs);
+		irq_exit();
+		break;
 
 	default:
 		pr_crit("CPU%u: Unknown IPI message 0x%x\n", cpu, ipinr);
@@ -632,6 +669,10 @@ void smp_send_stop(void)
 {
 	unsigned long timeout;
 
+	printk(KERN_ERR"================================================================================\n");
+	printk(KERN_ERR" SMP Send Stop Other CPU!\n");
+	printk(KERN_ERR"================================================================================\n");
+
 	if (num_online_cpus() > 1) {
 		cpumask_t mask;
 
@@ -642,7 +683,7 @@ void smp_send_stop(void)
 	}
 
 	/* Wait up to one second for other CPUs to stop */
-	timeout = USEC_PER_SEC;
+	timeout = 2 * USEC_PER_SEC;
 	while (num_online_cpus() > 1 && timeout--)
 		udelay(1);
 
@@ -656,4 +697,21 @@ void smp_send_stop(void)
 int setup_profiling_timer(unsigned int multiplier)
 {
 	return -EINVAL;
+}
+
+static void raise_nmi(cpumask_t *mask)
+{
+	/*
+	 * Generate the backtrace directly if we are running in a
+	 * calling context that is not preemptible by the backtrace IPI.
+	 */
+	if (cpumask_test_cpu(smp_processor_id(), mask) && irqs_disabled())
+		nmi_cpu_backtrace(NULL);
+
+	__smp_cross_call(mask, IPI_CPU_BACKTRACE);
+}
+
+void arch_trigger_all_cpu_backtrace(bool include_self)
+{
+	nmi_trigger_all_cpu_backtrace(include_self, raise_nmi);
 }

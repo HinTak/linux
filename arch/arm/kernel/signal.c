@@ -21,6 +21,7 @@
 #include <asm/ucontext.h>
 #include <asm/unistd.h>
 #include <asm/vfp.h>
+#include <linux/vmalloc.h>
 
 extern const unsigned long sigreturn_codes[7];
 
@@ -563,6 +564,10 @@ asmlinkage int
 do_work_pending(struct pt_regs *regs, unsigned int thread_flags, int syscall)
 {
 	do {
+#ifdef CONFIG_KERNEL_STACK_SMALL
+		if (unlikely(thread_flags & _TIF_VM_STACK))
+			free_mapped_stack(current);
+#endif
 		if (likely(thread_flags & _TIF_NEED_RESCHED)) {
 			schedule();
 		} else {

@@ -26,6 +26,8 @@
 #include "udf_i.h"
 #include "udf_sb.h"
 
+void udf_release_data(struct buffer_head *bh);
+
 static void extent_trunc(struct inode *inode, struct extent_position *epos,
 			 struct kernel_lb_addr *eloc, int8_t etype, uint32_t elen,
 			 uint32_t nelen)
@@ -115,7 +117,7 @@ void udf_truncate_tail_extent(struct inode *inode)
 	/* This inode entry is in-memory only and thus we don't have to mark
 	 * the inode dirty */
 	iinfo->i_lenExtents = inode->i_size;
-	brelse(epos.bh);
+	udf_release_data(epos.bh);
 }
 
 void udf_discard_prealloc(struct inode *inode)
@@ -173,7 +175,7 @@ void udf_discard_prealloc(struct inode *inode)
 	/* This inode entry is in-memory only and thus we don't have to mark
 	 * the inode dirty */
 	iinfo->i_lenExtents = lbcount;
-	brelse(epos.bh);
+	udf_release_data(epos.bh);
 }
 
 static void udf_update_alloc_ext_desc(struct inode *inode,
@@ -255,7 +257,7 @@ void udf_truncate_extents(struct inode *inode)
 			} else
 				udf_update_alloc_ext_desc(inode,
 						&epos, lenalloc);
-			brelse(epos.bh);
+			udf_release_data(epos.bh);
 			epos.offset = sizeof(struct allocExtDesc);
 			epos.block = eloc;
 			epos.bh = udf_tread(sb,
@@ -282,5 +284,5 @@ void udf_truncate_extents(struct inode *inode)
 		udf_update_alloc_ext_desc(inode, &epos, lenalloc);
 	iinfo->i_lenExtents = inode->i_size;
 
-	brelse(epos.bh);
+	udf_release_data(epos.bh);
 }

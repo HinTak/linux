@@ -1,0 +1,9 @@
+#
+# Micom Interfaces for CEC/Normal Buffer data.
+#
+config MSG_WT61P807
+	tristate "Micom interface for Normal Buffer data"
+	default n
+	depends on MFD_SDP_MICOM
+	help
+	  This driver provides the interface to transmit the Normal Buffer data for sending messages to Micom.

@@ -18,3 +18,12 @@ config UDF_NLS
 	bool
 	default y
 	depends on (UDF_FS=m && NLS) || (UDF_FS=y && NLS=y)
+
+config SSIF_EXT_CACHE
+	bool "BD UDF Extents Cache (for 3D BD)"
+	default n
+	depends on UDF_FS=m || UDF_FS=y
+	help
+	 The 3D Blu-ray has many extents. So it make slow read problem when play it.
+	 This problem also occur even we play 3D Blu-ray with 2D mode.
+	 So remember last accessed inode to enhance read performance of 3D Blu-ray.

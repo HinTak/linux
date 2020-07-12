@@ -190,4 +190,11 @@ struct prctl_mm_map {
 # define PR_FP_MODE_FR		(1 << 0)	/* 64b FP registers */
 # define PR_FP_MODE_FRE		(1 << 1)	/* 32b compatibility */
 
+#ifdef CONFIG_USE_HW_CLOCK_FOR_USERTRACE
+/*
+ * Inject a trace event into the current tracing context:
+ */
+#define PR_TASK_PERF_USER_TRACE	666
+#endif
+
 #endif /* _LINUX_PRCTL_H */

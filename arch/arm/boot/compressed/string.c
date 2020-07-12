@@ -6,7 +6,7 @@
 
 #include <linux/string.h>
 
-void *memcpy(void *__dest, __const void *__src, size_t __n)
+void *__memcpy(void *__dest, __const void *__src, size_t __n)
 {
 	int i = 0;
 	unsigned char *d = (unsigned char *)__dest, *s = (unsigned char *)__src;
@@ -40,7 +40,7 @@ void *memcpy(void *__dest, __const void *__src, size_t __n)
 	return __dest;
 }
 
-void *memmove(void *__dest, __const void *__src, size_t count)
+void *__memmove(void *__dest, __const void *__src, size_t count)
 {
 	unsigned char *d = __dest;
 	const unsigned char *s = __src;

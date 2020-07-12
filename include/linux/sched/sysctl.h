@@ -91,6 +91,7 @@ extern unsigned int sysctl_sched_cfs_bandwidth_slice;
 
 #ifdef CONFIG_SCHED_AUTOGROUP
 extern unsigned int sysctl_sched_autogroup_enabled;
+extern unsigned int sysctl_sched_autogroup_migrate;
 #endif
 
 extern int sched_rr_timeslice;

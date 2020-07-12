@@ -998,6 +998,9 @@ void __init __weak early_init_dt_add_memory_arch(u64 base, u64 size)
 		base = phys_offset;
 	}
 	memblock_add(base, size);
+#ifdef CONFIG_SPARSE_LOWMEM_EXT_MAP
+	memblock_reserve_puremem(base,size);
+#endif
 }
 
 int __init __weak early_init_dt_reserve_memory_arch(phys_addr_t base,

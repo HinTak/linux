@@ -27,6 +27,13 @@
 #include <linux/backing-dev.h>
 #include <net/flow.h>
 
+/**
+* @brief Include Security Framework security operations
+* @author ChangWoo Lee (jason77.lee@samsung.com)
+* @date May 01, 2015
+*/
+#include <linux/sf_security.h>
+
 #define MAX_LSM_EVM_XATTR	2
 
 /* Boot-time LSM user choice */
@@ -347,6 +354,8 @@ int security_inode_alloc(struct inode *inode)
 
 void security_inode_free(struct inode *inode)
 {
+	sf_security_inode_free( inode );
+	
 	integrity_inode_free(inode);
 	security_ops->inode_free_security(inode);
 }
@@ -520,8 +529,15 @@ int security_inode_link(struct dentry *old_dentry, struct inode *dir,
 
 int security_inode_unlink(struct inode *dir, struct dentry *dentry)
 {
+	int result = 0;
+	
 	if (unlikely(IS_PRIVATE(d_backing_inode(dentry))))
 		return 0;
+
+	result = sf_security_inode_unlink( dir, dentry );
+	if(unlikely(result))
+		return result;
+
 	return security_ops->inode_unlink(dir, dentry);
 }
 
@@ -590,8 +606,15 @@ int security_inode_follow_link(struct dentry *dentry, struct nameidata *nd)
 
 int security_inode_permission(struct inode *inode, int mask)
 {
+	int result = 0;
+
 	if (unlikely(IS_PRIVATE(inode)))
 		return 0;
+
+	result = sf_security_inode_permission( inode, mask );
+	if(unlikely(result))
+		return result;
+	
 	return security_ops->inode_permission(inode, mask);
 }
 
@@ -1151,6 +1174,27 @@ int security_inode_getsecctx(struct inode *inode, void **ctx, u32 *ctxlen)
 	return security_ops->inode_getsecctx(inode, ctx, ctxlen);
 }
 EXPORT_SYMBOL(security_inode_getsecctx);
+
+int security_inode_copy_up(struct dentry *dentry, struct cred **new)
+{
+	return security_ops->inode_copy_up(dentry, new);
+}
+EXPORT_SYMBOL(security_inode_copy_up);
+
+int security_inode_copy_up_xattr(const char *name)
+{
+	return security_ops->inode_copy_up_xattr(name);
+}
+EXPORT_SYMBOL(security_inode_copy_up_xattr);
+
+int security_dentry_create_files_as(struct dentry *dentry, int mode,
+					struct qstr *name,
+					const struct cred *old,
+					struct cred *new)
+{
+	return security_ops->dentry_create_files_as(dentry, mode, name, old, new);
+}
+EXPORT_SYMBOL(security_dentry_create_files_as);
 
 #ifdef CONFIG_SECURITY_NETWORK
 

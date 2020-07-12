@@ -27,6 +27,11 @@
 
 static struct memblock_region memblock_memory_init_regions[INIT_MEMBLOCK_REGIONS] __initdata_memblock;
 static struct memblock_region memblock_reserved_init_regions[INIT_MEMBLOCK_REGIONS] __initdata_memblock;
+#ifdef CONFIG_SPARSE_LOWMEM_EXT_MAP
+#include <linux/cma.h>
+static struct memblock_region memblock_puremem_init_regions[INIT_MEMBLOCK_REGIONS] __initdata_memblock;
+static struct memblock_region memblock_dmamem_init_regions[MAX_CMA_AREAS] __initdata_memblock;
+#endif
 #ifdef CONFIG_HAVE_MEMBLOCK_PHYS_MAP
 static struct memblock_region memblock_physmem_init_regions[INIT_PHYSMEM_REGIONS] __initdata_memblock;
 #endif
@@ -39,7 +44,15 @@ struct memblock memblock __initdata_memblock = {
 	.reserved.regions	= memblock_reserved_init_regions,
 	.reserved.cnt		= 1,	/* empty dummy entry */
 	.reserved.max		= INIT_MEMBLOCK_REGIONS,
+#ifdef CONFIG_SPARSE_LOWMEM_EXT_MAP
+	.puremem.regions	= memblock_puremem_init_regions,
+	.puremem.cnt		= 1,	/* empty dummy entry */
+	.puremem.max		= INIT_MEMBLOCK_REGIONS,
 
+	.dmamem.regions		= memblock_dmamem_init_regions,
+	.dmamem.cnt			= 1,
+	.dmamem.max			= MAX_CMA_AREAS,
+#endif
 #ifdef CONFIG_HAVE_MEMBLOCK_PHYS_MAP
 	.physmem.regions	= memblock_physmem_init_regions,
 	.physmem.cnt		= 1,	/* empty dummy entry */
@@ -727,6 +740,59 @@ int __init_memblock memblock_reserve(phys_addr_t base, phys_addr_t size)
 {
 	return memblock_reserve_region(base, size, MAX_NUMNODES, 0);
 }
+#ifdef CONFIG_SPARSE_LOWMEM_EXT_MAP
+static int __init_memblock memblock_reserve_dma_region(phys_addr_t base,
+						   phys_addr_t size,
+						   int nid,
+						   unsigned long flags)
+{
+	struct memblock_type *type = &memblock.dmamem;
+
+	memblock_dbg("memblock_reserve: [%#016llx-%#016llx] flags %#02lx %pF\n",
+		     (unsigned long long)base,
+		     (unsigned long long)base + size - 1,
+		     flags, (void *)_RET_IP_);
+
+	return memblock_add_range(type, base, size, nid, flags);
+}
+
+int __init_memblock memblock_reserve_dma(phys_addr_t base, phys_addr_t size)
+{
+	return memblock_reserve_dma_region(base, size, MAX_NUMNODES, 0);
+}
+
+int __init_memblock memblock_remove_dma(phys_addr_t base, phys_addr_t size)
+{
+	return memblock_remove_range(&memblock.dmamem, base, size);
+}
+
+static int __init_memblock memblock_reserve_puremem_region(phys_addr_t base,
+						   phys_addr_t size,
+						   int nid,
+						   unsigned long flags)
+{
+	struct memblock_type *type = &memblock.puremem;
+
+	memblock_dbg("memblock_reserve: [%#016llx-%#016llx] flags %#02lx %pF\n",
+		     (unsigned long long)base,
+		     (unsigned long long)base + size - 1,
+		     flags, (void *)_RET_IP_);
+
+	return memblock_add_range(type, base, size, nid, flags);
+}
+
+int __init_memblock memblock_reserve_puremem(phys_addr_t base, phys_addr_t size)
+{
+	return memblock_reserve_puremem_region(base, size, MAX_NUMNODES, 0);
+}
+
+int __init_memblock memblock_remove_puremem(phys_addr_t base, phys_addr_t size)
+{
+	return memblock_remove_range(&memblock.puremem, base, size);
+}
+
+
+#endif
 
 /**
  *
@@ -1594,6 +1660,10 @@ static int __init memblock_init_debugfs(void)
 		return -ENXIO;
 	debugfs_create_file("memory", S_IRUGO, root, &memblock.memory, &memblock_debug_fops);
 	debugfs_create_file("reserved", S_IRUGO, root, &memblock.reserved, &memblock_debug_fops);
+#ifdef CONFIG_SPARSE_LOWMEM_EXT_MAP
+	debugfs_create_file("puremem", S_IRUGO, root, &memblock.puremem, &memblock_debug_fops);
+	debugfs_create_file("dmamem", S_IRUGO, root, &memblock.dmamem, &memblock_debug_fops);
+#endif
 #ifdef CONFIG_HAVE_MEMBLOCK_PHYS_MAP
 	debugfs_create_file("physmem", S_IRUGO, root, &memblock.physmem, &memblock_debug_fops);
 #endif

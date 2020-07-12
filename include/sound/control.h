@@ -22,6 +22,7 @@
  *
  */
 
+#include <linux/nospec.h>
 #include <sound/asound.h>
 
 #define snd_kcontrol_chip(kcontrol) ((kcontrol)->private_data)
@@ -104,8 +105,13 @@ struct snd_ctl_file {
 	struct snd_card *card;
 	struct pid *pid;
 	int preferred_subdevice[SND_CTL_SUBDEV_ITEMS];
+#ifdef __cplusplus
+	unsigned int change_sleep;
+	unsigned long long read_lock;
+#else
 	wait_queue_head_t change_sleep;
 	spinlock_t read_lock;
+#endif
 	struct fasync_struct *fasync;
 	int subscribed;			/* read interface is activated */
 	struct list_head events;	/* waiting events for read */
@@ -147,12 +153,14 @@ int snd_ctl_get_preferred_subdevice(struct snd_card *card, int type);
 
 static inline unsigned int snd_ctl_get_ioffnum(struct snd_kcontrol *kctl, struct snd_ctl_elem_id *id)
 {
-	return id->numid - kctl->id.numid;
+	unsigned int ioff = id->numid - kctl->id.numid;
+	return array_index_nospec(ioff, kctl->count);
 }
 
 static inline unsigned int snd_ctl_get_ioffidx(struct snd_kcontrol *kctl, struct snd_ctl_elem_id *id)
 {
-	return id->index - kctl->id.index;
+	unsigned int ioff = id->index - kctl->id.index;
+	return array_index_nospec(ioff, kctl->count);
 }
 
 static inline unsigned int snd_ctl_get_ioff(struct snd_kcontrol *kctl, struct snd_ctl_elem_id *id)

@@ -189,6 +189,9 @@ int usb_create_ep_devs(struct device *parent,
 	ep_dev->udev = udev;
 	ep_dev->dev.groups = ep_dev_groups;
 	ep_dev->dev.type = &usb_ep_device_type;
+#ifdef USB_AMBIENTMODE
+	ep_dev->dev.is_usb = 1;
+#endif
 	ep_dev->dev.parent = parent;
 	dev_set_name(&ep_dev->dev, "ep_%02x", endpoint->desc.bEndpointAddress);
 

@@ -119,11 +119,28 @@ config ARM_HISI_ACPU_CPUFREQ
 
 config ARM_IMX6Q_CPUFREQ
 	tristate "Freescale i.MX6 cpufreq support"
-	depends on ARCH_MXC
+	depends on SOC_IMX6
 	depends on REGULATOR_ANATOP
 	select PM_OPP
 	help
 	  This adds cpufreq driver support for Freescale i.MX6 series SoCs.
+
+	  If in doubt, say N.
+
+config ARM_IMX7D_CPUFREQ
+	tristate "Freescale i.MX7 cpufreq support"
+	depends on SOC_IMX7
+	help
+	  This adds cpufreq driver support for Freescale i.MX7 series SoCs.
+
+	  If in doubt, say N.
+
+config ARM_IMX8MM_CPUFREQ
+	tristate "NXP i.MX8MM cpufreq support"
+	depends on SOC_IMX8MM
+	select PM_OPP
+	help
+	  This adds cpufreq driver support for NXP i.MX8MM series SoCs.
 
 	  If in doubt, say N.
 
@@ -272,3 +289,49 @@ config ARM_PXA2xx_CPUFREQ
 	  This add the CPUFreq driver support for Intel PXA2xx SOCs.
 
 	  If in doubt, say N.
+
+config ARM_SDP_CPUFREQ
+    bool "Samsung DTV Processor"
+    depends on ARCH_SDP
+    default n
+    help
+      This adds the CPUFreq driver common part for SDP SoCs.
+      If in doubt, say N
+
+config ARM_SDP1501_CPUFREQ
+    bool "SDP1501(Jazz-M) CPUFreq support"
+    depends on ARM_SDP_CPUFREQ
+    help
+      This adds the CPUFreq driver for SDP1501(Jazz-M) SoC.
+
+config ARM_SDP1601_CPUFREQ
+    bool "SDP1601(Kant-M) CPUFreq support"
+    depends on ARM_SDP_CPUFREQ
+    help
+      This adds the CPUFreq driver for SDP1601(Kant-M) SoC.
+
+config ARM_SDP1803_CPUFREQ
+    bool "SDP1803(Muse-M) CPUFreq support"
+    depends on ARM_SDP_CPUFREQ
+    help
+      This adds the CPUFreq driver for SDP1803(Muse-M) SoC.
+
+config ARM_SDP_NIKE_CPUFREQ
+    bool "SDP_NIKE CPUFreq support"
+    depends on ARM_SDP_CPUFREQ
+    help
+      This adds the CPUFreq driver for Nike-M/L SoC.
+
+config ARM_SDP_CPUFREQ_DEBUG
+    bool "SDP CPUFreq debug print support"
+    depends on ARM_SDP_CPUFREQ
+
+
+if PLAT_NOVATEK
+config ARM_NVT_CPUFREQ
+	bool "Novatek CPUFreq support"
+	depends on ARCH_NVT_V7
+	default y
+	help
+	  This adds the CPUFreq driver support for Novatek SOCs.
+endif

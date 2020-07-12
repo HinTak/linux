@@ -88,6 +88,19 @@
 #include <asm/sections.h>
 #include <asm/cacheflush.h>
 
+#ifdef CONFIG_PM_CRC_CHECK
+#include <crypto/sha.h>
+#include <crypto/md5.h>
+#include <crypto/crypto_wrapper.h>
+#endif
+
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+extern void show_kernel_patch_version(void);
+#endif
+
+#include <trace/early.h>
+
 static int kernel_init(void *);
 
 extern void init_IRQ(void);
@@ -131,6 +144,11 @@ static char *initcall_command_line;
 static char *execute_command;
 static char *ramdisk_execute_command;
 
+#ifdef CONFIG_FORCE_EXEC_SHELL_N_SERIAL
+static char *argv[] = {"/bin/sh","-s",NULL };
+static char *envp[] = {"HOME=/", "TERM=linux", "PATH=/usr/bin:/bin/sh", NULL };
+#endif
+
 /*
  * Used to generate warnings if static_key manipulation functions are used
  * before jump_label_init is called.
@@ -157,6 +175,70 @@ static int __init set_reset_devices(char *str)
 }
 
 __setup("reset_devices", set_reset_devices);
+
+unsigned int board_information;
+EXPORT_SYMBOL(board_information);
+static int __init set_board_information(char *str)
+{
+#ifdef CONFIG_ARCH_MXC
+	int i=0;
+	/* for parm "bdinfo=" val should be b1010 format.*/
+	for(i=4;i>=0;i--) {
+			if(str[i] == '1')
+					board_information |= 1<<(4-i);	
+	}
+#else
+	if (!str || !strlen(str))
+		return 0;
+
+	if (kstrtouint(str, 16, &board_information))
+		return 0;
+#endif
+	return 1;
+}
+__setup("bdinfo=", set_board_information);
+
+static char * __initdata model_names = NULL;
+static struct file_operations model_names_fops = { };
+static int __init set_model_names(char *str)
+{
+	model_names = str;
+	return 1;
+}
+__setup("model=", set_model_names);
+
+static int __init model_name_procfs_init(void)
+{
+	if (!model_names || !strlen(model_names))
+		return 0;
+
+	if (!proc_create(model_names, 0, NULL, &model_names_fops))
+		pr_warn("/proc/%s registration failed.\n", model_names);
+
+	return 0;
+}
+late_initcall(model_name_procfs_init);
+
+static int __initdata pba_boot;
+static struct file_operations pba_boot_fops = { };
+static int __init set_pba_boot(char *str)
+{
+	pba_boot = 1;
+	return 1;
+}
+__setup("pba_boot", set_pba_boot);
+
+static int __init pba_boot_procfs_init(void)
+{
+	if (!pba_boot)
+		return 0;
+
+	if (!proc_create("pba_boot", 0, NULL, &pba_boot_fops))
+		pr_warn("/proc/pba_boot registration failed.\n");
+
+	return 0;
+}
+late_initcall(pba_boot_procfs_init);
 
 static const char *argv_init[MAX_INIT_ARGS+2] = { "init", NULL, };
 const char *envp_init[MAX_INIT_ENVS+2] = { "HOME=/", "TERM=linux", NULL, };
@@ -471,6 +553,12 @@ void __init __weak thread_info_cache_init(void)
 }
 #endif
 
+#ifndef CONFIG_KERNEL_STACK_SMALL
+void __init __weak thread_info_struct_cache_init(void)
+{
+}
+#endif
+
 /*
  * Set up kernel memory allocators
  */
@@ -499,6 +587,15 @@ asmlinkage __visible void __init start_kernel(void)
 	 * lockdep hash:
 	 */
 	lockdep_init();
+#ifndef CONFIG_FIX_HWCLOCK_VA
+#ifdef CONFIG_DPM_SHOW_TIME_IN_HWTRACING
+	trace_early_message("start_kernel");
+#endif
+#else
+#ifdef CONFIG_DPM_SHOW_TIME_IN_HWTRACING
+	trace_early_message_fixed("start_kernel");
+#endif
+#endif
 	set_task_stack_end_magic(&init_task);
 	smp_setup_processor_id();
 	debug_objects_early_init();
@@ -530,7 +627,10 @@ asmlinkage __visible void __init start_kernel(void)
 	build_all_zonelists(NULL, NULL);
 	page_alloc_init();
 
-	pr_notice("Kernel command line: %s\n", boot_command_line);
+#ifndef CONFIG_VDLP_VERSION_INFO
+	/* version info will show command line instread of this. */
+	pr_alert("%s\n", boot_command_line);
+#endif
 	parse_early_param();
 	after_dashes = parse_args("Booting kernel",
 				  static_command_line, __start___param,
@@ -594,7 +694,7 @@ asmlinkage __visible void __init start_kernel(void)
 	local_irq_enable();
 
 	kmem_cache_init_late();
-
+	setup_emem();
 	/*
 	 * HACK ALERT! This is early. We're enabling the console before
 	 * we've done PCI setups etc, and console_init() must be aware of
@@ -644,6 +744,7 @@ asmlinkage __visible void __init start_kernel(void)
 	init_espfix_bsp();
 #endif
 	thread_info_cache_init();
+	thread_info_struct_cache_init();
 	cred_init();
 	fork_init();
 	proc_caches_init();
@@ -938,7 +1039,9 @@ static int __ref kernel_init(void *unused)
 	numa_default_policy();
 
 	flush_delayed_fput();
-
+#ifdef CONFIG_DPM_SHOW_TIME_IN_HWTRACING
+	trace_early_message("kernel kernel_init end");
+#endif
 	if (ramdisk_execute_command) {
 		ret = run_init_process(ramdisk_execute_command);
 		if (!ret)
@@ -955,8 +1058,17 @@ static int __ref kernel_init(void *unused)
 	 */
 	if (execute_command) {
 		ret = run_init_process(execute_command);
+#ifdef CONFIG_FORCE_EXEC_SHELL_N_SERIAL
 		if (!ret)
+                {
+                        /* execute user process /bin/sh for debugging on production board*/
+                        ret = call_usermodehelper(argv[0], argv, envp, UMH_NO_WAIT);
+                        return 0;
+                }
+#else
+		if(!ret)
 			return 0;
+#endif
 		panic("Requested init %s failed (error %d).",
 		      execute_command, ret);
 	}
@@ -998,8 +1110,13 @@ static noinline void __init kernel_init_freeable(void)
 
 	smp_init();
 	sched_init_smp();
-
+#ifdef CONFIG_DPM_SHOW_TIME_IN_HWTRACING
+	trace_early_message("kernel do_basic_setup start");
+#endif
 	do_basic_setup();
+#ifdef CONFIG_DPM_SHOW_TIME_IN_HWTRACING
+	trace_early_message("kernel do_basic_setup end");
+#endif
 
 	/* Open the /dev/console on the rootfs, this should never fail */
 	if (sys_open((const char __user *) "/dev/console", O_RDWR, 0) < 0)
@@ -1007,6 +1124,11 @@ static noinline void __init kernel_init_freeable(void)
 
 	(void) sys_dup(0);
 	(void) sys_dup(0);
+
+#ifdef CONFIG_VDLP_VERSION_INFO
+	show_kernel_patch_version();
+#endif
+
 	/*
 	 * check if there is an early userspace init.  If yes, let it do all
 	 * the work
@@ -1020,6 +1142,10 @@ static noinline void __init kernel_init_freeable(void)
 		prepare_namespace();
 	}
 
+#ifdef CONFIG_EMRG_SAVE_KLOG
+        init_emrg_klog_save();
+#endif
+
 	/*
 	 * Ok, we have completed the initial bootup, and
 	 * we're essentially up and running. Get rid of the
@@ -1032,3 +1158,114 @@ static noinline void __init kernel_init_freeable(void)
 	integrity_load_keys();
 	load_default_modules();
 }
+
+#ifdef CONFIG_PM_CRC_CHECK
+
+/* Searching order SHA256 -> MD5 -> SHA1 -> NONE */
+#ifdef	CONFIG_CRYPTO_SHA256
+#define	CRC_LEN	SHA256_DIGEST_SIZE
+#elif	CONFIG_CRYPTO_MD5
+#define	CRC_LEN	MD5_DIGEST_SIZE
+#elif	CONFIG_CRYPTO_SHA1
+#define	CRC_LEN	SHA1_DIGEST_SIZE
+#else
+# error "Need to enable SHA1/SHA256 algorithm to use PM_CRC_CHECK"
+#endif
+
+unsigned char suspend_crc[CRC_LEN];
+unsigned char resume_crc[CRC_LEN];
+
+void make_hash( unsigned char *hash, unsigned long start, unsigned long end)
+{
+	unsigned long len = end - start;
+	unsigned char *input_buf;
+
+	input_buf = (unsigned char*)start;
+	printk("[SABSP] start : 0x%lx, end : 0x%lx, len : 0x%lx\n", start, end, len);
+	printk("[SABSP] input_buf:0x%p(first four byte contents: 0x%x, 0x%x, 0x%x, 0x%x)\n",
+				input_buf,
+				(unsigned int)input_buf[0], (unsigned int)input_buf[1],
+				(unsigned int)input_buf[2], (unsigned int)input_buf[3]);
+#ifdef	CONFIG_CRYPTO_SHA256
+	calculate_sw_hash_sha256(input_buf,len,hash);
+#elif	CONFIG_CRYPTO_MD5
+	calculate_sw_hash_md5(input_buf,len,hash);
+#elif	CONFIG_CRYPTO_SHA1
+	calculate_sw_hash_sha1(input_buf,len,hash);
+#endif
+}
+
+#ifdef CONFIG_PM_CRC_CHECK_AREA_SELECT
+unsigned int* crc_check_base = 0;
+#endif
+void save_suspend_crc(void)
+{
+	printk("[SABSP:%s:%d:save_suspend_crc()]\n", __FILE__, __LINE__);
+
+	memset(suspend_crc, 0x0, CRC_LEN);
+
+#ifdef CONFIG_PM_CRC_CHECK_AREA_SELECT
+	crc_check_base = ioremap(CONFIG_PM_CRC_CHECK_AREA_START,
+							CONFIG_PM_CRC_CHECK_AREA_SIZE);
+	if(unlikely(!crc_check_base))
+	{
+		printk("[SABSP] PM CRC Check error : Can't map PM_CRC_CHECK_AREA area\n");
+		printk("[SABSP] PM CRC Check error : Check the 'CONFIG_PM_CRC_CHECK_AREA_START' value\n");
+		return;
+	}
+	else
+	{
+		printk("[SABSP] Physical Address - start : 0x%x, end : 0x%x, len : 0x%x\n",
+				CONFIG_PM_CRC_CHECK_AREA_START,
+				CONFIG_PM_CRC_CHECK_AREA_START + CONFIG_PM_CRC_CHECK_AREA_SIZE,
+				CONFIG_PM_CRC_CHECK_AREA_SIZE);
+	}
+	make_hash( suspend_crc,
+			(unsigned long) crc_check_base,
+			(unsigned long) crc_check_base + CONFIG_PM_CRC_CHECK_AREA_SIZE);
+#else
+	// read-only part
+	make_hash( suspend_crc, (unsigned long) _text, (unsigned long) (__end_rodata-4) );
+#endif
+}
+
+void compare_resume_crc(void)
+{
+	printk("[SABSP:%s:%d:compare_resume_crc()]\n", __FILE__, __LINE__);
+
+	memset(resume_crc, 0x0, CRC_LEN);
+	// read-only part
+
+#ifdef CONFIG_PM_CRC_CHECK_AREA_SELECT
+	if(unlikely(!crc_check_base))
+	{
+		printk("[SABSP] PM CRC Check error : Not mapped 'PM_CRC_CHECK_AREA'\n");
+		return;
+	}
+	make_hash( resume_crc,
+			(unsigned long) crc_check_base,
+			(unsigned long) crc_check_base + CONFIG_PM_CRC_CHECK_AREA_SIZE);
+
+	iounmap(crc_check_base);
+#else
+	make_hash( resume_crc, (unsigned long) _text, (unsigned long) (__end_rodata-4) );
+#endif
+
+	if(memcmp( suspend_crc, resume_crc, CRC_LEN ) != 0 )
+	{
+		int i;
+
+		printk("[SABSP] SUSPEND CRC & RESUME CRC is different!!!!\n");
+		printk("[SABSP] DUMP CMAC(SUSPEND VS RESUME)\n");
+		printk("-----------------------------------------------------------\n");
+		for(i=0; i<CRC_LEN ; i++)
+		{
+			printk(	"0x%2x, 0x%2x\n", suspend_crc[i], resume_crc[i]);
+		}
+		printk("-----------------------------------------------------------\n");
+		while(1);
+	}
+	else
+		printk("[SABSP] CRC check success!!!\n");
+}
+#endif /* end of CONFIG_PM_CRC_CHECK */

@@ -43,7 +43,13 @@
  */
 #define VMALLOC_OFFSET		(8*1024*1024)
 #define VMALLOC_START		(((unsigned long)high_memory + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1))
+
+#ifndef CONFIG_VMAP_STACK
+#define VMALLOC_END		0xff800000UL
+#else
+/* get more memory in high mem.*/
 #define VMALLOC_END		0xff000000UL
+#endif
 
 #define LIBRARY_TEXT_START	0x0c000000
 

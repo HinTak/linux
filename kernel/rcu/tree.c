@@ -66,6 +66,11 @@ MODULE_ALIAS("rcutree");
 #endif
 #define MODULE_PARAM_PREFIX "rcutree."
 
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+void show_kernel_patch_version(void);
+#endif
+
 /* Data structures. */
 
 static struct lock_class_key rcu_node_class[RCU_NUM_LVLS];
@@ -1159,6 +1164,54 @@ static void rcu_dump_cpu_stacks(struct rcu_state *rsp)
 	}
 }
 
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+extern void show_irq(void);
+#endif
+
+#ifndef CONFIG_VD_RELEASE
+static void print_all_task_run_time(void)
+{
+	struct task_struct *g = NULL, *p = NULL;
+
+	pr_err("Exec time info of all task/threads..\n");
+	rcu_read_lock();
+
+	do_each_thread(g, p) {
+		__u32 nsec = 0;
+		u64 ts, sum_exec;
+		unsigned long state;
+
+		ts = p->se.exec_start;
+		sum_exec = p->se.sum_exec_runtime;
+		do_div(sum_exec, NSEC_PER_USEC);
+		nsec = do_div(ts, NSEC_PER_SEC);
+		pr_err("pid:%d, tgid:%d, comm:%s, sum_exec_runtime:[%llu usec] exec_start[%llu.%09u]\n",
+				p->pid, p->tgid, p->comm, sum_exec, ts, nsec);
+
+		state = p->state;
+		if (state)
+			state = __ffs(state) + 1;
+
+		pr_err("cpu:[%d], preempt_count: %d, state:%lu , sched_policy:%d ",
+				task_cpu(p), task_thread_info(p)->preempt_count, state, p->policy);
+#if BITS_PER_LONG == 32
+		if (state == TASK_RUNNING)
+			pr_cont(" running\n");
+		else
+			pr_cont(" %08lx\n", thread_saved_pc(p));
+#else
+		if (state == TASK_RUNNING)
+			pr_cont("  running task\n");
+		else
+			pr_cont(" %016lx\n", thread_saved_pc(p));
+#endif
+	} while_each_thread(g, p);
+
+	rcu_read_unlock();
+
+}
+#endif
+
 static void print_other_cpu_stall(struct rcu_state *rsp, unsigned long gpnum)
 {
 	int cpu;
@@ -1181,6 +1234,12 @@ static void print_other_cpu_stall(struct rcu_state *rsp, unsigned long gpnum)
 	ACCESS_ONCE(rsp->jiffies_stall) = jiffies + 3 * rcu_jiffies_till_stall_check() + 3;
 	raw_spin_unlock_irqrestore(&rnp->lock, flags);
 
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+	show_irq();
+#endif
+#ifdef CONFIG_VDLP_VERSION_INFO
+	show_kernel_patch_version();
+#endif
 	/*
 	 * OK, time to rat on our buddy...
 	 * See Documentation/RCU/stallwarn.txt for info on how to debug
@@ -1188,6 +1247,14 @@ static void print_other_cpu_stall(struct rcu_state *rsp, unsigned long gpnum)
 	 */
 	pr_err("INFO: %s detected stalls on CPUs/tasks:",
 	       rsp->name);
+#ifdef CONFIG_PRINT_SMC_HISTORY_PRINT
+	printk(KERN_ERR "[SABSP] CONFIG_PRINT_SMC_HISTORY_PRINT is enabled!! \n");
+	if ( print_smc_info_sec )
+		print_smc_info_sec();
+#else
+	printk(KERN_ERR "[SABSP] CONFIG_PRINT_SMC_HISTORY_PRINT is NOT!! enabled\n");
+#endif
+
 	print_cpu_stall_info_begin();
 	rcu_for_each_leaf_node(rsp, rnp) {
 		raw_spin_lock_irqsave(&rnp->lock, flags);
@@ -1230,6 +1297,9 @@ static void print_other_cpu_stall(struct rcu_state *rsp, unsigned long gpnum)
 	/* Complain about tasks blocking the grace period. */
 	rcu_print_detail_task_stall(rsp);
 
+#ifndef CONFIG_VD_RELEASE
+	print_all_task_run_time();
+#endif
 	rcu_check_gp_kthread_starvation(rsp);
 
 	force_quiescent_state(rsp);  /* Kick them all. */
@@ -1242,12 +1312,28 @@ static void print_cpu_stall(struct rcu_state *rsp)
 	struct rcu_node *rnp = rcu_get_root(rsp);
 	long totqlen = 0;
 
+#ifdef CONFIG_UNHANDLED_IRQ_TRACE_DEBUGGING
+	show_irq();
+#endif
+
+#ifdef CONFIG_VDLP_VERSION_INFO
+	show_kernel_patch_version();
+#endif
+
 	/*
 	 * OK, time to rat on ourselves...
 	 * See Documentation/RCU/stallwarn.txt for info on how to debug
 	 * RCU CPU stall warnings.
 	 */
 	pr_err("INFO: %s self-detected stall on CPU", rsp->name);
+#ifdef CONFIG_PRINT_SMC_HISTORY_PRINT
+        printk(KERN_ERR "[SABSP] CONFIG_PRINT_SMC_HISTORY_PRINT is enabled!! \n");
+        if ( print_smc_info_sec )
+                print_smc_info_sec();
+#else
+        printk(KERN_ERR "[SABSP] CONFIG_PRINT_SMC_HISTORY_PRINT is NOT!! enabled\n");
+#endif
+
 	print_cpu_stall_info_begin();
 	print_cpu_stall_info(rsp, smp_processor_id());
 	print_cpu_stall_info_end();

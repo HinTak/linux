@@ -1585,8 +1585,13 @@ static int snd_soc_instantiate_card(struct snd_soc_card *card)
 	}
 
 	/* card bind complete so register a sound card */
+#ifdef CONFIG_ARCH_MXC
 	ret = snd_card_new(card->dev, SNDRV_DEFAULT_IDX1, SNDRV_DEFAULT_STR1,
 			card->owner, 0, &card->snd_card);
+#else	
+	ret = snd_card_new(card->dev, card->card_num, SNDRV_DEFAULT_STR1,
+			card->owner, 0, &card->snd_card);
+#endif			
 	if (ret < 0) {
 		dev_err(card->dev,
 			"ASoC: can't create sound card for card %s: %d\n",

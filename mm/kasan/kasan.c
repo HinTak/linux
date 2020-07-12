@@ -35,6 +35,36 @@
 #include "kasan.h"
 #include "../slab.h"
 
+#ifndef CONFIG_KASAN_SHADOW_OFFSET
+unsigned int __read_mostly kasan_initialized;
+
+static unsigned long kasan_shadow_start;
+static unsigned long kasan_shadow_end;
+unsigned long kasan_vmalloc_shadow_start;
+static unsigned long kasan_vmalloc_shadow_end;
+
+unsigned long __read_mostly kasan_shadow_offset;
+#endif
+
+#ifdef CONFIG_KASAN_GLOBALS
+#define START_VADDR MODULES_VADDR
+#else
+#define START_VADDR PAGE_OFFSET
+#endif
+
+static inline bool addr_is_in_mem(unsigned long addr)
+{
+	bool ret = false;
+
+	ret = (addr >= START_VADDR && addr < (unsigned long)high_memory);
+
+#ifdef CONFIG_KASAN_VMALLOC
+	ret = ret || is_vmalloc_addr((void *)addr);
+#endif
+
+	return ret;
+}
+
 /*
  * Poisons the shadow memory for 'size' bytes starting from 'addr'.
  * Memory addresses should be aligned to KASAN_SHADOW_SCALE_SIZE.
@@ -44,7 +74,7 @@ static void kasan_poison_shadow(const void *address, size_t size, u8 value)
 	void *shadow_start, *shadow_end;
 
 	shadow_start = kasan_mem_to_shadow(address);
-	shadow_end = kasan_mem_to_shadow(address + size);
+	shadow_end = kasan_mem_to_shadow(address + size - 1) + 1;
 
 	memset(shadow_start, value, shadow_end - shadow_start);
 }
@@ -232,17 +262,24 @@ static __always_inline bool memory_is_poisoned(unsigned long addr, size_t size)
 	return memory_is_poisoned_n(addr, size);
 }
 
-
 static __always_inline void check_memory_region(unsigned long addr,
-						size_t size, bool write)
+						size_t size, bool write,
+						int skip)
 {
-	struct kasan_access_info info;
+	if (unlikely(!kasan_initialized))
+		return;
 
 	if (unlikely(size == 0))
 		return;
 
+#ifndef CONFIG_KASAN_SHADOW_OFFSET
+	if (unlikely(!addr_is_in_mem(addr) || !addr_is_in_mem(addr + size - 1)))
+		return;
+#else
 	if (unlikely((void *)addr <
 		kasan_shadow_to_mem((void *)KASAN_SHADOW_START))) {
+		struct kasan_access_info info;
+
 		info.access_addr = (void *)addr;
 		info.access_size = size;
 		info.is_write = write;
@@ -250,20 +287,98 @@ static __always_inline void check_memory_region(unsigned long addr,
 		kasan_report_user_access(&info);
 		return;
 	}
+#endif
 
 	if (likely(!memory_is_poisoned(addr, size)))
 		return;
 
-	kasan_report(addr, size, write, _RET_IP_);
+	kasan_report(addr, size, write, _RET_IP_, skip);
 }
 
-void __asan_loadN(unsigned long addr, size_t size);
-void __asan_storeN(unsigned long addr, size_t size);
+#ifndef CONFIG_KASAN_SHADOW_OFFSET
+/*
+ * Shadow memory is not defined in the configuration, so
+ * we must allocate it dynamically.
+ */
+
+static inline size_t lowmem_shadow_size(void)
+{
+	return ((unsigned long)high_memory - START_VADDR)
+		>> KASAN_SHADOW_SCALE_SHIFT;
+}
+
+static inline size_t vmalloc_shadow_size(void)
+{
+#ifdef CONFIG_KASAN_VMALLOC
+	return (VMALLOC_END - VMALLOC_START) >> PAGE_SHIFT;
+#else
+	return 0;
+#endif
+}
+
+void __init kasan_alloc_shadow(void)
+{
+	size_t kasan_shadow_size;
+	phys_addr_t shadow_phys_addr;
+
+	kasan_shadow_size = lowmem_shadow_size()
+		+ vmalloc_shadow_size();
+
+	shadow_phys_addr = memblock_alloc(kasan_shadow_size, PAGE_SIZE);
+	if (!shadow_phys_addr) {
+		pr_err("Unable to reserve shadow region\n");
+		return;
+	}
+
+	kasan_shadow_start = (unsigned long)phys_to_virt(shadow_phys_addr);
+	kasan_shadow_end = kasan_shadow_start + lowmem_shadow_size();
+	kasan_vmalloc_shadow_start = kasan_shadow_end;
+	kasan_vmalloc_shadow_end = kasan_vmalloc_shadow_start
+		+ vmalloc_shadow_size();
+
+	pr_info("Lowmem shadow start: 0x%lx\n", kasan_shadow_start);
+	pr_info("Lowmem shadow end: 0x%lx\n", kasan_shadow_end);
+	pr_info("Vmalloc shadow start 0x%lx\n", kasan_vmalloc_shadow_start);
+	pr_info("Vmalloc shadow end 0x%lx\n", kasan_vmalloc_shadow_end);
+}
+
+void __init kasan_init_shadow(void)
+{
+	if (kasan_shadow_start) {
+		kasan_shadow_offset = kasan_shadow_start
+			- (START_VADDR >> KASAN_SHADOW_SCALE_SHIFT);
+
+		kasan_unpoison_shadow((void *)START_VADDR,
+				(size_t)(kasan_shadow_start - START_VADDR));
+		kasan_poison_shadow((void *)kasan_shadow_start,
+			kasan_vmalloc_shadow_end - kasan_shadow_start,
+			KASAN_SHADOW_GAP);
+		kasan_unpoison_shadow((void *)kasan_vmalloc_shadow_end,
+				(size_t)(high_memory - kasan_vmalloc_shadow_end));
+#ifdef CONFIG_KASAN_VMALLOC
+		kasan_unpoison_shadow((void *)VMALLOC_START,
+				(size_t)(VMALLOC_END - VMALLOC_START));
+#endif
+		kasan_shadow_offset = kasan_shadow_start
+			- (START_VADDR >> KASAN_SHADOW_SCALE_SHIFT);
+
+		kasan_initialized = 1;
+	}
+}
+
+#endif
+
+void __asan_loadN(unsigned long addr, size_t size, int skip);
+void __asan_storeN(unsigned long addr, size_t size, int skip);
+
+extern void *__memset(void *, int, __kernel_size_t);
+extern void *__memcpy(void *, const void *, __kernel_size_t);
+extern void *__memmove(void *, const void *, __kernel_size_t);
 
 #undef memset
 void *memset(void *addr, int c, size_t len)
 {
-	__asan_storeN((unsigned long)addr, len);
+	__asan_storeN((unsigned long)addr, len, 1);
 
 	return __memset(addr, c, len);
 }
@@ -271,8 +386,8 @@ void *memset(void *addr, int c, size_t len)
 #undef memmove
 void *memmove(void *dest, const void *src, size_t len)
 {
-	__asan_loadN((unsigned long)src, len);
-	__asan_storeN((unsigned long)dest, len);
+	__asan_loadN((unsigned long)src, len, 1);
+	__asan_storeN((unsigned long)dest, len, 1);
 
 	return __memmove(dest, src, len);
 }
@@ -280,8 +395,8 @@ void *memmove(void *dest, const void *src, size_t len)
 #undef memcpy
 void *memcpy(void *dest, const void *src, size_t len)
 {
-	__asan_loadN((unsigned long)src, len);
-	__asan_storeN((unsigned long)dest, len);
+	__asan_loadN((unsigned long)src, len, 1);
+	__asan_storeN((unsigned long)dest, len, 1);
 
 	return __memcpy(dest, src, len);
 }
@@ -443,6 +558,39 @@ void kasan_free_shadow(const struct vm_struct *vm)
 		vfree(kasan_mem_to_shadow(vm->addr));
 }
 
+#ifdef CONFIG_KASAN_VMALLOC
+
+void kasan_vmalloc(unsigned long addr, size_t size)
+{
+	if (!is_vmalloc_addr((void *)addr) ||
+		!is_vmalloc_addr((void *)(addr + size - 1)))
+		return;
+
+	kasan_unpoison_shadow((void *)addr, size - PAGE_SIZE);
+	kasan_poison_shadow((void *)addr + size - PAGE_SIZE,
+		PAGE_SIZE, KASAN_VMALLOC_REDZONE);
+}
+
+void kasan_vmalloc_nopageguard(unsigned long addr, size_t size)
+{
+	if (!is_vmalloc_addr((void *)addr)
+		|| !is_vmalloc_addr((void *)(addr + size - 1)))
+		return;
+
+	kasan_unpoison_shadow((void *)addr, size);
+}
+
+void kasan_vfree(unsigned long addr, size_t size)
+{
+	if (!is_vmalloc_addr((void *)addr)
+		|| !is_vmalloc_addr((void *)(addr + size - 1)))
+		return;
+
+	kasan_poison_shadow((void *)addr, size, KASAN_VMALLOC_FREE);
+}
+
+#endif /* CONFIG_KASAN_VMALLOC */
+
 static void register_global(struct kasan_global *global)
 {
 	size_t aligned_size = round_up(global->size, KASAN_SHADOW_SCALE_SIZE);
@@ -468,10 +616,18 @@ void __asan_unregister_globals(struct kasan_global *globals, size_t size)
 }
 EXPORT_SYMBOL(__asan_unregister_globals);
 
+#ifdef CONFIG_KASAN_GLOBALS
+void kasan_module_load(void *mod, size_t size)
+{
+	if (mod)
+		kasan_unpoison_shadow(mod, size);
+}
+#endif
+
 #define DEFINE_ASAN_LOAD_STORE(size)				\
 	void __asan_load##size(unsigned long addr)		\
 	{							\
-		check_memory_region(addr, size, false);		\
+		check_memory_region(addr, size, false, 0);		\
 	}							\
 	EXPORT_SYMBOL(__asan_load##size);			\
 	__alias(__asan_load##size)				\
@@ -479,7 +635,7 @@ EXPORT_SYMBOL(__asan_unregister_globals);
 	EXPORT_SYMBOL(__asan_load##size##_noabort);		\
 	void __asan_store##size(unsigned long addr)		\
 	{							\
-		check_memory_region(addr, size, true);		\
+		check_memory_region(addr, size, true, 0);		\
 	}							\
 	EXPORT_SYMBOL(__asan_store##size);			\
 	__alias(__asan_store##size)				\
@@ -492,9 +648,9 @@ DEFINE_ASAN_LOAD_STORE(4);
 DEFINE_ASAN_LOAD_STORE(8);
 DEFINE_ASAN_LOAD_STORE(16);
 
-void __asan_loadN(unsigned long addr, size_t size)
+void __asan_loadN(unsigned long addr, size_t size, int skip)
 {
-	check_memory_region(addr, size, false);
+	check_memory_region(addr, size, false, skip);
 }
 EXPORT_SYMBOL(__asan_loadN);
 
@@ -502,9 +658,9 @@ __alias(__asan_loadN)
 void __asan_loadN_noabort(unsigned long, size_t);
 EXPORT_SYMBOL(__asan_loadN_noabort);
 
-void __asan_storeN(unsigned long addr, size_t size)
+void __asan_storeN(unsigned long addr, size_t size, int skip)
 {
-	check_memory_region(addr, size, true);
+	check_memory_region(addr, size, true, skip);
 }
 EXPORT_SYMBOL(__asan_storeN);
 
@@ -515,6 +671,12 @@ EXPORT_SYMBOL(__asan_storeN_noabort);
 /* to shut up compiler complaints */
 void __asan_handle_no_return(void) {}
 EXPORT_SYMBOL(__asan_handle_no_return);
+
+unsigned long __asan_get_shadow_ptr(void)
+{
+	return kasan_shadow_offset;
+}
+EXPORT_SYMBOL(__asan_get_shadow_ptr);
 
 #ifdef CONFIG_MEMORY_HOTPLUG
 static int kasan_mem_notifier(struct notifier_block *nb,

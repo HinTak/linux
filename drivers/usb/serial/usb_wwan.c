@@ -462,6 +462,9 @@ static struct urb *usb_wwan_setup_urb(struct usb_serial_port *port,
 {
 	struct usb_serial *serial = port->serial;
 	struct urb *urb;
+#ifdef QUECTEL_DONGLE_5G_2019_SUPPORT
+	struct usb_device_descriptor *desc;
+#endif
 
 	urb = usb_alloc_urb(0, GFP_KERNEL);	/* No ISO */
 	if (!urb)
@@ -470,6 +473,14 @@ static struct urb *usb_wwan_setup_urb(struct usb_serial_port *port,
 	usb_fill_bulk_urb(urb, serial->dev,
 			  usb_sndbulkpipe(serial->dev, endpoint) | dir,
 			  buf, len, callback, ctx);
+
+#ifdef QUECTEL_DONGLE_5G_2019_SUPPORT	//Added by Quectel for zero packet
+	if (dir == USB_DIR_OUT) {
+		desc = &serial->dev->descriptor;
+		if (desc->idVendor == cpu_to_le16(0x2C7C))
+			urb->transfer_flags |= URB_ZERO_PACKET;
+	}
+#endif
 
 	return urb;
 }

@@ -17,7 +17,9 @@
 static int override_alt = -1;
 module_param_named(alt, override_alt, int, 0644);
 MODULE_PARM_DESC(alt, ">= 0 to override altsetting selection");
-
+#ifdef CONFIG_ARCH_MXC
+static void complicated_callback(struct urb *urb);
+#endif
 /*-------------------------------------------------------------------------*/
 
 /* FIXME make these public somewhere; usbdevfs.h? */
@@ -95,6 +97,9 @@ static struct usb_device *testdev_to_usbdev(struct usbtest_dev *test)
 	dev_warn(&(tdev)->intf->dev , fmt , ## args)
 
 #define GUARD_BYTE	0xA5
+#ifdef CONFIG_ARCH_MXC
+#define MAX_SGLEN	128
+#endif
 
 /*-------------------------------------------------------------------------*/
 
@@ -238,7 +243,13 @@ static struct urb *usbtest_alloc_urb(
 	unsigned long		bytes,
 	unsigned		transfer_flags,
 	unsigned		offset,
-	u8			bInterval)
+#ifdef CONFIG_ARCH_MXC
+	u8			bInterval,
+	usb_complete_t		complete_fn)
+#else
+	u8			bInterval	)
+#endif		
+
 {
 	struct urb		*urb;
 
@@ -247,11 +258,20 @@ static struct urb *usbtest_alloc_urb(
 		return urb;
 
 	if (bInterval)
-		usb_fill_int_urb(urb, udev, pipe, NULL, bytes, simple_callback,
+#ifdef CONFIG_ARCH_MXC
+		usb_fill_int_urb(urb, udev, pipe, NULL, bytes, complete_fn,
 				NULL, bInterval);
 	else
+		usb_fill_bulk_urb(urb, udev, pipe, NULL, bytes, complete_fn,
+				NULL);				
+#else 	
+		usb_fill_int_urb(urb, udev, pipe, NULL, bytes, simple_callback,
+				NULL, bInterval);
+		else
 		usb_fill_bulk_urb(urb, udev, pipe, NULL, bytes, simple_callback,
 				NULL);
+#endif				
+
 
 	urb->interval = (udev->speed == USB_SPEED_HIGH)
 			? (INTERRUPT_RATE << 3)
@@ -294,15 +314,65 @@ static struct urb *simple_alloc_urb(
 	unsigned long		bytes,
 	u8			bInterval)
 {
+#ifdef #ifdef CONFIG_ARCH_MXC
+	return usbtest_alloc_urb(udev, pipe, bytes, URB_NO_TRANSFER_DMA_MAP, 0,
+			bInterval, simple_callback);
+}
+#else
 	return usbtest_alloc_urb(udev, pipe, bytes, URB_NO_TRANSFER_DMA_MAP, 0,
 			bInterval);
 }
+#endif
+
+#ifdef #ifdef CONFIG_ARCH_MXC
+static struct urb *complicated_alloc_urb(
+	struct usb_device	*udev,
+	int			pipe,
+	unsigned long		bytes,
+	u8			bInterval)
+{
+	return usbtest_alloc_urb(udev, pipe, bytes, URB_NO_TRANSFER_DMA_MAP, 0,
+			bInterval, complicated_callback);
+}
+#endif
+
 
 static unsigned pattern;
 static unsigned mod_pattern;
 module_param_named(pattern, mod_pattern, uint, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(mod_pattern, "i/o pattern (0 == zeroes)");
+#ifdef #ifdef CONFIG_ARCH_MXC
+static unsigned get_maxpacket(struct usb_device *udev, int pipe)
+{
+	struct usb_host_endpoint	*ep;
 
+	ep = usb_pipe_endpoint(udev, pipe);
+	return le16_to_cpup(&ep->desc.wMaxPacketSize);
+}
+#endif
+
+#ifdef #ifdef CONFIG_ARCH_MXC
+static void simple_fill_buf(struct urb *urb)
+{
+	unsigned	i;
+	u8		*buf = urb->transfer_buffer;
+	unsigned	len = urb->transfer_buffer_length;
+	unsigned	maxpacket;
+
+	switch (pattern) {
+	default:
+		/* FALLTHROUGH */
+	case 0:
+		memset(buf, 0, len);
+		break;
+	case 1:			/* mod63 */
+		maxpacket = get_maxpacket(urb->dev, urb->pipe);
+		for (i = 0; i < len; i++)
+			*buf++ = (u8) ((i % maxpacket) % 63);
+		break;
+	}
+}
+#else
 static inline void simple_fill_buf(struct urb *urb)
 {
 	unsigned	i;
@@ -321,7 +391,7 @@ static inline void simple_fill_buf(struct urb *urb)
 		break;
 	}
 }
-
+#endif
 static inline unsigned long buffer_offset(void *buf)
 {
 	return (unsigned long)buf & (ARCH_KMALLOC_MINALIGN - 1);
@@ -349,7 +419,9 @@ static int simple_check_buf(struct usbtest_dev *tdev, struct urb *urb)
 	u8		expected;
 	u8		*buf = urb->transfer_buffer;
 	unsigned	len = urb->actual_length;
-
+#ifdef CONFIG_ARCH_MXC
+	unsigned	maxpacket = get_maxpacket(urb->dev, urb->pipe);
+#endif
 	int ret = check_guard_bytes(tdev, urb);
 	if (ret)
 		return ret;
@@ -366,7 +438,12 @@ static int simple_check_buf(struct usbtest_dev *tdev, struct urb *urb)
 		 * with set_interface or set_config.
 		 */
 		case 1:			/* mod63 */
+#ifdef CONFIG_ARCH_MXC
+			expected = (i % maxpacket) % 63;
+#esle			
 			expected = i % 63;
+#endif
+			
 			break;
 		/* always fail unsupported patterns */
 		default:
@@ -476,7 +553,58 @@ static void free_sglist(struct scatterlist *sg, int nents)
 	}
 	kfree(sg);
 }
+#ifdef CONFIG_ARCH_MXC
+static struct scatterlist *
+alloc_sglist(int nents, int max, int vary, struct usbtest_dev *dev, int pipe)
+{
+	struct scatterlist	*sg;
+	unsigned		i;
+	unsigned		size = max;
+	unsigned		maxpacket =
+		get_maxpacket(interface_to_usbdev(dev->intf), pipe);
 
+	if (max == 0)
+		return NULL;
+
+	sg = kmalloc_array(nents, sizeof(*sg), GFP_KERNEL);
+	if (!sg)
+		return NULL;
+	sg_init_table(sg, nents);
+
+	for (i = 0; i < nents; i++) {
+		char		*buf;
+		unsigned	j;
+
+		buf = kzalloc(size, GFP_KERNEL);
+		if (!buf) {
+			free_sglist(sg, i);
+			return NULL;
+		}
+
+		/* kmalloc pages are always physically contiguous! */
+		sg_set_buf(&sg[i], buf, size);
+
+		switch (pattern) {
+		case 0:
+			/* already zeroed */
+			break;
+		case 1:
+			for (j = 0; j < size; j++)
+				*buf++ = (u8) ((j % maxpacket) % 63);
+			break;
+		}
+
+		if (vary) {
+			size += vary;
+			size %= max;
+			if (size == 0)
+				size = (vary < max) ? vary : max;
+		}
+	}
+
+	return sg;
+}
+#else
 static struct scatterlist *
 alloc_sglist(int nents, int max, int vary)
 {
@@ -525,7 +653,7 @@ alloc_sglist(int nents, int max, int vary)
 
 	return sg;
 }
-
+#endif
 static void sg_timeout(unsigned long _req)
 {
 	struct usb_sg_request	*req = (struct usb_sg_request *) _req;
@@ -1719,7 +1847,11 @@ static int ctrl_out(struct usbtest_dev *dev,
 	for (i = 0; i < count; i++) {
 		/* write patterned data */
 		for (j = 0; j < len; j++)
+#ifdef CONFIG_ARCH_MXC
+			buf[j] = (u8)(i + j);
+#else
 			buf[j] = i + j;
+#endif			
 		retval = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
 				0x5b, USB_DIR_OUT|USB_TYPE_VENDOR,
 				0, 0, buf, len, USB_CTRL_SET_TIMEOUT);
@@ -1750,8 +1882,13 @@ static int ctrl_out(struct usbtest_dev *dev,
 		/* fail if we can't verify */
 		for (j = 0; j < len; j++) {
 			if (buf[j] != (u8) (i + j)) {
+#ifdef CONFIG_ARCH_MXC
+				ERROR(dev, "ctrl_out, byte %d is %d not %d\n",
+					j, buf[j], (u8)(i + j));
+#else
 				ERROR(dev, "ctrl_out, byte %d is %d not %d\n",
 					j, buf[j], (u8) i + j);
+#endif					
 				retval = -EBADMSG;
 				break;
 			}
@@ -1780,7 +1917,25 @@ static int ctrl_out(struct usbtest_dev *dev,
 }
 
 /*-------------------------------------------------------------------------*/
+#ifdef CONFIG_ARCH_MXC
+/* ISO/BULK tests ... mimics common usage
+ *  - buffer length is split into N packets (mostly maxpacket sized)
+ *  - multi-buffers according to sglen
+ */
 
+struct transfer_context {
+	unsigned		count;
+	unsigned		pending;
+	spinlock_t		lock;
+	struct completion	done;
+	int			submit_error;
+	unsigned long		errors;
+	unsigned long		packet_count;
+	struct usbtest_dev	*dev;
+	bool			is_iso;
+};
+
+#else
 /* ISO tests ... mimics common usage
  *  - buffer length is split into N packets (mostly maxpacket sized)
  *  - multi-buffers according to sglen
@@ -1796,10 +1951,17 @@ struct iso_context {
 	unsigned long		packet_count;
 	struct usbtest_dev	*dev;
 };
+#endif
 
+#ifdef CONFIG_ARCH_MXC
+static void complicated_callback(struct urb *urb)
+{
+	struct transfer_context	*ctx = urb->context;
+#else
 static void iso_callback(struct urb *urb)
 {
 	struct iso_context	*ctx = urb->context;
+#endif
 
 	spin_lock(&ctx->lock);
 	ctx->count--;
@@ -1808,7 +1970,11 @@ static void iso_callback(struct urb *urb)
 	if (urb->error_count > 0)
 		ctx->errors += urb->error_count;
 	else if (urb->status != 0)
+#ifdef CONFIG_ARCH_MXC
+		ctx->errors += (ctx->is_iso ? urb->number_of_packets : 1);
+#else
 		ctx->errors += urb->number_of_packets;
+#endif		
 	else if (urb->actual_length != urb->transfer_buffer_length)
 		ctx->errors++;
 	else if (check_guard_bytes(ctx->dev, urb) != 0)
@@ -1894,14 +2060,117 @@ static struct urb *iso_alloc_urb(
 
 		urb->iso_frame_desc[i].offset = maxp * i;
 	}
-
+#ifdef CONFIG_ARCH_MXC
+	urb->complete = complicated_callback;
+#else
 	urb->complete = iso_callback;
+#endif	
 	/* urb->context = SET BY CALLER */
 	urb->interval = 1 << (desc->bInterval - 1);
 	urb->transfer_flags = URB_ISO_ASAP | URB_NO_TRANSFER_DMA_MAP;
 	return urb;
 }
+#ifdef CONFIG_ARCH_MXC
+static int
+test_queue(struct usbtest_dev *dev, struct usbtest_param *param,
+		int pipe, struct usb_endpoint_descriptor *desc, unsigned offset)
+{
+	struct transfer_context	context;
+	struct usb_device	*udev;
+	unsigned		i;
+	unsigned long		packets = 0;
+	int			status = 0;
+	struct urb		*urbs[param->sglen];
 
+	memset(&context, 0, sizeof(context));
+	context.count = param->iterations * param->sglen;
+	context.dev = dev;
+	context.is_iso = !!desc;
+	init_completion(&context.done);
+	spin_lock_init(&context.lock);
+
+	udev = testdev_to_usbdev(dev);
+
+	for (i = 0; i < param->sglen; i++) {
+		if (context.is_iso)
+			urbs[i] = iso_alloc_urb(udev, pipe, desc,
+					param->length, offset);
+		else
+			urbs[i] = complicated_alloc_urb(udev, pipe,
+					param->length, 0);
+
+		if (!urbs[i]) {
+			status = -ENOMEM;
+			goto fail;
+		}
+		packets += urbs[i]->number_of_packets;
+		urbs[i]->context = &context;
+	}
+	packets *= param->iterations;
+
+	if (context.is_iso) {
+		dev_info(&dev->intf->dev,
+			"iso period %d %sframes, wMaxPacket %d, transactions: %d\n",
+			1 << (desc->bInterval - 1),
+			(udev->speed == USB_SPEED_HIGH) ? "micro" : "",
+			usb_endpoint_maxp(desc) & 0x7ff,
+			1 + (0x3 & (usb_endpoint_maxp(desc) >> 11)));
+
+		dev_info(&dev->intf->dev,
+			"total %lu msec (%lu packets)\n",
+			(packets * (1 << (desc->bInterval - 1)))
+				/ ((udev->speed == USB_SPEED_HIGH) ? 8 : 1),
+			packets);
+	}
+
+	spin_lock_irq(&context.lock);
+	for (i = 0; i < param->sglen; i++) {
+		++context.pending;
+		status = usb_submit_urb(urbs[i], GFP_ATOMIC);
+		if (status < 0) {
+			ERROR(dev, "submit iso[%d], error %d\n", i, status);
+			if (i == 0) {
+				spin_unlock_irq(&context.lock);
+				goto fail;
+			}
+
+			simple_free_urb(urbs[i]);
+			urbs[i] = NULL;
+			context.pending--;
+			context.submit_error = 1;
+			break;
+		}
+	}
+	spin_unlock_irq(&context.lock);
+
+	wait_for_completion(&context.done);
+
+	for (i = 0; i < param->sglen; i++) {
+		if (urbs[i])
+			simple_free_urb(urbs[i]);
+	}
+	/*
+	 * Isochronous transfers are expected to fail sometimes.  As an
+	 * arbitrary limit, we will report an error if any submissions
+	 * fail or if the transfer failure rate is > 10%.
+	 */
+	if (status != 0)
+		;
+	else if (context.submit_error)
+		status = -EACCES;
+	else if (context.errors >
+			(context.is_iso ? context.packet_count / 10 : 0))
+		status = -EIO;
+	return status;
+
+fail:
+	for (i = 0; i < param->sglen; i++) {
+		if (urbs[i])
+			simple_free_urb(urbs[i]);
+	}
+	return status;
+}
+#esle
 static int
 test_iso_queue(struct usbtest_dev *dev, struct usbtest_param *param,
 		int pipe, struct usb_endpoint_descriptor *desc, unsigned offset)
@@ -1993,6 +2262,7 @@ fail:
 	}
 	return status;
 }
+#endif
 
 static int test_unaligned_bulk(
 	struct usbtest_dev *tdev,
@@ -2003,9 +2273,13 @@ static int test_unaligned_bulk(
 	const char *label)
 {
 	int retval;
+#ifdef CONFIG_ARCH_MXC
+	struct urb *urb = usbtest_alloc_urb(testdev_to_usbdev(tdev),
+			pipe, length, transfer_flags, 1, 0, simple_callback);
+#else
 	struct urb *urb = usbtest_alloc_urb(
 		testdev_to_usbdev(tdev), pipe, length, transfer_flags, 1, 0);
-
+#endif
 	if (!urb)
 		return -ENOMEM;
 
@@ -2059,7 +2333,10 @@ usbtest_ioctl(struct usb_interface *intf, unsigned int code, void *buf)
 
 	if (param->iterations <= 0)
 		return -EINVAL;
-
+#ifdef CONFIG_ARCH_MXC
+	if (param->sglen > MAX_SGLEN)
+		return -EINVAL;
+#endif
 	if (mutex_lock_interruptible(&dev->lock))
 		return -ERESTARTSYS;
 
@@ -2175,7 +2452,12 @@ usbtest_ioctl(struct usb_interface *intf, unsigned int code, void *buf)
 			"TEST 5:  write %d sglists %d entries of %d bytes\n",
 				param->iterations,
 				param->sglen, param->length);
+#ifdef CONFIG_ARCH_MXC
+		sg = alloc_sglist(param->sglen, param->length,
+				0, dev, dev->out_pipe);
+#else
 		sg = alloc_sglist(param->sglen, param->length, 0);
+#endif
 		if (!sg) {
 			retval = -ENOMEM;
 			break;
@@ -2193,7 +2475,12 @@ usbtest_ioctl(struct usb_interface *intf, unsigned int code, void *buf)
 			"TEST 6:  read %d sglists %d entries of %d bytes\n",
 				param->iterations,
 				param->sglen, param->length);
+#ifdef CONFIG_ARCH_MXC
+		sg = alloc_sglist(param->sglen, param->length,
+				0, dev, dev->in_pipe);
+#else
 		sg = alloc_sglist(param->sglen, param->length, 0);
+#endif
 		if (!sg) {
 			retval = -ENOMEM;
 			break;
@@ -2210,7 +2497,12 @@ usbtest_ioctl(struct usb_interface *intf, unsigned int code, void *buf)
 			"TEST 7:  write/%d %d sglists %d entries 0..%d bytes\n",
 				param->vary, param->iterations,
 				param->sglen, param->length);
+#ifdef CONFIG_ARCH_MXC
+		sg = alloc_sglist(param->sglen, param->length,
+				param->vary, dev, dev->out_pipe);
+#else				
 		sg = alloc_sglist(param->sglen, param->length, param->vary);
+#endif
 		if (!sg) {
 			retval = -ENOMEM;
 			break;
@@ -2227,7 +2519,12 @@ usbtest_ioctl(struct usb_interface *intf, unsigned int code, void *buf)
 			"TEST 8:  read/%d %d sglists %d entries 0..%d bytes\n",
 				param->vary, param->iterations,
 				param->sglen, param->length);
+#ifdef CONFIG_ARCH_MXC
+		sg = alloc_sglist(param->sglen, param->length,
+				param->vary, dev, dev->in_pipe);
+#else
 		sg = alloc_sglist(param->sglen, param->length, param->vary);
+#endif
 		if (!sg) {
 			retval = -ENOMEM;
 			break;
@@ -2324,8 +2621,13 @@ usbtest_ioctl(struct usb_interface *intf, unsigned int code, void *buf)
 				param->iterations,
 				param->sglen, param->length);
 		/* FIRMWARE:  iso sink */
+#ifdef CONFIG_ARCH_MXC 
+		retval = test_queue(dev, param,
+				dev->out_iso_pipe, dev->iso_out, 0);
+#else
 		retval = test_iso_queue(dev, param,
 				dev->out_iso_pipe, dev->iso_out, 0);
+#endif
 		break;
 
 	/* iso read tests */
@@ -2337,8 +2639,13 @@ usbtest_ioctl(struct usb_interface *intf, unsigned int code, void *buf)
 				param->iterations,
 				param->sglen, param->length);
 		/* FIRMWARE:  iso source */
+#ifdef CONFIG_ARCH_MXC 
+		retval = test_queue(dev, param,
+				dev->in_iso_pipe, dev->iso_in, 0);
+#else
 		retval = test_iso_queue(dev, param,
 				dev->in_iso_pipe, dev->iso_in, 0);
+#endif
 		break;
 
 	/* FIXME scatterlist cancel (needs helper thread) */
@@ -2418,8 +2725,13 @@ usbtest_ioctl(struct usb_interface *intf, unsigned int code, void *buf)
 			"TEST 22:  write %d iso odd, %d entries of %d bytes\n",
 				param->iterations,
 				param->sglen, param->length);
+#ifdef CONFIG_ARCH_MXC 
+		retval = test_queue(dev, param,
+				dev->out_iso_pipe, dev->iso_out, 1);
+#else
 		retval = test_iso_queue(dev, param,
 				dev->out_iso_pipe, dev->iso_out, 1);
+#endif
 		break;
 
 	case 23:
@@ -2429,8 +2741,13 @@ usbtest_ioctl(struct usb_interface *intf, unsigned int code, void *buf)
 			"TEST 23:  read %d iso odd, %d entries of %d bytes\n",
 				param->iterations,
 				param->sglen, param->length);
+#ifdef CONFIG_ARCH_MXC 
+		retval = test_queue(dev, param,
+				dev->in_iso_pipe, dev->iso_in, 1);
+#else
 		retval = test_iso_queue(dev, param,
 				dev->in_iso_pipe, dev->iso_in, 1);
+#endif
 		break;
 
 	/* unlink URBs from a bulk-OUT queue */
@@ -2486,6 +2803,27 @@ usbtest_ioctl(struct usb_interface *intf, unsigned int code, void *buf)
 		retval = simple_io(dev, urb, param->iterations, 0, 0, "test26");
 		simple_free_urb(urb);
 		break;
+#ifdef CONFIG_ARCH_MXC
+	case 27:
+		/* We do performance test, so ignore data compare */
+		if (dev->out_pipe == 0 || param->sglen == 0 || pattern != 0)
+			break;
+		dev_info(&intf->dev,
+			"TEST 27: bulk write %dMbytes\n", (param->iterations *
+			param->sglen * param->length) / (1024 * 1024));
+		retval = test_queue(dev, param,
+				dev->out_pipe, NULL, 0);
+		break;
+	case 28:
+		if (dev->in_pipe == 0 || param->sglen == 0 || pattern != 0)
+			break;
+		dev_info(&intf->dev,
+			"TEST 28: bulk read %dMbytes\n", (param->iterations *
+			param->sglen * param->length) / (1024 * 1024));
+		retval = test_queue(dev, param,
+				dev->in_pipe, NULL, 0);
+		break;
+#endif				
 	}
 	do_gettimeofday(&param->duration);
 	param->duration.tv_sec -= start.tv_sec;

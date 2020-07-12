@@ -25,4 +25,8 @@ typedef __restorefn_t __user *__sigrestore_t;
 #define SIG_ERR	((__force __sighandler_t)-1)	/* error return from signal */
 #endif
 
+#ifndef CONFIG_VD_RELEASE
+#define USE_PROHIBIT_SIG (CONFIG_PROHIBIT_SIG < SIGRTMAX)
+#endif
+
 #endif /* __ASM_GENERIC_SIGNAL_DEFS_H */

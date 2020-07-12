@@ -363,9 +363,9 @@ int fsnotify_add_mark_locked(struct fsnotify_mark *mark,
 err:
 	mark->flags &= ~FSNOTIFY_MARK_FLAG_ALIVE;
 	list_del_init(&mark->g_list);
+	atomic_dec(&group->num_marks);
 	fsnotify_put_group(group);
 	mark->group = NULL;
-	atomic_dec(&group->num_marks);
 
 	spin_unlock(&mark->lock);
 

@@ -226,12 +226,20 @@ bool dma_release_from_contiguous(struct device *dev, struct page *pages,
 static int rmem_cma_device_init(struct reserved_mem *rmem, struct device *dev)
 {
 	dev_set_cma_area(dev, rmem->priv);
+#ifdef CONFIG_CMA
+	get_device(dev);
+	cma_add_device_on_region(dev, rmem->priv);
+#endif
 	return 0;
 }
 
 static void rmem_cma_device_release(struct reserved_mem *rmem,
 				    struct device *dev)
 {
+#ifdef CONFIG_CMA
+	cma_remove_device_on_region(dev, rmem->priv);
+	put_device(dev);
+#endif
 	dev_set_cma_area(dev, NULL);
 }
 

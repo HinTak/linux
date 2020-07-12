@@ -7,6 +7,7 @@ obj-$(CONFIG_DMA_ACPI) += acpi-dma.o
 obj-$(CONFIG_DMA_OF) += of-dma.o
 
 obj-$(CONFIG_DMATEST) += dmatest.o
+obj-$(CONFIG_DMA_MTK_UART) += 8250_mtk_dma.o
 obj-$(CONFIG_INTEL_IOATDMA) += ioat/
 obj-$(CONFIG_INTEL_IOP_ADMA) += iop-adma.o
 obj-$(CONFIG_FSL_DMA) += fsldma.o

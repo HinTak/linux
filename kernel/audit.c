@@ -385,6 +385,33 @@ static void audit_hold_skb(struct sk_buff *skb)
 		kfree_skb(skb);
 }
 
+#ifdef CONFIG_SECURITY_SMACK_LOG_FOR_REL
+
+#define SMACK_LOG_LIMIT_COUNT		10
+#define SMACK_LOG_JIFFIES_PER_MIN	(HZ * 60)
+static DEFINE_SPINLOCK(smack_log_limit);
+unsigned long smack_log_start_time = 1;
+unsigned long smack_log_count;
+
+bool check_smack_log_limitation(void)
+{
+	int ret = 0;
+	unsigned long flags;
+	
+	spin_lock_irqsave(&smack_log_limit, flags);
+	if (jiffies > (smack_log_start_time * SMACK_LOG_JIFFIES_PER_MIN)) {
+		smack_log_start_time = (jiffies / SMACK_LOG_JIFFIES_PER_MIN) + 1;
+		smack_log_count = 1;
+		ret = 1;
+	} else if (smack_log_count < SMACK_LOG_LIMIT_COUNT) {
+		ret = 1;
+		smack_log_count++;
+	}
+	spin_unlock_irqrestore(&smack_log_limit, flags);
+	return ret;
+}
+#endif
+
 /*
  * For one reason or another this nlh isn't getting delivered to the userspace
  * audit daemon, just send it to printk.
@@ -395,10 +422,19 @@ static void audit_printk_skb(struct sk_buff *skb)
 	char *data = nlmsg_data(nlh);
 
 	if (nlh->nlmsg_type != AUDIT_EOE) {
+#ifdef CONFIG_SECURITY_SMACK_LOG_FOR_REL
+		if (check_smack_log_limitation())
+			printk(KERN_ERR"type=%d %s\n", nlh->nlmsg_type, data);
+		else
+			printk(KERN_DEBUG"type=%d %s\n", nlh->nlmsg_type, data);
+#elif defined(CONFIG_SECURITY_SMACK)
+		printk(KERN_NOTICE "type=%d %s\n", nlh->nlmsg_type, data);
+#else
 		if (printk_ratelimit())
 			pr_notice("type=%d %s\n", nlh->nlmsg_type, data);
 		else
 			audit_log_lost("printk limit exceeded");
+#endif
 	}
 
 	audit_hold_skb(skb);

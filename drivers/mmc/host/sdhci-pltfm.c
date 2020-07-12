@@ -238,14 +238,26 @@ EXPORT_SYMBOL_GPL(sdhci_pltfm_unregister);
 int sdhci_pltfm_suspend(struct device *dev)
 {
 	struct sdhci_host *host = dev_get_drvdata(dev);
+#ifdef CONFIG_ARCH_MXC
+	int ret;
 
+	ret = sdhci_suspend_host(host);
+	pinctrl_pm_select_sleep_state(dev);
+
+	return ret;
+#else
 	return sdhci_suspend_host(host);
+#endif
 }
 EXPORT_SYMBOL_GPL(sdhci_pltfm_suspend);
 
 int sdhci_pltfm_resume(struct device *dev)
 {
 	struct sdhci_host *host = dev_get_drvdata(dev);
+
+#ifdef CONFIG_ARCH_MXC
+	pinctrl_pm_select_default_state(dev);
+#endif
 
 	return sdhci_resume_host(host);
 }

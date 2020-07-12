@@ -122,7 +122,11 @@ static int __init __reserved_mem_alloc_size(unsigned long node,
 		}
 		align = dt_mem_next_cell(dt_root_addr_cells, &prop);
 	}
-
+#ifdef CONFIG_ARCH_MXC
+	/* Need adjust the alignment to satisfy the CMA requirement */
+	if (IS_ENABLED(CONFIG_CMA) && of_flat_dt_is_compatible(node, "shared-dma-pool"))
+		align = max(align, (phys_addr_t)PAGE_SIZE << max(MAX_ORDER - 1, pageblock_order));
+#endif
 	prop = of_get_flat_dt_prop(node, "alloc-ranges", &len);
 	if (prop) {
 
@@ -243,18 +247,22 @@ static inline struct reserved_mem *__find_rmem(struct device_node *node)
  * This function assign memory region pointed by "memory-region" device tree
  * property to the given device.
  */
-int of_reserved_mem_device_init(struct device *dev)
+int of_reserved_mem_device_init_by_idx(struct device *dev,
+		struct device_node *np, int idx)
 {
+	struct device_node *target;
 	struct reserved_mem *rmem;
-	struct device_node *np;
 	int ret;
 
-	np = of_parse_phandle(dev->of_node, "memory-region", 0);
-	if (!np)
+	if (!np || !dev)
+		return -EINVAL;
+
+	target = of_parse_phandle(np, "memory-region", idx);
+	if (!target)
 		return -ENODEV;
 
-	rmem = __find_rmem(np);
-	of_node_put(np);
+	rmem = __find_rmem(target);
+	of_node_put(target);
 
 	if (!rmem || !rmem->ops || !rmem->ops->device_init)
 		return -EINVAL;
@@ -265,7 +273,7 @@ int of_reserved_mem_device_init(struct device *dev)
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(of_reserved_mem_device_init);
+EXPORT_SYMBOL_GPL(of_reserved_mem_device_init_by_idx);
 
 /**
  * of_reserved_mem_device_release() - release reserved memory device structures

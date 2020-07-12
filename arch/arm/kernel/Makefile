@@ -23,6 +23,7 @@ obj-y		:= elf.o entry-common.o irq.o opcodes.o \
 obj-$(CONFIG_ATAGS)		+= atags_parse.o
 obj-$(CONFIG_ATAGS_PROC)	+= atags_proc.o
 obj-$(CONFIG_DEPRECATED_PARAM_STRUCT) += atags_compat.o
+obj-$(CONFIG_AARCH32_CACHE_DUMPER) +=  aarch32_cache_dump.o
 
 ifeq ($(CONFIG_CPU_V7M),y)
 obj-y		+= entry-v7m.o v7m.o
@@ -34,6 +35,7 @@ obj-$(CONFIG_CPU_IDLE)		+= cpuidle.o
 obj-$(CONFIG_ISA_DMA_API)	+= dma.o
 obj-$(CONFIG_FIQ)		+= fiq.o fiqasm.o
 obj-$(CONFIG_MODULES)		+= armksyms.o module.o
+obj-$(CONFIG_ARM_MODULE_PLTS)	+= module-plts.o
 obj-$(CONFIG_ISA_DMA)		+= dma-isa.o
 obj-$(CONFIG_PCI)		+= bios32.o isa.o
 obj-$(CONFIG_ARM_CPU_SUSPEND)	+= sleep.o suspend.o
@@ -60,7 +62,13 @@ obj-$(CONFIG_HAVE_TCM)		+= tcm.o
 obj-$(CONFIG_OF)		+= devtree.o
 obj-$(CONFIG_CRASH_DUMP)	+= crash_dump.o
 obj-$(CONFIG_SWP_EMULATE)	+= swp_emulate.o
-CFLAGS_swp_emulate.o		:= -Wa,-march=armv7-a
+ifeq ($(CONFIG_CPU_ARM_CORTEX_A8),y)
+	CFLAGS_swp_emulate.o		:= -Wa,-mcpu=cortex-a8
+else ifeq ($(CONFIG_CPU_ARM_CORTEX_A15),y)
+	CFLAGS_swp_emulate.o		:= -Wa,-mcpu=cortex-a15
+else
+	CFLAGS_swp_emulate.o		:= -Wa,-march=armv7-a
+endif
 obj-$(CONFIG_HAVE_HW_BREAKPOINT)	+= hw_breakpoint.o
 
 obj-$(CONFIG_CPU_XSCALE)	+= xscale-cp0.o
@@ -89,5 +97,7 @@ ifeq ($(CONFIG_ARM_PSCI),y)
 obj-y				+= psci.o psci-call.o
 obj-$(CONFIG_SMP)		+= psci_smp.o
 endif
+
+obj-$(CONFIG_HAVE_ARM_SMCCC)	+= smccc-call.o
 
 extra-y := $(head-y) vmlinux.lds

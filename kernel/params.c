@@ -93,6 +93,10 @@ static void param_check_unsafe(const struct kernel_param *kp)
 	}
 }
 
+#ifdef CONFIG_SERIAL_INPUT_MANIPULATION
+extern void set_enable_string(char *val);
+#endif
+
 static int parse_one(char *param,
 		     char *val,
 		     const char *doing,
@@ -107,6 +111,13 @@ static int parse_one(char *param,
 	int err;
 
 	/* Find parameter */
+	if (!strcmp(param, "SELP_ENABLE")) {
+#ifdef CONFIG_SERIAL_INPUT_MANIPULATION
+		set_enable_string(val);
+#endif
+		return 0;
+	}
+
 	for (i = 0; i < num_params; i++) {
 		if (parameq(param, params[i].name)) {
 			if (params[i].level < min_level

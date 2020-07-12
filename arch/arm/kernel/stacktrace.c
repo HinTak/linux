@@ -4,6 +4,9 @@
 
 #include <asm/stacktrace.h>
 #include <asm/traps.h>
+#ifdef CONFIG_IRQ_STACK
+#include <asm/irq.h>
+#endif
 
 #if defined(CONFIG_FRAME_POINTER) && !defined(CONFIG_ARM_UNWIND)
 /*
@@ -26,6 +29,13 @@ int notrace unwind_frame(struct stackframe *frame)
 {
 	unsigned long high, low;
 	unsigned long fp = frame->fp;
+#ifdef CONFIG_IRQ_STACK
+	unsigned long irq_stack_base_p;
+	unsigned long irq_stack_p;
+
+	irq_stack_base_p = IRQ_STACK_BASE_PTR(raw_smp_processor_id());
+	irq_stack_p = IRQ_STACK_PTR(raw_smp_processor_id());
+#endif
 
 	/* only go to a higher address on the stack */
 	low = frame->sp;
@@ -39,6 +49,25 @@ int notrace unwind_frame(struct stackframe *frame)
 	frame->fp = *(unsigned long *)(fp - 12);
 	frame->sp = *(unsigned long *)(fp - 8);
 	frame->pc = *(unsigned long *)(fp - 4);
+
+#ifdef CONFIG_IRQ_STACK
+	/*
+	 * Check whether we are going to walk through from interrupt stack
+	 * to task stack.
+	 * If we reach the end of the stack - and its an interrupt stack,
+	 * read the original task stack pointer base + 4 of IRQ stack.
+	 */
+	if (frame->sp == irq_stack_p) {
+		frame->sp = IRQ_STACK_TO_TASK_STACK(irq_stack_base_p);
+		/*
+		 * workaround:
+		 * In case of vfp r11 (fp) holds value of CPU number,
+		 * instead of real fp. so avoid that case also.
+		 */
+		if (frame->sp < NR_CPUS)
+			return -EINVAL;
+	}
+#endif
 
 	return 0;
 }
@@ -99,6 +128,9 @@ static int save_trace(struct stackframe *frame, void *d)
 		return 0;
 
 	regs = (struct pt_regs *)frame->sp;
+
+	if (!__kernel_text_address(regs->ARM_pc))
+		return 1;
 
 	trace->entries[trace->nr_entries++] = regs->ARM_pc;
 

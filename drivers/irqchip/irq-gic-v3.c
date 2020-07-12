@@ -106,44 +106,102 @@ static void gic_redist_wait_for_rwp(void)
 	gic_do_wait_for_rwp(gic_data_rdist_rd_base());
 }
 
-/* Low level accessors */
-static u64 __maybe_unused gic_read_iar(void)
-{
-	u64 irqstat;
+#define __ACCESS_CP15(CRn, Op1, CRm, Op2)	\
+	"mrc", "mcr", __stringify(p15, Op1, %0, CRn, CRm, Op2), u32
+#define __ACCESS_CP15_64(Op1, CRm)		\
+	"mrrc", "mcrr", __stringify(p15, Op1, %Q0, %R0, CRm), u64
 
-	asm volatile("mrs_s %0, " __stringify(ICC_IAR1_EL1) : "=r" (irqstat));
+#define __read_sysreg(r, w, c, t) ({				\
+	t __val;						\
+	asm volatile(r " " c : "=r" (__val));			\
+	__val;							\
+})
+#define read_sysreg(...)		__read_sysreg(__VA_ARGS__)
+
+#define __write_sysreg(v, r, w, c, t)	asm volatile(w " " c : : "r" ((t)(v)))
+#define write_sysreg(v, ...)		__write_sysreg(v, __VA_ARGS__)
+#define ICC_EOIR1			__ACCESS_CP15(c12, 0, c12, 1)
+#define ICC_DIR				__ACCESS_CP15(c12, 0, c11, 1)
+#define ICC_IAR1			__ACCESS_CP15(c12, 0, c12, 0)
+#define ICC_SGI1R			__ACCESS_CP15_64(0, c12)
+#define ICC_PMR				__ACCESS_CP15(c4, 0, c6, 0)
+#define ICC_CTLR			__ACCESS_CP15(c12, 0, c12, 4)
+#define ICC_SRE				__ACCESS_CP15(c12, 0, c12, 5)
+#define ICC_IGRPEN1			__ACCESS_CP15(c12, 0, c12, 7)
+#define ICC_BPR1			__ACCESS_CP15(c12, 0, c12, 3)
+
+#define ICC_HSRE			__ACCESS_CP15(c12, 4, c9, 5)
+
+#define ICH_VSEIR			__ACCESS_CP15(c12, 4, c9, 4)
+#define ICH_HCR				__ACCESS_CP15(c12, 4, c11, 0)
+#define ICH_VTR				__ACCESS_CP15(c12, 4, c11, 1)
+#define ICH_MISR			__ACCESS_CP15(c12, 4, c11, 2)
+#define ICH_EISR			__ACCESS_CP15(c12, 4, c11, 3)
+#define ICH_ELSR			__ACCESS_CP15(c12, 4, c11, 5)
+#define ICH_VMCR			__ACCESS_CP15(c12, 4, c11, 7)
+
+/* Low level accessors */
+
+static inline u32 gic_read_iar(void)
+{
+	u32 irqstat = read_sysreg(ICC_IAR1);
+
+	dsb(sy);
+
 	return irqstat;
 }
 
-static void __maybe_unused gic_write_pmr(u64 val)
+static inline void gic_write_pmr(u32 val)
 {
-	asm volatile("msr_s " __stringify(ICC_PMR_EL1) ", %0" : : "r" (val));
+	write_sysreg(val, ICC_PMR);
 }
 
-static void __maybe_unused gic_write_ctlr(u64 val)
+static inline void gic_write_ctlr(u32 val)
 {
-	asm volatile("msr_s " __stringify(ICC_CTLR_EL1) ", %0" : : "r" (val));
+	write_sysreg(val, ICC_CTLR);
 	isb();
 }
 
-static void __maybe_unused gic_write_grpen1(u64 val)
+static inline void gic_write_grpen1(u32 val)
 {
-	asm volatile("msr_s " __stringify(ICC_GRPEN1_EL1) ", %0" : : "r" (val));
+	write_sysreg(val, ICC_IGRPEN1);
 	isb();
 }
 
-static void __maybe_unused gic_write_sgi1r(u64 val)
+static inline void gic_write_sgi1r(u64 val)
 {
-	asm volatile("msr_s " __stringify(ICC_SGI1R_EL1) ", %0" : : "r" (val));
+	write_sysreg(val, ICC_SGI1R);
+}
+
+static inline u32 gic_read_sre(void)
+{
+	return read_sysreg(ICC_SRE);
+}
+
+static inline void gic_write_sre(u32 val)
+{
+	write_sysreg(val, ICC_SRE);
+	isb();
+}
+
+static inline void gic_write_bpr1(u32 val)
+{
+	write_sysreg(val, ICC_BPR1);
+}
+
+static inline void gic_write_eoir(u32 irq)
+{
+	write_sysreg(irq, ICC_EOIR1);
+	isb();
 }
 
 static void gic_enable_sre(void)
 {
 	u64 val;
 
-	asm volatile("mrs_s %0, " __stringify(ICC_SRE_EL1) : "=r" (val));
+	val = gic_read_sre();
 	val |= ICC_SRE_EL1_SRE;
-	asm volatile("msr_s " __stringify(ICC_SRE_EL1) ", %0" : : "r" (val));
+	gic_write_sre(val);
 	isb();
 
 	/*
@@ -153,7 +211,7 @@ static void gic_enable_sre(void)
 	 *
 	 * Kindly inform the luser.
 	 */
-	asm volatile("mrs_s %0, " __stringify(ICC_SRE_EL1) : "=r" (val));
+	val = gic_read_sre();
 	if (!(val & ICC_SRE_EL1_SRE))
 		pr_err("GIC: unable to set SRE (disabled at EL2), panic ahead\n");
 }
@@ -383,8 +441,10 @@ static void __init gic_dist_init(void)
 	 * enabled.
 	 */
 	affinity = gic_mpidr_to_affinity(cpu_logical_map(smp_processor_id()));
-	for (i = 32; i < gic_data.irq_nr; i++)
-		writeq_relaxed(affinity, base + GICD_IROUTER + i * 8);
+	for (i = 32; i < gic_data.irq_nr; i++) {
+		writel_relaxed((u32)affinity, base + GICD_IROUTER + i * 8);
+		writel_relaxed((u32)(affinity >> 32), base + GICD_IROUTER + i * 8 + 4);
+	}
 }
 
 static int gic_populate_rdist(void)
@@ -415,7 +475,9 @@ static int gic_populate_rdist(void)
 		}
 
 		do {
-			typer = readq_relaxed(ptr + GICR_TYPER);
+			typer = readl_relaxed(ptr + GICR_TYPER);
+			typer |= (u64)readl_relaxed(ptr + GICR_TYPER + 4) << 32;
+
 			if ((typer >> 32) == aff) {
 				u64 offset = ptr - gic_data.redist_regions[i].redist_base;
 				gic_data_rdist_rd_base() = ptr;
@@ -604,7 +666,8 @@ static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 	reg = gic_dist_base(d) + GICD_IROUTER + (gic_irq(d) * 8);
 	val = gic_mpidr_to_affinity(cpu_logical_map(cpu));
 
-	writeq_relaxed(val, reg);
+	writel_relaxed((u32)val, reg);
+	writel_relaxed((u32)(val >> 32), reg + 4);
 
 	/*
 	 * If the interrupt was enabled, enabled it again. Otherwise,

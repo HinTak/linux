@@ -156,7 +156,7 @@ STATIC inline int INIT unlz4(u8 *input, long in_len,
 #else
 		dest_len = uncomp_chunksize;
 		ret = lz4_decompress_unknownoutputsize(inp, chunksize, outp,
-				&dest_len);
+				&dest_len, NoDynOffset);
 #endif
 		if (ret < 0) {
 			error("Decoding failed");

@@ -35,6 +35,10 @@
 
 static inline int is_dma_buf_file(struct file *);
 
+#ifdef CONFIG_DMA_SHARED_BUFFER_USES_KDS
+struct kds_dma_buf_register *g_kds_dma_buf_register = NULL;
+#endif
+
 struct dma_buf_list {
 	struct list_head head;
 	struct mutex lock;
@@ -64,6 +68,16 @@ static int dma_buf_release(struct inode *inode, struct file *file)
 	BUG_ON(dmabuf->cb_shared.active || dmabuf->cb_excl.active);
 
 	dmabuf->ops->release(dmabuf);
+
+#ifdef CONFIG_DMA_SHARED_BUFFER_USES_KDS
+	if(g_kds_dma_buf_register)
+	{
+		if(g_kds_dma_buf_register->kds_callback_term)
+			g_kds_dma_buf_register->kds_callback_term(&dmabuf->kds_cb);
+		if(g_kds_dma_buf_register->kds_resource_term)
+			g_kds_dma_buf_register->kds_resource_term(&dmabuf->kds);
+	}
+#endif
 
 	mutex_lock(&db_list.lock);
 	list_del(&dmabuf->list_node);
@@ -130,9 +144,53 @@ static void dma_buf_poll_cb(struct fence *fence, struct fence_cb *cb)
 	spin_unlock_irqrestore(&dcb->poll->lock, flags);
 }
 
+#ifdef CONFIG_DMA_SHARED_BUFFER_USES_KDS
+static void dma_buf_kds_cb_fn (void *param1, void *param2)
+{
+	struct kds_resource_set **rset_ptr = param1;
+	struct kds_resource_set *rset = *rset_ptr;
+	wait_queue_head_t *wait_queue = param2;
+
+	kfree(rset_ptr);
+	if(g_kds_dma_buf_register && g_kds_dma_buf_register->kds_resource_set_release)
+		g_kds_dma_buf_register->kds_resource_set_release(&rset);
+	wake_up(wait_queue);
+}
+
+static int dma_buf_kds_check(struct kds_resource *kds,
+                             long unsigned int exclusive, int *poll_ret)
+{
+	if(g_kds_dma_buf_register)
+	{
+		/* Synchronous wait with 0 timeout - poll availability */
+		struct kds_resource_set *rset = g_kds_dma_buf_register->kds_waitall(1,&exclusive,&kds,0);
+
+		if (IS_ERR(rset))
+			return POLLERR;
+
+		if (rset){
+			if(g_kds_dma_buf_register && g_kds_dma_buf_register->kds_resource_set_release)
+				g_kds_dma_buf_register->kds_resource_set_release(&rset);
+			*poll_ret = POLLIN | POLLRDNORM;
+			if (exclusive)
+				*poll_ret |=  POLLOUT | POLLWRNORM;
+			return 1;
+		}
+		else{
+			return 0;
+		}
+	}
+
+	return 0;
+}
+#endif
+
 static unsigned int dma_buf_poll(struct file *file, poll_table *poll)
 {
 	struct dma_buf *dmabuf;
+#ifdef CONFIG_DMA_SHARED_BUFFER_USES_KDS
+	struct kds_resource *kds;
+#endif
 	struct reservation_object *resv;
 	struct reservation_object_list *fobj;
 	struct fence *fence_excl;
@@ -142,6 +200,53 @@ static unsigned int dma_buf_poll(struct file *file, poll_table *poll)
 	dmabuf = file->private_data;
 	if (!dmabuf || !dmabuf->resv)
 		return POLLERR;
+
+#ifdef CONFIG_DMA_SHARED_BUFFER_USES_KDS
+#ifdef CONFIG_ARCH_NVT72673
+	if(strcmp(dmabuf->exp_name, "Ndp_Gem") == 0)
+#endif
+	{
+		unsigned int ret = 0;
+
+		kds    = &dmabuf->kds;
+
+		if (poll_does_not_wait(poll)){
+			/* Check for exclusive access (superset of shared) first */
+			if(!dma_buf_kds_check(kds, 1ul, &ret))
+				dma_buf_kds_check(kds, 0ul, &ret);
+		}else{
+			int events = (int)poll_requested_events(poll);
+			unsigned long exclusive;
+			wait_queue_head_t *wq;
+			struct kds_resource_set **rset_ptr = kmalloc(sizeof(*rset_ptr), GFP_KERNEL);
+
+			if (!rset_ptr)
+				return POLL_ERR;
+
+			if (events & POLLOUT){
+				wq = &dmabuf->wq_exclusive;
+				exclusive = 1;
+			}else{
+				wq = &dmabuf->wq_shared;
+				exclusive = 0;
+			}
+			poll_wait(file, wq, poll);
+			if(g_kds_dma_buf_register && g_kds_dma_buf_register->kds_async_waitall)
+			{
+				ret = (unsigned int)(g_kds_dma_buf_register->kds_async_waitall(rset_ptr, KDS_FLAG_LOCKED_WAIT, &dmabuf->kds_cb, rset_ptr, wq, 1, &exclusive, &kds));
+
+				if (IS_ERR_VALUE(ret)){
+					ret = POLL_ERR;
+					kfree(rset_ptr);
+				}else{
+					/* Can't allow access until callback */
+					ret = 0;
+				}
+			}
+		}
+		return ret;
+	}
+#endif
 
 	resv = dmabuf->resv;
 
@@ -332,6 +437,19 @@ struct dma_buf *dma_buf_export(const struct dma_buf_export_info *exp_info)
 
 	mutex_init(&dmabuf->lock);
 	INIT_LIST_HEAD(&dmabuf->attachments);
+
+#ifdef CONFIG_DMA_SHARED_BUFFER_USES_KDS
+	init_waitqueue_head(&dmabuf->wq_exclusive);
+	init_waitqueue_head(&dmabuf->wq_shared);
+
+	if(g_kds_dma_buf_register)
+	{
+		if(g_kds_dma_buf_register->kds_resource_init)
+			g_kds_dma_buf_register->kds_resource_init(&dmabuf->kds);
+		if(g_kds_dma_buf_register->kds_callback_init)
+			g_kds_dma_buf_register->kds_callback_init(&dmabuf->kds_cb, 1, dma_buf_kds_cb_fn);
+	}
+#endif
 
 	mutex_lock(&db_list.lock);
 	list_add(&dmabuf->list_node, &db_list.head);
@@ -902,3 +1020,15 @@ static void __exit dma_buf_deinit(void)
 	dma_buf_uninit_debugfs();
 }
 __exitcall(dma_buf_deinit);
+
+#ifdef CONFIG_DMA_SHARED_BUFFER_USES_KDS
+int kds_dma_buf_module_register(struct kds_dma_buf_register *kds_funcs)
+{
+	if(!kds_funcs)
+		return 0;
+
+	g_kds_dma_buf_register=kds_funcs;
+	return 1;
+}
+EXPORT_SYMBOL(kds_dma_buf_module_register);
+#endif

@@ -728,6 +728,11 @@ struct Scsi_Host {
 	 * Points to the transport data (if any) which is allocated
 	 * separately
 	 */
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+        // patch for wrong inquiry response length case of SUNSTAR memory stick        //JUN-18-2007
+         unsigned long           flags;
+#endif
+
 	void *shost_data;
 
 	/*

@@ -46,6 +46,17 @@
 
 unsigned long irq_err_count;
 
+#ifdef CONFIG_IRQ_STACK
+DEFINE_PER_CPU(unsigned long, irq_stack_ptr);
+
+/*
+ * irq_stack should be IRQ_STACK_SIZE(THREAD_SIZE) aligned,
+ * to keep logic of current_thread_info same for IRQ stack
+ * as well as normal kernel stack.
+ */
+unsigned long irq_stack[NR_CPUS][IRQ_STACK_SIZE / sizeof(unsigned long)] __aligned(IRQ_STACK_SIZE);
+#endif
+
 int arch_show_interrupts(struct seq_file *p, int prec)
 {
 #ifdef CONFIG_FIQ
@@ -101,6 +112,16 @@ EXPORT_SYMBOL_GPL(set_irq_flags);
 void __init init_IRQ(void)
 {
 	int ret;
+
+#ifdef CONFIG_IRQ_STACK
+	int i;
+	unsigned long __percpu *irq_stack_p = NULL;
+
+	for_each_possible_cpu(i) {
+		irq_stack_p = per_cpu_ptr(&irq_stack_ptr, i);
+		*irq_stack_p = (unsigned long)irq_stack[i];
+	}
+#endif
 
 	if (IS_ENABLED(CONFIG_OF) && !machine_desc->init_irq)
 		irqchip_init();

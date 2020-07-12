@@ -388,4 +388,26 @@ config IR_SUNXI
       To compile this driver as a module, choose M here: the module will
       be called sunxi-ir.
 
+config IRB_NVT
+    tristate "NVT IR remote transmitter"
+    depends on RC_CORE
+    depends on LIRC
+    ---help---
+       Say Y if you want to support NVT IR Transmitter Controller
+       It supports both modulated, non-modulated output
+
+       To compile this driver as a module, choose M here: the module will
+       be called nvt-irb
+
+config IRS_NVT
+    tristate "NVT IR remote receiver"
+    depends on RC_CORE
+    depends on LIRC
+    ---help---
+       Say Y if you want to support NVT IR Receiver Controller
+       It supports input pin select
+
+       To compile this driver as a module, choose M here: the module will
+       be called nvt-irs
+
 endif #RC_DEVICES

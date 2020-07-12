@@ -144,6 +144,8 @@ bitmap_find_next_zero_area(unsigned long *map,
 					      align_mask, 0);
 }
 
+extern int bitmap_scnprintf(char *buf, unsigned int len,
+			const unsigned long *src, int nbits);
 extern int __bitmap_parse(const char *buf, unsigned int buflen, int is_user,
 			unsigned long *dst, int nbits);
 extern int bitmap_parse_user(const char __user *ubuf, unsigned int ulen,

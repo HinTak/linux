@@ -1,0 +1,3 @@
+# UAPI Header export list
+header-y += sdp_uart_direct_io.h
+

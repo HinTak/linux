@@ -33,8 +33,24 @@ static char *sound_devnode(struct device *dev, umode_t *mode)
 {
 	if (MAJOR(dev->devt) == SOUND_MAJOR)
 		return NULL;
+
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+	if (mode) {
+		*mode = 0666; /* fixme: file permission rwrwrw, DAC GID should be set in here same as udev does */
+	}
+#endif
+
 	return kasprintf(GFP_KERNEL, "snd/%s", dev_name(dev));
 }
+
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+static int sound_get_smack64_label(struct device *dev, char* buf, int size)
+{
+	printk(KERN_INFO "set smack label - %s\n", dev_name(dev));
+	snprintf(buf, size, "%s", "*");
+	return 0;
+}
+#endif
 
 static int __init init_soundcore(void)
 {
@@ -51,6 +67,10 @@ static int __init init_soundcore(void)
 	}
 
 	sound_class->devnode = sound_devnode;
+
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+	sound_class->get_smack64_label = sound_get_smack64_label;
+#endif
 
 	return 0;
 }

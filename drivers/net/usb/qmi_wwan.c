@@ -78,14 +78,46 @@ static const u8 buggy_fw_addr[ETH_ALEN] = {0x00, 0xa0, 0xc6, 0x00, 0x00, 0x00};
  * to 00:a0:c6:00:00:00 despite the host address being different.
  * This function will also fixup such packets.
  */
+
+#ifdef QUECTEL_DONGLE_5G_2019_SUPPORT  //Added by Quectel
+#include <linux/etherdevice.h>
+struct sk_buff *qmi_wwan_tx_fixup(struct usbnet *dev, struct sk_buff *skb, gfp_t flags)
+{
+	if (dev->udev->descriptor.idVendor != cpu_to_le16(0x2C7C))
+		return skb;
+	// Skip Ethernet header from message
+	if (dev->net->hard_header_len == 0)
+		return skb;
+	else{
+		skb_reset_mac_header(skb); 
+		if (skb_pull(skb, ETH_HLEN)) {
+			return skb;
+		}else {
+			dev_err(&dev->intf->dev, "Packet Dropped ");
+		}
+	}
+	
+	// Filter the packet out, release it
+	dev_kfree_skb_any(skb);
+	return NULL;
+}
+
+#include <linux/version.h>
+#if (LINUX_VERSION_CODE < KERNEL_VERSION( 3,9,1 ))
+#define QUECTEL_5G_KERNEL_VER_LESS_3_9_1
+#endif
+#endif
 static int qmi_wwan_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 {
 	__be16 proto;
-
+	
+#ifdef QUECTEL_5G_KERNEL_VER_LESS_3_9_1
+	if (dev->udev->descriptor.idVendor != cpu_to_le16(0x2C7C))
+		return 1;
+#endif
 	/* This check is no longer done by usbnet */
 	if (skb->len < dev->net->hard_header_len)
 		return 0;
-
 	switch (skb->data[0] & 0xf0) {
 	case 0x40:
 		proto = htons(ETH_P_IP);
@@ -108,7 +140,12 @@ static int qmi_wwan_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 	skb_push(skb, ETH_HLEN);
 	skb_reset_mac_header(skb);
 	eth_hdr(skb)->h_proto = proto;
+#ifdef QUECTEL_5G_KERNEL_VER_LESS_3_9_1
+	memset(eth_hdr(skb)->h_source, 0, ETH_ALEN);
+#else
 	eth_zero_addr(eth_hdr(skb)->h_source);
+#endif
+
 fix_dest:
 	memcpy(eth_hdr(skb)->h_dest, dev->net->dev_addr, ETH_ALEN);
 	return 1;
@@ -348,6 +385,33 @@ next_desc:
 		dev->net->dev_addr[0] &= 0xbf;	/* clear "IP" bit */
 	}
 	dev->net->netdev_ops = &qmi_wwan_netdev_ops;
+
+#ifdef QUECTEL_DONGLE_5G_2019_SUPPORT  //Added by Quectel
+	if (dev->udev->descriptor.idVendor == cpu_to_le16(0x2C7C)) {
+		if (intf->cur_altsetting->desc.bInterfaceClass != 0xff) {
+			dev_info(&intf->dev, "Quectel module not qmi_wwan mode! please check 'at+qcfg=\"usbnet\"'\n");
+			return -ENODEV;
+		}
+
+	dev_info(&intf->dev, "Quectel EC25&EC21&EG91&EG95&EG06&EP06&EM06&EG12&EP12&EM12&EG16&EG18&BG96&AG35 work on RawIP mode\n");
+	dev->net->flags |= IFF_NOARP;
+
+		#if (LINUX_VERSION_CODE < KERNEL_VERSION( 3,9,1 ))
+			/* make MAC addr easily distinguishable from an IP header */
+			if (possibly_iphdr(dev->net->dev_addr)) {
+				dev->net->dev_addr[0] |= 0x02; /* set local assignment bit */
+				dev->net->dev_addr[0] &= 0xbf; /* clear "IP" bit */
+			}
+		#endif
+
+		usb_control_msg(interface_to_usbdev(intf),usb_sndctrlpipe(interface_to_usbdev(intf), 0),
+			0x22, //USB_CDC_REQ_SET_CONTROL_LINE_STATE 
+			0x21, //USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE
+			1, //active CDC DTR
+			intf->cur_altsetting->desc.bInterfaceNumber,NULL, 0, 100);
+	}
+#endif
+
 err:
 	return status;
 }
@@ -432,7 +496,10 @@ static const struct driver_info	qmi_wwan_info = {
 	.bind		= qmi_wwan_bind,
 	.unbind		= qmi_wwan_unbind,
 	.manage_power	= qmi_wwan_manage_power,
-	.rx_fixup       = qmi_wwan_rx_fixup,
+	.rx_fixup 	= qmi_wwan_rx_fixup,
+#ifdef QUECTEL_DONGLE_5G_2019_SUPPORT //Added by Quectel
+	.tx_fixup 	= qmi_wwan_tx_fixup,
+#endif
 };
 
 #define HUAWEI_VENDOR_ID	0x12D1
@@ -539,6 +606,19 @@ static const struct usb_device_id products[] = {
 					      USB_CDC_PROTO_NONE),
 		.driver_info        = (unsigned long)&qmi_wwan_info,
 	},
+
+#ifdef QUECTEL_DONGLE_5G_2019_SUPPORT  //Added by Quectel
+	#ifndef QMI_FIXED_INTF	/* map QMI/wwan function by a fixed interface number */
+	#define QMI_FIXED_INTF(vend, prod, num) \
+	.match_flags = USB_DEVICE_ID_MATCH_DEVICE | USB_DEVICE_ID_MATCH_INT_INFO, \
+	.idVendor = vend, \
+	.idProduct = prod, \
+	.bInterfaceClass = 0xff, \
+	.bInterfaceSubClass = 0xff, \
+	.bInterfaceProtocol = 0xff, \
+	.driver_info = (unsigned long)&qmi_wwan_force_int##num,
+	#endif
+#endif
 
 	/* 3. Combined interface devices matching on interface number */
 	{QMI_FIXED_INTF(0x0408, 0xea42, 4)},	/* Yota / Megafon M100-1 */
@@ -785,6 +865,7 @@ static const struct usb_device_id products[] = {
 	{QMI_FIXED_INTF(0x413c, 0x81a8, 8)},	/* Dell Wireless 5808 Gobi(TM) 4G LTE Mobile Broadband Card */
 	{QMI_FIXED_INTF(0x413c, 0x81a9, 8)},	/* Dell Wireless 5808e Gobi(TM) 4G LTE Mobile Broadband Card */
 	{QMI_FIXED_INTF(0x03f0, 0x581d, 4)},	/* HP lt4112 LTE/HSPA+ Gobi 4G Module (Huawei me906e) */
+	{QMI_FIXED_INTF(0x2C7C, 0x0512, 4)}, 	/* Quectel EG12/EP12/EM12/EG16/EG18 */
 
 	/* 4. Gobi 1000 devices */
 	{QMI_GOBI1K_DEVICE(0x05c6, 0x9212)},	/* Acer Gobi Modem Device */

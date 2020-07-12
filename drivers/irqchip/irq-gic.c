@@ -243,9 +243,17 @@ static int gic_set_affinity(struct irq_data *d, const struct cpumask *mask_val,
 	unsigned long flags;
 
 	if (!force)
+#ifndef CONFIG_VD_GIC_SET_AFFINITY
 		cpu = cpumask_any_and(mask_val, cpu_online_mask);
+#else
+		cpu = (unsigned int)cpumask_last_and(NR_CPUS, mask_val, cpu_online_mask);
+#endif
 	else
+#ifndef CONFIG_VD_GIC_SET_AFFINITY
 		cpu = cpumask_first(mask_val);
+#else
+		cpu = cpumask_last(mask_val);
+#endif
 
 	if (cpu >= NR_GIC_CPU_IF || cpu >= nr_cpu_ids)
 		return -EINVAL;
@@ -639,7 +647,11 @@ static void gic_raise_softirq(const struct cpumask *mask, unsigned int irq)
 	dmb(ishst);
 
 	/* this always happens on GIC0 */
+#if defined(CONFIG_ARCH_SDP1202)
+	writel_relaxed(map << 16 | irq | 0x8000, gic_data_dist_base(&gic_data[0]) + GIC_DIST_SOFTINT);
+#else
 	writel_relaxed(map << 16 | irq, gic_data_dist_base(&gic_data[0]) + GIC_DIST_SOFTINT);
+#endif
 
 	raw_spin_unlock_irqrestore(&irq_controller_lock, flags);
 }

@@ -1,0 +1,9 @@
+# Related additional device.
+
+config RGBCOMBO_LED
+	tristate "PWM driven RGB LED Support"
+	default n
+	depends on PWM
+	help
+	  This option enables support for pwm driven RGB LEDs
+

@@ -14,6 +14,9 @@
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include <linux/compat.h>
+#ifdef CONFIG_PROC_VD_SUSPEND_POLICY
+#include <linux/vd_suspend_policy.h>
+#endif
 
 #include <asm/ioctls.h>
 
@@ -786,9 +789,28 @@ SYSCALL_DEFINE2(fanotify_init, unsigned int, flags, unsigned int, event_f_flags)
 		group->fanotify_data.max_marks = FANOTIFY_DEFAULT_MAX_MARKS;
 	}
 
-	fd = anon_inode_getfd("[fanotify]", &fanotify_fops, group, f_flags);
-	if (fd < 0)
+#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+	if(flags & FAN_CONTAINER_ONLY){
+		group->fanotify_data.container = 1;
+	}else{
+		group->fanotify_data.container = 0;
+	}
+#endif
+
+#ifdef CONFIG_PROC_VD_SUSPEND_POLICY
+	if ((fd = vd_suspend_policy_add_task(current->comm)) < 0)
 		goto out_destroy_group;
+
+	current->suspend_last = 1;
+#endif
+	fd = anon_inode_getfd("[fanotify]", &fanotify_fops, group, f_flags);
+	if (fd < 0) {
+#ifdef CONFIG_PROC_VD_SUSPEND_POLICY
+		current->suspend_last = 0;
+		vd_suspend_policy_remove_task(current->comm);
+#endif
+		goto out_destroy_group;
+	}
 
 	return fd;
 

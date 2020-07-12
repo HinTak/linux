@@ -163,7 +163,8 @@ static inline u64 get_jiffies_64(void)
  * Have the 32 bit jiffies value wrap 5 minutes after boot
  * so jiffies wrap bugs show up earlier.
  */
-#define INITIAL_JIFFIES ((unsigned long)(unsigned int) (-300*HZ))
+/* VDLinux kernel patch, 2010-09-17, to avoid glibc times() fail */
+#define INITIAL_JIFFIES ((unsigned long)(unsigned int) (0))
 
 /*
  * Change timeval to jiffies, trying to avoid the

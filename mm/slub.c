@@ -34,6 +34,7 @@
 #include <linux/stacktrace.h>
 #include <linux/prefetch.h>
 #include <linux/memcontrol.h>
+#include <linux/stackdepot.h>
 
 #include <trace/events/kmem.h>
 
@@ -181,20 +182,22 @@ static inline bool kmem_cache_has_cpu_partial(struct kmem_cache *s)
 #ifdef CONFIG_SMP
 static struct notifier_block slab_notifier;
 #endif
-
 /*
  * Tracking user of a slab.
  */
-#define TRACK_ADDRS_COUNT 16
 struct track {
+#ifdef CONFIG_STACKDEPOT
+	depot_stack_handle_t handle;
+#else
 	unsigned long addr;	/* Called from address */
-#ifdef CONFIG_STACKTRACE
-	unsigned long addrs[TRACK_ADDRS_COUNT];	/* Called from address */
 #endif
-	int cpu;		/* Was running on cpu */
-	int pid;		/* Pid context */
+	unsigned int pid:22;		/* Pid context */
+	unsigned int cpu:10;		/* Was running on cpu */
 	unsigned long when;	/* When did the operation occur */
 };
+#ifdef CONFIG_STACKDEPOT
+static depot_stack_handle_t failure_handle;
+#endif
 
 enum track_item { TRACK_ALLOC, TRACK_FREE };
 
@@ -352,8 +355,8 @@ static inline void set_page_slub_counters(struct page *page, unsigned long count
 	tmp.counters = counters_new;
 	/*
 	 * page->counters can cover frozen/inuse/objects as well
-	 * as page->_count.  If we assign to ->counters directly
-	 * we run the risk of losing updates to page->_count, so
+	 * as page->_refcount.  If we assign to ->counters directly
+	 * we run the risk of losing updates to page->_refcount, so
 	 * be careful and only assign to the fields we need.
 	 */
 	page->frozen  = tmp.frozen;
@@ -508,22 +511,39 @@ static struct track *get_track(struct kmem_cache *s, void *object,
 	return p + alloc;
 }
 
+#ifdef CONFIG_KASAN
+void kasan_get_track(struct kmem_cache *cache, void *object, int  alloc,
+		struct stack_trace *trace){
+	int i;
+	struct track *t = get_track(cache, object, alloc);
+
+	if (!t->handle)
+		return;
+
+	depot_fetch_stack(t->handle, trace);
+	for (i = trace->nr_entries; i < TRACK_ADDRS_COUNT; i++)
+		trace->entries[i] = 0;
+}
+#endif
+
 static void set_track(struct kmem_cache *s, void *object,
 			enum track_item alloc, unsigned long addr)
 {
 	struct track *p = get_track(s, object, alloc);
 
 	if (addr) {
-#ifdef CONFIG_STACKTRACE
+#ifdef CONFIG_STACKDEPOT
 		struct stack_trace trace;
 		int i;
+		unsigned long trace_entries[TRACK_ADDRS_COUNT];
 
 		trace.nr_entries = 0;
 		trace.max_entries = TRACK_ADDRS_COUNT;
-		trace.entries = p->addrs;
+		trace.entries = trace_entries;
 		trace.skip = 3;
 		metadata_access_enable();
 		save_stack_trace(&trace);
+		filter_irq_stacks(&trace);
 		metadata_access_disable();
 
 		/* See rant in lockdep.c */
@@ -531,10 +551,12 @@ static void set_track(struct kmem_cache *s, void *object,
 		    trace.entries[trace.nr_entries - 1] == ULONG_MAX)
 			trace.nr_entries--;
 
-		for (i = trace.nr_entries; i < TRACK_ADDRS_COUNT; i++)
-			p->addrs[i] = 0;
-#endif
+		p->handle = depot_save_stack(&trace, GFP_ATOMIC);
+		if (!p->handle)
+			p->handle = failure_handle;
+#else
 		p->addr = addr;
+#endif
 		p->cpu = smp_processor_id();
 		p->pid = current->pid;
 		p->when = jiffies;
@@ -553,20 +575,24 @@ static void init_tracking(struct kmem_cache *s, void *object)
 
 static void print_track(const char *s, struct track *t)
 {
+#ifdef CONFIG_STACKDEPOT
+	struct stack_trace trace;
+	int i;
+
+	if (!t->handle)
+		return;
+
+	depot_fetch_stack(t->handle, &trace);
+	pr_err("INFO: %s in %pS age=%lu cpu=%u pid=%d\n",
+		s, (void *)trace.entries[1], jiffies - t->when, t->cpu, t->pid);
+	for (i = 0; i < trace.nr_entries; i++)
+		pr_err("\t%pS\n", (void *)trace.entries[i]);
+#else
 	if (!t->addr)
 		return;
 
 	pr_err("INFO: %s in %pS age=%lu cpu=%u pid=%d\n",
-	       s, (void *)t->addr, jiffies - t->when, t->cpu, t->pid);
-#ifdef CONFIG_STACKTRACE
-	{
-		int i;
-		for (i = 0; i < TRACK_ADDRS_COUNT; i++)
-			if (t->addrs[i])
-				pr_err("\t%pS\n", (void *)t->addrs[i]);
-			else
-				break;
-	}
+		s, (void *)t->addr, jiffies - t->when, t->cpu, t->pid);
 #endif
 }
 
@@ -3410,7 +3436,22 @@ void kfree(const void *x)
 
 	page = virt_to_head_page(x);
 	if (unlikely(!PageSlab(page))) {
-		BUG_ON(!PageCompound(page));
+		if (!PageCompound(page)) {
+			pr_crit("Before BUG ON: Kfree failure : Page Address : 0x%p\n",
+					page_address(page));
+			pr_crit("Page Flags: %lu\n", page->flags);
+#ifndef CONFIG_VD_RELEASE
+			if (page_mapping(page) &&
+					page->mapping->host &&
+					page->mapping->host->i_sb &&
+					page->mapping->host->i_sb->s_type &&
+					page->mapping->host->i_sb->s_type->name)
+				pr_crit("Page Address Mapping ->  Host Inode ->"
+						"Super Block -> File System Type ->Name %s\n",
+						page->mapping->host->i_sb->s_type->name);
+#endif
+			BUG_ON(1);
+		}
 		kfree_hook(x);
 		__free_kmem_pages(page, compound_order(page));
 		return;
@@ -3666,10 +3707,35 @@ static struct kmem_cache * __init bootstrap(struct kmem_cache *static_cache)
 	return s;
 }
 
+#ifdef CONFIG_STACKDEPOT
+static __always_inline depot_stack_handle_t create_dummy_stack(void)
+{
+	unsigned long entries[4];
+	struct stack_trace dummy;
+
+	dummy.nr_entries = 0;
+	dummy.max_entries = ARRAY_SIZE(entries);
+	dummy.entries = &entries[0];
+	dummy.skip = 0;
+
+	save_stack_trace(&dummy);
+	return depot_save_stack(&dummy, GFP_KERNEL);
+}
+
+static noinline void register_failure_stack(void)
+{
+	failure_handle = create_dummy_stack();
+}
+#endif
+
 void __init kmem_cache_init(void)
 {
 	static __initdata struct kmem_cache boot_kmem_cache,
 		boot_kmem_cache_node;
+
+#if defined(CONFIG_SLUB_DEBUG) && defined(CONFIG_STACKDEPOT)
+	register_failure_stack();
+#endif
 
 	if (debug_guardpage_minorder())
 		slub_max_order = 0;
@@ -4013,6 +4079,11 @@ static int add_location(struct loc_track *t, struct kmem_cache *s,
 	unsigned long caddr;
 	unsigned long age = jiffies - track->when;
 
+#ifdef CONFIG_STACKDEPOT
+	struct stack_trace trace;
+
+	depot_fetch_stack(track->handle, &trace);
+#endif
 	start = -1;
 	end = t->count;
 
@@ -4027,8 +4098,11 @@ static int add_location(struct loc_track *t, struct kmem_cache *s,
 			break;
 
 		caddr = t->loc[pos].addr;
+#ifdef CONFIG_STACKDEPOT
+		if (trace.entries[1] == caddr) {
+#else
 		if (track->addr == caddr) {
-
+#endif
 			l = &t->loc[pos];
 			l->count++;
 			if (track->when) {
@@ -4050,7 +4124,11 @@ static int add_location(struct loc_track *t, struct kmem_cache *s,
 			return 1;
 		}
 
+#ifdef CONFIG_STACKDEPOT
+		if (trace.entries[1] < caddr)
+#else
 		if (track->addr < caddr)
+#endif
 			end = pos;
 		else
 			start = pos;
@@ -4068,7 +4146,11 @@ static int add_location(struct loc_track *t, struct kmem_cache *s,
 			(t->count - pos) * sizeof(struct location));
 	t->count++;
 	l->count = 1;
+#ifdef CONFIG_STACKDEPOT
+	l->addr = trace.entries[1];
+#else
 	l->addr = track->addr;
+#endif
 	l->sum_time = age;
 	l->min_time = age;
 	l->max_time = age;

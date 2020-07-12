@@ -624,8 +624,8 @@ int phy_attach_direct(struct net_device *dev, struct phy_device *phydev,
 	err = phy_init_hw(phydev);
 	if (err)
 		phy_detach(phydev);
-	else
-		phy_resume(phydev);
+//	else
+//		phy_resume(phydev);
 
 	return err;
 }
@@ -698,13 +698,18 @@ EXPORT_SYMBOL(phy_detach);
 int phy_suspend(struct phy_device *phydev)
 {
 	struct phy_driver *phydrv = to_phy_driver(phydev->dev.driver);
+#ifndef CONFIG_ARCH_SDP
 	struct ethtool_wolinfo wol = { .cmd = ETHTOOL_GWOL };
+#endif
 	int ret = 0;
 
+/* fix for sdp-mac-phy suspend fail when phy WOL is enabled */
+#ifndef CONFIG_ARCH_SDP
 	/* If the device has WOL enabled, we cannot suspend the PHY */
 	phy_ethtool_get_wol(phydev, &wol);
 	if (wol.wolopts)
 		return -EBUSY;
+#endif
 
 	if (phydrv->suspend)
 		ret = phydrv->suspend(phydev);

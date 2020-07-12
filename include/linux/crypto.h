@@ -744,6 +744,12 @@ struct crypto_attr_u32 {
 	u32 num;
 };
 
+#ifdef CONFIG_BACKGROUND_RECOMPRESS
+void bgrecompress_set_comp_level(int comp_level);
+int bgrecompress_get_comp_level(void);
+int bgrecompress_get_recomp_level(void);
+#endif
+
 /* 
  * Transform user interface.
  */

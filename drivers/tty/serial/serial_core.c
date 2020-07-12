@@ -44,6 +44,22 @@
 static DEFINE_MUTEX(port_mutex);
 
 /*
+ * This indicates whether rs232 is debug or not.
+ */
+static int rs232_val;
+static int __init rs232_setup(char *str)
+{
+	rs232_val = simple_strtoul(str, NULL, 10);
+#ifdef CONFIG_FORCE_EXEC_SHELL_N_SERIAL
+        rs232_val = 0;
+#endif
+	return 1;
+}
+__setup("rs232=", rs232_setup);
+
+extern int console_portnum;
+
+/*
  * lockdep: port->lock is initialized in two places, but we
  *          want only one lock-class:
  */
@@ -136,6 +152,9 @@ static int uart_port_startup(struct tty_struct *tty, struct uart_state *state,
 {
 	struct uart_port *uport = state->uart_port;
 	unsigned long page;
+#ifdef CONFIG_ARCH_MXC	
+	unsigned long flags = 0;
+#endif	
 	int retval = 0;
 
 	if (uport->type == PORT_UNKNOWN)
@@ -150,6 +169,20 @@ static int uart_port_startup(struct tty_struct *tty, struct uart_state *state,
 	 * Initialise and allocate the transmit and temporary
 	 * buffer.
 	 */
+#ifdef CONFIG_ARCH_MXC	
+	page = get_zeroed_page(GFP_KERNEL);
+	if (!page)
+		return -ENOMEM;
+
+	spin_lock_irqsave(&uport->lock, flags);
+	if (!state->xmit.buf) {
+		state->xmit.buf = (unsigned char *) page;
+		uart_circ_clear(&state->xmit);
+	} else {
+		free_page(page);
+	}
+	spin_unlock_irqrestore(&uport->lock, flags);	 
+#else	 
 	if (!state->xmit.buf) {
 		/* This is protected by the per port mutex */
 		page = get_zeroed_page(GFP_KERNEL);
@@ -159,6 +192,7 @@ static int uart_port_startup(struct tty_struct *tty, struct uart_state *state,
 		state->xmit.buf = (unsigned char *) page;
 		uart_circ_clear(&state->xmit);
 	}
+#endif
 
 	retval = uport->ops->startup(uport);
 	if (retval == 0) {
@@ -226,7 +260,9 @@ static void uart_shutdown(struct tty_struct *tty, struct uart_state *state)
 {
 	struct uart_port *uport = state->uart_port;
 	struct tty_port *port = &state->port;
-
+#ifdef CONFIG_ARCH_MXC		
+	unsigned long flags = 0;
+#endif
 	/*
 	 * Set the TTY IO error marker
 	 */
@@ -256,10 +292,16 @@ static void uart_shutdown(struct tty_struct *tty, struct uart_state *state)
 	/*
 	 * Free the transmit buffer page.
 	 */
+#ifdef CONFIG_ARCH_MXC		 
+	spin_lock_irqsave(&uport->lock, flags);
+#endif	
 	if (state->xmit.buf) {
 		free_page((unsigned long)state->xmit.buf);
 		state->xmit.buf = NULL;
 	}
+#ifdef CONFIG_ARCH_MXC		
+	spin_unlock_irqrestore(&uport->lock, flags);
+#endif	
 }
 
 /**
@@ -497,6 +539,14 @@ static int uart_put_char(struct tty_struct *tty, unsigned char ch)
 {
 	struct uart_state *state = tty->driver_data;
 
+#ifdef CONFIG_DTVLOGD
+	/* Write printf messages to dlog buffer */
+	do_dtvlog(11, &ch, 1);
+#endif
+
+	if (rs232_val && tty->index == console_portnum)
+		return 1;
+
 	return __uart_put_char(state->uart_port, &state->xmit, ch);
 }
 
@@ -528,6 +578,14 @@ static int uart_write(struct tty_struct *tty,
 
 	if (!circ->buf)
 		return 0;
+
+#ifdef CONFIG_DTVLOGD
+	/* Write printf messages to dlog buffer */
+	do_dtvlog(11, buf, count);
+#endif
+
+	if (rs232_val && tty->index == console_portnum)
+		return count;
 
 	spin_lock_irqsave(&port->lock, flags);
 	while (1) {
@@ -1778,6 +1836,9 @@ void uart_console_write(struct uart_port *port, const char *s,
 			void (*putchar)(struct uart_port *, int))
 {
 	unsigned int i;
+
+	if (rs232_val)
+		return;
 
 	for (i = 0; i < count; i++, s++) {
 		if (*s == '\n')

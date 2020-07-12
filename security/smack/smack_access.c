@@ -206,10 +206,14 @@ out_audit:
 
 #ifdef CONFIG_AUDIT
 	if (a)
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+		smack_log(subject->smk_known, object->smk_known,
+			  request, rc, a, smack_mode);
+#else
 		smack_log(subject->smk_known, object->smk_known,
 			  request, rc, a);
 #endif
-
+#endif
 	return rc;
 }
 
@@ -231,7 +235,10 @@ int smk_tskacc(struct task_smack *tsp, struct smack_known *obj_known,
 	struct smack_known *sbj_known = smk_of_task(tsp);
 	int may;
 	int rc;
-
+#ifdef CONFIG_OVERLAY_FS
+	struct inode *inode = NULL;
+	struct common_audit_data *ad;
+#endif
 	/*
 	 * Check the global rule list
 	 */
@@ -257,11 +264,53 @@ int smk_tskacc(struct task_smack *tsp, struct smack_known *obj_known,
 	if (rc != 0 && smack_privileged(CAP_MAC_OVERRIDE))
 		rc = 0;
 
+#ifdef CONFIG_OVERLAY_FS
+	/*
+	 * Work-around for smack issue on overlayfs
+	 */
+	if (rc != 0 && a) {
+		ad = &a->a;
+		switch (ad->type) {
+			case LSM_AUDIT_DATA_PATH:
+				inode = d_backing_inode(ad->u.path.dentry);
+				break;
+			case LSM_AUDIT_DATA_DENTRY:
+				inode = d_backing_inode(ad->u.dentry);
+				break;
+			case LSM_AUDIT_DATA_INODE:
+				inode = ad->u.inode;
+				break;
+		}
+		/*
+		 * The Rules to skip smack error detection while using ovl.
+		 * Rule1 : This file has been accessed through ovl layer ?
+		 * Rule2 : Sb of this file is overlay ?
+		 */
+		if (inode) {
+			if (IS_OVERLAY(inode) || !strncmp(inode->i_sb->s_id, "overlay", 7))
+				rc = 0;
+		}
+	}
+#endif
+
 out_audit:
 #ifdef CONFIG_AUDIT
 	if (a)
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+		smack_log(sbj_known->smk_known, obj_known->smk_known,
+			mode, rc, a, smack_mode);
+#else
 		smack_log(sbj_known->smk_known, obj_known->smk_known,
 			  mode, rc, a);
+#endif
+
+#endif
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+		/*	
+		 * Allow access when SMACK module is set for
+		 * permissive mode (1), unconfound mode(3)
+		 */
+		rc = check_system_mode(rc, sbj_known->smk_known, obj_known->smk_known);
 #endif
 	return rc;
 }
@@ -311,6 +360,95 @@ static inline void smack_str_from_perm(char *string, int access)
 		string[i++] = 'l';
 	string[i] = '\0';
 }
+
+/**
+ *  smk_print_socket_type - Print the socket type
+ *  @ab: a pointer to the audit buffer
+ *  @sad: a pointer to the SMACK specific audit data
+ *
+ *  This function checks the the type of a socket and
+ *  prints the socket type as part of SMACK audit log.
+ */
+
+static inline void smk_print_socket_type(struct audit_buffer *ab,
+					struct smack_audit_data *sad)
+{
+	switch (sad->sock_type) {
+	case SOCK_DGRAM:
+		audit_log_format(ab, " socket-type=%s", "SOCK_DGRAM");
+		break;
+	case SOCK_STREAM:
+		audit_log_format(ab, " socket-type=%s", "SOCK_STREAM");
+		break;
+	case SOCK_RAW:
+		audit_log_format(ab, " socket-type=%s", "SOCK_RAW");
+		break;
+	case SOCK_RDM:
+		audit_log_format(ab, " socket-type=%s", "SOCK_RDM");
+		break;
+	case SOCK_SEQPACKET:
+		audit_log_format(ab, " socket-type=%s", "SOCK_SEQPACKET");
+		break;
+	case SOCK_DCCP:
+		audit_log_format(ab, " socket-type=%s", "SOCK_DCCP");
+		break;
+	case SOCK_PACKET:
+		audit_log_format(ab, " socket-type=%s", "SOCK_PACKET");
+		break;
+	default:
+		audit_log_format(ab, " socket-type=%s %d", "INVALID:",
+				sad->sock_type);
+		break;
+	}
+	return;
+}
+
+/**
+ *  smk_print_socket_protocol - Print the socket protocol
+ *  @ab: a pointer to the audit buffer
+ *  @sad: a pointer to the SMACK specific audit data
+ *
+ *  This function checks the the protocol of a socket and
+ *  prints the socket protocol as part of SMACK audit log.
+ */
+
+static inline void smk_print_socket_protocol(struct audit_buffer *ab,
+						struct smack_audit_data *sad)
+{
+	switch (sad->sock_proto) {
+	case IPPROTO_IP:
+		audit_log_format(ab, " socket-protocol=%s", "IPPROTO_IP");
+		break;
+	case IPPROTO_TCP:
+		audit_log_format(ab, " socket-protocol=%s", "IPPROTO_TCP");
+		break;
+	case IPPROTO_UDP:
+		audit_log_format(ab, " socket-protocol=%s", "IPPROTO_UDP");
+		break;
+	case IPPROTO_RAW:
+		audit_log_format(ab, " socket-protocol=%s", "IPPROTO_RAW");
+		break;
+	case IPPROTO_ICMP:
+		audit_log_format(ab, " socket-protocol=%s", "IPPROTO_ICMP");
+		break;
+	case IPPROTO_SCTP:
+		audit_log_format(ab, " socket-protocol=%s", "IPPROTO_SCTP");
+		break;
+	case IPPROTO_UDPLITE:
+		audit_log_format(ab, " socket-protocol=%s", "IPPROTO_UDPLITE");
+		break;
+	case IPPROTO_DCCP:
+		audit_log_format(ab, " socket-protocol=%s", "IPPROTO_DCCP");
+		break;
+	default:
+		audit_log_format(ab, " socket-protocol=%s %d", "INVALID:",
+				sad->sock_proto);
+		break;
+	}
+	return;
+}
+
+
 /**
  * smack_log_callback - SMACK specific information
  * will be called by generic audit code
@@ -322,17 +460,56 @@ static void smack_log_callback(struct audit_buffer *ab, void *a)
 {
 	struct common_audit_data *ad = a;
 	struct smack_audit_data *sad = ad->smack_audit_data;
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+	int unconfined_subject = 0;
+	int unconfined_object = 0;
+	if( sad->mode == 3 ) {
+		unconfined_subject = smk_exist_unconfined_label(sad->subject);
+		unconfined_object = smk_exist_unconfined_label(sad->object);
+	}
+#endif
 	audit_log_format(ab, "lsm=SMACK fn=%s action=%s",
 			 ad->smack_audit_data->function,
 			 sad->result ? "denied" : "granted");
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+	if( unconfined_subject || unconfined_object )
+		audit_log_format(ab, " mode=%s", "unconfined");
+	else
+		audit_log_format(ab, " mode=%s",
+				(sad->mode == 1) ? "permissive" : "enforcing");
+#endif
+#ifdef CONFIG_SECURITY_SMACK_BOOTMODE_FOR_DEV_NODE
+	audit_log_format(ab, " wait=%s",
+			(sad->wait_permission == 1) ? "yes" : "no");
+#endif
 	audit_log_format(ab, " subject=");
 	audit_log_untrustedstring(ab, sad->subject);
 	audit_log_format(ab, " object=");
 	audit_log_untrustedstring(ab, sad->object);
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+	audit_log_format(ab, " requested=%s%s%s", sad->request,
+			unconfined_subject ? "(US)" : "",
+				 unconfined_object ? "(UO)" : "");
+#else
 	if (sad->request[0] == '\0')
 		audit_log_format(ab, " labels_differ");
 	else
 		audit_log_format(ab, " requested=%s", sad->request);
+#endif
+	if (sad->d_instantiated != -1)
+		audit_log_format(ab, " d_inst=%d", sad->d_instantiated);
+
+	if (ad->type == LSM_AUDIT_DATA_NET) {
+		smk_print_socket_type(ab, sad);
+		smk_print_socket_protocol(ab, sad);
+		if (sad->sock_reuseaddr)
+			audit_log_format(ab, " socket-option=%s",
+						"SO_REUSEADDR");
+		if (sad->sock_reuseport)
+			audit_log_format(ab, " socket-option=%s",
+						"SO_REUSEPORT");
+	}
+
 }
 
 /**
@@ -346,8 +523,13 @@ static void smack_log_callback(struct audit_buffer *ab, void *a)
  * Audit the granting or denial of permissions in accordance
  * with the policy.
  */
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+void smack_log(char *subject_label, char *object_label, int request,
+	       int result, struct smk_audit_info *ad, int mode)
+#else
 void smack_log(char *subject_label, char *object_label, int request,
 	       int result, struct smk_audit_info *ad)
+#endif
 {
 #ifdef CONFIG_SECURITY_SMACK_BRINGUP
 	char request_buffer[SMK_NUM_ACCESS_TYPE + 5];
@@ -356,7 +538,6 @@ void smack_log(char *subject_label, char *object_label, int request,
 #endif
 	struct smack_audit_data *sad;
 	struct common_audit_data *a = &ad->a;
-
 	/* check if we have to log the current event */
 	if (result < 0 && (log_policy & SMACK_AUDIT_DENIED) == 0)
 		return;
@@ -389,14 +570,24 @@ void smack_log(char *subject_label, char *object_label, int request,
 #endif
 	sad->request = request_buffer;
 	sad->result  = result;
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+	sad->mode    = mode;
+#endif
 
 	common_lsm_audit(a, smack_log_callback, NULL);
 }
 #else /* #ifdef CONFIG_AUDIT */
+#ifdef CONFIG_SECURITY_SMACK_SYSTEM_MODE
+void smack_log(char *subject_label, char *object_label, int request,
+               int result, struct smk_audit_info *ad, int mode)
+{
+}
+#else
 void smack_log(char *subject_label, char *object_label, int request,
                int result, struct smk_audit_info *ad)
 {
 }
+#endif
 #endif
 
 DEFINE_MUTEX(smack_known_lock);
@@ -425,7 +616,7 @@ void smk_insert_entry(struct smack_known *skp)
  * @string: a text string that might be a Smack label
  *
  * Returns a pointer to the entry in the label list that
- * matches the passed string.
+ * matches the passed string or NULL if not found.
  */
 struct smack_known *smk_find_entry(const char *string)
 {
@@ -448,7 +639,7 @@ struct smack_known *smk_find_entry(const char *string)
  * @string: a text string that might contain a Smack label
  * @len: the maximum size, or zero if it is NULL terminated.
  *
- * Returns a pointer to the clean label, or NULL
+ * Returns a pointer to the clean label or an error code.
  */
 char *smk_parse_smack(const char *string, int len)
 {
@@ -464,7 +655,7 @@ char *smk_parse_smack(const char *string, int len)
 	 * including /smack/cipso and /smack/cipso2
 	 */
 	if (string[0] == '-')
-		return NULL;
+		return ERR_PTR(-EINVAL);
 
 	for (i = 0; i < len; i++)
 		if (string[i] > '~' || string[i] <= ' ' || string[i] == '/' ||
@@ -472,11 +663,13 @@ char *smk_parse_smack(const char *string, int len)
 			break;
 
 	if (i == 0 || i >= SMK_LONGLABEL)
-		return NULL;
+		return ERR_PTR(-EINVAL);
 
 	smack = kzalloc(i + 1, GFP_KERNEL);
-	if (smack != NULL)
-		strncpy(smack, string, i);
+	if (smack == NULL)
+		return ERR_PTR(-ENOMEM);
+
+	strncpy(smack, string, i);
 
 	return smack;
 }
@@ -523,7 +716,8 @@ int smk_netlbl_mls(int level, char *catset, struct netlbl_lsm_secattr *sap,
  * @len: the maximum size, or zero if it is NULL terminated.
  *
  * Returns a pointer to the entry in the label list that
- * matches the passed string, adding it if necessary.
+ * matches the passed string, adding it if necessary,
+ * or an error code.
  */
 struct smack_known *smk_import_entry(const char *string, int len)
 {
@@ -533,8 +727,8 @@ struct smack_known *smk_import_entry(const char *string, int len)
 	int rc;
 
 	smack = smk_parse_smack(string, len);
-	if (smack == NULL)
-		return NULL;
+	if (IS_ERR(smack))
+		return ERR_CAST(smack);
 
 	mutex_lock(&smack_known_lock);
 
@@ -543,8 +737,10 @@ struct smack_known *smk_import_entry(const char *string, int len)
 		goto freeout;
 
 	skp = kzalloc(sizeof(*skp), GFP_KERNEL);
-	if (skp == NULL)
+	if (skp == NULL) {
+		skp = ERR_PTR(-ENOMEM);
 		goto freeout;
+	}
 
 	skp->smk_known = smack;
 	skp->smk_secid = smack_next_secid++;
@@ -577,7 +773,7 @@ struct smack_known *smk_import_entry(const char *string, int len)
 	 * smk_netlbl_mls failed.
 	 */
 	kfree(skp);
-	skp = NULL;
+	skp = ERR_PTR(rc);
 freeout:
 	kfree(smack);
 unlockout:
@@ -611,4 +807,51 @@ struct smack_known *smack_from_secid(const u32 secid)
 	 */
 	rcu_read_unlock();
 	return &smack_known_invalid;
+}
+
+/*
+ * Unless a process is running with one of these labels
+ * even having CAP_MAC_OVERRIDE isn't enough to grant
+ * privilege to violate MAC policy. If no labels are
+ * designated (the empty list case) capabilities apply to
+ * everyone.
+ */
+LIST_HEAD(smack_onlycap_list);
+DEFINE_MUTEX(smack_onlycap_lock);
+
+/*
+ * Is the task privileged and allowed to be privileged
+ * by the onlycap rule.
+ *
+ * Returns 1 if the task is allowed to be privileged, 0 if it's not.
+ */
+int smack_privileged(int cap)
+{
+	struct smack_known *skp = smk_of_current();
+	struct smack_onlycap *sop;
+
+	/*
+	 * All kernel tasks are privileged
+	 */
+	if (unlikely(current->flags & PF_KTHREAD))
+		return 1;
+
+	if (!capable(cap))
+		return 0;
+
+	rcu_read_lock();
+	if (list_empty(&smack_onlycap_list)) {
+		rcu_read_unlock();
+		return 1;
+	}
+
+	list_for_each_entry_rcu(sop, &smack_onlycap_list, list) {
+		if (sop->smk_label == skp) {
+			rcu_read_unlock();
+			return 1;
+		}
+	}
+	rcu_read_unlock();
+
+	return 0;
 }

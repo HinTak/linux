@@ -268,12 +268,19 @@ static struct file_system_type *__get_fs_type(const char *name, int len)
 	return fs;
 }
 
+#ifdef CONFIG_DYN_MOD_UNLOAD
+atomic_t mount_in_progress = ATOMIC_INIT(0);
+#endif
+
 struct file_system_type *get_fs_type(const char *name)
 {
 	struct file_system_type *fs;
 	const char *dot = strchr(name, '.');
 	int len = dot ? dot - name : strlen(name);
 
+#ifdef CONFIG_DYN_MOD_UNLOAD
+	atomic_inc(&mount_in_progress);
+#endif
 	fs = __get_fs_type(name, len);
 	if (!fs && (request_module("fs-%.*s", len, name) == 0))
 		fs = __get_fs_type(name, len);
@@ -282,6 +289,9 @@ struct file_system_type *get_fs_type(const char *name)
 		put_filesystem(fs);
 		fs = NULL;
 	}
+#ifdef CONFIG_DYN_MOD_UNLOAD
+	atomic_dec(&mount_in_progress);
+#endif
 	return fs;
 }
 

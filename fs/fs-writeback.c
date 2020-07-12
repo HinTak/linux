@@ -29,6 +29,8 @@
 #include <linux/device.h>
 #include "internal.h"
 
+#include <linux/vdfs_trace.h>	/* FlashFS : vdfs-trace */
+
 /*
  * 4MB minimal write chunk size
  */
@@ -88,7 +90,7 @@ struct backing_dev_info *inode_to_bdi(struct inode *inode)
 	sb = inode->i_sb;
 #ifdef CONFIG_BLOCK
 	if (sb_is_blkdev_sb(sb))
-		return blk_get_backing_dev_info(I_BDEV(inode));
+		return I_BDEV(inode)->bd_bdi;
 #endif
 	return sb->s_bdi;
 }
@@ -1094,7 +1096,9 @@ void bdi_writeback_workfn(struct work_struct *work)
 						struct bdi_writeback, dwork);
 	struct backing_dev_info *bdi = wb->bdi;
 	long pages_written;
+	VT_PREPARE_PARAM(vt_data);
 
+	VT_WRITE_BACK_START(vt_data);
 	set_worker_desc("flush-%s", dev_name(bdi->dev));
 	current->flags |= PF_SWAPWRITE;
 
@@ -1127,6 +1131,7 @@ void bdi_writeback_workfn(struct work_struct *work)
 		bdi_wakeup_thread_delayed(bdi);
 
 	current->flags &= ~PF_SWAPWRITE;
+	VT_FINISH(vt_data);
 }
 
 /*
@@ -1323,9 +1328,9 @@ void __mark_inode_dirty(struct inode *inode, int flags)
 			spin_unlock(&inode->i_lock);
 			spin_lock(&bdi->wb.list_lock);
 			if (bdi_cap_writeback_dirty(bdi)) {
-				WARN(!test_bit(BDI_registered, &bdi->state),
-				     "bdi-%s not registered\n", bdi->name);
-
+				if (!test_bit(BDI_registered, &bdi->state))
+					pr_err("bdi-%s not registered\n",
+							bdi->name);
 				/*
 				 * If this is the first dirty inode for this
 				 * bdi, we have to wake-up the corresponding

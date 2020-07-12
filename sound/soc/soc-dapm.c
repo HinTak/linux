@@ -3311,7 +3311,12 @@ static int snd_soc_dai_link_event(struct snd_soc_dapm_widget *w,
 
 	default:
 		WARN(1, "Unknown event %d\n", event);
+#ifdef CONFIG_ARCH_MXC
+		ret = -EINVAL;
+		goto out;
+#else		
 		return -EINVAL;
+#endif
 	}
 
 out:

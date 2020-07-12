@@ -39,7 +39,16 @@
 #define PROTO_UNDEF	(0)
 #define PROTO_HOST	(1)
 #define PROTO_GADGET	(2)
-
+#ifdef CONFIG_ARCH_MXC
+#define OTG_STS_SELECTOR	0xF000	/* OTG status selector, according to
+					 * OTG and EH 2.0 Charpter 6.2.3
+					 * Table:6-4
+					 */
+#define HOST_REQUEST_FLAG	1	/* Host request flag, according to
+					 * OTG and EH 2.0 Charpter 6.2.3
+					 * Table:6-5
+					 */
+#endif					 
 enum otg_fsm_timer {
 	/* Standard OTG timers */
 	A_WAIT_VRISE,
@@ -48,14 +57,22 @@ enum otg_fsm_timer {
 	A_AIDL_BDIS,
 	B_ASE0_BRST,
 	A_BIDL_ADIS,
-
+#ifdef CONFIG_ARCH_MXC	
+	B_AIDL_BDIS,
+#endif
 	/* Auxiliary timers */
 	B_SE0_SRP,
 	B_SRP_FAIL,
 	A_WAIT_ENUM,
 	B_DATA_PLS,
 	B_SSEND_SRP,
-
+#ifdef CONFIG_ARCH_MXC	
+	A_DP_END,
+	A_TST_MAINT,
+	B_SRP_REQD,
+	B_TST_SUSP,
+	HNP_POLLING,
+#endif
 	NUM_OTG_FSM_TIMERS,
 };
 
@@ -96,7 +113,15 @@ struct otg_fsm {
 	int b_srp_done;
 	int b_hnp_enable;
 	int a_clr_err;
+#ifdef CONFIG_ARCH_MXC	
+	int hnp_polling;
 
+	/* OTG test device */
+	int tst_maint;
+	int otg_vbus_off;
+	int otg_srp_reqd;
+	int otg_hnp_reqd;
+#endif
 	/* Informative variables */
 	int a_bus_drop_inf;
 	int a_bus_req_inf;
@@ -119,6 +144,9 @@ struct otg_fsm {
 	/* Current usb protocol used: 0:undefine; 1:host; 2:client */
 	int protocol;
 	struct mutex lock;
+#ifdef CONFIG_ARCH_MXC	
+	u8 *host_req_flag;
+#endif	
 };
 
 struct otg_fsm_ops {
@@ -240,7 +268,9 @@ static inline int otg_start_gadget(struct otg_fsm *fsm, int on)
 		return -EOPNOTSUPP;
 	return fsm->ops->start_gadget(fsm, on);
 }
-
+#ifdef CONFIG_ARCH_MXC	
+int otg_hnp_polling(struct otg_fsm *fsm);
+#endif
 int otg_statemachine(struct otg_fsm *fsm);
 
 #endif /* __LINUX_USB_OTG_FSM_H */

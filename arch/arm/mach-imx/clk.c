@@ -7,6 +7,8 @@
 
 DEFINE_SPINLOCK(imx_ccm_lock);
 
+bool uart_from_osc;
+
 void __init imx_check_clocks(struct clk *clks[], unsigned int count)
 {
 	unsigned i;
@@ -73,3 +75,46 @@ void imx_cscmr1_fixup(u32 *val)
 	*val ^= CSCMR1_FIXUP;
 	return;
 }
+
+static int imx_keep_uart_clocks __initdata;
+static struct clk ** const *imx_uart_clocks __initdata;
+
+static int __init imx_keep_uart_clocks_param(char *str)
+{
+	imx_keep_uart_clocks = 1;
+
+	return 0;
+}
+__setup_param("earlyprintk", imx_keep_uart_earlyprintk,
+	      imx_keep_uart_clocks_param, 0);
+
+void __init imx_register_uart_clocks(struct clk ** const clks[])
+{
+	if (imx_keep_uart_clocks) {
+		int i;
+
+		imx_uart_clocks = clks;
+		for (i = 0; imx_uart_clocks[i]; i++)
+			clk_prepare_enable(*imx_uart_clocks[i]);
+	}
+}
+
+static int __init imx_clk_disable_uart(void)
+{
+	if (imx_keep_uart_clocks && imx_uart_clocks) {
+		int i;
+
+		for (i = 0; imx_uart_clocks[i]; i++)
+			clk_disable_unprepare(*imx_uart_clocks[i]);
+	}
+
+	return 0;
+}
+late_initcall_sync(imx_clk_disable_uart);
+
+static int __init setup_uart_clk(char *uart_rate)
+{
+       uart_from_osc = true;
+       return 1;
+}
+__setup("uart_from_osc", setup_uart_clk);

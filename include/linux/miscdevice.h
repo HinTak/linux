@@ -49,6 +49,9 @@
 #define LOOP_CTRL_MINOR		237
 #define VHOST_NET_MINOR		238
 #define UHID_MINOR		239
+#ifdef CONFIG_BPTIME
+#define BPTIME_MINOR        248
+#endif
 #define MISC_DYNAMIC_MINOR	255
 
 struct device;
@@ -63,6 +66,9 @@ struct miscdevice  {
 	struct device *this_device;
 	const struct attribute_group **groups;
 	const char *nodename;
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+	const char *lab_smk64;
+#endif
 	umode_t mode;
 };
 

@@ -419,6 +419,9 @@ int usb_hub_create_port_device(struct usb_hub *hub, int port1)
 	port_dev->dev.parent = hub->intfdev;
 	port_dev->dev.groups = port_dev_group;
 	port_dev->dev.type = &usb_port_device_type;
+#ifdef USB_AMBIENTMODE
+	port_dev->dev.is_usb = 1;
+#endif
 	port_dev->dev.driver = &usb_port_driver;
 	if (hub_is_superspeed(hub->hdev))
 		port_dev->is_superspeed = 1;

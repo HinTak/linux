@@ -5,6 +5,7 @@
  *  Based on:
  *	imx-pcm-dma-mx2.c, Copyright 2009 Sascha Hauer <s.hauer@pengutronix.de>
  *	mxs-pcm.c, Copyright (C) 2011 Freescale Semiconductor, Inc.
+ *	imx-pcm-dma.c, Copyright (C) 2014-2015 Freescale Semiconductor, Inc.
  *	ep93xx-pcm.c, Copyright (C) 2006 Lennert Buytenhek <buytenh@wantstofly.org>
  *		      Copyright (C) 2006 Applied Data Systems
  *
@@ -27,14 +28,15 @@
 #include <sound/soc.h>
 
 #include <sound/dmaengine_pcm.h>
-
+#ifndef CONFIG_ARCH_MXC
+#ifdef CONFIG_ARCH_MXC
 struct dmaengine_pcm_runtime_data {
 	struct dma_chan *dma_chan;
 	dma_cookie_t cookie;
 
 	unsigned int pos;
 };
-
+#endif
 static inline struct dmaengine_pcm_runtime_data *substream_to_prtd(
 	const struct snd_pcm_substream *substream)
 {
@@ -117,11 +119,21 @@ void snd_dmaengine_pcm_set_config_from_dai_data(
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		slave_config->dst_addr = dma_data->addr;
 		slave_config->dst_maxburst = dma_data->maxburst;
+#ifdef CONFIG_ARCH_MXC		
+		if (dma_data->flags & SND_DMAENGINE_PCM_DAI_FLAG_PACK)
+			slave_config->dst_addr_width =
+				DMA_SLAVE_BUSWIDTH_UNDEFINED;
+#endif				
 		if (dma_data->addr_width != DMA_SLAVE_BUSWIDTH_UNDEFINED)
 			slave_config->dst_addr_width = dma_data->addr_width;
 	} else {
 		slave_config->src_addr = dma_data->addr;
 		slave_config->src_maxburst = dma_data->maxburst;
+#ifdef CONFIG_ARCH_MXC		
+		if (dma_data->flags & SND_DMAENGINE_PCM_DAI_FLAG_PACK)
+			slave_config->src_addr_width =
+				DMA_SLAVE_BUSWIDTH_UNDEFINED;
+#endif				
 		if (dma_data->addr_width != DMA_SLAVE_BUSWIDTH_UNDEFINED)
 			slave_config->src_addr_width = dma_data->addr_width;
 	}
@@ -163,8 +175,12 @@ static int dmaengine_pcm_prepare_and_submit(struct snd_pcm_substream *substream)
 
 	if (!desc)
 		return -ENOMEM;
-
-	desc->callback = dmaengine_pcm_dma_complete;
+#ifdef CONFIG_ARCH_MXC
+	if (prtd->callback)
+		desc->callback = prtd->callback;
+	else
+#endif	
+		desc->callback = dmaengine_pcm_dma_complete;
 	desc->callback_param = substream;
 	prtd->cookie = dmaengine_submit(desc);
 
@@ -345,7 +361,9 @@ EXPORT_SYMBOL_GPL(snd_dmaengine_pcm_open_request_chan);
 int snd_dmaengine_pcm_close(struct snd_pcm_substream *substream)
 {
 	struct dmaengine_pcm_runtime_data *prtd = substream_to_prtd(substream);
-
+#ifdef CONFIG_ARCH_MXC
+	dma_sync_wait_tasklet(prtd->dma_chan);
+#endif
 	kfree(prtd);
 
 	return 0;

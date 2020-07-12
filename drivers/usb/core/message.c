@@ -690,6 +690,10 @@ static int usb_get_string(struct usb_device *dev, unsigned short langid,
 			USB_REQ_GET_DESCRIPTOR, USB_DIR_IN,
 			(USB_DT_STRING << 8) + index, langid, buf, size,
 			USB_CTRL_GET_TIMEOUT);
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+		if(result == -ECONNRESET)
+			break;
+#endif		
 		if (result == 0 || result == -EPIPE)
 			continue;
 		if (result > 1 && ((u8 *) buf)[1] != USB_DT_STRING) {
@@ -726,7 +730,11 @@ static int usb_string_sub(struct usb_device *dev, unsigned int langid,
 		rc = -EIO;
 	else
 		rc = usb_get_string(dev, langid, index, buf, 255);
-
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+        //JAN-25-2007 
+        if(rc == -ECONNRESET)
+                return rc;
+#endif
 	/* If that failed try to read the descriptor length, then
 	 * ask for just that many bytes */
 	if (rc < 2) {
@@ -826,7 +834,11 @@ int usb_string(struct usb_device *dev, int index, char *buf, size_t size)
 	err = usb_get_langid(dev, tbuf);
 	if (err < 0)
 		goto errout;
-
+#ifdef SAMSUNG_PATCH_WITH_USB_ENHANCEMENT
+	// 20100208, by kks: timeout occur when requested string descriptor with Yepp-U4.(MP3)	
+	if(dev->descriptor.idVendor == 0x4E8 && dev->descriptor.idProduct == 0x5092)
+		goto errout;
+#endif
 	err = usb_string_sub(dev, dev->string_langid, index, tbuf);
 	if (err < 0)
 		goto errout;
@@ -1827,6 +1839,9 @@ free_interfaces:
 		intf->dev.driver = NULL;
 		intf->dev.bus = &usb_bus_type;
 		intf->dev.type = &usb_if_device_type;
+#ifdef USB_AMBIENTMODE
+		intf->dev.is_usb = 1;
+#endif
 		intf->dev.groups = usb_interface_groups;
 		intf->dev.dma_mask = dev->dev.dma_mask;
 		INIT_WORK(&intf->reset_ws, __usb_queue_reset_device);

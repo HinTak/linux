@@ -16,9 +16,20 @@
 #include <asm/fpstate.h>
 #include <asm/page.h>
 
+#ifdef CONFIG_KASAN_STACK
+#define THREAD_SIZE_ORDER	2
+#else
 #define THREAD_SIZE_ORDER	1
+#endif
+
 #define THREAD_SIZE		(PAGE_SIZE << THREAD_SIZE_ORDER)
-#define THREAD_START_SP		(THREAD_SIZE - 8)
+
+#ifdef CONFIG_KERNEL_STACK_SMALL
+#define THREAD_START_SP		(THREAD_SIZE - 16)
+#define THREAD_START_SAVE	(THREAD_SIZE - 4)
+#else
+#define THREAD_START_SP        (THREAD_SIZE - 8)
+#endif
 
 #ifndef __ASSEMBLY__
 
@@ -48,6 +59,9 @@ struct cpu_context_save {
  * __switch_to() assumes cpu_context follows immediately after cpu_domain.
  */
 struct thread_info {
+#ifdef CONFIG_KERNEL_STACK_LARGE
+	void			*tinfo_ptr;	/*pointer to self thread_info */
+#endif
 	unsigned long		flags;		/* low level flags */
 	int			preempt_count;	/* 0 => preemptable, <0 => bug */
 	mm_segment_t		addr_limit;	/* address limit */
@@ -68,8 +82,19 @@ struct thread_info {
 #endif
 };
 
+#define init_thread_info	(init_thread_union.thread_info)
+#define init_stack		(init_thread_union.stack)
+
+#ifdef CONFIG_KERNEL_STACK_LARGE
+#define INIT_SELF_THREAD_INFO 			\
+	.tinfo_ptr      = &init_thread_info,
+#else
+#define INIT_SELF_THREAD_INFO
+#endif
+
 #define INIT_THREAD_INFO(tsk)						\
 {									\
+	INIT_SELF_THREAD_INFO						\
 	.task		= &tsk,						\
 	.flags		= 0,						\
 	.preempt_count	= INIT_PREEMPT_COUNT,				\
@@ -78,9 +103,6 @@ struct thread_info {
 			  domain_val(DOMAIN_KERNEL, DOMAIN_MANAGER) |	\
 			  domain_val(DOMAIN_IO, DOMAIN_CLIENT),		\
 }
-
-#define init_thread_info	(init_thread_union.thread_info)
-#define init_stack		(init_thread_union.stack)
 
 /*
  * how to get the current stack pointer in C
@@ -94,8 +116,16 @@ static inline struct thread_info *current_thread_info(void) __attribute_const__;
 
 static inline struct thread_info *current_thread_info(void)
 {
+#if defined(CONFIG_KERNEL_STACK_SMALL)
+	return (struct thread_info *)
+		(*((unsigned long *) (((unsigned long)(current_stack_pointer & ~(THREAD_SIZE - 1))) + THREAD_START_SAVE)));
+#elif defined(CONFIG_KERNEL_STACK_LARGE)
+	return (struct thread_info *)
+		(*((unsigned long *) (current_stack_pointer & ~(THREAD_SIZE - 1))));
+#else
 	return (struct thread_info *)
 		(current_stack_pointer & ~(THREAD_SIZE - 1));
+#endif
 }
 
 #define thread_saved_pc(tsk)	\
@@ -147,12 +177,26 @@ extern int vfp_restore_user_hwstate(struct user_vfp __user *,
 #define TIF_SIGPENDING		0
 #define TIF_NEED_RESCHED	1
 #define TIF_NOTIFY_RESUME	2	/* callback before returning to user */
+#define TIF_VM_STACK 3
 #define TIF_UPROBE		7
 #define TIF_SYSCALL_TRACE	8
 #define TIF_SYSCALL_AUDIT	9
 #define TIF_SYSCALL_TRACEPOINT	10
 #define TIF_SECCOMP		11	/* seccomp syscall filtering active */
 #define TIF_NOHZ		12	/* in adaptive nohz mode */
+
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+#define TIF_SMART_DEADLOCK	13
+#endif
+
+#ifdef CONFIG_BACKGROUND_RECOMPRESS
+#define TIF_BGRECOMPD 14
+#endif
+
+#ifdef CONFIG_KERNEL_STACK_SMALL
+#define TIF_VMAP_STACK_ALLOC 15
+#endif
+
 #define TIF_USING_IWMMXT	17
 #define TIF_MEMDIE		18	/* is terminating due to OOM killer */
 #define TIF_RESTORE_SIGMASK	20
@@ -166,16 +210,32 @@ extern int vfp_restore_user_hwstate(struct user_vfp __user *,
 #define _TIF_SYSCALL_TRACEPOINT	(1 << TIF_SYSCALL_TRACEPOINT)
 #define _TIF_SECCOMP		(1 << TIF_SECCOMP)
 #define _TIF_USING_IWMMXT	(1 << TIF_USING_IWMMXT)
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+#define _TIF_SMART_DEADLOCK	(1 << TIF_SMART_DEADLOCK)
+#endif
+#define _TIF_VM_STACK (1 << TIF_VM_STACK)
+
+#ifdef CONFIG_KERNEL_STACK_SMALL
+#define _TIF_VMAP_STACK_ALLOC (1 << TIF_VMAP_STACK_ALLOC)
+#endif
 
 /* Checks for any syscall work in entry-common.S */
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
 #define _TIF_SYSCALL_WORK (_TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT | \
-			   _TIF_SYSCALL_TRACEPOINT | _TIF_SECCOMP)
+			   _TIF_SYSCALL_TRACEPOINT | _TIF_SECCOMP | _TIF_SMART_DEADLOCK)
+#else
+#define _TIF_SYSCALL_WORK (_TIF_SYSCALL_TRACE | _TIF_SYSCALL_AUDIT | \
+               _TIF_SYSCALL_TRACEPOINT | _TIF_SECCOMP)
+#endif
+#ifdef CONFIG_BACKGROUND_RECOMPRESS
+#define _TIF_BGRECOMPD (1 << TIF_BGRECOMPD)
+#endif
 
 /*
  * Change these and you break ASM code in entry-common.S
  */
 #define _TIF_WORK_MASK		(_TIF_NEED_RESCHED | _TIF_SIGPENDING | \
-				 _TIF_NOTIFY_RESUME | _TIF_UPROBE)
+				 _TIF_NOTIFY_RESUME | _TIF_UPROBE | _TIF_VM_STACK)
 
 #endif /* __KERNEL__ */
 #endif /* __ASM_ARM_THREAD_INFO_H */

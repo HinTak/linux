@@ -268,7 +268,18 @@ static void dma_chan_put(struct dma_chan *chan)
 	if (!chan->client_count && chan->device->device_free_chan_resources)
 		chan->device->device_free_chan_resources(chan);
 }
+#ifdef CONFIG_ARCH_MXC
+enum dma_status dma_sync_wait_tasklet(struct dma_chan *chan)
+{
+	enum dma_status status = DMA_ERROR;
 
+	if (chan->device->device_wait_tasklet)
+		status = chan->device->device_wait_tasklet(chan);
+
+	return status;
+}
+EXPORT_SYMBOL(dma_sync_wait_tasklet);
+#endif
 enum dma_status dma_sync_wait(struct dma_chan *chan, dma_cookie_t cookie)
 {
 	enum dma_status status;

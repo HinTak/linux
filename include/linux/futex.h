@@ -8,6 +8,15 @@ struct mm_struct;
 struct task_struct;
 union ktime;
 
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+enum wait_reason {
+	NO_WAIT = -1,
+	WAIT_REASON_COND_WAIT,
+	WAIT_REASON_MUTEX_LOCK,
+	WAIT_REASON_JOIN
+};
+#endif
+
 long do_futex(u32 __user *uaddr, int op, u32 val, union ktime *timeout,
 	      u32 __user *uaddr2, u32 val2, u32 val3);
 

@@ -920,6 +920,9 @@ static struct miscdevice uinput_misc = {
 	.fops		= &uinput_fops,
 	.minor		= UINPUT_MINOR,
 	.name		= UINPUT_NAME,
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+	.lab_smk64 = "*",
+#endif
 };
 MODULE_ALIAS_MISCDEV(UINPUT_MINOR);
 MODULE_ALIAS("devname:" UINPUT_NAME);

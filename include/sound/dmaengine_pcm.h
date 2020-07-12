@@ -51,6 +51,18 @@ struct dma_chan *snd_dmaengine_pcm_request_channel(dma_filter_fn filter_fn,
 	void *filter_data);
 struct dma_chan *snd_dmaengine_pcm_get_chan(struct snd_pcm_substream *substream);
 
+#ifdef CONFIG_ARCH_MXC
+/*
+ * The DAI supports packed transfers, eg 2 16-bit samples in a 32-bit word.
+ * If this flag is set the dmaengine driver won't put any restriction on
+ * the supported sample formats and set the DMA transfer size to undefined.
+ * The DAI driver is responsible to disable any unsupported formats in it's
+ * configuration and catch corner cases that are not already handled in
+ * the ALSA core.
+ */
+#define SND_DMAENGINE_PCM_DAI_FLAG_PACK BIT(0)
+#endif
+
 /**
  * struct snd_dmaengine_dai_dma_data - DAI DMA configuration data
  * @addr: Address of the DAI data source or destination register.
@@ -63,6 +75,9 @@ struct dma_chan *snd_dmaengine_pcm_get_chan(struct snd_pcm_substream *substream)
  * requesting the DMA channel.
  * @chan_name: Custom channel name to use when requesting DMA channel.
  * @fifo_size: FIFO size of the DAI controller in bytes
+ * @check_xrun: check if hardware xrun happen in the cpu dai.
+ * @device_reset: if xrun happened, then do cpu dai reset.
+ * @flags: PCM_DAI flags, only SND_DMAENGINE_PCM_DAI_FLAG_PACK for now
  */
 struct snd_dmaengine_dai_dma_data {
 	dma_addr_t addr;
@@ -72,8 +87,22 @@ struct snd_dmaengine_dai_dma_data {
 	void *filter_data;
 	const char *chan_name;
 	unsigned int fifo_size;
+#ifdef CONFIG_ARCH_MXC	
+	unsigned int flags;
+	unsigned int fifo_num;
+	bool (*check_xrun)(struct snd_pcm_substream *substream);
+	void (*device_reset)(struct snd_pcm_substream *substream, bool stop);
+#endif	
 };
+#ifdef CONFIG_ARCH_MXC
+struct dmaengine_pcm_runtime_data {
+	struct dma_chan *dma_chan;
+	dma_cookie_t cookie;
 
+	unsigned int pos;
+	dma_async_tx_callback callback;
+};
+#endif
 void snd_dmaengine_pcm_set_config_from_dai_data(
 	const struct snd_pcm_substream *substream,
 	const struct snd_dmaengine_dai_dma_data *dma_data,

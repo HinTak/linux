@@ -8,10 +8,14 @@
 #include <linux/utsname.h>
 #include <linux/security.h>
 #include <linux/export.h>
+#include <linux/kthread.h>
 
 unsigned int __read_mostly sysctl_sched_autogroup_enabled = 1;
 static struct autogroup autogroup_default;
 static atomic_t autogroup_seq_nr;
+struct task_struct *ag_thread;
+unsigned int  sysctl_sched_autogroup_migrate;
+struct completion migrate_compl;
 
 void __init autogroup_init(struct task_struct *init_task)
 {
@@ -113,13 +117,11 @@ bool task_wants_autogroup(struct task_struct *p, struct task_group *tg)
 {
 	if (tg != &root_task_group)
 		return false;
-
 	/*
-	 * We can only assume the task group can't go away on us if
-	 * autogroup_move_group() can see us on ->thread_group list.
-	 */
-	if (p->flags & PF_EXITING)
-		return false;
+	* If we race with autogroup_move_group() the caller can use the old
+	* value of signal->autogroup but in this case sched_move_task() will
+	* be called again before autogroup_kref_put().
+	*/
 
 	return true;
 }
@@ -141,15 +143,42 @@ autogroup_move_group(struct task_struct *p, struct autogroup *ag)
 
 	p->signal->autogroup = autogroup_kref_get(ag);
 
-	if (!ACCESS_ONCE(sysctl_sched_autogroup_enabled))
-		goto out;
+	/*
+	* We can't avoid sched_move_task() after we changed signal->autogroup,
+	* this process can already run with task_group() == prev->tg or we can
+	* race with cgroup code which can read autogroup = prev under rq->lock.
+	* In the latter case for_each_thread() can not miss a migrating thread,
+	* cpu_cgroup_attach() must not be possible after cgroup_exit() and it
+	* can't be removed from thread list, we hold ->siglock.
+	*/
 
 	for_each_thread(p, t)
 		sched_move_task(t);
-out:
+
 	unlock_task_sighand(p, &flags);
 	autogroup_kref_put(prev);
 }
+
+static void
+autogroup_move2_group(struct task_struct *p, struct autogroup *ag)
+{
+	struct autogroup *prev;
+	struct task_struct *t;
+	unsigned long flags;
+	struct task_group *tg;
+
+	BUG_ON(!lock_task_sighand(p, &flags));
+
+	autogroup_kref_get(ag);
+	tg = ag->tg;
+
+	for_each_thread(p, t)
+		sched_auto_move_task(t, tg);
+
+	unlock_task_sighand(p, &flags);
+	autogroup_kref_put(ag);
+}
+
 
 /* Allocates GFP_KERNEL, cannot be called under any spinlock */
 void sched_autogroup_create_attach(struct task_struct *p)
@@ -182,9 +211,69 @@ void sched_autogroup_exit(struct signal_struct *sig)
 static int __init setup_autogroup(char *str)
 {
 	sysctl_sched_autogroup_enabled = 0;
+	sysctl_sched_autogroup_migrate = 0;
 
 	return 1;
 }
+
+void sched_autogroup_attach(struct task_struct *p)
+{
+	struct autogroup *ag = p->signal->autogroup;
+
+	if (ag->tg != &root_task_group)		/* Only migrating task belonging to non-root_task_group */
+		autogroup_move2_group(p, ag);
+}
+
+void sched_autogroup_retain_ag_detach(struct task_struct *p)
+{
+	struct autogroup *ag = p->signal->autogroup;
+
+	if (ag->tg != &root_task_group)			/* Only migrating task belonging to non-root_task_group */
+		autogroup_move2_group(p, &autogroup_default);
+}
+
+static int ag_migrate(void *m)
+{
+	struct task_struct *p;
+
+	while (!kthread_should_stop()) {
+		set_current_state(TASK_INTERRUPTIBLE);
+		schedule();
+		set_current_state(TASK_RUNNING);
+		pr_alert("[ag_migrated] awakened with sysctl_sched_autogroup_migrate:%d\n",
+				sysctl_sched_autogroup_migrate);
+		rcu_read_lock();
+		if (sysctl_sched_autogroup_migrate) {
+			for_each_process(p)
+				sched_autogroup_attach(p);
+		} else {
+			for_each_process(p)
+				sched_autogroup_retain_ag_detach(p);
+		}
+		rcu_read_unlock();
+		complete(&migrate_compl);
+	}
+	return 0;
+}
+
+static int __init ag_migrate_init(void)
+{
+	ag_thread = kthread_run(ag_migrate, NULL, "ag_migrated");
+	if (IS_ERR(ag_thread)) {
+		pr_err("Failed to start ag_migrated\n");
+		return PTR_ERR(ag_thread);
+	}
+	init_completion(&migrate_compl);
+	return 0;
+}
+
+static void __exit ag_migrate_exit(void)
+{
+	kthread_stop(ag_thread);
+}
+
+core_initcall(ag_migrate_init);
+module_exit(ag_migrate_exit);
 
 __setup("noautogroup", setup_autogroup);
 
@@ -249,5 +338,4 @@ int autogroup_path(struct task_group *tg, char *buf, int buflen)
 	return snprintf(buf, buflen, "%s-%ld", "/autogroup", tg->autogroup->id);
 }
 #endif /* CONFIG_SCHED_DEBUG */
-
 #endif /* CONFIG_SCHED_AUTOGROUP */

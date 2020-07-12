@@ -1,0 +1,50 @@
+#
+# Samsung DTV Platform device configuration
+#
+
+config SDP_MAC
+        depends on ARCH_SDP
+        tristate "SDP Ethernet MAC Driver"
+		default y
+        select MII
+        select PHYLIB
+
+config SDP_MAC_DEBUG
+		depends on SDP_MAC
+		bool "Print Debug Msg for SDP MAC"
+
+if SDP_MAC
+
+# Use Normal Descriptor
+config SDP_MAC_NORMAL_DESC
+		default n
+		bool	"MAC Use Normal Descriptor"
+
+choice
+        prompt "How to set MAC Address?"
+        default MAC_SET_RAMDOM
+
+config MAC_SET_BY_USER
+        depends on SDP_MAC
+        bool    "MAC set mac address by user"
+
+config MAC_SET_RANDOM
+        depends on SDP_MAC
+        bool    "Generate software assigned random ethernet addr"
+endchoice
+
+
+if MAC_SET_BY_USER
+
+config MAC_FRONT_4BYTE
+        depends on MAC_SET_BY_USER
+        hex     "MAC Mac address front 4 byte"
+        default 0xFFFFFFFF
+
+config MAC_END_2BYTE
+        depends on MAC_SET_BY_USER
+        hex     "MAC Mac address end 2 byte"
+        default 0xFFFF
+endif # MAC_SET_BY_USER
+
+endif # SDP_MAC

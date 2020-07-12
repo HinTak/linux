@@ -1,0 +1,14 @@
+config MTK_XO
+	bool "MediaTek Crystal Oscillator"
+	default n
+	help
+	  Say Y here if your SoC chip is MT8167 or MT8516
+	  If unsure, say N.
+
+config MTK_XO_NVRAM_RETRY
+	bool "MediaTek XO Offset Load Retry"
+	depends on MTK_XO
+	default n
+	help
+	  Say Y here if your system using NVRAM for store XO offset data
+	  If unsure, say N.

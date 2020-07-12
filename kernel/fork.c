@@ -88,6 +88,10 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/task.h>
 
+#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+#include <linux/sf_security.h>
+#endif
+
 /*
  * Minimum number of threads to boot the kernel
  */
@@ -157,19 +161,39 @@ void __weak arch_release_thread_info(struct thread_info *ti)
  * Allocate pages if THREAD_SIZE is >= PAGE_SIZE, otherwise use a
  * kmemcache based allocator.
  */
-# if THREAD_SIZE >= PAGE_SIZE
+# if THREAD_SIZE >= PAGE_SIZE || defined(CONFIG_VMAP_STACK)
 static struct thread_info *alloc_thread_info_node(struct task_struct *tsk,
 						  int node)
 {
+#ifdef CONFIG_VMAP_STACK
+	void *stack = __vmalloc_node_range(PAGE_SIZE, THREAD_SIZE,
+					   VMALLOC_START, VMALLOC_END,
+					   THREADINFO_GFP | __GFP_HIGHMEM,
+					   PAGE_KERNEL,
+					   VM_STACK, node,
+					   __builtin_return_address(0));
+	/*
+	 * We can't call find_vm_area() in interrupt context, and
+	 * free_thread_info() can be called in interrupt context,
+	 * so cache the vm_struct.
+	 */
+	if (stack)
+		tsk->stack_vm_area = find_vm_area(stack);
+	return stack;
+#else
 	struct page *page = alloc_kmem_pages_node(node, THREADINFO_GFP,
 						  THREAD_SIZE_ORDER);
 
 	return page ? page_address(page) : NULL;
+#endif
 }
 
-static inline void free_thread_info(struct thread_info *ti)
+static inline void free_thread_info(struct task_struct *tsk)
 {
-	free_kmem_pages((unsigned long)ti, THREAD_SIZE_ORDER);
+	if (task_stack_vm_area(tsk))
+		vfree(tsk->stack + PAGE_SIZE);
+	else
+		free_kmem_pages((unsigned long)tsk->stack, THREAD_SIZE_ORDER);
 }
 # else
 static struct kmem_cache *thread_info_cache;
@@ -180,9 +204,9 @@ static struct thread_info *alloc_thread_info_node(struct task_struct *tsk,
 	return kmem_cache_alloc_node(thread_info_cache, THREADINFO_GFP, node);
 }
 
-static void free_thread_info(struct thread_info *ti)
+static void free_thread_info(struct task_struct *tsk)
 {
-	kmem_cache_free(thread_info_cache, ti);
+	kmem_cache_free(thread_info_cache, tsk->stack);
 }
 
 void thread_info_cache_init(void)
@@ -191,7 +215,32 @@ void thread_info_cache_init(void)
 					      THREAD_SIZE, 0, NULL);
 	BUG_ON(thread_info_cache == NULL);
 }
+
 # endif
+#endif
+
+#ifdef CONFIG_KERNEL_STACK_SMALL
+static struct kmem_cache *thread_info_struct_cache;
+static struct thread_info *alloc_thread_info_struct_node(struct task_struct *tsk,
+						  int node)
+{
+	return kmem_cache_alloc_node(thread_info_struct_cache, THREADINFO_GFP, node);
+}
+
+static void free_thread_info_struct(struct thread_info *ti_struct)
+{
+	if (!ti_struct)
+		return;
+
+	kmem_cache_free(thread_info_struct_cache, ti_struct);
+}
+
+void thread_info_struct_cache_init(void)
+{
+	thread_info_struct_cache = kmem_cache_create("thread_struct_info", sizeof(struct thread_info),
+					      0, 0, NULL);
+	BUG_ON(thread_info_struct_cache == NULL);
+}
 #endif
 
 /* SLAB cache for signal_struct structures (tsk->signal) */
@@ -212,18 +261,67 @@ struct kmem_cache *vm_area_cachep;
 /* SLAB cache for mm_struct structures (tsk->mm) */
 static struct kmem_cache *mm_cachep;
 
-static void account_kernel_stack(struct thread_info *ti, int account)
+void account_kernel_stack(struct task_struct *tsk, int account, struct page *page)
 {
-	struct zone *zone = page_zone(virt_to_page(ti));
+	void *stack = task_stack_page(tsk);
+	struct vm_struct *vm = task_stack_vm_area(tsk);
+	struct zone *zone;
 
-	mod_zone_page_state(zone, NR_KERNEL_STACK, account);
+	BUILD_BUG_ON(IS_ENABLED(CONFIG_VMAP_STACK) && PAGE_SIZE % 1024 != 0);
+
+	if (vm) {
+		/*
+		 * For KERNEL_STACK_SMALL on demand page is allocated for kernel stack.
+		 * only one page is allocated during fork and extended on demand.
+		 * account vma page if it is allocated at time for fork.
+		 * otherwise account extra page allocated to extend kernel stack.
+		 */
+		if (!page)
+			zone = page_zone(vm->pages[0]);
+		else
+			zone = page_zone(page);
+
+		mod_zone_page_state(zone, NR_KERNEL_STACK, account);
+	} else {
+		/*
+		 * All stack pages are in the same zone and belong to the
+		 * same memcg.
+		 */
+		zone = page_zone(virt_to_page(stack));
+
+		mod_zone_page_state(zone, NR_KERNEL_STACK, account);
+	}
+
 }
+
+#ifdef CONFIG_KERNEL_STACK_SMALL
+void free_mapped_stack(struct task_struct *tsk)
+{
+	unsigned long addr = (unsigned long)tsk->stack;
+	struct page *page = (struct page *)*(unsigned long *)addr;
+
+	pr_alert("[STACK EXTENDED] Freeing allocated stack, Comm: %s PID: %d page: %p stack: %p\n",
+			tsk->comm, tsk->pid, page, (void *)addr);
+	account_kernel_stack(tsk, -1, page);
+	__free_page(page);
+	unmap_kernel_range(addr, PAGE_SIZE);
+	clear_tsk_thread_flag(tsk, TIF_VM_STACK);
+}
+#endif
 
 void free_task(struct task_struct *tsk)
 {
-	account_kernel_stack(tsk->stack, -1);
+#ifdef CONFIG_KERNEL_STACK_SMALL
+	void *ti_info = (void *)(*(unsigned long *)(tsk->stack + THREAD_START_SAVE));
+
+	if (unlikely(test_tsk_thread_flag(tsk, TIF_VM_STACK)))
+		free_mapped_stack(tsk);
+
+	free_thread_info_struct(ti_info);
+#endif
+	account_kernel_stack(tsk, -1, NULL);
 	arch_release_thread_info(tsk->stack);
-	free_thread_info(tsk->stack);
+	free_thread_info(tsk);
 	rt_mutex_debug_task_free(tsk);
 	ftrace_graph_exit_task(tsk);
 	put_seccomp_filter(tsk);
@@ -245,11 +343,20 @@ static inline void put_signal_struct(struct signal_struct *sig)
 		free_signal_struct(sig);
 }
 
+#ifdef CONFIG_SMART_DEADLOCK
+extern void hook_smart_deadlock_put_task(struct task_struct * released_tsk);
+#endif
+
 void __put_task_struct(struct task_struct *tsk)
 {
 	WARN_ON(!tsk->exit_state);
 	WARN_ON(atomic_read(&tsk->usage));
 	WARN_ON(tsk == current);
+
+#ifdef CONFIG_SMART_DEADLOCK
+	if( tsk->sm_tsk.tsk )
+		hook_smart_deadlock_put_task(tsk);
+#endif
 
 	task_numa_free(tsk);
 	security_task_free(tsk);
@@ -317,6 +424,9 @@ int __weak arch_dup_task_struct(struct task_struct *dst,
 	return 0;
 }
 
+#ifdef CONFIG_KERNEL_STACK_SMALL
+void set_task_stack_end_magic(struct task_struct *tsk) {}
+#else
 void set_task_stack_end_magic(struct task_struct *tsk)
 {
 	unsigned long *stackend;
@@ -324,11 +434,16 @@ void set_task_stack_end_magic(struct task_struct *tsk)
 	stackend = end_of_stack(tsk);
 	*stackend = STACK_END_MAGIC;	/* for overflow detection */
 }
+#endif
 
 static struct task_struct *dup_task_struct(struct task_struct *orig)
 {
 	struct task_struct *tsk;
 	struct thread_info *ti;
+	struct vm_struct *stack_vm_area;
+#ifdef CONFIG_KERNEL_STACK_SMALL
+	struct thread_info *ti_struct;
+#endif
 	int node = tsk_fork_get_node(orig);
 	int err;
 
@@ -336,15 +451,37 @@ static struct task_struct *dup_task_struct(struct task_struct *orig)
 	if (!tsk)
 		return NULL;
 
+#ifdef CONFIG_KERNEL_STACK_SMALL
+	ti_struct = alloc_thread_info_struct_node(tsk, node);
+	if (!ti_struct)
+		goto free_tsk;
+#endif
 	ti = alloc_thread_info_node(tsk, node);
 	if (!ti)
 		goto free_tsk;
 
+	stack_vm_area = task_stack_vm_area(tsk);
+
 	err = arch_dup_task_struct(tsk, orig);
+
+	/*
+	 * arch_dup_task_struct() clobbers the stack-related fields.  Make
+	 * sure they're properly initialized before using any stack-related
+	 * functions again.
+	 */
+
+	tsk->stack = ti;
+#ifdef CONFIG_VMAP_STACK
+	tsk->stack_vm_area = stack_vm_area;
+#endif
+
 	if (err)
 		goto free_ti;
 
-	tsk->stack = ti;
+#ifdef CONFIG_KERNEL_STACK_SMALL
+	*(unsigned long *)(tsk->stack + THREAD_START_SAVE) = (unsigned long)ti_struct;
+#endif
+
 #ifdef CONFIG_SECCOMP
 	/*
 	 * We must handle setting up seccomp filters once we're under
@@ -356,7 +493,15 @@ static struct task_struct *dup_task_struct(struct task_struct *orig)
 #endif
 
 	setup_thread_stack(tsk, orig);
+
+#ifdef CONFIG_KERNEL_STACK_LARGE
+	ti->tinfo_ptr = tsk->stack;
+#endif
 	clear_user_return_notifier(tsk);
+
+#ifdef CONFIG_KERNEL_STACK_SMALL
+	clear_tsk_thread_flag(tsk, TIF_VM_STACK);
+#endif
 	clear_tsk_need_resched(tsk);
 	set_task_stack_end_magic(tsk);
 
@@ -375,13 +520,16 @@ static struct task_struct *dup_task_struct(struct task_struct *orig)
 	tsk->splice_pipe = NULL;
 	tsk->task_frag.page = NULL;
 
-	account_kernel_stack(ti, 1);
+	account_kernel_stack(tsk, 1, NULL);
 
 	return tsk;
 
 free_ti:
-	free_thread_info(ti);
+	free_thread_info(tsk);
 free_tsk:
+#ifdef CONFIG_KERNEL_STACK_SMALL
+	free_thread_info_struct(ti_struct);
+#endif
 	free_task_struct(tsk);
 	return NULL;
 }
@@ -434,8 +582,15 @@ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 		if (mpnt->vm_flags & VM_ACCOUNT) {
 			unsigned long len = vma_pages(mpnt);
 
+#ifdef CONFIG_SKIP_CHECKING_MEMORY_WHILE_FORK
+			/* VDLinux,system() syscall patch, skip jump
+				to fail_nomem routine,2010-10-21 */
+			security_vm_enough_memory_mm(oldmm, len); /* sic */
+#else
+			/* Original vanilla kernel codes */
 			if (security_vm_enough_memory_mm(oldmm, len)) /* sic */
 				goto fail_nomem;
+#endif
 			charge = len;
 		}
 		tmp = kmem_cache_alloc(vm_area_cachep, GFP_KERNEL);
@@ -491,7 +646,13 @@ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 		rb_parent = &tmp->vm_rb;
 
 		mm->map_count++;
+#ifdef CONFIG_RSS_INFO
+		/* use tmp as 3rd arg for RSS counting */
+		/* orig code : retval = copy_page_range(mm, oldmm, mpnt); */
+		retval = copy_page_range(mm, oldmm, tmp);
+#else
 		retval = copy_page_range(mm, oldmm, mpnt);
+#endif
 
 		if (tmp->vm_ops && tmp->vm_ops->open)
 			tmp->vm_ops->open(tmp);
@@ -601,7 +762,11 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p)
 #if defined(CONFIG_TRANSPARENT_HUGEPAGE) && !USE_SPLIT_PMD_PTLOCKS
 	mm->pmd_huge_pte = NULL;
 #endif
-
+#ifdef CONFIG_RSS_INFO
+	atomic_long_set(&mm->max_total_rss, 0);
+	memset(mm->curr_rss, 0, sizeof(unsigned long) * VMAG_CNT);
+	memset(mm->max_rss, 0, sizeof(unsigned long) * VMAG_CNT);
+#endif
 	if (current->mm) {
 		mm->flags = current->mm->flags & MMF_INIT_MASK;
 		mm->def_flags = current->mm->def_flags & VM_INIT_DEF_MASK;
@@ -1067,6 +1232,7 @@ static int copy_sighand(unsigned long clone_flags, struct task_struct *tsk)
 	rcu_assign_pointer(tsk->sighand, sig);
 	if (!sig)
 		return -ENOMEM;
+
 	atomic_set(&sig->count, 1);
 	memcpy(sig->action, current->sighand->action, sizeof(sig->action));
 	return 0;
@@ -1131,6 +1297,7 @@ static int copy_signal(unsigned long clone_flags, struct task_struct *tsk)
 	init_sigpending(&sig->shared_pending);
 	INIT_LIST_HEAD(&sig->posix_timers);
 	seqlock_init(&sig->stats_lock);
+	prev_cputime_init(&sig->prev_cputime);
 
 	hrtimer_init(&sig->real_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	sig->real_timer.function = it_real_fn;
@@ -1319,6 +1486,23 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 	if (retval < 0)
 		goto bad_fork_free;
 
+#ifdef CONFIG_SMART_DEADLOCK
+	p->sm_tsk.tsk = NULL;
+	p->sm_tsk.w_syscall_time = 0;
+	p->sm_tsk.nr_switches = 0;
+	p->sm_tsk.sum_exec_runtime = 0;
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	p->sm_tsk.profile = NULL;
+	spin_lock_init(&p->sm_tsk.lock);
+	set_tsk_thread_flag(p, TIF_SMART_DEADLOCK);
+#endif
+#endif
+#ifdef CONFIG_PROC_VD_SUSPEND_POLICY
+	p->suspend_last = 0;
+#endif
+#ifdef CONFIG_STACK_RECLAIM
+	p->stack_rec_time = 0;
+#endif
 	/*
 	 * If multiple threads are within copy_process(), then this check
 	 * triggers too late. This doesn't hurt, the check is only there
@@ -1341,9 +1525,8 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 
 	p->utime = p->stime = p->gtime = 0;
 	p->utimescaled = p->stimescaled = 0;
-#ifndef CONFIG_VIRT_CPU_ACCOUNTING_NATIVE
-	p->prev_cputime.utime = p->prev_cputime.stime = 0;
-#endif
+	prev_cputime_init(&p->prev_cputime);
+
 #ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN
 	seqlock_init(&p->vtime_seqlock);
 	p->vtime_snap = 0;
@@ -1502,7 +1685,11 @@ static struct task_struct *copy_process(unsigned long clone_flags,
 		if (clone_flags & CLONE_PARENT)
 			p->exit_signal = current->group_leader->exit_signal;
 		else
-			p->exit_signal = (clone_flags & CSIGNAL);
+			#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+			p->exit_signal = ((clone_flags & (CSIGNAL & ~CLONE_CONTAINER_SECURE)));
+			#else
+			p->exit_signal = ((clone_flags & CSIGNAL));
+			#endif
 		p->group_leader = p;
 		p->tgid = p->pid;
 	}
@@ -1698,6 +1885,12 @@ long do_fork(unsigned long clone_flags,
 		else
 			trace = PTRACE_EVENT_FORK;
 
+		#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+		if((trace == PTRACE_EVENT_CLONE)  
+			&& (((clone_flags & CLONE_CONTAINER_ISOLATE) || (clone_flags & CLONE_CONTAINER_HYBRID)) &&  (clone_flags & SIGCHLD)))
+			trace = PTRACE_EVENT_FORK;
+		#endif
+
 		if (likely(!ptrace_event_enabled(current, trace)))
 			trace = 0;
 	}
@@ -1725,7 +1918,6 @@ long do_fork(unsigned long clone_flags,
 			init_completion(&vfork);
 			get_task_struct(p);
 		}
-
 		wake_up_new_task(p);
 
 		/* forking complete and child started to run, tell ptracer */
@@ -1797,6 +1989,13 @@ SYSCALL_DEFINE5(clone, unsigned long, clone_flags, unsigned long, newsp,
 		 int, tls_val)
 #endif
 {
+	#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+	if(((CLONE_CONTAINER_ISOLATE & clone_flags) || (CLONE_CONTAINER_HYBRID & clone_flags)) && (!sf_syscall_task_authorized(current,"clone")))
+	{
+		return -EPERM;
+	}
+	#endif
+	
 	return do_fork(clone_flags, newsp, 0, parent_tidptr, child_tidptr);
 }
 #endif
@@ -1851,7 +2050,11 @@ static int check_unshare_flags(unsigned long unshare_flags)
 	if (unshare_flags & ~(CLONE_THREAD|CLONE_FS|CLONE_NEWNS|CLONE_SIGHAND|
 				CLONE_VM|CLONE_FILES|CLONE_SYSVSEM|
 				CLONE_NEWUTS|CLONE_NEWIPC|CLONE_NEWNET|
-				CLONE_NEWUSER|CLONE_NEWPID))
+				CLONE_NEWUSER|CLONE_NEWPID
+#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+				| CLONE_CONTAINER_SECURE
+#endif
+				))
 		return -EINVAL;
 	/*
 	 * Not implemented, but pretend it works if there is nothing

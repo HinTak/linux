@@ -135,7 +135,10 @@
 #define	TEST_SE0_NAK	3
 #define	TEST_PACKET	4
 #define	TEST_FORCE_EN	5
-
+#ifdef CONFIG_ARCH_MXC
+#define	TEST_OTG_SRP_REQD	6
+#define	TEST_OTG_HNP_REQD	7
+#endif
 /*
  * New Feature Selectors as added by USB 3.0
  * See USB 3.0 spec Table 9-7
@@ -673,11 +676,24 @@ struct usb_otg_descriptor {
 
 	__u8  bmAttributes;	/* support for HNP, SRP, etc */
 } __attribute__ ((packed));
+#ifdef CONFIG_ARCH_MXC
+/* USB_DT_OTG (from OTG 2.0 supplement) */
+struct usb_otg20_descriptor {
+	__u8  bLength;
+	__u8  bDescriptorType;
 
+	__u8  bmAttributes;	/* support for HNP, SRP and ADP, etc */
+	__le16 bcdOTG;		/* OTG and EH supplement release number
+				 * in binary-coded decimal(i.e. 2.0 is 0200H)
+				 */
+} __attribute__ ((packed));
+#endif
 /* from usb_otg_descriptor.bmAttributes */
 #define USB_OTG_SRP		(1 << 0)
 #define USB_OTG_HNP		(1 << 1)	/* swap host/device roles */
-
+#ifdef CONFIG_ARCH_MXC
+#define USB_OTG_ADP		(1 << 2)	/* support ADP */
+#endif
 /*-------------------------------------------------------------------------*/
 
 /* USB_DT_DEBUG:  for special highspeed devices, replacing serial console */
@@ -705,7 +721,7 @@ struct usb_interface_assoc_descriptor {
 	__u8  iFunction;
 } __attribute__ ((packed));
 
-
+#define USB_DT_INTERFACE_ASSOCIATION_SIZE	8 
 /*-------------------------------------------------------------------------*/
 
 /* USB_DT_SECURITY:  group of wireless security descriptors, including

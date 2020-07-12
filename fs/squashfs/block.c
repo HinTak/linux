@@ -37,6 +37,7 @@
 #include "squashfs.h"
 #include "decompressor.h"
 #include "page_actor.h"
+#include "debug_print.h"
 
 /*
  * Read the metadata block length, this is stored in the first two
@@ -94,7 +95,20 @@ int squashfs_read_data(struct super_block *sb, u64 index, int length,
 	struct buffer_head **bh;
 	int offset = index & ((1 << msblk->devblksize_log2) - 1);
 	u64 cur_index = index >> msblk->devblksize_log2;
-	int bytes, compressed, b = 0, k = 0, avail, i;
+	int bytes, compressed = 0, b = 0, k = 0, avail, i;
+	int is_metablock = 0;
+	int block_rel = 0;
+
+	/* Debug state */
+	struct debug_print_state d_state = {
+		.sb = sb,
+		.k = 0,
+		.index = index,
+		.srclength   = length,
+		.__offset    = offset,
+		.__length    = output->length,
+		.get_block_length = get_block_length
+	};
 
 	bh = kcalloc(((output->length + msblk->devblksize - 1)
 		>> msblk->devblksize_log2) + 1, sizeof(*bh), GFP_KERNEL);
@@ -129,6 +143,7 @@ int squashfs_read_data(struct super_block *sb, u64 index, int length,
 		/*
 		 * Metadata block.
 		 */
+		is_metablock = 1;
 		if ((index + 2) > msblk->bytes_used)
 			goto read_failure;
 
@@ -203,12 +218,24 @@ int squashfs_read_data(struct super_block *sb, u64 index, int length,
 	return length;
 
 block_release:
-	for (; k < b; k++)
-		put_bh(bh[k]);
-
+	block_rel = 1;
 read_failure:
 	ERROR("squashfs_read_data failed to read block 0x%llx\n",
 					(unsigned long long) index);
+
+	d_state.bh = bh;
+	d_state.b = b;
+	d_state.k = output->k;
+	d_state.block_type = is_metablock;
+	d_state.compressed = compressed;
+	/* Print everything we can print in case of decompress error */
+	debug_print(&d_state);
+
+	if (block_rel) {
+		for (; k < b; k++)
+			put_bh(bh[k]);
+	}
+
 	kfree(bh);
 	return -EIO;
 }

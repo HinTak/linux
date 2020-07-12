@@ -1,0 +1,4 @@
+Main node required properties:
+
+- compatible : should be one of:
+	"nvt,periph_clk"

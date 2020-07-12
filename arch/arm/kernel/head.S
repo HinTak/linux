@@ -14,6 +14,14 @@
 #include <linux/linkage.h>
 #include <linux/init.h>
 
+#ifdef CONFIG_SDP_HW_CLOCK
+#include <mach/sdp_hwclock_regs.h>
+#elif CONFIG_NVT_HW_CLOCK
+#include <mach/nvt_hwclock_regs.h>
+#elif CONFIG_MTK_HW_CLOCK
+#include <mach/mtk_hwclock_regs.h>
+#endif
+
 #include <asm/assembler.h>
 #include <asm/cp15.h>
 #include <asm/domain.h>
@@ -56,6 +64,51 @@
 	sub	\rd, \rd, #PG_DIR_SIZE
 	.endm
 
+/* start::jackee.lee@samsung.com */
+#if defined(CONFIG_SDP_HW_CLOCK) || defined(CONFIG_NVT_HW_CLOCK) || defined(CONFIG_MTK_HW_CLOCK)
+        /*      Get physical and virtual address of HW clock */
+        .macro  addr_hw_clock   rp, rv
+        movw    \rp, #0
+        movt    \rp, #(HW_CLOCK_PA >> 16)
+        movw    \rv, #0
+        movt    \rv, #(HW_CLOCK_VA >> 16)
+        .endm
+
+        /*      Map address of I/O Devices                                      */
+        .macro  map_dev_addr    rp, rv, rz, pgt, procinfo
+        mov \rv, \rv, lsr #SECTION_SHIFT
+        mov \rv, \rv, lsl #PMD_ORDER
+
+        add \rz, \pgt, \rv
+        mov \rv, \rp, lsr #SECTION_SHIFT
+        ldr \rp, [\procinfo, #PROCINFO_IO_MMUFLAGS] @ io_mmuflags
+        orr \rv, \rp, \rv, lsl #SECTION_SHIFT
+#ifdef CONFIG_ARM_LPAE
+        mov \rp, #1 << (54 - 32)     @ XN
+#ifdef CONFIG_CPU_ENDIAN_BE8
+        str \rp, [\rz], #4
+        str \rv, [\rz], #4
+#else
+        str \rv, [\rz], #4
+        str \rp, [\rz], #4
+#endif
+#else
+        orr \rv, \rv, #PMD_SECT_XN
+        str \rv, [\rz], #4
+#endif
+        .endm
+#endif  /* CONFIG_SDP_HW_CLOCK */
+/* end::jackee.lee@samsung.com */
+#if defined(CONFIG_NVT_HW_CLOCK)
+	/*	Get physical and virtual address of HW clock */
+	.macro	addr_mpll_reg	rp, rv
+	movw	\rp, #0
+	movt	\rp, #(MPLL_REG_PA >> 16)
+	movw	\rv, #0
+	movt	\rv, #(MPLL_REG_VA >> 16)
+	.endm
+#endif	/* CONFIG_NVT_HW_CLOCK */
+
 /*
  * Kernel startup entry point.
  * ---------------------------
@@ -78,18 +131,48 @@
 
 	__HEAD
 ENTRY(stext)
+#ifdef CONFIG_ARCH_MXC
+	/*
+	 * mov	r0, #0xe
+	 * movt	r0, #0xc200
+	 * __SMC(0)
+	 * it will trap to ATF, ATF will back to jh-stub for EL2 initialization,
+	 * jh-stub will back to next ins following SMC. Actually the 3 instructions
+	 * are ARM32 inst.
+	 */
+	 .word	0xe3a0000e
+	 .word	0xe34c0200
+	 .word	0xe1600070
+#endif
  ARM_BE8(setend	be )			@ ensure we are in BE8 mode
+
+#if defined(CONFIG_ARCH_NVT_V7) && defined (CONFIG_SUSPEND)
+	b stext_start
+.extern nt72xxx_cpu_resume
+	b nt72xxx_cpu_resume
+stext_start:
+#endif
 
  THUMB(	adr	r9, BSYM(1f)	)	@ Kernel is always entered in ARM.
  THUMB(	bx	r9		)	@ If this is a Thumb-2 kernel,
  THUMB(	.thumb			)	@ switch to Thumb now.
  THUMB(1:			)
-
+#if 1
+	mov	r12, r1			@ back machine nr and atags pointer
+	mov	r13, r2	
+	bl	v7_invalidate_l1
+	mov	r1, r12
+	mov	r2, r13
+#endif
 #ifdef CONFIG_ARM_VIRT_EXT
 	bl	__hyp_stub_install
 #endif
 	@ ensure svc mode and all interrupts masked
 	safe_svcmode_maskall r9
+
+#ifdef CONFIG_BOOTLOADER_ERASE
+	bl	__erase_onboot
+#endif
 
 	mrc	p15, 0, r9, c0, c0		@ get processor id
 	bl	__lookup_processor_type		@ r5=procinfo r9=cpuid
@@ -274,6 +357,24 @@ __create_page_tables:
 						@ for 64-bit descriptors
 #endif
 
+/* start::jackee.lee@samsung.com
+ * Here we statically mmap HW clock ph addr to access these
+ * devices on early boot stage, when nothing is enabled yet.
+ */
+#if defined(CONFIG_SDP_HW_CLOCK) || defined(CONFIG_NVT_HW_CLOCK) || defined(CONFIG_MTK_HW_CLOCK)
+        addr_hw_clock   r7, r3
+        map_dev_addr    r7, r3, r0, r4, r10
+#endif  /* CONFIG_SDP_HW_CLOCK */
+/* end::jackee.lee@samsung.com */
+
+/* Here we statically mmap MPLL REG ph addr to access these
+ * devices on early boot stage, when nothing is enabled yet.
+*/
+#if defined(CONFIG_NVT_HW_CLOCK)
+	addr_mpll_reg	r7, r3
+	map_dev_addr	r7, r3, r0, r4, r10
+#endif	/* CONFIG_NVT_HW_CLOCK */
+
 #ifdef CONFIG_DEBUG_LL
 #if !defined(CONFIG_DEBUG_ICEDCC) && !defined(CONFIG_DEBUG_SEMIHOSTING)
 	/*
@@ -360,8 +461,23 @@ ENTRY(secondary_startup)
 	 * the processor type - there is no need to check the machine type
 	 * as it has already been validated by the primary processor.
 	 */
-
+#ifdef CONFIG_ARCH_MXC
+	/*
+	 * mov x0, #0xf5f5; This is used to differentiate from core0 with x0 #0x0
+	 * mov x3, #0x920000
+	 * blr x3
+	 * The stub code in 0x930000 will return to the next instruction
+	 * below 'blr x3' with mode switched to aarch32 EL1.
+	 * secondaries cores starts from EL2 mode, because of ATF changed
+	 * next image info
+	 */
+	 .word 0xd29ebea0
+	 .word 0xd2a01243
+	 .word 0xd63f0060
+#endif
  ARM_BE8(setend	be)				@ ensure we are in BE8 mode
+
+	bl	v7_invalidate_l1
 
 #ifdef CONFIG_ARM_VIRT_EXT
 	bl	__hyp_stub_install_secondary
@@ -707,6 +823,21 @@ __pv_phys_pfn_offset:
 __pv_offset:
 	.quad	0
 	.size	__pv_offset, . -__pv_offset
+#endif
+
+#ifdef CONFIG_BOOTLOADER_ERASE
+	__HEAD
+ENTRY(__erase_onboot)
+	ldr	r3, [r2, #-4]
+	sub	r3, r3, #0x4000		@ start to erase from boot0
+	add	r4, r3, #CONFIG_BOOTLOADER_SIZE
+	mov	r5, #0;
+1:
+	str	r5, [r3], #4
+	teq	r3, r4
+	bne	1b
+	mov pc,lr
+ENDPROC(__erase_onboot)
 #endif
 
 #include "head-common.S"

@@ -31,12 +31,14 @@
 #include <linux/bug.h>
 #include <linux/compiler.h>
 #include <linux/sort.h>
+#include <linux/psci.h>
 
 #include <asm/unified.h>
 #include <asm/cp15.h>
 #include <asm/cpu.h>
 #include <asm/cputype.h>
 #include <asm/elf.h>
+#include <asm/fixmap.h>
 #include <asm/procinfo.h>
 #include <asm/psci.h>
 #include <asm/sections.h>
@@ -57,6 +59,9 @@
 #include <asm/unwind.h>
 #include <asm/memblock.h>
 #include <asm/virt.h>
+#ifdef CONFIG_EMEM
+#include <linux/efficient_mem.h>
+#endif
 
 #include "atags.h"
 
@@ -889,6 +894,24 @@ static void __init reserve_crashkernel(void)
 	crashk_res.end = crash_base + crash_size - 1;
 	insert_resource(&iomem_resource, &crashk_res);
 }
+#ifdef CONFIG_EMEM
+void setup_emem(void)
+{
+	struct emem* emem_res;
+	if (crashk_res.end) {
+		unsigned long ret_pfn, base_pfn = __phys_to_pfn(crashk_res.start);
+		unsigned long sz = (crashk_res.end - crashk_res.start + 1) >> PAGE_SHIFT;
+		if (emem_register_contig(base_pfn, sz, EMEM_CRASHONUSE, &emem_res))
+			return;
+
+		//! reserve control page for ramdump 
+		ret_pfn = emem_alloc_contig(base_pfn, KEXEC_CONTROL_PAGE_SIZE >> PAGE_SHIFT);
+		if (!ret_pfn)
+			pr_err("%s reserve is failure control page base:0x%08llx sz:0x%08lx\n",
+				__func__, (long long)crashk_res.start, (long)KEXEC_CONTROL_PAGE_SIZE);
+	}
+}
+#endif
 #else
 static inline void reserve_crashkernel(void) {}
 #endif /* CONFIG_KEXEC */
@@ -910,9 +933,16 @@ void __init hyp_mode_check(void)
 #endif
 }
 
+#ifdef CONFIG_EMRG_SAVE_KLOG
+extern int kdump_part;
+#endif
+
 void __init setup_arch(char **cmdline_p)
 {
 	const struct machine_desc *mdesc;
+#ifdef CONFIG_EMRG_SAVE_KLOG
+	char *tmp;
+#endif
 
 	setup_processor();
 	mdesc = setup_machine_fdt(__atags_pointer);
@@ -930,12 +960,36 @@ void __init setup_arch(char **cmdline_p)
 	init_mm.end_data   = (unsigned long) _edata;
 	init_mm.brk	   = (unsigned long) _end;
 
+#ifdef CONFIG_EMRG_SAVE_KLOG
+	tmp = strstr(boot_command_line, "KDUMP=");
+	if (tmp) {
+		int count = 0, value = 0;
+
+		kdump_part = 0;
+		tmp = tmp + strlen("KDUMP=");
+		/* Make sure only read number */
+		while ('0' <= tmp[count] && '9' >= tmp[count]) {
+			value = tmp[count] - '0';
+			kdump_part = kdump_part * 10 + value;
+			count++;
+		}
+#ifndef CONFIG_VD_RELEASE
+		pr_info("[EMERG] kdump_part is %d\n", kdump_part);
+#endif
+	}
+#endif
+
 	/* populate cmd_line too for later use, preserving boot_command_line */
 	strlcpy(cmd_line, boot_command_line, COMMAND_LINE_SIZE);
 	*cmdline_p = cmd_line;
 
-	parse_early_param();
+	if (IS_ENABLED(CONFIG_FIX_EARLYCON_MEM))
+		early_fixmap_init();
 
+	parse_early_param();
+#ifdef CONFIG_ENABLE_DEBUG_PAGEALLOC_WITHOUT_KERNEL_PARAM
+	_debug_pagealloc_enabled = true; // to make dtb cmdline setting not required.
+#endif
 	early_paging_init(mdesc, lookup_processor_type(read_cpuid_id()));
 	setup_dma_zone(mdesc);
 	sanity_check_meminfo();
@@ -944,6 +998,7 @@ void __init setup_arch(char **cmdline_p)
 	paging_init(mdesc);
 	request_standard_resources(mdesc);
 
+
 	if (mdesc->restart)
 		arm_pm_restart = mdesc->restart;
 
@@ -951,6 +1006,13 @@ void __init setup_arch(char **cmdline_p)
 
 	arm_dt_init_cpu_maps();
 	psci_init();
+
+#ifdef CONFIG_KASAN
+	kasan_alloc_shadow();
+	kasan_init_shadow();
+	init_task.kasan_depth = 0;
+#endif
+
 #ifdef CONFIG_SMP
 	if (is_smp()) {
 		if (!mdesc->smp_init || !mdesc->smp_init()) {

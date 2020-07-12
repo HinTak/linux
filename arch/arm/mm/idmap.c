@@ -98,9 +98,20 @@ static void identity_mapping_add(pgd_t *pgd, const char *text_start,
 
 extern char  __idmap_text_start[], __idmap_text_end[];
 
+#if defined(CONFIG_SPARSE_LOWMEM_EXT_LPAE)
+extern void* suspend_save_sp;
+#endif
 static int __init init_static_idmap(void)
 {
+
+#if defined(CONFIG_SPARSE_LOWMEM_EXT_LPAE)
+	/* Assign reserved page restricted 32bit phys on idmap_pgd */
+	idmap_pgd = suspend_pgd_alloc(&init_mm, suspend_save_sp);
+	pr_notice("%s idmap_pgd:%p initialized \n", 
+		__func__, idmap_pgd);
+#else
 	idmap_pgd = pgd_alloc(&init_mm);
+#endif
 	if (!idmap_pgd)
 		return -ENOMEM;
 
@@ -113,6 +124,29 @@ static int __init init_static_idmap(void)
 	return 0;
 }
 early_initcall(init_static_idmap);
+
+#ifdef CONFIG_VMAP_STACK
+/*
+ * update_idmap_pgd()
+ *
+ * copy init_pgd into idmap_pgd, since kernel stack is allocated
+ * from vmalloc area and it was not present in init_pgd at init time
+ * function (init_static_idmap).
+ */
+void update_idmap_pgd(void)
+{
+	pgd_t *init_pgd = pgd_offset_k(0);
+
+	memcpy(idmap_pgd + USER_PTRS_PER_PGD, init_pgd + USER_PTRS_PER_PGD,
+			(PTRS_PER_PGD - USER_PTRS_PER_PGD) * sizeof(pgd_t));
+	clean_dcache_area(idmap_pgd, PTRS_PER_PGD * sizeof(pgd_t));
+	identity_mapping_add(idmap_pgd, __idmap_text_start,
+			     __idmap_text_end, 0);
+
+	/* Flush L1 for the hardware to see this page table content */
+	flush_cache_louis();
+}
+#endif
 
 /*
  * In order to soft-boot, we need to switch to a 1:1 mapping for the

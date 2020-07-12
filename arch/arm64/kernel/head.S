@@ -234,6 +234,10 @@ section_table:
 
 ENTRY(stext)
 	bl	preserve_boot_args
+#ifdef CONFIG_BOOTLOADER_ERASE
+	bl	__erase_onboot
+#endif
+
 	bl	el2_setup			// Drop to EL1, w20=cpu_boot_mode
 	adrp	x24, __PHYS_OFFSET
 	bl	set_cpu_boot_mode_flag
@@ -684,3 +688,18 @@ __enable_mmu:
 	isb
 	br	x27
 ENDPROC(__enable_mmu)
+
+#ifdef CONFIG_BOOTLOADER_ERASE
+	__HEAD
+ENTRY(__erase_onboot)
+	ldr	r3, [r2, #-4]
+	sub	r3, r3, #0x4000		@ start to erase from boot0
+	add	r4, r3, #CONFIG_BOOTLOADER_SIZE
+	mov	r5, #0;
+1:
+	str	r5, [r3], #4
+	teq	r3, r4
+	bne	1b
+	mov pc,lr
+ENDPROC(__erase_onboot)
+#endif

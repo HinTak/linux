@@ -1,0 +1,32 @@
+#ifndef __TZTV_MICOM_H
+#define __TZTV_MICOM_H
+void wt61p807_ar_init(void);
+void wt61p807_bs_init(void);
+void wt61p807_cec_init(void);
+void wt61p807_isp_init(void);
+void wt61p807_map_panel_init(void);
+void wt61p807_rc_map_init(void);
+void wt61p807_msg_init(void);
+void wt61p807_ontimer_init(void);
+void wt61p807_panel_init(void);
+void wt61p807_rc_init(void);
+void wt61p807_rtc_init(void);
+void wt61p807_system_grp_init(void);
+void wt61p807_ar_exit(void);
+void wt61p807_bs_exit(void);
+void wt61p807_cec_exit(void);
+void wt61p807_isp_exit(void);
+void wt61p807_map_panel_exit(void);
+void wt61p807_rc_map_exit(void);
+void wt61p807_msg_exit(void);
+void wt61p807_ontimer_exit(void);
+void wt61p807_panel_exit(void);
+void wt61p807_rc_exit(void);
+void wt61p807_rtc_exit(void);
+void wt61p807_system_grp_exit(void);
+#if defined(__NT16M__)
+void wt61p807_rc_keyboard_init(void);
+void wt61p807_rc_keyboard_exit(void);
+#endif //NT16M
+
+#endif /* __TZTV_MICOM_H */

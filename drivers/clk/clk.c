@@ -43,6 +43,10 @@ static int clk_core_get_phase(struct clk_core *clk);
 static bool clk_core_is_prepared(struct clk_core *clk);
 static bool clk_core_is_enabled(struct clk_core *clk);
 static struct clk_core *clk_core_lookup(const char *name);
+static int clk_core_prepare(struct clk_core *clk);
+static int clk_core_enable(struct clk_core *clk);
+static void clk_core_disable(struct clk_core *clk);
+static void clk_core_unprepare(struct clk_core *clk);
 
 /***    private data structures    ***/
 
@@ -505,17 +509,28 @@ static void clk_unprepare_unused_subtree(struct clk_core *clk)
 	}
 }
 
+
 /* caller must hold prepare_lock */
 static void clk_disable_unused_subtree(struct clk_core *clk)
 {
 	struct clk_core *child;
+#ifdef CONFIG_ARCH_MXC
+	struct clk_core *parent = NULL;
+#endif	
 	unsigned long flags;
 
 	lockdep_assert_held(&prepare_lock);
 
 	hlist_for_each_entry(child, &clk->children, child_node)
 		clk_disable_unused_subtree(child);
-
+#ifdef CONFIG_ARCH_MXC
+	if (clk->flags & CLK_SET_PARENT_ON) {
+		parent = clk->parent;
+		WARN(!parent, "%s no parent found but has CLK_SET_PARENT_ON claimed\n", clk->name);
+		clk_core_prepare(parent);
+		clk_core_enable(parent);
+	}
+#endif
 	flags = clk_enable_lock();
 
 	if (clk->enable_count)
@@ -540,6 +555,13 @@ static void clk_disable_unused_subtree(struct clk_core *clk)
 
 unlock_out:
 	clk_enable_unlock(flags);
+#ifdef CONFIG_ARCH_MXC	
+	if (clk->flags & CLK_SET_PARENT_ON) {
+		clk_core_disable(parent);
+		clk_core_unprepare(parent);
+	}
+	return;
+#endif	
 }
 
 static bool clk_ignore_unused;
@@ -1473,7 +1495,24 @@ static struct clk_core *__clk_set_parent_before(struct clk_core *clk,
 	 * hardware and software states.
 	 *
 	 * See also: Comment for clk_set_parent() below.
+	 *
+	 * 2. enable two parents clock for .set_parent() operation if finding
+	 * flag CLK_SET_PARENT_ON
 	 */
+#ifdef CONFIG_ARCH_MXC
+	if (clk->prepare_count || clk->flags & CLK_SET_PARENT_ON) {
+		clk_core_prepare(parent);
+		flags = clk_enable_lock();
+		clk_core_enable(parent);
+		if (clk->prepare_count) {
+			clk_core_enable(clk);
+		} else {
+			clk_core_prepare(old_parent);
+			clk_core_enable(old_parent);
+		}
+		clk_enable_unlock(flags);
+	}	 
+#else	 
 	if (clk->prepare_count) {
 		clk_core_prepare(parent);
 		flags = clk_enable_lock();
@@ -1481,7 +1520,7 @@ static struct clk_core *__clk_set_parent_before(struct clk_core *clk,
 		clk_core_enable(clk);
 		clk_enable_unlock(flags);
 	}
-
+#endif
 	/* update the clk tree topology */
 	flags = clk_enable_lock();
 	clk_reparent(clk, parent);
@@ -1500,6 +1539,20 @@ static void __clk_set_parent_after(struct clk_core *core,
 	 * Finish the migration of prepare state and undo the changes done
 	 * for preventing a race with clk_enable().
 	 */
+#ifdef CONFIG_ARCH_MXC
+	if (core->prepare_count || core->flags & CLK_SET_PARENT_ON) {
+		flags = clk_enable_lock();
+		clk_core_disable(old_parent);
+		clk_core_unprepare(old_parent);
+		if (core->prepare_count) {
+			clk_core_disable(core);
+		} else {
+			clk_core_disable(parent);
+			clk_core_unprepare(parent);
+		}
+		clk_enable_unlock(flags);
+	}	 
+#else	 
 	if (core->prepare_count) {
 		flags = clk_enable_lock();
 		clk_core_disable(core);
@@ -1507,6 +1560,7 @@ static void __clk_set_parent_after(struct clk_core *core,
 		clk_enable_unlock(flags);
 		clk_core_unprepare(old_parent);
 	}
+#endif	
 }
 
 static int __clk_set_parent(struct clk_core *clk, struct clk_core *parent,
@@ -1530,7 +1584,20 @@ static int __clk_set_parent(struct clk_core *clk, struct clk_core *parent,
 		flags = clk_enable_lock();
 		clk_reparent(clk, old_parent);
 		clk_enable_unlock(flags);
-
+#ifdef CONFIG_ARCH_MXC
+		if (clk->prepare_count || clk->flags & CLK_SET_PARENT_ON) {
+			flags = clk_enable_lock();
+			clk_core_disable(parent);
+			clk_core_unprepare(parent);
+			if (clk->prepare_count) {
+				clk_core_disable(clk);
+			} else {
+				clk_core_disable(old_parent);
+				clk_core_unprepare(old_parent);
+			}
+			clk_enable_unlock(flags);
+		}
+#else
 		if (clk->prepare_count) {
 			flags = clk_enable_lock();
 			clk_core_disable(clk);
@@ -1538,6 +1605,7 @@ static int __clk_set_parent(struct clk_core *clk, struct clk_core *parent,
 			clk_enable_unlock(flags);
 			clk_core_unprepare(parent);
 		}
+#endif
 		return ret;
 	}
 
@@ -1752,13 +1820,22 @@ static void clk_change_rate(struct clk_core *clk)
 	unsigned long best_parent_rate = 0;
 	bool skip_set_rate = false;
 	struct clk_core *old_parent;
-
+#ifdef CONFIG_ARCH_MXC
+	struct clk_core *parent = NULL;
+#endif
 	old_rate = clk->rate;
 
-	if (clk->new_parent)
+	if (clk->new_parent) {
+#ifdef CONFIG_ARCH_MXC	
+		parent = clk->new_parent;
+#endif		
 		best_parent_rate = clk->new_parent->rate;
-	else if (clk->parent)
+	} else if (clk->parent) {
+#ifdef CONFIG_ARCH_MXC		
+		parent = clk->parent;
+#endif			
 		best_parent_rate = clk->parent->rate;
+	}
 
 	if (clk->new_parent && clk->new_parent != clk->parent) {
 		old_parent = __clk_set_parent_before(clk, clk->new_parent);
@@ -1778,14 +1855,24 @@ static void clk_change_rate(struct clk_core *clk)
 	}
 
 	trace_clk_set_rate(clk, clk->new_rate);
-
+#ifdef CONFIG_ARCH_MXC	
+	if (clk->flags & CLK_SET_PARENT_ON && parent) {
+		clk_core_prepare(parent);
+		clk_core_enable(parent);
+	}
+#endif
 	if (!skip_set_rate && clk->ops->set_rate)
 		clk->ops->set_rate(clk->hw, clk->new_rate, best_parent_rate);
 
 	trace_clk_set_rate_complete(clk, clk->new_rate);
 
 	clk->rate = clk_recalc(clk, best_parent_rate);
-
+#ifdef CONFIG_ARCH_MXC
+	if (clk->flags & CLK_SET_PARENT_ON && parent) {
+		clk_core_disable(parent);
+		clk_core_unprepare(parent);
+	}
+#endif
 	if (clk->notifier_count && old_rate != clk->rate)
 		__clk_notify(clk, POST_RATE_CHANGE, old_rate, clk->rate);
 

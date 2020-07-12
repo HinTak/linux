@@ -754,6 +754,9 @@ static int wm8960_set_bias_level_capless(struct snd_soc_codec *codec,
 			break;
 
 		case SND_SOC_BIAS_ON:
+			if (wm8960->clk_id == WM8960_SYSCLK_AUTO && (pm2 & 0x1))
+				wm8960_set_pll(codec, 0, 0);
+
 			if (!IS_ERR(wm8960->mclk))
 				clk_disable_unprepare(wm8960->mclk);
 
@@ -814,6 +817,28 @@ struct _pll_div {
 	u32 k:24;
 };
 
+static bool is_pll_freq_available(unsigned int source, unsigned int target)
+{
+	unsigned int Ndiv;
+
+	if (source == 0 || target == 0)
+		return false;
+
+	/* Scale up target to PLL operating frequency */
+	target *= 4;
+	Ndiv = target / source;
+
+	if (Ndiv < 6) {
+		source >>= 1;
+		Ndiv = target / source;
+	}
+
+	if ((Ndiv < 6) || (Ndiv > 12))
+		return false;
+
+	return true;
+}
+
 /* The size in bits of the pll divide multiplied by 10
  * to allow rounding later */
 #define FIXED_PLL_SIZE ((1 << 24) * 10)
@@ -865,10 +890,9 @@ static int pll_factors(unsigned int source, unsigned int target,
 	return 0;
 }
 
-static int wm8960_set_dai_pll(struct snd_soc_dai *codec_dai, int pll_id,
-		int source, unsigned int freq_in, unsigned int freq_out)
+static int wm8960_set_pll(struct snd_soc_codec *codec,
+		unsigned int freq_in, unsigned int freq_out)
 {
-	struct snd_soc_codec *codec = codec_dai->codec;
 	u16 reg;
 	static struct _pll_div pll_div;
 	int ret;
@@ -906,6 +930,20 @@ static int wm8960_set_dai_pll(struct snd_soc_dai *codec_dai, int pll_id,
 	snd_soc_update_bits(codec, WM8960_CLOCK1, 0x1, 0x1);
 
 	return 0;
+}
+
+static int wm8960_set_dai_pll(struct snd_soc_dai *codec_dai, int pll_id,
+		int source, unsigned int freq_in, unsigned int freq_out)
+{
+	struct snd_soc_codec *codec = codec_dai->codec;
+	struct wm8960_priv *wm8960 = snd_soc_codec_get_drvdata(codec);
+
+	wm8960->freq_in = freq_in;
+
+	if (pll_id == WM8960_SYSCLK_AUTO)
+		return 0;
+
+	return wm8960_set_pll(codec, freq_in, freq_out);
 }
 
 static int wm8960_set_dai_clkdiv(struct snd_soc_dai *codec_dai,
@@ -950,18 +988,47 @@ static int wm8960_set_bias_level(struct snd_soc_codec *codec,
 	return wm8960->set_bias_level(codec, level);
 }
 
+static int wm8960_set_dai_sysclk(struct snd_soc_dai *dai, int clk_id,
+					unsigned int freq, int dir)
+{
+	struct snd_soc_codec *codec = dai->codec;
+	struct wm8960_priv *wm8960 = snd_soc_codec_get_drvdata(codec);
+
+	switch (clk_id) {
+	case WM8960_SYSCLK_MCLK:
+		snd_soc_update_bits(codec, WM8960_CLOCK1,
+					0x1, WM8960_SYSCLK_MCLK);
+		break;
+	case WM8960_SYSCLK_PLL:
+		snd_soc_update_bits(codec, WM8960_CLOCK1,
+					0x1, WM8960_SYSCLK_PLL);
+		break;
+	case WM8960_SYSCLK_AUTO:
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	wm8960->sysclk = freq;
+	wm8960->clk_id = clk_id;
+
+	return 0;
+}
+
 #define WM8960_RATES SNDRV_PCM_RATE_8000_48000
 
 #define WM8960_FORMATS \
 	(SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S20_3LE | \
-	SNDRV_PCM_FMTBIT_S24_LE)
+	SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S32_LE)
 
 static const struct snd_soc_dai_ops wm8960_dai_ops = {
 	.hw_params = wm8960_hw_params,
+	.hw_free = wm8960_hw_free,
 	.digital_mute = wm8960_mute,
 	.set_fmt = wm8960_set_dai_fmt,
 	.set_clkdiv = wm8960_set_dai_clkdiv,
 	.set_pll = wm8960_set_dai_pll,
+	.set_sysclk = wm8960_set_dai_sysclk,
 };
 
 static struct snd_soc_dai_driver wm8960_dai = {

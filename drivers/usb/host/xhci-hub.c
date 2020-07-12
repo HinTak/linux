@@ -26,6 +26,10 @@
 
 #include "xhci.h"
 #include "xhci-trace.h"
+#if IS_ENABLED(CONFIG_USB_NVT_XHCI_HCD)
+#include <linux/usb/phy.h>
+#include <linux/usb/nvt_usb_phy.h>
+#endif
 
 #define	PORT_WAKE_BITS	(PORT_WKOC_E | PORT_WKDISC_E | PORT_WKCONN_E)
 #define	PORT_RWC_BITS	(PORT_CSC | PORT_PEC | PORT_WRC | PORT_OCC | \
@@ -688,6 +692,29 @@ static u32 xhci_get_port_status(struct usb_hcd *hcd,
 		else
 			status |= USB_PORT_STAT_POWER;
 	}
+
+#if defined(CONFIG_ARCH_SDP) && defined(CONFIG_USB_DEBUG)
+	if( hcd->speed != HCD_USB3 
+		&& CHK_STATE(temp,PORT_CONNECT)
+		&& !CHK_STATE(temp,PORT_RESET) 
+		&& CHK_STATE(temp,PORT_RC) ) {
+		/* If USB2, check speed and enable on reset-done */
+		if( !CHK_STATE(temp,PORT_PE)
+			|| !DEV_HIGHSPEED(temp)) {
+			xhci->handshake_fail_cnt_usb2++;
+			
+			xhci_dbg(xhci,
+				"handshake fail[usb2]:port idx[%d] "
+				"conn[%d] Reset[%d] HS[%d] PE[%d]\n"
+				,wIndex + 1
+				,CHK_STATE(temp,PORT_CONNECT)
+				,CHK_STATE(temp,PORT_RESET)
+				,DEV_HIGHSPEED(temp)
+				,CHK_STATE(temp,PORT_PE));
+		}
+	}
+#endif
+
 	/* Update Port Link State */
 	if (hcd->speed == HCD_USB3) {
 		xhci_hub_report_usb3_link_state(xhci, &status, raw_port_status);
@@ -719,6 +746,12 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 	u16 link_state = 0;
 	u16 wake_mask = 0;
 	u16 timeout = 0;
+#if IS_ENABLED(CONFIG_USB_NVT_XHCI_HCD)
+	struct nvt_u3_phy *pphy;
+	u32 temp2;
+
+	pphy = container_of(hcd->usb_phy, struct nvt_u3_phy, u_phy);
+#endif
 
 	max_ports = xhci_get_ports(hcd, &port_array);
 	bus_state = &xhci->bus_state[hcd_index(hcd)];
@@ -818,7 +851,7 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 			}
 			/* In spec software should not attempt to suspend
 			 * a port unless the port reports that it is in the
-			 * enabled (PED = ‘1’,PLS < ‘3’) state.
+			 * enabled (PED = ????PLS < ???? state.
 			 */
 			temp = readl(port_array[wIndex]);
 			if ((temp & PORT_PE) == 0 || (temp & PORT_RESET)
@@ -931,6 +964,13 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 			spin_lock_irqsave(&xhci->lock, flags);
 			break;
 		case USB_PORT_FEAT_RESET:
+#if IS_ENABLED(CONFIG_USB_NVT_XHCI_HCD)
+			if (hcd->speed == HCD_USB3) {
+				temp2 = pphy->get_apb_reg(pphy, 0x18);
+				if ((temp2 & 0xf0) != 0)
+					break;
+			}
+#endif
 			temp = (temp | PORT_RESET);
 			writel(temp, port_array[wIndex]);
 

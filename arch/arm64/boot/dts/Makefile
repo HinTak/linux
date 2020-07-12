@@ -6,6 +6,7 @@ dts-dirs += exynos
 dts-dirs += freescale
 dts-dirs += mediatek
 dts-dirs += qcom
+dts-dirs += sdp
 dts-dirs += sprd
 dts-dirs += xilinx
 

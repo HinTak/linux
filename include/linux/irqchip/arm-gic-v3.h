@@ -378,12 +378,6 @@ struct rdists {
 	u64			flags;
 };
 
-static inline void gic_write_eoir(u64 irq)
-{
-	asm volatile("msr_s " __stringify(ICC_EOIR1_EL1) ", %0" : : "r" (irq));
-	isb();
-}
-
 struct irq_domain;
 int its_cpu_init(void);
 int its_init(struct device_node *node, struct rdists *rdists,

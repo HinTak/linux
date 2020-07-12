@@ -18,6 +18,9 @@ EXPORT_SYMBOL(system_freezing_cnt);
 /* indicate whether PM freezing is in effect, protected by pm_mutex */
 bool pm_freezing;
 bool pm_nosig_freezing;
+#ifdef CONFIG_POWER_SAVING_MODE
+extern bool pwsv_freezing;
+#endif
 
 /*
  * Temporary export for the deadlock workaround in ata_scsi_hotplug().

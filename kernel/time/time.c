@@ -208,7 +208,10 @@ SYSCALL_DEFINE2(settimeofday, struct timeval __user *, tv,
 			return -EFAULT;
 	}
 
-	return do_sys_settimeofday(tv ? &new_ts : NULL, tz ? &new_tz : NULL);
+
+	return do_sys_settimeofday(tv ? &new_ts :
+			NULL, tz ? &new_tz : NULL);
+
 }
 
 SYSCALL_DEFINE1(adjtimex, struct timex __user *, txc_p)

@@ -13,7 +13,7 @@
     GNU General Public License for more details.			     */
 /* ------------------------------------------------------------------------- */
 
-/* With some changes from Kyösti Mälkki <kmalkki@cc.hut.fi>.
+/* With some changes from Kyosti Malkki <kmalkki@cc.hut.fi>.
    All SMBus-related things are written by Frodo Looijaard <frodol@dds.nl>
    SMBus 2.0 support by Mark Studebaker <mdsxyz123@yahoo.com> and
    Jean Delvare <jdelvare@suse.de>
@@ -777,7 +777,8 @@ static int i2c_check_client_addr_validity(const struct i2c_client *client)
 			return -EINVAL;
 	} else {
 		/* 7-bit address, reject the general call address */
-		if (client->addr == 0x00 || client->addr > 0x7f)
+	//	if (client->addr == 0x00 || client->addr > 0x7f)
+		if (client->addr > 0x7f)	/* INX TCON 0x00 SOC141008*/
 			return -EINVAL;
 	}
 	return 0;
@@ -799,6 +800,9 @@ static int i2c_check_addr_validity(unsigned short addr)
 	 *  0x78-0x7b  10-bit slave addressing
 	 *  0x7c-0x7f  Reserved for future purposes
 	 */
+	if(addr == 0x00)	/* INX TCON 0x00 SOC141008*/
+		return 0;
+
 	if (addr < 0x08 || addr > 0x77)
 		return -EINVAL;
 	return 0;
@@ -1301,7 +1305,7 @@ static struct i2c_client *of_i2c_register_device(struct i2c_adapter *adap,
 	return result;
 }
 
-static void of_i2c_register_devices(struct i2c_adapter *adap)
+void of_i2c_register_devices(struct i2c_adapter *adap)
 {
 	struct device_node *node;
 
@@ -1314,6 +1318,8 @@ static void of_i2c_register_devices(struct i2c_adapter *adap)
 	for_each_available_child_of_node(adap->dev.of_node, node)
 		of_i2c_register_device(adap, node);
 }
+EXPORT_SYMBOL(of_i2c_register_devices);
+
 
 static int of_dev_node_match(struct device *dev, void *data)
 {
@@ -2052,6 +2058,10 @@ int __i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 }
 EXPORT_SYMBOL(__i2c_transfer);
 
+#ifndef CONFIG_VD_RELEASE
+#include <linux/ratelimit.h>
+static DEFINE_RATELIMIT_STATE(i2c_error_rate, 1 * HZ, 1);
+#endif /*CONFIG_VD_RELEASE*/
 /**
  * i2c_transfer - execute a single or combined I2C message
  * @adap: Handle to I2C bus
@@ -2106,7 +2116,11 @@ int i2c_transfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 
 		ret = __i2c_transfer(adap, msgs, num);
 		i2c_unlock_adapter(adap);
-
+#ifndef CONFIG_VD_RELEASE
+		if((ktime_get_seconds() > 15) && ret < 0 && __ratelimit(&i2c_error_rate)) { /* 15sec is approximate and heuristic */
+			dump_stack();
+		}
+#endif /*CONFIG_VD_RELEASE*/
 		return ret;
 	} else {
 		dev_dbg(&adap->dev, "I2C level transfers not supported\n");
@@ -2769,16 +2783,16 @@ static s32 i2c_smbus_xfer_emulated(struct i2c_adapter *adapter, u16 addr,
 				   the underlying bus driver */
 		break;
 	case I2C_SMBUS_I2C_BLOCK_DATA:
+		if (data->block[0] > I2C_SMBUS_BLOCK_MAX) {
+			dev_err(&adapter->dev, "Invalid block %s size %d\n",
+				read_write == I2C_SMBUS_READ ? "read" : "write",
+				data->block[0]);
+			return -EINVAL;
+		}
 		if (read_write == I2C_SMBUS_READ) {
 			msg[1].len = data->block[0];
 		} else {
 			msg[0].len = data->block[0] + 1;
-			if (msg[0].len > I2C_SMBUS_BLOCK_MAX + 1) {
-				dev_err(&adapter->dev,
-					"Invalid block write size %d\n",
-					data->block[0]);
-				return -EINVAL;
-			}
 			for (i = 1; i <= data->block[0]; i++)
 				msgbuf0[i] = data->block[i];
 		}

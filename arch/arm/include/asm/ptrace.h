@@ -154,9 +154,15 @@ static inline unsigned long user_stack_pointer(struct pt_regs *regs)
 	return regs->ARM_sp;
 }
 
+#ifdef CONFIG_KERNEL_STACK_SMALL
+#define current_pt_regs(void) ({ (struct pt_regs *)			\
+		((current_stack_pointer | (THREAD_SIZE - 1)) - 15) - 1;	\
+})
+#else
 #define current_pt_regs(void) ({ (struct pt_regs *)			\
 		((current_stack_pointer | (THREAD_SIZE - 1)) - 7) - 1;	\
 })
+#endif
 
 #endif /* __ASSEMBLY__ */
 #endif

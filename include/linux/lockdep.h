@@ -422,6 +422,11 @@ struct lock_class_key { };
 
 #endif /* !LOCKDEP */
 
+#ifdef CONFIG_PRINT_SMC_HISTORY_PRINT
+typedef void (*print_smc_info_sec_fn)(void);
+extern print_smc_info_sec_fn print_smc_info_sec;
+#endif
+
 #ifdef CONFIG_LOCK_STAT
 
 extern void lock_contended(struct lockdep_map *lock, unsigned long ip);

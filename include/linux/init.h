@@ -152,8 +152,18 @@ void setup_arch(char **);
 void prepare_namespace(void);
 void __init load_default_modules(void);
 int __init init_rootfs(void);
+#ifdef CONFIG_EMEM
+void setup_emem(void);
+#else
+static inline void setup_emem(void) {}
+#endif
 
 extern void (*late_time_init)(void);
+
+#ifdef CONFIG_EMRG_SAVE_KLOG
+/* Init emergency klog dump to partition*/
+void init_emrg_klog_save(void);
+#endif
 
 extern bool initcall_debug;
 

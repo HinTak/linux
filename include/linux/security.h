@@ -1671,7 +1671,12 @@ struct security_operations {
 	int (*inode_notifysecctx)(struct inode *inode, void *ctx, u32 ctxlen);
 	int (*inode_setsecctx)(struct dentry *dentry, void *ctx, u32 ctxlen);
 	int (*inode_getsecctx)(struct inode *inode, void **ctx, u32 *ctxlen);
-
+	int (*inode_copy_up)(struct dentry *dentry, struct cred **new);
+	int (*inode_copy_up_xattr)(const char *name);
+	int (*dentry_create_files_as)(struct dentry *dentry, int mode,
+					struct qstr *name,
+					const struct cred *old,
+					struct cred *new);
 #ifdef CONFIG_SECURITY_NETWORK
 	int (*unix_stream_connect) (struct sock *sock, struct sock *other, struct sock *newsk);
 	int (*unix_may_send) (struct socket *sock, struct socket *other);
@@ -1938,6 +1943,12 @@ void security_release_secctx(char *secdata, u32 seclen);
 int security_inode_notifysecctx(struct inode *inode, void *ctx, u32 ctxlen);
 int security_inode_setsecctx(struct dentry *dentry, void *ctx, u32 ctxlen);
 int security_inode_getsecctx(struct inode *inode, void **ctx, u32 *ctxlen);
+int security_inode_copy_up(struct dentry *dentry, struct cred **new);
+int security_inode_copy_up_xattr(const char *name);
+int security_dentry_create_files_as(struct dentry *dentry, int mode,
+					struct qstr *name,
+					const struct cred *old,
+					struct cred *new);
 #else /* CONFIG_SECURITY */
 struct security_mnt_opts {
 };
@@ -2683,6 +2694,21 @@ static inline int security_inode_setsecctx(struct dentry *dentry, void *ctx, u32
 	return -EOPNOTSUPP;
 }
 static inline int security_inode_getsecctx(struct inode *inode, void **ctx, u32 *ctxlen)
+{
+	return -EOPNOTSUPP;
+}
+static inline int security_inode_copy_up(struct dentry *dentry, struct cred **new)
+{
+	return -EOPNOTSUPP;
+}
+static inline int security_inode_copy_up_xattr(const char *name)
+{
+	return -EOPNOTSUPP;
+}
+static inline int security_dentry_create_files_as(struct dentry *dentry, int mode,
+					struct qstr *name,
+					const struct cred *old,
+					struct cred *new)
 {
 	return -EOPNOTSUPP;
 }

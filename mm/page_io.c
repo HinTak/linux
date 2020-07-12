@@ -48,6 +48,9 @@ void end_swap_bio_write(struct bio *bio, int err)
 	const int uptodate = test_bit(BIO_UPTODATE, &bio->bi_flags);
 	struct page *page = bio->bi_io_vec[0].bv_page;
 
+	/* huristic value */
+	static DEFINE_RATELIMIT_STATE(ratelimit, 1 * HZ, 5);
+
 	if (!uptodate) {
 		SetPageError(page);
 		/*
@@ -59,10 +62,11 @@ void end_swap_bio_write(struct bio *bio, int err)
 		 * Also clear PG_reclaim to avoid rotate_reclaimable_page()
 		 */
 		set_page_dirty(page);
-		printk(KERN_ALERT "Write-error on swap-device (%u:%u:%Lu)\n",
-				imajor(bio->bi_bdev->bd_inode),
-				iminor(bio->bi_bdev->bd_inode),
-				(unsigned long long)bio->bi_iter.bi_sector);
+		if (__ratelimit(&ratelimit))
+			printk(KERN_ALERT "Write-error on swap-device (%u:%u:%Lu)\n",
+					imajor(bio->bi_bdev->bd_inode),
+					iminor(bio->bi_bdev->bd_inode),
+					(unsigned long long)bio->bi_iter.bi_sector);
 		ClearPageReclaim(page);
 	}
 	end_page_writeback(page);
@@ -260,6 +264,7 @@ int __swap_writepage(struct page *page, struct writeback_control *wbc,
 	int ret, rw = WRITE;
 	struct swap_info_struct *sis = page_swap_info(page);
 
+	BUG_ON(!PageSwapCache(page));
 	if (sis->flags & SWP_FILE) {
 		struct kiocb kiocb;
 		struct file *swap_file = sis->swap_file;
@@ -374,6 +379,7 @@ int swap_set_page_dirty(struct page *page)
 
 	if (sis->flags & SWP_FILE) {
 		struct address_space *mapping = sis->swap_file->f_mapping;
+		BUG_ON(!PageSwapCache(page));
 		return mapping->a_ops->set_page_dirty(page);
 	} else {
 		return __set_page_dirty_no_writeback(page);

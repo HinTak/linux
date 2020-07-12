@@ -138,6 +138,7 @@ config THERMAL_EMULATION
 
 config IMX_THERMAL
 	tristate "Temperature sensor driver for Freescale i.MX SoCs"
+	depends on SOC_IMX6 || SOC_IMX7
 	depends on CPU_THERMAL
 	depends on MFD_SYSCON
 	depends on OF
@@ -146,6 +147,24 @@ config IMX_THERMAL
 	  It supports one critical trip point and one passive trip point.  The
 	  cpufreq is used as the cooling device to throttle CPUs when the
 	  passive trip is crossed.
+
+config IMX8MM_THERMAL
+	tristate "i.MX8MM Thermal Monitor Unit"
+	depends on SOC_IMX8MM
+	depends on THERMAL_OF
+	depends on HAS_IOMEM
+	help
+	  Support for Thermal Monitor Unit (TMU) found on i.MX8MM platforms.
+	  It supports one critical trip point and one passive trip point. The
+	  cpufreq is used as the cooling device to throttle CPUs when the
+	  passive trip is crossed.
+
+config DEVICE_THERMAL
+	tristate "generic device cooling support"
+	help
+	  Support for device cooling.
+	  It supports notification of crossing passive trip for devices,
+	  devices need to do their own actions to cool down the SOC.
 
 config SPEAR_THERMAL
 	bool "SPEAr thermal sensor driver"
@@ -284,6 +303,14 @@ config INT340X_THERMAL
 config ACPI_THERMAL_REL
 	tristate
 	depends on ACPI
+
+config NVT_THERMAL
+	bool "Novatek thermal drivers"
+	depends on PLAT_NOVATEK
+	default n
+	help
+	  Enable this to plug the novatek thermal sensor driver into the Linux
+	  thermal framework.
 
 menu "Texas Instruments thermal drivers"
 source "drivers/thermal/ti-soc-thermal/Kconfig"

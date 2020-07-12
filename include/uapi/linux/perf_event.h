@@ -328,7 +328,12 @@ struct perf_event_attr {
 				mmap2          :  1, /* include mmap with inode data     */
 				comm_exec      :  1, /* flag comm events that are due to an exec */
 				use_clockid    :  1, /* use @clockid for time fields */
-				__reserved_1   : 38;
+#ifdef CONFIG_CACHE_ANALYZER
+				inherit_indep:1, /* inherit as independent */
+				__reserved_1:40;
+#else
+				__reserved_1:38;
+#endif
 
 	union {
 		__u32		wakeup_events;	  /* wakeup every n events */

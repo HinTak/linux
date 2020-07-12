@@ -44,6 +44,10 @@
 
 #include <crypto/hash.h>
 #include <crypto/sha.h>
+#ifdef CONFIG_EMEM
+#include <linux/pfn.h>
+#include <linux/efficient_mem.h>
+#endif
 
 /* Per cpu memory for storing cpu states in case of system crash. */
 note_buf_t __percpu *crash_notes;
@@ -82,12 +86,26 @@ struct resource crashk_low_res = {
 	.flags = IORESOURCE_BUSY | IORESOURCE_MEM
 };
 
+#ifdef CONFIG_KEXEC_CSYSTEM
+#define kexec_on_die 1
+/*
+ * The VDLP does seperate die and oops by CONFIG_BUSYLOOP_WHILE_OOPS config.
+ * For this reason, kexec on die and kexec on panic should be handled
+ * independently. Becuase This function in only used in die (e.g. oops_end),
+ * it always return 1
+ */
+int kexec_should_crash(struct task_struct *p)
+{
+	return kexec_on_die;
+}
+#else 
 int kexec_should_crash(struct task_struct *p)
 {
 	if (in_interrupt() || !p->pid || is_global_init(p) || panic_on_oops)
 		return 1;
 	return 0;
 }
+#endif
 
 /*
  * When kexec transitions to the new kernel there is a one-to-one
@@ -140,6 +158,122 @@ static int kimage_is_destination_range(struct kimage *image,
 static struct page *kimage_alloc_page(struct kimage *image,
 				       gfp_t gfp_mask,
 				       unsigned long dest);
+#ifdef CONFIG_EMEM
+struct kexec_segment emem_segment[KEXEC_SEGMENT_MAX];
+int emem_nr_segment = 0;
+
+static int kimage_segment_compare_size(struct kexec_segment *new_segment,
+				  struct kexec_segment *org_segment, int nr_segments)
+{
+	int i;
+
+	for (i = 0; i < nr_segments; i++)  {
+		if (new_segment[i].memsz != org_segment[i].memsz) 
+			return -EINVAL;
+	}
+
+	return 0;
+}
+static void kimage_segment_duplicate(struct kexec_segment *dst_segment,
+				  struct kexec_segment *src_segment)
+{
+	int i;
+	unsigned long pfn;
+	for (i = 0; i < emem_nr_segment; i++)  {
+		pfn = PFN_DOWN(emem_segment[i].mem);
+		memcpy(&dst_segment[i], &src_segment[i], sizeof(dst_segment[i]));
+		emem_segment[i].mem = PFN_PHYS(pfn); 
+	}
+}
+
+int kimage_reload_crash_segment(struct kexec_segment *dst_segment,
+					struct kexec_segment *mg_segment)
+{
+	size_t mbytes;
+	int result;
+	unsigned char *src_mem, *dst_mem;
+	struct page *dst_page, *src_page = NULL;
+	/* For crash dumps kernels we simply migrate the data from
+	 * emem unaligned buffer to it's destination.
+	 * We do things a page at a time for the sake of kmap.
+	 */
+	result = 0;
+	mbytes = dst_segment->memsz;
+
+	src_page = pfn_to_page(PFN_DOWN(mg_segment->mem));
+	src_mem = kmap(src_page);
+	dst_page = pfn_to_page(PFN_DOWN(dst_segment->mem));
+	if (!dst_page) {
+		result  = -ENOMEM;
+		goto out;
+	}
+	dst_mem = kmap(dst_page);
+	memmove(dst_mem, src_mem, mbytes);
+	kunmap(dst_page);
+out:
+	kunmap(src_page);
+	return result;
+}
+
+static void migrate_kexec_crash_image(struct kimage *image) 
+{
+	int i;
+	if (emem_nr_segment) {
+		for (i = kexec_crash_image->nr_segments; i >= 0; i--) {
+			if (emem_segment[i].mem == kexec_crash_image->segment[i].mem)
+				continue;
+			kimage_reload_crash_segment(&kexec_crash_image->segment[i], &emem_segment[i]);
+		}
+	}
+}
+
+static int alloc_emem_segments(struct kimage *image) 
+{
+	int i;
+	unsigned long pfn;
+
+	/*if kexec_crash_image is already registered, mean to say kexec_load again */
+	if (emem_nr_segment) {
+		int result;
+		if (emem_nr_segment == image->nr_segments) {
+			result = kimage_segment_compare_size(image->segment,
+					emem_segment, image->nr_segments);
+		} else {
+			result = -EINVAL;
+		}
+		if (!result) {
+			kimage_segment_duplicate(emem_segment, image->segment);
+			return result;
+		}
+		/* free all the allocated memory from emem */
+		for (i = 0; i < emem_nr_segment; i++)  {
+				emem_free_contig(PFN_DOWN(emem_segment[i].mem),
+						emem_segment[i].memsz >> PAGE_SHIFT);
+		}
+		emem_nr_segment = 0;
+	}
+
+	for (i = 0; i < image->nr_segments; i++)  {
+		pfn = PFN_DOWN(image->segment[i].mem);
+		pfn = emem_alloc_contig(pfn,
+				image->segment[i].memsz >> PAGE_SHIFT);
+		if(!pfn) { /* crash image allocation within EMEM fail */
+			pr_err("[error] %s allocate segment[%d] is failed, kimage mem:0x%lx, memsz:0x%x",
+					__func__, i, image->segment[i].mem, image->segment[i].memsz);
+			emem_nr_segment = 0;
+			return -ENOMEM;
+		}
+		memcpy(&emem_segment[i], &image->segment[i], sizeof(image->segment[i]));
+		emem_segment[i].mem = PFN_PHYS(pfn);
+		emem_nr_segment++;
+	}
+	return 0;
+}
+#else
+static void migrate_kexec_mem(struct kimage *image) {}
+static int alloc_emem_segments(struct kimage *image) { return 0; } 
+static void migrate_kexec_crash_image(struct kimage *image) {}
+#endif
 
 static int copy_user_segment_list(struct kimage *image,
 				  unsigned long nr_segments,
@@ -311,6 +445,11 @@ static int kimage_alloc_init(struct kimage **rimage, unsigned long entry,
 	if (kexec_on_panic) {
 		image->control_page = crashk_res.start;
 		image->type = KEXEC_TYPE_CRASH;
+		ret = alloc_emem_segments(image);
+		if(ret) {
+			pr_err("[error] %s : RAMDUMP is disabled! (no available crash kernel area)\n",__func__);
+			goto out_free_image; 
+		}
 	}
 
 	/*
@@ -1311,7 +1450,16 @@ SYSCALL_DEFINE4(kexec_load, unsigned long, entry, unsigned long, nr_segments,
 			goto out;
 
 		for (i = 0; i < nr_segments; i++) {
-			result = kimage_load_segment(image, &image->segment[i]);
+			struct kexec_segment *ksegment = &image->segment[i];
+#ifdef CONFIG_EMEM
+			/*
+			 * load segment on emem buffer and then
+			 * migrate into dedicated location when happen to panic
+			 */
+			if (emem_nr_segment)
+				ksegment = &emem_segment[i];
+#endif
+			result = kimage_load_segment(image, ksegment);
 			if (result)
 				goto out;
 		}
@@ -1471,11 +1619,16 @@ void crash_kexec(struct pt_regs *regs)
 	 */
 	if (mutex_trylock(&kexec_mutex)) {
 		if (kexec_crash_image) {
+#ifdef CONFIG_KEXEC_CSYSTEM
+			struct arm_regs_t fixed_regs;
+			crash_setup_regs(&fixed_regs);
+#else
 			struct pt_regs fixed_regs;
-
 			crash_setup_regs(&fixed_regs, regs);
+#endif
 			crash_save_vmcoreinfo();
 			machine_crash_shutdown(&fixed_regs);
+			migrate_kexec_crash_image(kexec_crash_image);
 			machine_kexec(kexec_crash_image);
 		}
 		mutex_unlock(&kexec_mutex);
@@ -1580,6 +1733,27 @@ static void final_note(u32 *buf)
 	memcpy(buf, &note, sizeof(note));
 }
 
+#ifdef CONFIG_KEXEC_CSYSTEM
+void crash_save_cpu(struct arm_regs_t *arm_regs, int cpu)
+{
+	u32 *buf;
+
+	if ((cpu < 0) || (cpu >= nr_cpu_ids))
+		return;
+
+	buf = (u32 *)per_cpu_ptr(crash_notes, cpu);
+	if (!buf)
+		return ;
+	
+	arm_regs->cpu = cpu;
+	arm_regs->pid = current->pid;
+	buf = append_elf_note(buf, KEXEC_CORE_NOTE_NAME, NT_PRSTATUS,
+			      arm_regs, sizeof(*arm_regs));
+	final_note(buf);
+	
+	pr_info("CPU %u register dump completed\n", smp_processor_id());
+}
+#else
 void crash_save_cpu(struct pt_regs *regs, int cpu)
 {
 	struct elf_prstatus prstatus;
@@ -1605,6 +1779,7 @@ void crash_save_cpu(struct pt_regs *regs, int cpu)
 			      &prstatus, sizeof(prstatus));
 	final_note(buf);
 }
+#endif
 
 static int __init crash_notes_memory_init(void)
 {
@@ -1967,7 +2142,7 @@ static int __init crash_save_vmcoreinfo_init(void)
 	VMCOREINFO_STRUCT_SIZE(list_head);
 	VMCOREINFO_SIZE(nodemask_t);
 	VMCOREINFO_OFFSET(page, flags);
-	VMCOREINFO_OFFSET(page, _count);
+	VMCOREINFO_OFFSET(page, _refcount);
 	VMCOREINFO_OFFSET(page, mapping);
 	VMCOREINFO_OFFSET(page, lru);
 	VMCOREINFO_OFFSET(page, _mapcount);

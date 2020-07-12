@@ -18,9 +18,16 @@ static struct sighand_struct init_sighand = INIT_SIGHAND(init_sighand);
 struct task_struct init_task = INIT_TASK(init_task);
 EXPORT_SYMBOL(init_task);
 
+#ifdef CONFIG_KERNEL_STACK_SMALL
+struct thread_info init_sep_thread_info = INIT_THREAD_INFO(init_task);
+#endif
 /*
  * Initial thread structure. Alignment of this is handled by a special
  * linker map entry.
  */
+#ifdef CONFIG_KERNEL_STACK_SMALL
+union thread_union init_thread_union __init_task_data = {.stack[(THREAD_START_SAVE)/4] = (unsigned long)&init_sep_thread_info};
+#else
 union thread_union init_thread_union __init_task_data =
 	{ INIT_THREAD_INFO(init_task) };
+#endif

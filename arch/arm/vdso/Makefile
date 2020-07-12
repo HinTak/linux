@@ -29,6 +29,10 @@ CFLAGS_vgettimeofday.o = -O2
 # Disable gcov profiling for VDSO code
 GCOV_PROFILE := n
 
+# Disable KASAN for VDSO code
+KASAN_SANITIZE := n
+UBSAN_SANITIZE := n
+
 # Force dependency
 $(obj)/vdso.o : $(obj)/vdso.so
 

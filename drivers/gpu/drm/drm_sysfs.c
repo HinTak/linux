@@ -26,6 +26,17 @@
 #define to_drm_minor(d) dev_get_drvdata(d)
 #define to_drm_connector(d) dev_get_drvdata(d)
 
+
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+static int drm_get_smack64_label(struct device *dev, char* buf, int size)
+{
+	DRM_INFO("set smack label - %s\n", dev_name(dev));
+	snprintf(buf, size, "%s", "*");
+	return 0;
+}
+#endif
+
+
 static struct device_type drm_sysfs_device_minor = {
 	.name = "drm_minor"
 };
@@ -101,6 +112,10 @@ static const struct dev_pm_ops drm_class_dev_pm_ops = {
 
 static char *drm_devnode(struct device *dev, umode_t *mode)
 {
+	if(mode) {
+		DRM_INFO("[%s] drm node set mode - 0666\n", dev_name(dev));
+		*mode = 0666;
+	}
 	return kasprintf(GFP_KERNEL, "dri/%s", dev_name(dev));
 }
 
@@ -140,6 +155,9 @@ struct class *drm_sysfs_create(struct module *owner, char *name)
 		goto err_out_class;
 
 	class->devnode = drm_devnode;
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+	class->get_smack64_label = drm_get_smack64_label;
+#endif
 
 	return class;
 

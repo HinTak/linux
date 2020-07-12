@@ -1,0 +1,19 @@
+/*
+ * Copyright (C) 2013 Samsung Electronics Co.Ltd
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
+//#include "skeleton.dtsi"
+#include "sdp-bootargs.dtsi"
+/ {
+	interrupt-parent = <&gic>;
+	#address-cells = <2>;
+	#size-cells = <2>;
+	chosen { };
+	aliases { };
+	memory { device_type = "memory"; reg = <0 0 0 0>; };
+};
+

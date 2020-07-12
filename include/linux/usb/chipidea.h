@@ -6,8 +6,29 @@
 #define __LINUX_USB_CHIPIDEA_H
 
 #include <linux/usb/otg.h>
+#include <linux/extcon.h>
 
 struct ci_hdrc;
+
+/**
+ * struct ci_hdrc_cable - structure for external connector cable state tracking
+ * @connected: true if cable is connected, false otherwise
+ * @changed: set to true when extcon event happen
+ * @enabled: set to true if we've enabled the vbus or id interrupt
+ * @edev: device which generate events
+ * @ci: driver state of the chipidea device
+ * @nb: hold event notification callback
+ */
+struct ci_hdrc_cable {
+	bool			connected;
+	bool 			changed;
+	bool			enabled;
+	struct extcon_dev	*edev;
+	struct ci_hdrc		*ci;
+	struct extcon_specific_cable_nb	extcon_id_dev;
+	struct notifier_block	nb;
+};
+
 struct ci_hdrc_platform_data {
 	const char	*name;
 	/* offset of the capability registers */
@@ -19,8 +40,11 @@ struct ci_hdrc_platform_data {
 	enum usb_phy_interface phy_mode;
 	unsigned long	 flags;
 #define CI_HDRC_REGS_SHARED		BIT(0)
+#define CI_HDRC_DISABLE_DEVICE_STREAMING	BIT(1)
 #define CI_HDRC_SUPPORTS_RUNTIME_PM	BIT(2)
-#define CI_HDRC_DISABLE_STREAMING	BIT(3)
+#define CI_HDRC_DISABLE_HOST_STREAMING	BIT(3)
+#define CI_HDRC_DISABLE_STREAMING (CI_HDRC_DISABLE_DEVICE_STREAMING |	\
+		CI_HDRC_DISABLE_HOST_STREAMING)
 	/*
 	 * Only set it when DCCPARAMS.DC==1 and DCCPARAMS.HC==1,
 	 * but otg is not supported (no register otgsc).
@@ -29,12 +53,41 @@ struct ci_hdrc_platform_data {
 #define CI_HDRC_IMX28_WRITE_FIX		BIT(5)
 #define CI_HDRC_FORCE_FULLSPEED		BIT(6)
 #define CI_HDRC_TURN_VBUS_EARLY_ON	BIT(7)
+#define CI_HDRC_SET_NON_ZERO_TTHA	BIT(8)
+#define CI_HDRC_OVERRIDE_AHB_BURST	BIT(9)
+#define CI_HDRC_OVERRIDE_TX_BURST	BIT(10)
+#define CI_HDRC_OVERRIDE_RX_BURST	BIT(11)
+#define CI_HDRC_IMX_EHCI_QUIRK		BIT(12)
+#define CI_HDRC_IMX_IS_HSIC		BIT(13)
 	enum usb_dr_mode	dr_mode;
 #define CI_HDRC_CONTROLLER_RESET_EVENT		0
 #define CI_HDRC_CONTROLLER_STOPPED_EVENT	1
+#define CI_HDRC_CONTROLLER_VBUS_EVENT		2
+#define CI_HDRC_NOTIFY_RET_DEFER_EVENT		3
+#define CI_HDRC_CONTROLLER_CHARGER_POST_EVENT	4
+#define CI_HDRC_IMX_HSIC_ACTIVE_EVENT		5
+#define CI_HDRC_IMX_HSIC_SUSPEND_EVENT		6
+#define CI_HDRC_IMX_TERM_SELECT_OVERRIDE_FS	7
+#define CI_HDRC_IMX_TERM_SELECT_OVERRIDE_OFF	8
+#ifdef CONFIG_ARCH_MXC
+	int	(*notify_event)(struct ci_hdrc *ci, unsigned event);
+#else
 	void	(*notify_event) (struct ci_hdrc *ci, unsigned event);
+#endif	
 	struct regulator	*reg_vbus;
+#ifdef CONFIG_ARCH_MXC	
+	struct usb_otg_caps	ci_otg_caps;
+#endif	
 	bool			tpl_support;
+#ifdef CONFIG_ARCH_MXC		
+	/* interrupt threshold setting */
+	u32			itc_setting;
+	u32			ahb_burst_config;
+	u32			tx_burst_size;
+	u32			rx_burst_size;
+	u32			phy_clkgate_delay_us;
+	struct ci_hdrc_cable	id_extcon;
+#endif	
 };
 
 /* Default offset of capability registers */
@@ -46,5 +99,8 @@ struct platform_device *ci_hdrc_add_device(struct device *dev,
 			struct ci_hdrc_platform_data *platdata);
 /* Remove ci hdrc device */
 void ci_hdrc_remove_device(struct platform_device *pdev);
-
+#ifdef CONFIG_ARCH_MXC
+/* Get current available role */
+enum usb_dr_mode ci_hdrc_query_available_role(struct platform_device *pdev);
+#endif
 #endif

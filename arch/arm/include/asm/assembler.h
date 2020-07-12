@@ -185,6 +185,12 @@
  THUMB(	mov	\rd, sp			)
  THUMB(	lsr	\rd, \rd, #THREAD_SIZE_ORDER + PAGE_SHIFT	)
 	mov	\rd, \rd, lsl #THREAD_SIZE_ORDER + PAGE_SHIFT
+#if defined(CONFIG_KERNEL_STACK_SMALL)
+ ARM(	add \rd, \rd, #PAGE_SIZE	)
+ ARM(	ldr	\rd, [\rd, #THREAD_START_SAVE - PAGE_SIZE]	)
+#elif defined(CONFIG_KERNEL_STACK_LARGE)
+ ARM(	ldr	\rd, [\rd]	)
+#endif
 	.endm
 
 /*
@@ -450,5 +456,13 @@ THUMB(	orr	\reg , \reg , #PSR_T_BIT	)
 	nop
 #endif
 	.endm
+
+#ifdef CONFIG_IRQ_STACK
+	.macro this_cpu_ptr, sym, reg, tmp
+	ldr	\reg, =\sym
+	mrc	p15, 0, \tmp, cr13, c0, 4
+	add	\reg, \reg, \tmp
+	.endm
+#endif
 
 #endif /* __ASM_ASSEMBLER_H__ */

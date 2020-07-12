@@ -34,6 +34,7 @@
 #include "udf_i.h"
 #include "udf_sb.h"
 
+void udf_release_data(struct buffer_head *bh);
 
 static int udf_readdir(struct file *file, struct dir_context *ctx)
 {
@@ -110,12 +111,12 @@ static int udf_readdir(struct file *file, struct dir_context *ctx)
 				if (tmp && !buffer_uptodate(tmp) && !buffer_locked(tmp))
 					bha[num++] = tmp;
 				else
-					brelse(tmp);
+					udf_release_data(tmp);
 			}
 			if (num) {
 				ll_rw_block(READA, num, bha);
 				for (i = 0; i < num; i++)
-					brelse(bha[i]);
+					udf_release_data(bha[i]);
 			}
 		}
 	}
@@ -181,9 +182,9 @@ static int udf_readdir(struct file *file, struct dir_context *ctx)
 
 out:
 	if (fibh.sbh != fibh.ebh)
-		brelse(fibh.ebh);
-	brelse(fibh.sbh);
-	brelse(epos.bh);
+		udf_release_data(fibh.ebh);
+	udf_release_data(fibh.sbh);
+	udf_release_data(epos.bh);
 	kfree(fname);
 
 	return ret;

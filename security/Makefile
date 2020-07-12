@@ -27,3 +27,11 @@ obj-$(CONFIG_CGROUP_DEVICE)		+= device_cgroup.o
 # Object integrity file lists
 subdir-$(CONFIG_INTEGRITY)		+= integrity
 obj-$(CONFIG_INTEGRITY)			+= integrity/
+
+# VD Security Filter Driver
+subdir-$(CONFIG_SECURITY_SFD)		+= sfd
+obj-$(CONFIG_SECURITY_SFD) += sfd/built-in.o
+
+# SIM Watchdog
+subdir-$(CONFIG_SECURITY_SIM) += sim
+obj-$(CONFIG_SECURITY_SIM) += sim/

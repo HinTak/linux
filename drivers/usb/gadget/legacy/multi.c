@@ -78,7 +78,9 @@ static struct usb_device_descriptor device_desc = {
 	.idProduct =		cpu_to_le16(MULTI_PRODUCT_NUM),
 };
 
-
+#ifdef CONFIG_ARCH_MXC
+static const struct usb_descriptor_header *otg_desc[2];
+#else
 static const struct usb_descriptor_header *otg_desc[] = {
 	(struct usb_descriptor_header *) &(struct usb_otg_descriptor){
 		.bLength =		sizeof(struct usb_otg_descriptor),
@@ -92,7 +94,7 @@ static const struct usb_descriptor_header *otg_desc[] = {
 	},
 	NULL,
 };
-
+#endif
 
 enum {
 	MULTI_STRING_RNDIS_CONFIG_IDX = USB_GADGET_FIRST_AVAIL_IDX,
@@ -428,15 +430,33 @@ static int __ref multi_bind(struct usb_composite_dev *cdev)
 	if (unlikely(status < 0))
 		goto fail_string_ids;
 	device_desc.iProduct = strings_dev[USB_GADGET_PRODUCT_IDX].id;
+#ifdef CONFIG_ARCH_MXC
+	if (gadget_is_otg(gadget) && !otg_desc[0]) {
+		struct usb_descriptor_header *usb_desc;
 
+		usb_desc = usb_otg_descriptor_alloc(gadget);
+		if (!usb_desc)
+			goto fail_string_ids;
+		usb_otg_descriptor_init(gadget, usb_desc);
+		otg_desc[0] = usb_desc;
+		otg_desc[1] = NULL;
+	}
+#endif
 	/* register configurations */
 	status = rndis_config_register(cdev);
 	if (unlikely(status < 0))
+#ifdef CONFIG_ARCH_MXC
+		goto fail_otg_desc;
+#else
 		goto fail_string_ids;
-
+#endif
 	status = cdc_config_register(cdev);
 	if (unlikely(status < 0))
+#ifdef CONFIG_ARCH_MXC
+		goto fail_otg_desc;
+#else
 		goto fail_string_ids;
+#endif		
 	usb_composite_overwrite_options(cdev, &coverwrite);
 
 	/* we're done */
@@ -445,6 +465,11 @@ static int __ref multi_bind(struct usb_composite_dev *cdev)
 
 
 	/* error recovery */
+#ifdef CONFIG_ARCH_MXC	
+fail_otg_desc:
+	kfree(otg_desc[0]);
+	otg_desc[0] = NULL;
+#endif	
 fail_string_ids:
 	fsg_common_remove_luns(fsg_opts->common);
 fail_set_cdev:
@@ -489,6 +514,10 @@ static int multi_unbind(struct usb_composite_dev *cdev)
 #ifdef CONFIG_USB_G_MULTI_CDC
 	usb_put_function(f_ecm);
 	usb_put_function_instance(fi_ecm);
+#endif
+#ifdef CONFIG_ARCH_MXC
+	kfree(otg_desc[0]);
+	otg_desc[0] = NULL;
 #endif
 	return 0;
 }

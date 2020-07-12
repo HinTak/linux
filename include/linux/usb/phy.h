@@ -59,7 +59,14 @@ enum usb_otg_state {
 	OTG_STATE_A_WAIT_VFALL,
 	OTG_STATE_A_VBUS_ERR,
 };
-
+#ifdef CONFIG_ARCH_MXC
+/* The usb role of phy to be working with */
+enum usb_current_mode {
+	USB_MODE_NONE,
+	USB_MODE_HOST,
+	USB_MODE_DEVICE,
+};
+#endif
 struct usb_phy;
 struct usb_otg;
 
@@ -122,6 +129,15 @@ struct usb_phy {
 			enum usb_device_speed speed);
 	int	(*notify_disconnect)(struct usb_phy *x,
 			enum usb_device_speed speed);
+#ifdef CONFIG_ARCH_MXC			
+	int	(*notify_suspend)(struct usb_phy *x,
+			enum usb_device_speed speed);
+	int	(*notify_resume)(struct usb_phy *x,
+			enum usb_device_speed speed);
+
+	int	(*set_mode)(struct usb_phy *x,
+			enum usb_current_mode mode);
+#endif
 };
 
 /**
@@ -195,7 +211,16 @@ usb_phy_vbus_off(struct usb_phy *x)
 
 	return x->set_vbus(x, false);
 }
+#ifdef CONFIG_ARCH_MXC
+static inline int
+usb_phy_set_mode(struct usb_phy *x, enum usb_current_mode mode)
+{
+	if (!x || !x->set_mode)
+		return 0;
 
+	return x->set_mode(x, mode);
+}
+#endif
 /* for usb host and peripheral controller drivers */
 #if IS_ENABLED(CONFIG_USB_PHY)
 extern struct usb_phy *usb_get_phy(enum usb_phy_type type);
@@ -301,7 +326,25 @@ usb_phy_notify_disconnect(struct usb_phy *x, enum usb_device_speed speed)
 	else
 		return 0;
 }
+#ifdef CONFIG_ARCH_MXC
+static inline int usb_phy_notify_suspend
+	(struct usb_phy *x, enum usb_device_speed speed)
+{
+	if (x && x->notify_suspend)
+		return x->notify_suspend(x, speed);
+	else
+		return 0;
+}
 
+static inline int usb_phy_notify_resume
+	(struct usb_phy *x, enum usb_device_speed speed)
+{
+	if (x && x->notify_resume)
+		return x->notify_resume(x, speed);
+	else
+		return 0;
+}
+#endif
 /* notifiers */
 static inline int
 usb_register_notifier(struct usb_phy *x, struct notifier_block *nb)

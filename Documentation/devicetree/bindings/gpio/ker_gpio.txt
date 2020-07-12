@@ -1,0 +1,11 @@
+gpioa: gpio@fd0f0000 {
+			compatible = "nvt,nt726xx-gpio";
+			reg = <0xfd0f0000 0x18>,
+			<0xfd0f0200 0x18>,
+			<0xfd100000 0x18>,
+			<0xfd110000 0x18>,
+			<0xfd110200 0x18>;
+			nvt,hwmods = "gpioa";
+			nvt,gpio-always-on;
+			gpio-controller;
+			#gpio-cells = <2>;};

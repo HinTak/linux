@@ -195,6 +195,10 @@ static inline int serial8250_request_dma(struct uart_8250_port *p)
 static inline void serial8250_release_dma(struct uart_8250_port *p) { }
 #endif
 
+#if defined(CONFIG_NVT_HSUART_SUPPORT)
+int ndp_hsuart_ctl_switch (struct uart_port *port);
+#endif
+
 static inline int ns16550a_goto_highspeed(struct uart_8250_port *up)
 {
 	unsigned char status;

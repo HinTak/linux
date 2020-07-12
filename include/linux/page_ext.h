@@ -3,6 +3,7 @@
 
 #include <linux/types.h>
 #include <linux/stacktrace.h>
+#include <linux/stackdepot.h>
 
 struct pglist_data;
 struct page_ext_operations {
@@ -20,12 +21,20 @@ struct page_ext_operations {
  * poison patterns and set this flag after free_pages(). The poisoned
  * pages are verified whether the patterns are not corrupted and clear
  * the flag before alloc_pages().
+ *
+ * Maximum number of possible flags is 12. For more flags, the variable
+ * reserved_flags needs to be increased.
  */
 
 enum page_ext_flags {
 	PAGE_EXT_DEBUG_POISON,		/* Page is poisoned */
 	PAGE_EXT_DEBUG_GUARD,
 	PAGE_EXT_OWNER,
+	PAGE_EXT_FALLBACK,
+#ifdef CONFIG_CMA_DEBUG_REFTRACE
+	PAGE_EXT_MIGRATE_FAIL,
+#endif
+	PAGE_EXT_FLAGS_MAX = 12		/* Maximum flags = 12*/
 };
 
 /*
@@ -36,16 +45,24 @@ enum page_ext_flags {
  * then the page_ext for pfn always exists.
  */
 struct page_ext {
+#ifndef CONFIG_PAGE_OWNER
 	unsigned long flags;
-#ifdef CONFIG_PAGE_OWNER
-	unsigned int order;
-	gfp_t gfp_mask;
-	unsigned int nr_entries;
-	unsigned long trace_entries[8];
+#else
+	union {
+		unsigned long flags;
+		struct {
+			/* First 12 bits reserved */
+			unsigned int reserved_flags:12;
+			unsigned int order:4;
+			unsigned int pid:16;
+		};
+	};
+	depot_stack_handle_t handle;
 #endif
 };
 
 extern void pgdat_page_ext_init(struct pglist_data *pgdat);
+extern void __init invoke_init_callbacks(void);
 
 #ifdef CONFIG_SPARSEMEM
 static inline void page_ext_init_flatmem(void)
@@ -56,6 +73,7 @@ extern void page_ext_init(void);
 extern void page_ext_init_flatmem(void);
 static inline void page_ext_init(void)
 {
+	invoke_init_callbacks();
 }
 #endif
 

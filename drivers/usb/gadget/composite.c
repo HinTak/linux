@@ -19,6 +19,9 @@
 #include <linux/utsname.h>
 
 #include <linux/usb/composite.h>
+#ifdef CONFIG_ARCH_MXC
+#include <linux/usb/otg.h>
+#endif
 #include <asm/unaligned.h>
 
 #include "u_os_desc.h"
@@ -1244,7 +1247,11 @@ EXPORT_SYMBOL_GPL(usb_string_ids_n);
 
 /*-------------------------------------------------------------------------*/
 
+#ifdef CONFIG_MTK_KERNEL_SOLUTION
+void composite_setup_complete(struct usb_ep *ep, struct usb_request *req)
+#else
 static void composite_setup_complete(struct usb_ep *ep, struct usb_request *req)
+#endif
 {
 	struct usb_composite_dev *cdev;
 
@@ -1534,6 +1541,34 @@ composite_setup(struct usb_gadget *gadget, const struct usb_ctrlrequest *ctrl)
 				value = min(w_length, (u16) value);
 			}
 			break;
+#ifdef CONFIG_ARCH_MXC
+		case USB_DT_OTG:
+			if (gadget_is_otg(gadget)) {
+				struct usb_configuration *config;
+				int otg_desc_len = 0;
+
+				if (cdev->config)
+					config = cdev->config;
+				else
+					config = list_first_entry(
+							&cdev->configs,
+						struct usb_configuration, list);
+				if (!config)
+					goto done;
+
+				if (gadget->otg_caps &&
+					(gadget->otg_caps->otg_rev >= 0x0200))
+					otg_desc_len += sizeof(
+						struct usb_otg20_descriptor);
+				else
+					otg_desc_len += sizeof(
+						struct usb_otg_descriptor);
+
+				value = min_t(int, w_length, otg_desc_len);
+				memcpy(req->buf, config->descriptors[0], value);
+			}
+			break;
+#endif			
 		}
 		break;
 
@@ -1773,6 +1808,10 @@ unknown:
 			break;
 
 		case USB_RECIP_ENDPOINT:
+#ifdef CONFIG_ARCH_MXC
+			if (!cdev->config)
+				break;
+#endif				
 			endp = ((w_index & 0x80) >> 3) | (w_index & 0x0f);
 			list_for_each_entry(f, &cdev->config->functions, list) {
 				if (test_bit(endp, f->endpoints))

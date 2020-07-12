@@ -150,6 +150,30 @@ void drm_err(const char *format, ...);
 #define DRIVER_ATOMIC      0x10000
 
 /***********************************************************************/
+
+/***********************************************************************/
+/** \name Begin the DRM... */
+/*@{*/
+
+#define DRM_DEBUG_CODE 2	  /**< Include debugging code if > 1, then
+				     also include looping detection. */
+
+#define DRM_MAGIC_HASH_ORDER  4  /**< Size of key hash table. Must be power of 2. */
+#define DRM_KERNEL_CONTEXT    0	 /**< Change drm_resctx if changed */
+#define DRM_RESERVED_CONTEXTS 1	 /**< Change drm_resctx if changed */
+#define DRM_LOOPING_LIMIT     5000000
+#define DRM_TIME_SLICE	      (HZ/20)  /**< Time slice for GLXContexts */
+#define DRM_LOCK_SLICE	      1	/**< Time slice for lock, in jiffies */
+
+#define DRM_FLAG_DEBUG	  0x01
+
+#define DRM_MAX_CTXBITMAP (PAGE_SIZE * 8)
+#define DRM_MAP_HASH_OFFSET 0x10000000
+
+/*@}*/
+
+/***********************************************************************/
+
 /** \name Macros to make printk easier */
 /*@{*/
 
@@ -329,7 +353,7 @@ struct drm_file {
 	wait_queue_head_t event_wait;
 	struct list_head event_list;
 	int event_space;
-
+	pid_t drm_pid;
 	struct drm_prime_file_private prime;
 };
 

@@ -1,0 +1,13 @@
+#
+# IMX Soc drivers
+#
+menu "NXP IMX SoC drivers"
+
+config HAVE_IMX_MU
+	bool
+
+config HAVE_IMX_RPMSG
+	select RPMSG_VIRTIO
+	select RPMSG
+	bool
+endmenu

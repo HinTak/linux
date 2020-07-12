@@ -76,6 +76,18 @@ typedef enum dmx_ts_pes
 	DMX_PES_TELETEXT3,
 	DMX_PES_SUBTITLE3,
 	DMX_PES_PCR3,
+	
+	DMX_PES_AUDIO4,
+	DMX_PES_VIDEO4,
+	DMX_PES_TELETEXT4,
+	DMX_PES_SUBTITLE4,
+	DMX_PES_PCR4,
+	
+	DMX_PES_AUDIO5,
+	DMX_PES_VIDEO5,
+	DMX_PES_TELETEXT5,
+	DMX_PES_SUBTITLE5,
+	DMX_PES_PCR5,
 
 	DMX_PES_OTHER
 } dmx_pes_type_t;
@@ -123,10 +135,12 @@ typedef struct dmx_caps {
 } dmx_caps_t;
 
 typedef enum {
-	DMX_SOURCE_FRONT0 = 0,
-	DMX_SOURCE_FRONT1,
-	DMX_SOURCE_FRONT2,
-	DMX_SOURCE_FRONT3,
+	DMX_SOURCE_FRONT0,	/*Default Tuner*/
+	DMX_SOURCE_FRONT1,	/*First Parallel*/
+	DMX_SOURCE_FRONT2,	/*Not used in samsung soc*/
+	DMX_SOURCE_FRONT3,	/*Second Parallel*/
+	DMX_SOURCE_FRONT4,	/*First Serial*/
+	DMX_SOURCE_FRONT5,	/*Second Serial*/
 	DMX_SOURCE_DVR0   = 16,
 	DMX_SOURCE_DVR1,
 	DMX_SOURCE_DVR2,

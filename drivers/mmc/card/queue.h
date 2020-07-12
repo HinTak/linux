@@ -12,6 +12,9 @@ struct mmc_blk_request {
 	struct mmc_command	cmd;
 	struct mmc_command	stop;
 	struct mmc_data		data;
+#if defined(CONFIG_MTK_KERNEL_SOLUTION) || defined(CONFIG_ARCH_MXC)
+	int			retune_retry_done;
+#endif
 };
 
 enum mmc_packed_type {

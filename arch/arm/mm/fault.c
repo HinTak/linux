@@ -26,6 +26,14 @@
 #include <asm/system_info.h>
 #include <asm/tlbflush.h>
 
+#ifdef CONFIG_DUMP_RANGE_BASED_ON_REGISTER
+extern void dump_instr(const char *lvl, struct pt_regs *regs);
+#endif
+
+#ifdef CONFIG_DO_RAMDUMP_WHEN_STUCKED_AT_EXCEPTION
+#include <../../../kernel/sched/sched.h>
+#endif
+
 #include "fault.h"
 
 #ifdef CONFIG_MMU
@@ -146,6 +154,23 @@ __do_kernel_fault(struct mm_struct *mm, unsigned long addr, unsigned int fsr,
 		 (addr < PAGE_SIZE) ? "NULL pointer dereference" :
 		 "paging request", addr);
 
+#ifdef CONFIG_DUMP_RANGE_BASED_ON_REGISTER
+        printk(KERN_ERR "pc : [<%08lx>]    lr : [<%08lx>]    psr: %08lx\n"
+               "sp : %08lx  ip : %08lx  fp : %08lx\n",
+                regs->ARM_pc, regs->ARM_lr, regs->ARM_cpsr,
+                regs->ARM_sp, regs->ARM_ip, regs->ARM_fp);
+        printk(KERN_ERR "r10: %08lx  r9 : %08lx  r8 : %08lx\n",
+                regs->ARM_r10, regs->ARM_r9,
+                regs->ARM_r8);
+        printk(KERN_ERR "r7 : %08lx  r6 : %08lx  r5 : %08lx  r4 : %08lx\n",
+                regs->ARM_r7, regs->ARM_r6,
+                regs->ARM_r5, regs->ARM_r4);
+        printk(KERN_ERR "r3 : %08lx  r2 : %08lx  r1 : %08lx  r0 : %08lx\n",
+                regs->ARM_r3, regs->ARM_r2,
+                regs->ARM_r1, regs->ARM_r0);
+
+	dump_instr(KERN_ERR,regs);
+#endif
 	show_pte(mm, addr);
 	die("Oops", regs, fsr);
 	bust_spinlocks(0);
@@ -162,20 +187,28 @@ __do_user_fault(struct task_struct *tsk, unsigned long addr,
 		struct pt_regs *regs)
 {
 	struct siginfo si;
+	unsigned long int flags;
 
+	spin_lock_irqsave(&tsk->sighand->siglock, flags);
+	set_flag_block_sigkill_lockless(tsk, sig);
+	spin_unlock_irqrestore(&tsk->sighand->siglock, flags);
+
+#ifndef CONFIG_SHOW_FAULT_TRACE_INFO
 #ifdef CONFIG_DEBUG_USER
 	if (((user_debug & UDBG_SEGV) && (sig == SIGSEGV)) ||
-	    ((user_debug & UDBG_BUS)  && (sig == SIGBUS))) {
-		printk(KERN_DEBUG "%s: unhandled page fault (%d) at 0x%08lx, code 0x%03x\n",
-		       tsk->comm, sig, addr, fsr);
+		((user_debug & UDBG_BUS)  && (sig == SIGBUS))) {
+		pr_alert("%s: unhandled page fault (%d) at 0x%08lx, code 0x%03x\n",
+			tsk->comm, sig, addr, fsr);
 		show_pte(tsk->mm, addr);
 		show_regs(regs);
 	}
 #endif
-
+#endif
 	tsk->thread.address = addr;
 	tsk->thread.error_code = fsr;
 	tsk->thread.trap_no = 14;
+	tsk->thread.pc = regs->ARM_pc;
+	tsk->thread.lr = regs->ARM_lr;
 	si.si_signo = sig;
 	si.si_errno = 0;
 	si.si_code = code;
@@ -254,6 +287,86 @@ out:
 	return fault;
 }
 
+#define MAX_USER_RECOVERY_ATTEMPT      NR_CPUS
+static DEFINE_RATELIMIT_STATE(user_recov_rs, 10 * HZ, NR_CPUS);
+static int user_recovery_attempt;
+
+unsigned int getInstr(void __user *pc, struct pt_regs *regs)
+{
+	unsigned int instr = 0;
+	if (processor_mode(regs) == SVC_MODE) {
+	#ifdef CONFIG_THUMB2_KERNEL
+		if (thumb_mode(regs)) {
+			instr = __mem_to_opcode_thumb16(((u16 *)pc)[0]);
+			if (is_wide_instruction(instr)) {
+					u16 inst2;
+					inst2 = __mem_to_opcode_thumb16(((u16 *)pc)[1]);
+					instr = __opcode_thumb32_compose(instr, inst2);
+				}
+			} else
+	#endif
+				instr = __mem_to_opcode_arm(*(u32 *) pc);
+		} else if (thumb_mode(regs)) {
+			if (get_user(instr, (u16 __user *)pc))
+				goto die_sig;
+			instr = __mem_to_opcode_thumb16(instr);
+			if (is_wide_instruction(instr)) {
+				unsigned int instr2;
+				if (get_user(instr2, (u16 __user *)pc+1))
+					goto die_sig;
+				instr2 = __mem_to_opcode_thumb16(instr2);
+				instr = __opcode_thumb32_compose(instr, instr2);
+			}
+		} else {
+			if (get_user(instr, (u32 __user *)pc))
+				goto die_sig;
+			instr = __mem_to_opcode_arm(instr);
+		}
+die_sig:
+	return instr;
+}
+
+unsigned int do_instn_recovery(struct pt_regs *regs)
+{
+	void __user *pc;
+	unsigned int instr, instr2;
+	struct mm_struct *mm;
+	struct vm_area_struct *vma;
+
+	if ((user_recovery_attempt >= MAX_USER_RECOVERY_ATTEMPT) || !__ratelimit(&user_recov_rs)) {
+		pr_alert("Giving Up Recovery as attempts:%d exceeded limit(%d) or ratelimit\n",
+				user_recovery_attempt, MAX_USER_RECOVERY_ATTEMPT);
+		return -1;
+	}
+#ifdef CONFIG_DUMP_RANGE_BASED_ON_REGISTER
+	pr_alert("Before Recovery:\n");
+	dump_instr(KERN_ALERT, regs);
+#endif
+	mm = current->mm;
+	pc = (void __user *)instruction_pointer(regs);
+	instr = getInstr(pc, regs);
+	vma = find_vma(mm, (unsigned long)pc);
+	if (!vma) {
+		pr_alert("%s: Cannot recover %s(pid%d) : VMA not found for addr:0x%x\n", __func__,
+				current->comm, current->pid, (unsigned int)pc);
+		return -1;
+	}
+	down_write(&mm->mmap_sem);
+	flush_cache_range(vma, vma->vm_start, vma->vm_end); /* Invalidating all cache entries for vma range */
+	up_write(&mm->mmap_sem);
+	instr2 = getInstr(pc, regs);
+#ifdef CONFIG_DUMP_RANGE_BASED_ON_REGISTER
+	pr_alert("After Recovery:\n");
+	dump_instr(KERN_ALERT, regs);
+#endif
+	if (instr != instr2) {  /* No need to proceed for triggering handle_mm_fault */
+		user_recovery_attempt++;
+		WARN_ON(1);
+		return 0;
+	}
+	return -1;
+}
+
 static int __kprobes
 do_page_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 {
@@ -314,8 +427,11 @@ retry:
 	 * signal first. We do not need to release the mmap_sem because
 	 * it would already be released in __lock_page_or_retry in
 	 * mm/filemap.c. */
-	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current))
+	if ((fault & VM_FAULT_RETRY) && fatal_signal_pending(current))	{
+		if (!user_mode(regs))
+			goto no_context;
 		return 0;
+	}
 
 	/*
 	 * Major/minor page fault accounting is only done on the
@@ -375,14 +491,29 @@ retry:
 		 */
 		sig = SIGBUS;
 		code = BUS_ADRERR;
+
+		if (!do_instn_recovery(regs))
+			return 0;
 	} else {
 		/*
 		 * Something tried to access memory that
 		 * isn't in our memory map..
 		 */
+		void *handler;
+		struct k_sigaction *action;
+		unsigned long int s_flags;
+
 		sig = SIGSEGV;
 		code = fault == VM_FAULT_BADACCESS ?
 			SEGV_ACCERR : SEGV_MAPERR;
+
+		spin_lock_irqsave(&tsk->sighand->siglock, s_flags);
+		action = &tsk->sighand->action[sig-1];
+		handler = action->sa.sa_handler;
+		spin_unlock_irqrestore(&tsk->sighand->siglock, s_flags);
+
+		if (!handler && !do_instn_recovery(regs))
+				return 0;
 	}
 
 	__do_user_fault(tsk, addr, fsr, sig, code, regs);
@@ -399,6 +530,36 @@ do_page_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 	return 0;
 }
 #endif					/* CONFIG_MMU */
+
+#ifdef CONFIG_VMAP_STACK
+/*
+ * map_kernel_stack
+ *	Map kernel stack of task in mm.
+ *
+ * @mm will be updated wih  @task stack mapping.
+ */
+void map_kernel_stack(struct mm_struct *mm, struct task_struct *task)
+{
+	pgd_t *pgd, *pgd_k;
+	pud_t *pud, *pud_k;
+	pmd_t *pmd, *pmd_k;
+	unsigned int index;
+	unsigned long addr = (unsigned long)task->stack + PAGE_SIZE;
+
+	index = pgd_index(addr);
+	pgd_k = init_mm.pgd + index;
+	pgd = mm->pgd + index;
+
+	pud_k = pud_offset(pgd_k, addr);
+	pud = pud_offset(pgd, addr);
+
+	pmd = pmd_offset(pud, addr);
+	pmd_k = pmd_offset(pud_k, addr);
+
+	copy_pmd(pmd, pmd_k);
+	flush_pmd_entry(pmd);
+}
+#endif
 
 /*
  * First Level Translation Fault Handler
@@ -538,6 +699,42 @@ hook_fault_code(int nr, int (*fn)(unsigned long, unsigned int, struct pt_regs *)
 	fsr_info[nr].name = name;
 }
 
+#ifdef CONFIG_DO_RAMDUMP_WHEN_STUCKED_AT_EXCEPTION
+extern void crash_kexec(struct pt_regs *regs);
+
+static inline void is_cpu_regs_valid(struct pt_regs *regs)
+{
+        register unsigned long sp __asm__("sp");
+        register unsigned long fp __asm__("fp");
+
+        /* use read_cpuid_mpidr() insead of smp_processor_id() becasue sp,fp could be not untrustworthy */
+        unsigned int cpu = read_cpuid_mpidr() & 0xf;
+
+        if((unsigned long)cpu_curr(cpu)->stack != (sp & ~(THREAD_SIZE - 1)) ||
+                (unsigned long)cpu_curr(cpu)->stack != (fp & ~(THREAD_SIZE - 1)))
+        {
+		/* 
+		 * TIF_NEED_RESCHED cleared mean current callstack stay within __schedule(). 
+		 * in this situation prev,next task is switched. therefore stack is mismatched. so decide to just return 
+		 * when gator.ko is installed, system enter to abort exception while __schedule() in gator trace function.
+		 */
+		if(!test_tsk_need_resched(current)){ 
+			return;
+		}
+                pr_alert("[SABSP] Invalid sp,fp detected! sp.TI(0x%08lx) or fp.TI(0x%08lx) != rq.TI(0x%08lx)\n",
+				sp&~(THREAD_SIZE-1),fp&(THREAD_SIZE-1),(unsigned long)cpu_curr(cpu)->stack);
+                wmb();
+                if (regs)
+                        crash_kexec(regs); /* do ramdump */
+                while(1){
+                        smp_send_stop(); /* in case ramdump failed */
+                        cpu_relax();
+                }
+        }
+
+}
+#endif
+
 /*
  * Dispatch a data abort to the relevant handler.
  */
@@ -547,6 +744,9 @@ do_DataAbort(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 	const struct fsr_info *inf = fsr_info + fsr_fs(fsr);
 	struct siginfo info;
 
+#ifdef CONFIG_DO_RAMDUMP_WHEN_STUCKED_AT_EXCEPTION
+        is_cpu_regs_valid(regs);
+#endif
 	if (!inf->fn(addr, fsr & ~FSR_LNX_PF, regs))
 		return;
 
@@ -558,7 +758,7 @@ do_DataAbort(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 	info.si_errno = 0;
 	info.si_code  = inf->code;
 	info.si_addr  = (void __user *)addr;
-	arm_notify_die("", regs, &info, fsr, 0);
+	arm_notify_die(inf->name, regs, &info, fsr, 0);
 }
 
 void __init
@@ -580,6 +780,9 @@ do_PrefetchAbort(unsigned long addr, unsigned int ifsr, struct pt_regs *regs)
 	const struct fsr_info *inf = ifsr_info + fsr_fs(ifsr);
 	struct siginfo info;
 
+#ifdef CONFIG_DO_RAMDUMP_WHEN_STUCKED_AT_EXCEPTION
+        is_cpu_regs_valid(regs);
+#endif
 	if (!inf->fn(addr, ifsr | FSR_LNX_PF, regs))
 		return;
 
@@ -590,7 +793,7 @@ do_PrefetchAbort(unsigned long addr, unsigned int ifsr, struct pt_regs *regs)
 	info.si_errno = 0;
 	info.si_code  = inf->code;
 	info.si_addr  = (void __user *)addr;
-	arm_notify_die("", regs, &info, ifsr, 0);
+	arm_notify_die(inf->name, regs, &info, ifsr, 0);
 }
 
 #ifndef CONFIG_ARM_LPAE

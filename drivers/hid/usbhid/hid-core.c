@@ -170,6 +170,13 @@ static void hid_io_error(struct hid_device *hid)
 			schedule_work(&usbhid->reset_work);
 			goto done;
 		}
+		#ifdef SAMSUNG_PATCH_WITH_USB_HID_DISCONNECT_BUGFIX
+		/* Routing clear halt command from hid_io_error  */
+                else if(test_bit(HID_CLEAR_HALT, &usbhid->iofl))
+                {
+                        schedule_work(&usbhid->reset_work);
+                }
+                #endif
 	}
 
 	mod_timer(&usbhid->io_retry,
@@ -297,7 +304,13 @@ static void hid_irq_in(struct urb *urb)
 		usbhid_mark_busy(usbhid);
 		clear_bit(HID_IN_RUNNING, &usbhid->iofl);
 		set_bit(HID_CLEAR_HALT, &usbhid->iofl);
+	#ifdef SAMSUNG_PATCH_WITH_USB_HID_DISCONNECT_BUGFIX
+	/* hid_io_error is more standard way of processing error condition, 
+ 	does not schedule reset work queue until few retries */
+		hid_io_error(hid);
+	#else		
 		schedule_work(&usbhid->reset_work);
+	#endif
 		return;
 	case -ECONNRESET:	/* unlink */
 	case -ENOENT:

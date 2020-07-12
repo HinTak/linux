@@ -603,16 +603,20 @@ int mtd_device_unregister(struct mtd_info *master)
 {
 	int err;
 
+printk("%s [nvt_mtd][%s]:[%dline] %s\n", "\e[1;31m", __FUNCTION__, __LINE__, "\e[0m\e[37;40m");
 	if (master->_reboot)
 		unregister_reboot_notifier(&master->reboot_notifier);
 
+printk("%s [nvt_mtd][%s]:[%dline] %s\n", "\e[1;31m", __FUNCTION__, __LINE__, "\e[0m\e[37;40m");
 	err = del_mtd_partitions(master);
 	if (err)
 		return err;
 
+printk("%s [nvt_mtd][%s]:[%dline] %s\n", "\e[1;31m", __FUNCTION__, __LINE__, "\e[0m\e[37;40m");
 	if (!device_is_registered(&master->dev))
 		return 0;
 
+printk("%s [nvt_mtd][%s]:[%dline] %s\n", "\e[1;31m", __FUNCTION__, __LINE__, "\e[0m\e[37;40m");
 	return del_mtd_device(master);
 }
 EXPORT_SYMBOL_GPL(mtd_device_unregister);

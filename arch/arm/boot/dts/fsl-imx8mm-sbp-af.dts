@@ -1,0 +1,123 @@
+/*
+ * Copyright 2019 NXP
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
+
+#include "fsl-imx8mm-sbp-root.dts"
+
+/ {
+	ivshm_rpmsg {
+		compatible = "fsl,ivshm-rpmsg";
+
+		rpmsg_ppp {
+			compatible = "fsl,rpmsg-ppp";
+			id = <0x1>;
+			size = <8192>;
+		};
+		rpmsg_console {
+			compatible = "fsl,rpmsg-console";
+			id = <0x2>;
+			size = <8192>;
+		};
+		rpmsg_alsa {
+			compatible = "fsl,rpmsg-alsa";
+			id = <0x300 0x301 0x302 0x303 0x304 0x305>; /* stream control (main alsa + ppp + voice) */
+			size = <1048576 1024 1048576 1024 1048576 1024>;
+		};
+		cipc {
+			compatible = "fsl,rpmsg-binary";
+			id = <0x203>;
+			size = <8192>;	/* Endpoint buffer size (B) */
+			buffer = <8>;	/* Buffer size (MB) */
+		};
+		rpmsg_rpc_hdmi {
+			compatible = "fsl,rpmsg-rpc";
+			id = <0x100>;
+			size = <8192>;
+		};
+		rpmsg_rpc_dac {
+			compatible = "fsl,rpmsg-rpc";
+			id = <0x101>;
+			size = <8192>;
+		};
+		rpmsg-bin {
+			compatible = "fsl,rpmsg-binary";
+			id = <0x201>;
+			size = <8192>;	/* Endpoint buffer size (B) */
+			buffer = <32>;	/* Buffer size (MB) */
+		};
+		audio-weaver-rpmsg {
+			compatible = "fsl,rpmsg-binary";
+			id = <0x204>;
+			size = <8192>;	/* Endpoint buffer size (B) */
+			buffer = <8>;	/* Buffer size (MB) */
+		};
+		rpmsg-wd {
+			compatible = "fsl,rpmsg-binary";
+			id = <0x202>;
+			size = <8192>;	/* Endpoint buffer size (B) */
+			buffer = <1>;	/* Buffer size (MB) */
+		};
+		lktraces {
+			compatible = "fsl,rpmsg-binary";
+			id = <0x200>;
+			size = <8192>;	/* Endpoint buffer size (B) */
+			buffer = <32>;	/* Buffer size (MB) */
+			no-overwrite;	/* Do not overwrite buffer when full */
+		};
+		af-event {
+			compatible = "fsl,rpmsg-binary";
+			id = <0x205>;
+			size = <4096>; /* Endpoint buffer size (B) */
+			buffer = <1>; /* binary buffer size (MB) */
+			ascii-mode; /* read event as strings */
+		};
+	};
+
+	sound-rpmsg-main {
+		compatible = "nxp,snd-af-ivshmem-pcm";
+		nxp,name = "AF-main";
+		nxp,ep_id = <0x300 0x301>;
+		nxp,nb_chans = <16>;
+                nxp,card-id = <0>;
+		nxp,pcm-out;
+		nxp,pcm-in;
+		nxp,compr;
+	};
+
+	sound-rpmsg-ppp {
+		compatible = "nxp,snd-af-ivshmem-pcm";
+		nxp,name = "AF-ppp";
+		nxp,ep_id = <0x302 0x303>;
+		nxp,nb_chans = <16>;
+                nxp,card-id = <3>;
+		nxp,pcm-in;
+	};
+
+	sound-rpmsg-voice {
+		compatible = "nxp,snd-af-ivshmem-pcm";
+		nxp,name = "AF-voice";
+		nxp,ep_id = <0x304 0x305>;
+		nxp,nb_chans = <2>;
+                nxp,card-id = <4>;
+		nxp,pcm-out;
+	};
+};
+
+&inmate_reserved {
+	no-map;
+	reg = <0 0x60000000 0x0 0x10000000>;
+};
+
+&sdma3 {
+	status = "disabled";
+};

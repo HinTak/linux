@@ -33,6 +33,10 @@
 
 #include "sdhci.h"
 
+#ifdef CONFIG_MMC_SDHCI_NVT_HS400_RDQS_TUNING
+#include "sdhci-pltfm.h"
+#include "nvt_sdc.h"
+#endif
 #define DRIVER_NAME "sdhci"
 
 #define DBG(f, x...) \
@@ -55,8 +59,12 @@ static int sdhci_execute_tuning(struct mmc_host *mmc, u32 opcode);
 static void sdhci_tuning_timer(unsigned long data);
 static void sdhci_enable_preset_value(struct sdhci_host *host, bool enable);
 static int sdhci_pre_dma_transfer(struct sdhci_host *host,
+#if defined(CONFIG_MMC_SDHCI_NVT)
+					struct mmc_data *data);
+#else
 					struct mmc_data *data,
 					struct sdhci_host_next *next);
+#endif
 static int sdhci_do_get_cd(struct sdhci_host *host);
 
 #ifdef CONFIG_PM
@@ -81,60 +89,65 @@ static void sdhci_runtime_pm_bus_off(struct sdhci_host *host)
 }
 #endif
 
+#ifdef CONFIG_NVT_MMC_CLKGATE
+extern void nvt_mmc_clk_gating(struct sdhci_host *host, struct mmc_command *cmd);
+extern void nvt_mmc_clk_ungating(struct sdhci_host *host, struct mmc_command *cmd);
+#endif
+
 static void sdhci_dumpregs(struct sdhci_host *host)
 {
-	pr_debug(DRIVER_NAME ": =========== REGISTER DUMP (%s)===========\n",
+	pr_err(DRIVER_NAME ": =========== REGISTER DUMP (%s)===========\n",
 		mmc_hostname(host->mmc));
 
-	pr_debug(DRIVER_NAME ": Sys addr: 0x%08x | Version:  0x%08x\n",
+	pr_err(DRIVER_NAME ": Sys addr: 0x%08x | Version:  0x%08x\n",
 		sdhci_readl(host, SDHCI_DMA_ADDRESS),
 		sdhci_readw(host, SDHCI_HOST_VERSION));
-	pr_debug(DRIVER_NAME ": Blk size: 0x%08x | Blk cnt:  0x%08x\n",
+	pr_err(DRIVER_NAME ": Blk size: 0x%08x | Blk cnt:  0x%08x\n",
 		sdhci_readw(host, SDHCI_BLOCK_SIZE),
 		sdhci_readw(host, SDHCI_BLOCK_COUNT));
-	pr_debug(DRIVER_NAME ": Argument: 0x%08x | Trn mode: 0x%08x\n",
+	pr_err(DRIVER_NAME ": Argument: 0x%08x | Trn mode: 0x%08x\n",
 		sdhci_readl(host, SDHCI_ARGUMENT),
 		sdhci_readw(host, SDHCI_TRANSFER_MODE));
-	pr_debug(DRIVER_NAME ": Present:  0x%08x | Host ctl: 0x%08x\n",
+	pr_err(DRIVER_NAME ": Present:  0x%08x | Host ctl: 0x%08x\n",
 		sdhci_readl(host, SDHCI_PRESENT_STATE),
 		sdhci_readb(host, SDHCI_HOST_CONTROL));
-	pr_debug(DRIVER_NAME ": Power:    0x%08x | Blk gap:  0x%08x\n",
+	pr_err(DRIVER_NAME ": Power:    0x%08x | Blk gap:  0x%08x\n",
 		sdhci_readb(host, SDHCI_POWER_CONTROL),
 		sdhci_readb(host, SDHCI_BLOCK_GAP_CONTROL));
-	pr_debug(DRIVER_NAME ": Wake-up:  0x%08x | Clock:    0x%08x\n",
+	pr_err(DRIVER_NAME ": Wake-up:  0x%08x | Clock:    0x%08x\n",
 		sdhci_readb(host, SDHCI_WAKE_UP_CONTROL),
 		sdhci_readw(host, SDHCI_CLOCK_CONTROL));
-	pr_debug(DRIVER_NAME ": Timeout:  0x%08x | Int stat: 0x%08x\n",
+	pr_err(DRIVER_NAME ": Timeout:  0x%08x | Int stat: 0x%08x\n",
 		sdhci_readb(host, SDHCI_TIMEOUT_CONTROL),
 		sdhci_readl(host, SDHCI_INT_STATUS));
-	pr_debug(DRIVER_NAME ": Int enab: 0x%08x | Sig enab: 0x%08x\n",
+	pr_err(DRIVER_NAME ": Int enab: 0x%08x | Sig enab: 0x%08x\n",
 		sdhci_readl(host, SDHCI_INT_ENABLE),
 		sdhci_readl(host, SDHCI_SIGNAL_ENABLE));
-	pr_debug(DRIVER_NAME ": AC12 err: 0x%08x | Slot int: 0x%08x\n",
+	pr_err(DRIVER_NAME ": AC12 err: 0x%08x | Slot int: 0x%08x\n",
 		sdhci_readw(host, SDHCI_ACMD12_ERR),
 		sdhci_readw(host, SDHCI_SLOT_INT_STATUS));
-	pr_debug(DRIVER_NAME ": Caps:     0x%08x | Caps_1:   0x%08x\n",
+	pr_err(DRIVER_NAME ": Caps:     0x%08x | Caps_1:   0x%08x\n",
 		sdhci_readl(host, SDHCI_CAPABILITIES),
 		sdhci_readl(host, SDHCI_CAPABILITIES_1));
-	pr_debug(DRIVER_NAME ": Cmd:      0x%08x | Max curr: 0x%08x\n",
+	pr_err(DRIVER_NAME ": Cmd:      0x%08x | Max curr: 0x%08x\n",
 		sdhci_readw(host, SDHCI_COMMAND),
 		sdhci_readl(host, SDHCI_MAX_CURRENT));
-	pr_debug(DRIVER_NAME ": Host ctl2: 0x%08x\n",
+	pr_err(DRIVER_NAME ": Host ctl2: 0x%08x\n",
 		sdhci_readw(host, SDHCI_HOST_CONTROL2));
 
 	if (host->flags & SDHCI_USE_ADMA) {
 		if (host->flags & SDHCI_USE_64_BIT_DMA)
-			pr_debug(DRIVER_NAME ": ADMA Err: 0x%08x | ADMA Ptr: 0x%08x%08x\n",
+			pr_err(DRIVER_NAME ": ADMA Err: 0x%08x | ADMA Ptr: 0x%08x%08x\n",
 				 readl(host->ioaddr + SDHCI_ADMA_ERROR),
 				 readl(host->ioaddr + SDHCI_ADMA_ADDRESS_HI),
 				 readl(host->ioaddr + SDHCI_ADMA_ADDRESS));
 		else
-			pr_debug(DRIVER_NAME ": ADMA Err: 0x%08x | ADMA Ptr: 0x%08x\n",
+			pr_err(DRIVER_NAME ": ADMA Err: 0x%08x | ADMA Ptr: 0x%08x\n",
 				 readl(host->ioaddr + SDHCI_ADMA_ERROR),
 				 readl(host->ioaddr + SDHCI_ADMA_ADDRESS));
 	}
 
-	pr_debug(DRIVER_NAME ": ===========================================\n");
+	pr_err(DRIVER_NAME ": ===========================================\n");
 }
 
 /*****************************************************************************\
@@ -478,6 +491,7 @@ static void sdhci_adma_mark_end(void *desc)
 	dma_desc->cmd |= cpu_to_le16(ADMA2_END);
 }
 
+#define HW_GZIP_DMA_DBGMSG(...)	/*printk(__VA_ARGS__);*/
 static int sdhci_adma_table_pre(struct sdhci_host *host,
 	struct mmc_data *data)
 {
@@ -504,13 +518,35 @@ static int sdhci_adma_table_pre(struct sdhci_host *host,
 	else
 		direction = DMA_TO_DEVICE;
 
-	host->align_addr = dma_map_single(mmc_dev(host->mmc),
-		host->align_buffer, host->align_buffer_sz, direction);
-	if (dma_mapping_error(mmc_dev(host->mmc), host->align_addr))
-		goto fail;
-	BUG_ON(host->align_addr & host->align_mask);
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+	/*when hw2 for hwdecompress is used.
+		the data pass to hwdecomp will flag as MMC_DATA_NOMAP
+	we can ignore dma_map and related "dma cache operation to speed up*/
+	if (!(data->flags & MMC_DATA_NOMAP)) {
+#endif
+		host->align_addr = dma_map_single(mmc_dev(host->mmc),
+			host->align_buffer, host->align_buffer_sz, direction);
+		if (dma_mapping_error(mmc_dev(host->mmc), host->align_addr))
+			goto fail;
+		BUG_ON(host->align_addr & host->align_mask);
 
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+	} else {
+		/*we do the same thing to process address just
+		 as normal without dma_map_single.*/
+		HW_GZIP_DMA_DBGMSG(
+			"NVT HWGZIP: MMC DMA_OP ignore align_buffer, dir:%d\n ",
+			direction);
+		host->align_addr = virt_to_phys(host->align_buffer);
+		BUG_ON(host->align_addr & host->align_mask);
+
+	}
+#endif
+#if defined(CONFIG_MMC_SDHCI_NVT)
+	host->sg_count = sdhci_pre_dma_transfer(host, data);
+#else
 	host->sg_count = sdhci_pre_dma_transfer(host, data, NULL);
+#endif
 	if (host->sg_count < 0)
 		goto unmap_align;
 
@@ -523,6 +559,20 @@ static int sdhci_adma_table_pre(struct sdhci_host *host,
 		addr = sg_dma_address(sg);
 		len = sg_dma_len(sg);
 
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+	if (data->flags & MMC_DATA_NOMAP) {
+		/*because without dma_map_sg ,
+			we can't ge phys by sg_dma_address.
+		  we need get physical address with sg_phys.
+		  we set sg_dma_address as phys to make scatterlist flow
+			the same as general mmc case*/
+		sg_dma_address(sg) = sg_phys(sg);
+		addr = sg_dma_address(sg);
+		HW_GZIP_DMA_DBGMSG(
+			" NVT HWGZIP : MMC SG ADDR: vaddr %x -> %x : %x\n",
+			 (unsigned int)sg_virt(sg), sg_phys(sg), len);
+	}
+#endif
 		/*
 		 * The SDHCI specification states that ADMA
 		 * addresses must be 32-bit aligned. If they
@@ -540,6 +590,12 @@ static int sdhci_adma_table_pre(struct sdhci_host *host,
 			}
 
 			/* tran, valid */
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+			if (data->flags & MMC_DATA_NOMAP) {
+				/*printk("<<<SG DBG>>>>sg : virt %p phys %x\n",
+					 sg_virt(sg), addr);*/
+			}
+#endif
 			sdhci_adma_write_desc(host, desc, align_addr, offset,
 					      ADMA2_TRAN_VALID);
 
@@ -595,8 +651,20 @@ static int sdhci_adma_table_pre(struct sdhci_host *host,
 	return 0;
 
 unmap_align:
-	dma_unmap_single(mmc_dev(host->mmc), host->align_addr,
-		host->align_buffer_sz, direction);
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+	if (!(data->flags & MMC_DATA_NOMAP)) {
+#endif
+		dma_unmap_single(mmc_dev(host->mmc), host->align_addr,
+			host->align_buffer_sz, direction);
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+	} else {
+		/*because we don't do dma_mag_sg,
+			we don't need dma_unmap_sg*/
+		HW_GZIP_DMA_DBGMSG(
+			"NVT_GZIP : mmc dma_op err unmap align buffer dir:%d\n",
+			direction);
+	}
+#endif
 fail:
 	return -EINVAL;
 }
@@ -618,9 +686,25 @@ static void sdhci_adma_table_post(struct sdhci_host *host,
 	else
 		direction = DMA_TO_DEVICE;
 
-	dma_unmap_single(mmc_dev(host->mmc), host->align_addr,
-		host->align_buffer_sz, direction);
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+	/*when hw2 for hwdecompress is used.
+		the data pass to hwdecomp will flag as MMC_DATA_NOMAP
+		we can ignore dma_map and
+			related "dma cache operation to speed up*/
+	if (!(data->flags & MMC_DATA_NOMAP)) {
+#endif
+		dma_unmap_single(mmc_dev(host->mmc), host->align_addr,
+			host->align_buffer_sz, direction);
 
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+	} else {
+		/*we ignore cache related api dma_unmap_single
+			 for  decompessor hw2*/
+		HW_GZIP_DMA_DBGMSG(
+			"NVT_GZIP : mmc pos dma_op unmap align buffer dir:%d\n",
+			direction);
+	}
+#endif
 	/* Do a quick scan of the SG list for any unaligned mappings */
 	has_unaligned = false;
 	for_each_sg(data->sg, sg, host->sg_count, i)
@@ -630,9 +714,21 @@ static void sdhci_adma_table_post(struct sdhci_host *host,
 		}
 
 	if (has_unaligned && data->flags & MMC_DATA_READ) {
-		dma_sync_sg_for_cpu(mmc_dev(host->mmc), data->sg,
-			data->sg_len, direction);
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+		if (!(data->flags & MMC_DATA_NOMAP)) {
+#endif
+			dma_sync_sg_for_cpu(mmc_dev(host->mmc), data->sg,
+				data->sg_len, direction);
 
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+		} else {
+			/*we ignore dma related operation
+			cahce dma_sync_sg_for_cpu for decompessor hw2*/
+			HW_GZIP_DMA_DBGMSG(
+				"NVT_GZIP : mmc pos dma_op unmap cpu sg dir:%d\n",
+				direction);
+		}
+#endif
 		align = host->align_buffer;
 
 		for_each_sg(data->sg, sg, host->sg_count, i) {
@@ -649,9 +745,29 @@ static void sdhci_adma_table_post(struct sdhci_host *host,
 		}
 	}
 
-	if (!data->host_cookie)
-		dma_unmap_sg(mmc_dev(host->mmc), data->sg,
-			data->sg_len, direction);
+#if defined(CONFIG_MMC_SDHCI_NVT)
+	if (data->host_cookie == COOKIE_MAPPED) {
+#else
+	if (!data->host_cookie) {
+#endif
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+		if (!(data->flags & MMC_DATA_NOMAP)) {
+#endif
+			dma_unmap_sg(mmc_dev(host->mmc), data->sg,
+				data->sg_len, direction);
+#if defined(CONFIG_MMC_SDHCI_NVT)
+			data->host_cookie = COOKIE_UNMAPPED;
+#endif
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+		} else {
+			/*we ignore cache related api dma_unmap_single
+				for  decompessor hw2*/
+			HW_GZIP_DMA_DBGMSG(
+			"NVT_GZIP : mmc pos dma_op unmap sg dir:%d\n",
+			 direction);
+		}
+#endif
+	}
 }
 
 static u8 sdhci_calc_timeout(struct sdhci_host *host, struct mmc_command *cmd)
@@ -847,7 +963,11 @@ static void sdhci_prepare_data(struct sdhci_host *host, struct mmc_command *cmd)
 		} else {
 			int sg_cnt;
 
+#if defined(CONFIG_MMC_SDHCI_NVT)
+			sg_cnt = sdhci_pre_dma_transfer(host, data);
+#else
 			sg_cnt = sdhci_pre_dma_transfer(host, data, NULL);
+#endif
 			if (sg_cnt <= 0) {
 				/*
 				 * This only happens when someone fed
@@ -963,11 +1083,19 @@ static void sdhci_finish_data(struct sdhci_host *host)
 		if (host->flags & SDHCI_USE_ADMA)
 			sdhci_adma_table_post(host, data);
 		else {
+#if defined(CONFIG_MMC_SDHCI_NVT)
+			if (data->host_cookie == COOKIE_MAPPED) {
+#else
 			if (!data->host_cookie)
+#endif
 				dma_unmap_sg(mmc_dev(host->mmc),
 					data->sg, data->sg_len,
 					(data->flags & MMC_DATA_READ) ?
 					DMA_FROM_DEVICE : DMA_TO_DEVICE);
+#if defined(CONFIG_MMC_SDHCI_NVT)
+			data->host_cookie = COOKIE_UNMAPPED;
+			}
+#endif
 		}
 	}
 
@@ -1225,6 +1353,9 @@ void sdhci_set_clock(struct sdhci_host *host, unsigned int clock)
 			}
 			real_div = div;
 			div >>= 1;
+			if ((host->quirks2 & SDHCI_QUIRK2_CLOCK_DIV_ZERO_BROKEN)
+				&& !div && host->max_clk <= 25000000)
+				div = 1;
 		}
 	} else {
 		/* Version 2.00 divisors must be a power of 2. */
@@ -1369,6 +1500,10 @@ static void sdhci_request(struct mmc_host *mmc, struct mmc_request *mrq)
 
 #ifndef SDHCI_USE_LEDS_CLASS
 	sdhci_activate_led(host);
+#endif
+
+#ifdef CONFIG_NVT_MMC_CLKGATE
+	nvt_mmc_clk_ungating(host, mrq->cmd);
 #endif
 
 	/*
@@ -1714,6 +1849,11 @@ static void sdhci_hw_reset(struct mmc_host *mmc)
 
 	if (host->ops && host->ops->hw_reset)
 		host->ops->hw_reset(host);
+
+#if defined(CONFIG_MMC_SDHCI_NVT)
+	if (mmc->card)
+		sdhci_set_ios(host->mmc, &host->mmc->ios);
+#endif
 }
 
 static int sdhci_get_ro(struct mmc_host *mmc)
@@ -2094,6 +2234,18 @@ out_unlock:
 	return err;
 }
 
+static int sdhci_select_drive_strength(struct mmc_card *card,
+				       unsigned int max_dtr, int host_drv,
+				       int card_drv, int *drv_type)
+{
+	struct sdhci_host *host = mmc_priv(card->host);
+
+	if (!host->ops->select_drive_strength)
+		return 0;
+
+	return host->ops->select_drive_strength(host, card, max_dtr, host_drv,
+						card_drv, drv_type);
+}
 
 static void sdhci_enable_preset_value(struct sdhci_host *host, bool enable)
 {
@@ -2131,20 +2283,74 @@ static void sdhci_post_req(struct mmc_host *mmc, struct mmc_request *mrq,
 	struct mmc_data *data = mrq->data;
 
 	if (host->flags & SDHCI_REQ_USE_DMA) {
+#if defined(CONFIG_MMC_SDHCI_NVT)
+		if (data->host_cookie == COOKIE_GIVEN ||
+				data->host_cookie == COOKIE_MAPPED)
+#else
 		if (data->host_cookie)
+#endif
 			dma_unmap_sg(mmc_dev(host->mmc), data->sg, data->sg_len,
 					 data->flags & MMC_DATA_WRITE ?
 					 DMA_TO_DEVICE : DMA_FROM_DEVICE);
+#if defined(CONFIG_MMC_SDHCI_NVT)
+		data->host_cookie = COOKIE_UNMAPPED;
+#else
 		mrq->data->host_cookie = 0;
+#endif
 	}
 }
 
 static int sdhci_pre_dma_transfer(struct sdhci_host *host,
-				       struct mmc_data *data,
-				       struct sdhci_host_next *next)
+#if defined(CONFIG_MMC_SDHCI_NVT)
+					struct mmc_data *data)
+#else
+					struct mmc_data *data,
+					struct sdhci_host_next *next)
+#endif
 {
 	int sg_count;
 
+#if defined(CONFIG_MMC_SDHCI_NVT)
+	if (data->host_cookie == COOKIE_MAPPED) {
+		data->host_cookie = COOKIE_GIVEN;
+		return data->sg_count;
+	}
+
+	WARN_ON(data->host_cookie == COOKIE_GIVEN);
+
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+		if (!(data->flags & MMC_DATA_NOMAP)) {
+#endif
+			sg_count = dma_map_sg(mmc_dev(host->mmc), data->sg,
+					     data->sg_len,
+					     data->flags & MMC_DATA_WRITE ?
+					     DMA_TO_DEVICE : DMA_FROM_DEVICE);
+
+#ifdef CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM
+		} else {
+			struct scatterlist *s;
+			int i;
+
+			for_each_sg(data->sg, s, data->sg_len, i) {
+				s->dma_address = sg_phys(s);
+				HW_GZIP_DMA_DBGMSG(
+				"[UNZIP MMC](%s)virt: %p phys %x\n",
+				__func__, sg_virt(s), s->dma_address);
+			}
+			/*we do the same thing but without dma_map_sg.*/
+			sg_count = data->sg_len;
+			HW_GZIP_DMA_DBGMSG(
+				"NVTUNZIP MMC:DMA ignore sg_count %d\n",
+				sg_count);
+		}
+#endif
+
+	if (sg_count == 0)
+		return -ENOSPC;
+
+	data->sg_count = sg_count;
+	data->host_cookie = COOKIE_MAPPED;
+#else
 	if (!next && data->host_cookie &&
 	    data->host_cookie != host->next_data.cookie) {
 		pr_debug(DRIVER_NAME "[%s] invalid cookie: %d, next-cookie %d\n",
@@ -2155,10 +2361,10 @@ static int sdhci_pre_dma_transfer(struct sdhci_host *host,
 	/* Check if next job is already prepared */
 	if (next ||
 	    (!next && data->host_cookie != host->next_data.cookie)) {
-		sg_count = dma_map_sg(mmc_dev(host->mmc), data->sg,
-				     data->sg_len,
-				     data->flags & MMC_DATA_WRITE ?
-				     DMA_TO_DEVICE : DMA_FROM_DEVICE);
+			sg_count = dma_map_sg(mmc_dev(host->mmc), data->sg,
+					     data->sg_len,
+					     data->flags & MMC_DATA_WRITE ?
+					     DMA_TO_DEVICE : DMA_FROM_DEVICE);
 
 	} else {
 		sg_count = host->next_data.sg_count;
@@ -2175,6 +2381,7 @@ static int sdhci_pre_dma_transfer(struct sdhci_host *host,
 	} else
 		host->sg_count = sg_count;
 
+#endif
 	return sg_count;
 }
 
@@ -2183,6 +2390,12 @@ static void sdhci_pre_req(struct mmc_host *mmc, struct mmc_request *mrq,
 {
 	struct sdhci_host *host = mmc_priv(mmc);
 
+#if defined(CONFIG_MMC_SDHCI_NVT)
+	mrq->data->host_cookie = COOKIE_UNMAPPED;
+
+	if (host->flags & SDHCI_REQ_USE_DMA)
+		sdhci_pre_dma_transfer(host,mrq->data);
+#else
 	if (mrq->data->host_cookie) {
 		mrq->data->host_cookie = 0;
 		return;
@@ -2193,6 +2406,7 @@ static void sdhci_pre_req(struct mmc_host *mmc, struct mmc_request *mrq,
 					mrq->data,
 					&host->next_data) < 0)
 			mrq->data->host_cookie = 0;
+#endif
 }
 
 static void sdhci_card_event(struct mmc_host *mmc)
@@ -2238,6 +2452,7 @@ static const struct mmc_host_ops sdhci_ops = {
 	.start_signal_voltage_switch	= sdhci_start_signal_voltage_switch,
 	.prepare_hs400_tuning		= sdhci_prepare_hs400_tuning,
 	.execute_tuning			= sdhci_execute_tuning,
+	.select_drive_strength		= sdhci_select_drive_strength,
 	.card_event			= sdhci_card_event,
 	.card_busy	= sdhci_card_busy,
 };
@@ -2292,6 +2507,26 @@ static void sdhci_tasklet_finish(unsigned long param)
 		sdhci_do_reset(host, SDHCI_RESET_CMD);
 		sdhci_do_reset(host, SDHCI_RESET_DATA);
 	}
+
+
+#if defined(CONFIG_MMC_SDHCI_NVT)
+	if (mrq->cmd && (mrq->cmd->flags & MMC_RSP_BUSY)) {
+		unsigned long timeout = 100;
+		while (!(sdhci_readl(host, SDHCI_PRESENT_STATE) & SDHCI_DATA_0_LVL_MASK)) {
+			if (timeout == 0) {
+				pr_err("%s: Controller never released with 100ms "
+						"inhibit bit(s).\n", mmc_hostname(host->mmc));
+				sdhci_dumpregs(host);
+			}
+			timeout--;
+			mdelay(1);
+		}
+	}
+#endif
+
+#ifdef CONFIG_NVT_MMC_CLKGATE
+	nvt_mmc_clk_gating(host, host->cmd);
+#endif
 
 	host->mrq = NULL;
 	host->cmd = NULL;
@@ -2728,6 +2963,12 @@ static void sdhci_disable_irq_wakeups(struct sdhci_host *host)
 
 int sdhci_suspend_host(struct sdhci_host *host)
 {
+#ifdef CONFIG_MMC_SDHCI_NVT_HS400_RDQS_TUNING
+	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+	struct nvt_mmc_hwplat *hwplat = pltfm_host->priv;
+
+	hwplat->rdqs_tune = MMC_RDQS_TUNE_DISABLED;
+#endif
 	sdhci_disable_card_detection(host);
 
 	/* Disable tuning since we are suspending */
@@ -3090,7 +3331,9 @@ int sdhci_add_host(struct sdhci_host *host)
 		host->max_clk = host->ops->get_max_clock(host);
 	}
 
+#if !defined(CONFIG_MMC_SDHCI_NVT)
 	host->next_data.cookie = 1;
+#endif
 	/*
 	 * In case of Host Controller v3.00, find out whether clock
 	 * multiplier is supported.

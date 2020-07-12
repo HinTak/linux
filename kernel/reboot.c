@@ -268,6 +268,10 @@ void kernel_power_off(void)
 EXPORT_SYMBOL_GPL(kernel_power_off);
 
 static DEFINE_MUTEX(reboot_mutex);
+#ifdef CONFIG_NOT_ALLOW_REBOOT_DURING_COREDUMP
+extern atomic_t coredump_in_progress;
+extern atomic_t coredump_reboot_status;
+#endif
 
 /*
  * Reboot system call: for obvious reasons only root may call it,
@@ -312,6 +316,13 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
 		cmd = LINUX_REBOOT_CMD_HALT;
 
 	mutex_lock(&reboot_mutex);
+#ifdef CONFIG_NOT_ALLOW_REBOOT_DURING_COREDUMP
+	if (atomic_read(&coredump_reboot_status) && atomic_read(&coredump_in_progress)) {
+		printk(KERN_ALERT"#### COREDUMP IN PROGRESS REBOOT FAILS ####\n");
+		mutex_unlock(&reboot_mutex);
+		return -EBUSY;
+	}
+#endif
 	switch (cmd) {
 	case LINUX_REBOOT_CMD_RESTART:
 		kernel_restart(NULL);

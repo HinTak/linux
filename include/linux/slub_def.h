@@ -8,6 +8,8 @@
  */
 #include <linux/kobject.h>
 
+#define TRACK_ADDRS_COUNT 8
+
 enum stat_item {
 	ALLOC_FASTPATH,		/* Allocation from cpu slab */
 	ALLOC_SLOWPATH,		/* Allocation by getting a new cpu slab */

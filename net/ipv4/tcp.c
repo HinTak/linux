@@ -2670,6 +2670,11 @@ void tcp_get_info(struct sock *sk, struct tcp_info *info)
 	rate = READ_ONCE(sk->sk_max_pacing_rate);
 	info->tcpi_max_pacing_rate = rate != ~0U ? rate : ~0ULL;
 
+	/* For TCP Keep Alive Offload */
+	info->tcpi_snd_nxt = tp->snd_nxt;
+	info->tcpi_rcv_nxt = tp->rcv_nxt;
+	info->tcpi_rcv_wnd = tp->rcv_wnd;
+
 	do {
 		start = u64_stats_fetch_begin_irq(&tp->syncp);
 		info->tcpi_bytes_acked = tp->bytes_acked;

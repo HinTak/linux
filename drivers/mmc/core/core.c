@@ -46,6 +46,13 @@
 #include "sd_ops.h"
 #include "sdio_ops.h"
 
+#if defined(CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM)
+#include <linux/blkdev.h>
+#include "../card/queue.h"
+#endif
+
+#include "mmc_trace.h"
+
 /* If the device is not responding */
 #define MMC_CORE_TIMEOUT_MS	(10 * 60 * 1000) /* 10 minute timeout */
 
@@ -120,6 +127,53 @@ static inline void mmc_should_fail_request(struct mmc_host *host,
 
 #endif /* CONFIG_FAIL_MMC_REQUEST */
 
+#ifdef CONFIG_NVT_UNZIP_FIFO
+static void end_special_req(struct mmc_request *mrq)
+{
+	void fifo_atf_done(void);
+	void fifo_regdump(void);
+	void nvt_unzip_dump(void);
+	int nvt_unzip_dma_done(void);
+
+	struct mmc_blk_request *brq;
+	struct mmc_queue_req *mq_mrq;
+	struct request *req;
+	extern atomic_t unzip_busy;
+
+	if (!mrq->data || !(mrq->data->flags & MMC_DATA_NOMAP))
+		return;
+
+	brq = container_of(mrq, struct mmc_blk_request, mrq);
+	mq_mrq = container_of(brq, struct mmc_queue_req, brq);
+	req = mq_mrq->req;
+
+	/* For special request on UNZIP FIFO read */
+	if (req->special) {
+		unsigned long stop_time = jiffies + (3 * HZ);
+
+		/* Wait for unzip finish */
+		if (atomic_read(&unzip_busy) > 1) {
+			pr_err("__UNZIP_ERROR__: unzip_busy:%d\n", atomic_read(&unzip_busy));
+			pr_err("__UNZIP_ERROR__: unzip_busy:%d\n", atomic_read(&unzip_busy));
+			pr_err("__UNZIP_ERROR__: unzip_busy:%d\n", atomic_read(&unzip_busy));
+			pr_err("__UNZIP_ERROR__: unzip_busy:%d\n", atomic_read(&unzip_busy));
+		}
+
+		while (atomic_read(&unzip_busy) && (!nvt_unzip_dma_done())) {
+			if (time_after(jiffies, stop_time)) {
+				pr_err("__REQ_TIMEOUT__: %d\n", atomic_read(&unzip_busy));
+				nvt_unzip_dump();
+				fifo_regdump();
+				atomic_set(&unzip_busy, 0);
+				break;
+			}
+		}
+		/* Disable FIFO for next read */
+		fifo_atf_done();
+	}
+}
+#endif /* CONFIG_NVT_UNZIP_FIFO */
+
 /**
  *	mmc_request_done - finish processing an MMC request
  *	@host: MMC host which completed request
@@ -132,6 +186,18 @@ void mmc_request_done(struct mmc_host *host, struct mmc_request *mrq)
 {
 	struct mmc_command *cmd = mrq->cmd;
 	int err = cmd->error;
+
+	/* Flag re-tuning needed on CRC errors */
+	if ((cmd->opcode != MMC_SEND_TUNING_BLOCK &&
+	    cmd->opcode != MMC_SEND_TUNING_BLOCK_HS200) &&
+	    (err == -EILSEQ || (mrq->sbc && mrq->sbc->error == -EILSEQ) ||
+	    (mrq->data && mrq->data->error == -EILSEQ) ||
+	    (mrq->stop && mrq->stop->error == -EILSEQ)))
+		mmc_retune_needed(host);
+
+#ifdef CONFIG_NVT_UNZIP_FIFO
+	end_special_req(mrq);
+#endif
 
 	if (err && cmd->retries && mmc_host_is_spi(host)) {
 		if (cmd->resp[0] & R1_SPI_ILLEGAL_COMMAND)
@@ -186,14 +252,104 @@ void mmc_request_done(struct mmc_host *host, struct mmc_request *mrq)
 
 EXPORT_SYMBOL(mmc_request_done);
 
+#if  defined(CONFIG_HW_DECOMP_BLK_MMC_SUBSYSTEM)
+/**
+ * Yeah, I know, everything here looks more than ugly.
+ * But we have to make this special "hole" and inform
+ * upper layer about our special decompression request
+ * just before going down and dma setup.
+ */
+static void prepare_special_req(struct mmc_request *mrq)
+{
+	struct mmc_blk_request *brq;
+	struct mmc_queue_req *mq_mrq;
+	struct request *req;
+	typedef void (*ready_cb_t)(struct request *);
+
+	if (!mrq->data || !(mrq->data->flags & MMC_DATA_NOMAP))
+		return;
+
+	brq = container_of(mrq, struct mmc_blk_request, mrq);
+	mq_mrq = container_of(brq, struct mmc_queue_req, brq);
+	req = mq_mrq->req;
+
+	BUG_ON(!req || req->cmd_type != REQ_TYPE_SPECIAL);
+
+	if (req->special)
+		((ready_cb_t)req->special)(req);
+}
+#else
+static inline void prepare_special_req(struct mmc_request *mrq)
+{}
+#endif
+
+static void __mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
+{
+	int err;
+
+#if defined(CONFIG_MTK_KERNEL_SOLUTION) || defined(CONFIG_ARCH_MXC)
+	/* Assumes host controller has been runtime resumed by mmc_claim_host */
+	err = mmc_retune(host);
+	if (err) {
+		mrq->cmd->error = err;
+		mmc_request_done(host, mrq);
+		return;
+	}
+#endif
+
+	host->ops->request(host, mrq);
+}
+
+#ifdef CONFIG_MMC_PROTECT_GPT_AREA_FROM_WRITING
+extern unsigned int mmc_get_part_curr(struct mmc_card *card);
+static inline void mmc_check_write_gpt_area(struct mmc_host *host,
+					    struct mmc_request *mrq)
+{
+	unsigned int part_curr;
+
+	/* before mmc is attached, card is null */
+	if (unlikely(!host->card))
+		return;
+
+	/* filter only write commands */
+	if (mrq->cmd->opcode != MMC_WRITE_BLOCK &&
+	    mrq->cmd->opcode != MMC_WRITE_MULTIPLE_BLOCK)
+		return;
+	/*
+	 * part_cur
+	 *	0x0 : User Area
+	 *	0x1 : EXT_CSD_PART_CONFIG_ACC_BOOT0
+	 *	0x3 : EXT_CSD_PART_CONFIG_ACC_RPMB
+	 */
+	part_curr = mmc_get_part_curr(host->card);
+	if (unlikely(part_curr != 0x00))
+		return;
+
+	/* check lba address is over GPT Area(64KiB) */
+	if (likely(mrq->cmd->arg & ~0x7F))
+		return;
+
+	printk(KERN_ERR "[WARN] Protect GPT Area from writing!!\n");
+	BUG();
+}
+#else
+static inline void mmc_check_write_gpt_area(struct mmc_host *host,
+						   struct mmc_request *mrq) {}
+#endif
+
 static int mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
 {
 #ifdef CONFIG_MMC_DEBUG
 	unsigned int i, sz;
 	struct scatterlist *sg;
 #endif
+	mmc_retune_hold(host);
+
 	if (mmc_card_removed(host->card))
 		return -ENOMEDIUM;
+
+	/* Prepare for special request */
+	prepare_special_req(mrq);
 
 	if (mrq->sbc) {
 		pr_debug("<%s: starting CMD%u arg %08x flags %08x>\n",
@@ -252,7 +408,9 @@ static int mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
 	}
 	mmc_host_clk_hold(host);
 	led_trigger_event(host->led, LED_FULL);
-	host->ops->request(host, mrq);
+	mmc_cmd_start_trace(mrq);		/* FlashFS : mmc_trace */
+	mmc_check_write_gpt_area(host, mrq);	/* FlashFS : protect gpt area */
+	__mmc_start_request(host, mrq);
 
 	return 0;
 }
@@ -301,12 +459,15 @@ void mmc_start_bkops(struct mmc_card *card, bool from_exception)
 		use_busy_signal = false;
 	}
 
+	mmc_retune_hold(card->host);
+
 	err = __mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
 			EXT_CSD_BKOPS_START, 1, timeout,
 			use_busy_signal, true, false);
 	if (err) {
 		pr_warn("%s: Error %d starting bkops\n",
 			mmc_hostname(card->host), err);
+		mmc_retune_release(card->host);
 		goto out;
 	}
 
@@ -317,6 +478,8 @@ void mmc_start_bkops(struct mmc_card *card, bool from_exception)
 	 */
 	if (!use_busy_signal)
 		mmc_card_set_doing_bkops(card);
+	else
+		mmc_retune_release(card->host);
 out:
 	mmc_release_host(card->host);
 }
@@ -332,12 +495,14 @@ static void mmc_wait_data_done(struct mmc_request *mrq)
 {
 	struct mmc_context_info *context_info = &mrq->host->context_info;
 
+	mmc_cmd_finish_trace(mrq);	/* FlashFS : mmc_trace */
 	context_info->is_done_rcv = true;
 	wake_up_interruptible(&context_info->wait);
 }
 
 static void mmc_wait_done(struct mmc_request *mrq)
 {
+	mmc_cmd_finish_trace(mrq);	/* FlashFS : mmc_trace */
 	complete(&mrq->completion);
 }
 
@@ -419,24 +584,35 @@ static int mmc_wait_for_data_req_done(struct mmc_host *host,
 							    host->areq);
 				break; /* return err */
 			} else {
+				mmc_retune_recheck(host);
+
 				pr_info("%s: req failed (CMD%u): %d, retrying...\n",
 					mmc_hostname(host),
 					cmd->opcode, cmd->error);
 				cmd->retries--;
 				cmd->error = 0;
-				host->ops->request(host, mrq);
+				__mmc_start_request(host, mrq);
 				continue; /* wait for done/new event again */
 			}
 		} else if (context_info->is_new_req) {
 			context_info->is_new_req = false;
 			if (!next_req) {
+#if defined(CONFIG_MTK_KERNEL_SOLUTION) || defined(CONFIG_ARCH_MXC)
+				return MMC_BLK_NEW_REQUEST;
+#else
 				err = MMC_BLK_NEW_REQUEST;
 				break; /* return err */
+#endif
 			}
 		}
 	}
+	mmc_retune_release(host);
 	return err;
 }
+
+#ifdef CONFIG_MMC_TIMEOUT
+int g_irq_print = 0;
+#endif
 
 static void mmc_wait_for_req_done(struct mmc_host *host,
 				  struct mmc_request *mrq)
@@ -444,6 +620,29 @@ static void mmc_wait_for_req_done(struct mmc_host *host,
 	struct mmc_command *cmd;
 
 	while (1) {
+#ifdef CONFIG_MMC_TIMEOUT
+		unsigned long rc;
+		rc = wait_for_completion_timeout(&mrq->completion, HZ<<2);
+		if(rc){
+			cmd = mrq->cmd;
+			if (!cmd->error || !cmd->retries ||
+			    mmc_card_removed(host->card))
+				break;
+
+			pr_debug("%s: req failed (CMD%u): %d, retrying...\n",
+				 mmc_hostname(host), cmd->opcode, cmd->error);
+			cmd->retries--;
+			cmd->error = 0;
+			host->ops->request(host, mrq);
+		} else {
+			printk(KERN_ERR"\n[%s] timeout\n",__FUNCTION__);
+			g_irq_print=1;
+#ifdef CONFIG_SMP
+			smp_send_stop();
+#endif
+			while(1);
+		}
+#else
 		wait_for_completion(&mrq->completion);
 
 		cmd = mrq->cmd;
@@ -469,12 +668,15 @@ static void mmc_wait_for_req_done(struct mmc_host *host,
 		    mmc_card_removed(host->card))
 			break;
 
+		mmc_retune_recheck(host);
 		pr_debug("%s: req failed (CMD%u): %d, retrying...\n",
 			 mmc_hostname(host), cmd->opcode, cmd->error);
 		cmd->retries--;
 		cmd->error = 0;
-		host->ops->request(host, mrq);
+		__mmc_start_request(host, mrq);
+#endif /* end of CONFIG_MMC_TIMEOUT */
 	}
+	mmc_retune_release(host);
 }
 
 /**
@@ -730,6 +932,7 @@ int mmc_stop_bkops(struct mmc_card *card)
 	 */
 	if (!err || (err == -EINVAL)) {
 		mmc_card_clr_doing_bkops(card);
+		mmc_retune_release(card->host);
 		err = 0;
 	}
 
@@ -1111,6 +1314,8 @@ int mmc_execute_tuning(struct mmc_card *card)
 
 	if (err)
 		pr_err("%s: tuning execution failed\n", mmc_hostname(host));
+	else
+		mmc_retune_enable(host);
 
 	return err;
 }
@@ -1142,6 +1347,8 @@ void mmc_set_bus_width(struct mmc_host *host, unsigned int width)
  */
 void mmc_set_initial_state(struct mmc_host *host)
 {
+	mmc_retune_disable(host);
+
 	if (mmc_host_is_spi(host))
 		host->ios.chip_select = MMC_CS_HIGH;
 	else
@@ -1149,6 +1356,16 @@ void mmc_set_initial_state(struct mmc_host *host)
 	host->ios.bus_mode = MMC_BUSMODE_PUSHPULL;
 	host->ios.bus_width = MMC_BUS_WIDTH_1;
 	host->ios.timing = MMC_TIMING_LEGACY;
+	host->ios.enhanced_strobe = false;
+
+	/*
+	 * Make sure we are in non-enhanced strobe mode before we
+	 * actually enable it in ext_csd.
+	 */
+	if ((host->caps2 & MMC_CAP2_HS400_ES) &&
+	    host->ops->hs400_enhanced_strobe)
+		host->ops->hs400_enhanced_strobe(host, &host->ios);
+	host->ios.drv_type = 0;
 
 	mmc_set_ios(host);
 }
@@ -1458,7 +1675,9 @@ u32 mmc_select_voltage(struct mmc_host *host, u32 ocr)
 	if (host->caps2 & MMC_CAP2_FULL_PWR_CYCLE) {
 		bit = ffs(ocr) - 1;
 		ocr &= 3 << bit;
+#ifndef CONFIG_DISABLE_UNNECESSARY_MMC_CODE
 		mmc_power_cycle(host, ocr);
+#endif
 	} else {
 		bit = fls(ocr) - 1;
 		ocr &= 3 << bit;
@@ -1553,8 +1772,8 @@ int mmc_set_signal_voltage(struct mmc_host *host, int signal_voltage, u32 ocr)
 		goto power_cycle;
 	}
 
-	/* Keep clock gated for at least 5 ms */
-	mmc_delay(5);
+	/* Keep clock gated for at least 10 ms, though spec only says 5 ms */
+	mmc_delay(10);
 	host->ios.clock = clock;
 	mmc_set_ios(host);
 
@@ -1603,6 +1822,44 @@ void mmc_set_driver_type(struct mmc_host *host, unsigned int drv_type)
 	mmc_host_clk_release(host);
 }
 
+int mmc_select_drive_strength(struct mmc_card *card, unsigned int max_dtr,
+			      int card_drv_type, int *drv_type)
+{
+	struct mmc_host *host = card->host;
+	int host_drv_type = SD_DRIVER_TYPE_B;
+	int drive_strength;
+
+	*drv_type = 0;
+
+	if (!host->ops->select_drive_strength)
+		return 0;
+
+	/* Use SD definition of driver strength for hosts */
+	if (host->caps & MMC_CAP_DRIVER_TYPE_A)
+		host_drv_type |= SD_DRIVER_TYPE_A;
+
+	if (host->caps & MMC_CAP_DRIVER_TYPE_C)
+		host_drv_type |= SD_DRIVER_TYPE_C;
+
+	if (host->caps & MMC_CAP_DRIVER_TYPE_D)
+		host_drv_type |= SD_DRIVER_TYPE_D;
+
+	/*
+	 * The drive strength that the hardware can support
+	 * depends on the board design.  Pass the appropriate
+	 * information and let the hardware specific code
+	 * return what is possible given the options
+	 */
+	mmc_host_clk_hold(host);
+	drive_strength = host->ops->select_drive_strength(card, max_dtr,
+							  host_drv_type,
+							  card_drv_type,
+							  drv_type);
+	mmc_host_clk_release(host);
+
+	return drive_strength;
+}
+
 /*
  * Apply power to the MMC stack.  This is a two-stage process.
  * First, we enable power to the card without the clock running.
@@ -1640,7 +1897,11 @@ void mmc_power_up(struct mmc_host *host, u32 ocr)
 	 * This delay should be sufficient to allow the power supply
 	 * to reach the minimum voltage.
 	 */
+#ifndef CONFIG_DISABLE_UNNECESSARY_MMC_CODE
 	mmc_delay(10);
+#else
+	mmc_delay(1);
+#endif
 
 	mmc_pwrseq_post_power_on(host);
 
@@ -1653,7 +1914,11 @@ void mmc_power_up(struct mmc_host *host, u32 ocr)
 	 * This delay must be at least 74 clock sizes, or 1 ms, or the
 	 * time required to reach a stable voltage.
 	 */
+#ifndef CONFIG_DISABLE_UNNECESSARY_MMC_CODE
 	mmc_delay(10);
+#else
+	mmc_delay(1);
+#endif
 
 	mmc_host_clk_release(host);
 }
@@ -1972,6 +2237,8 @@ static int mmc_do_erase(struct mmc_card *card, unsigned int from,
 	unsigned long timeout;
 	int err;
 
+	mmc_retune_hold(card->host);
+
 	/*
 	 * qty is used to calculate the erase timeout which depends on how many
 	 * erase groups (or allocation units in SD terminology) are affected.
@@ -2075,6 +2342,7 @@ static int mmc_do_erase(struct mmc_card *card, unsigned int from,
 	} while (!(cmd.resp[0] & R1_READY_FOR_DATA) ||
 		 (R1_CURRENT_STATE(cmd.resp[0]) == R1_STATE_PRG));
 out:
+	mmc_retune_release(card->host);
 	return err;
 }
 
@@ -2091,6 +2359,7 @@ int mmc_erase(struct mmc_card *card, unsigned int from, unsigned int nr,
 	      unsigned int arg)
 {
 	unsigned int rem, to = from + nr;
+	int err;
 
 	if (!(card->host->caps & MMC_CAP_ERASE) ||
 	    !(card->csd.cmdclass & CCC_ERASE))
@@ -2140,6 +2409,22 @@ int mmc_erase(struct mmc_card *card, unsigned int from, unsigned int nr,
 
 	/* 'from' and 'to' are inclusive */
 	to -= 1;
+
+	/*
+	 * Special case where only one erase-group fits in the timeout budget:
+	 * If the region crosses an erase-group boundary on this particular
+	 * case, we will be trimming more than one erase-group which, does not
+	 * fit in the timeout budget of the controller, so we need to split it
+	 * and call mmc_do_erase() twice if necessary. This special case is
+	 * identified by the card->eg_boundary flag.
+	 */
+	rem = card->erase_size - (from % card->erase_size);
+	if ((arg & MMC_TRIM_ARGS) && (card->eg_boundary) && (nr > rem)) {
+		err = mmc_do_erase(card, from, from + rem - 1, arg);
+		from += rem;
+		if ((err) || (to <= from))
+			return err;
+	}
 
 	return mmc_do_erase(card, from, to, arg);
 }
@@ -2236,16 +2521,28 @@ static unsigned int mmc_do_calc_max_discard(struct mmc_card *card,
 	if (!qty)
 		return 0;
 
+	/*
+	 * When specifying a sector range to trim, chances are we might cross
+	 * an erase-group boundary even if the amount of sectors is less than
+	 * one erase-group.
+	 * If we can only fit one erase-group in the controller timeout budget,
+	 * we have to care that erase-group boundaries are not crossed by a
+	 * single trim operation. We flag that special case with "eg_boundary".
+	 * In all other cases we can just decrement qty and pretend that we
+	 * always touch (qty + 1) erase-groups as a simple optimization.
+	 */
 	if (qty == 1)
-		return 1;
+		card->eg_boundary = 1;
+	else
+		qty--;
 
 	/* Convert qty to sectors */
 	if (card->erase_shift)
-		max_discard = --qty << card->erase_shift;
+		max_discard = qty << card->erase_shift;
 	else if (mmc_card_sd(card))
-		max_discard = qty;
+		max_discard = qty + 1;
 	else
-		max_discard = --qty * card->erase_size;
+		max_discard = qty * card->erase_size;
 
 	return max_discard;
 }
@@ -2333,6 +2630,9 @@ int mmc_hw_reset(struct mmc_host *host)
 	ret = host->bus_ops->reset(host);
 	mmc_bus_put(host);
 
+#if defined(CONFIG_MTK_KERNEL_SOLUTION) || defined(CONFIG_ARCH_MXC)
+	if (ret != -EOPNOTSUPP)
+#endif
 	pr_warn("%s: tried to reset card\n", mmc_hostname(host));
 
 	return ret;
@@ -2349,20 +2649,29 @@ static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
 #endif
 	mmc_power_up(host, host->ocr_avail);
 
+#ifndef CONFIG_DISABLE_UNNECESSARY_MMC_CODE
 	/*
 	 * Some eMMCs (with VCCQ always on) may not be reset after power up, so
 	 * do a hardware reset if possible.
 	 */
 	mmc_hw_reset_for_init(host);
+#endif
 
+#ifndef CONFIG_DISABLE_UNNECESSARY_MMC_CODE /* not neccesary on DTV system */
 	/*
 	 * sdio_reset sends CMD52 to reset card.  Since we do not know
 	 * if the card is being re-initialized, just send it.  CMD52
 	 * should be ignored by SD/eMMC cards.
 	 */
 	sdio_reset(host);
+#endif
 	mmc_go_idle(host);
 
+#ifndef CONFIG_DISABLE_UNNECESSARY_MMC_CODE
+	/*
+	 * not neccesary on DTV system
+	 * skip it for booting time
+	 */
 	mmc_send_if_cond(host, host->ocr_avail);
 
 	/* Order's important: probe SDIO, then SD, then MMC */
@@ -2370,6 +2679,7 @@ static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
 		return 0;
 	if (!mmc_attach_sd(host))
 		return 0;
+#endif
 	if (!mmc_attach_mmc(host))
 		return 0;
 
@@ -2526,6 +2836,10 @@ void mmc_start_host(struct mmc_host *host)
 	else
 		mmc_power_up(host, host->ocr_avail);
 	mmc_gpiod_request_cd_irq(host);
+
+#ifdef CONFIG_ARCH_MXC
+	if (!(host->caps2 & MMC_CAP2_CD_POST))
+#endif
 	_mmc_detect_change(host, 0, false);
 }
 

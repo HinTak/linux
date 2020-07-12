@@ -18,9 +18,13 @@
 #include <linux/of.h>
 #include <linux/delay.h>
 #include <uapi/linux/psci.h>
+#include <linux/psci.h>
 
 #include <asm/psci.h>
 #include <asm/smp_plat.h>
+#include <asm/cacheflush.h>
+#include <asm/cp15.h>
+#include <asm/io.h>
 
 /*
  * psci_smp assumes that the following is true about PSCI:
@@ -58,13 +62,20 @@ static int psci_boot_secondary(unsigned int cpu, struct task_struct *idle)
 #ifdef CONFIG_HOTPLUG_CPU
 void __ref psci_cpu_die(unsigned int cpu)
 {
+#ifdef CONFIG_ARCH_MXC
+	u32 state = PSCI_POWER_STATE_TYPE_POWER_DOWN <<
+		    PSCI_0_2_POWER_STATE_TYPE_SHIFT;
+
+	if (psci_ops.cpu_off)
+		psci_ops.cpu_off(state);
+#else
        const struct psci_power_state ps = {
                .type = PSCI_POWER_STATE_TYPE_POWER_DOWN,
        };
 
        if (psci_ops.cpu_off)
                psci_ops.cpu_off(ps);
-
+#endif
        /* We should never return */
        panic("psci: cpu %d failed to shutdown\n", cpu);
 }
@@ -84,6 +95,52 @@ int __ref psci_cpu_kill(unsigned int cpu)
 	for (i = 0; i < 10; i++) {
 		err = psci_ops.affinity_info(cpu_logical_map(cpu), 0);
 		if (err == PSCI_0_2_AFFINITY_LEVEL_OFF) {
+#ifdef CONFIG_ARCH_SDP1601
+			u32 val;
+			const int wfi_check_max = 10000000;
+			int wfi_check_count = 0;
+			void __iomem *sdp_bootram_power;
+
+			pr_info("SDP PSCI CPU%d killing...\n", cpu);
+
+			sdp_bootram_power = ioremap(0x00400000, 0x400); 
+			while(!(readl(sdp_bootram_power) & (1 << (cpu + 24))) && (++wfi_check_count < wfi_check_max));//wait for CPU wfi
+			val = readl(sdp_bootram_power + 0x0C);
+			val &= (~(1 << (cpu + 4)));
+			writel(val, sdp_bootram_power + 0x0C);
+
+			if(wfi_check_count >= wfi_check_max) {
+				void __iomem *gicbase = NULL;
+
+				pr_err("SDP PSCI forced killing CPU%d, cnt %d\n", cpu, wfi_check_count);
+
+				pr_err("SDP PSCI CPU%d PowerCont Reg 0x%08x\n", cpu, readl(sdp_bootram_power + 0x10 + (cpu * 4)));
+
+				pr_err("DUMP IRQ Status Reg\n");
+				print_hex_dump(KERN_ERR, "IRQStatus ", DUMP_PREFIX_ADDRESS, 16, 4,
+					sdp_bootram_power+0x90, 0x20, false);
+
+				gicbase = ioremap(0x00431000, 0x1000);
+				if(gicbase) {
+					pr_err("DUMP GIC Set-Enable Reg\n");
+					print_hex_dump(KERN_ERR, "ICDISER ", DUMP_PREFIX_ADDRESS, 16, 4, gicbase+0x100, 0x20, false);
+					pr_err("DUMP GIC Set-Pening Reg\n");
+					print_hex_dump(KERN_ERR, "ICDISPR ", DUMP_PREFIX_ADDRESS, 16, 4, gicbase+0x200, 0x20, false);
+					pr_err("DUMP GIC Processor Target Reg\n");
+					print_hex_dump(KERN_ERR, "ICDIPTR ", DUMP_PREFIX_ADDRESS, 16, 4, gicbase+0x800, 0x100, false);
+
+					iounmap(gicbase);
+				} else {
+					pr_err("ioremap(0x00431000, 0x1000) return NULL\n");
+				}
+			}
+
+			iounmap(sdp_bootram_power);
+
+			if(wfi_check_count > 0) {
+				pr_info("SDP PSCI CPU%d killed. check count %d\n", cpu, wfi_check_count);
+			}
+#endif
 			pr_info("CPU%d killed.\n", cpu);
 			return 1;
 		}
@@ -105,8 +162,11 @@ bool __init psci_smp_available(void)
 	/* is cpu_on available at least? */
 	return (psci_ops.cpu_on != NULL);
 }
-
+#ifdef CONFIG_ARCH_MXC
+const struct smp_operations psci_smp_ops __initconst = {
+#else
 struct smp_operations __initdata psci_smp_ops = {
+#endif
 	.smp_boot_secondary	= psci_boot_secondary,
 #ifdef CONFIG_HOTPLUG_CPU
 	.cpu_die		= psci_cpu_die,

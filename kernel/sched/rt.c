@@ -886,6 +886,8 @@ static inline int rt_se_prio(struct sched_rt_entity *rt_se)
 	return rt_task_of(rt_se)->prio;
 }
 
+static DEFINE_RATELIMIT_STATE(rt_ratelimit, 10 * HZ, 4);
+
 static int sched_rt_runtime_exceeded(struct rt_rq *rt_rq)
 {
 	u64 runtime = sched_rt_runtime(rt_rq);
@@ -909,8 +911,12 @@ static int sched_rt_runtime_exceeded(struct rt_rq *rt_rq)
 		 * but accrue some time due to boosting.
 		 */
 		if (likely(rt_b->rt_runtime)) {
+			struct task_struct *task = rq_of_rt_rq(rt_rq)->curr;
+
 			rt_rq->rt_throttled = 1;
-			printk_deferred_once("sched: RT throttling activated\n");
+			if (__ratelimit(&rt_ratelimit))
+				printk_deferred("sched: RT throttling activated comm:%s pid:%d tgid:%d, exec_start:%llu, exec_runtime:%llu\n",
+						task->comm, task->pid, task->tgid, task->se.exec_start, task->se.sum_exec_runtime);
 		} else {
 			/*
 			 * In case we did anyway, make it go away,

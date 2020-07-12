@@ -170,7 +170,9 @@ static struct usb_device_descriptor device_desc = {
 	/* NO SERIAL NUMBER */
 	.bNumConfigurations =	1,
 };
-
+#ifdef CONFIG_ARCH_MXC
+static const struct usb_descriptor_header *otg_desc[2];
+#else
 static struct usb_otg_descriptor otg_descriptor = {
 	.bLength =		sizeof otg_descriptor,
 	.bDescriptorType =	USB_DT_OTG,
@@ -185,7 +187,7 @@ static const struct usb_descriptor_header *otg_desc[] = {
 	(struct usb_descriptor_header *) &otg_descriptor,
 	NULL,
 };
-
+#endif
 static struct usb_string strings_dev[] = {
 	[USB_GADGET_MANUFACTURER_IDX].s = "",
 	[USB_GADGET_PRODUCT_IDX].s = PREFIX DRIVER_DESC,
@@ -415,25 +417,47 @@ static int eth_bind(struct usb_composite_dev *cdev)
 		goto fail1;
 	device_desc.iManufacturer = strings_dev[USB_GADGET_MANUFACTURER_IDX].id;
 	device_desc.iProduct = strings_dev[USB_GADGET_PRODUCT_IDX].id;
+#ifdef CONFIG_ARCH_MXC
+	if (gadget_is_otg(gadget) && !otg_desc[0]) {
+		struct usb_descriptor_header *usb_desc;
 
+		usb_desc = usb_otg_descriptor_alloc(gadget);
+		if (!usb_desc)
+			goto fail1;
+		usb_otg_descriptor_init(gadget, usb_desc);
+		otg_desc[0] = usb_desc;
+		otg_desc[1] = NULL;
+	}
+#endif
 	/* register our configuration(s); RNDIS first, if it's used */
 	if (has_rndis()) {
 		status = usb_add_config(cdev, &rndis_config_driver,
 				rndis_do_config);
 		if (status < 0)
+#ifdef CONFIG_ARCH_MXC
+			goto fail2;
+#else
 			goto fail1;
+#endif			
 	}
 
 	status = usb_add_config(cdev, &eth_config_driver, eth_do_config);
 	if (status < 0)
+#ifdef CONFIG_ARCH_MXC
+		goto fail2;
+#else
 		goto fail1;
-
+#endif
 	usb_composite_overwrite_options(cdev, &coverwrite);
 	dev_info(&gadget->dev, "%s, version: " DRIVER_VERSION "\n",
 			DRIVER_DESC);
 
 	return 0;
-
+#ifdef CONFIG_ARCH_MXC
+fail2:
+	kfree(otg_desc[0]);
+	otg_desc[0] = NULL;
+#endif
 fail1:
 	if (has_rndis())
 		usb_put_function_instance(fi_rndis);
@@ -463,6 +487,10 @@ static int eth_unbind(struct usb_composite_dev *cdev)
 		usb_put_function(f_geth);
 		usb_put_function_instance(fi_geth);
 	}
+#ifdef CONFIG_ARCH_MXC
+	kfree(otg_desc[0]);
+	otg_desc[0] = NULL;
+#endif
 	return 0;
 }
 

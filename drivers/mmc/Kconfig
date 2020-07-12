@@ -12,6 +12,8 @@ menuconfig MMC
 	  If you want MMC/SD/SDIO support, you should say Y here and
 	  also to your specific host controller driver.
 
+if MMC
+
 config MMC_DEBUG
 	bool "MMC debugging"
 	depends on MMC != n
@@ -19,7 +21,26 @@ config MMC_DEBUG
 	  This is an option for use by developers; most people should
 	  say N here.  This enables MMC core and driver debugging.
 
-if MMC
+
+config HW_DECOMPRESSOR
+	bool "Platform has hardware decompressor"
+	#depends on (ARCH_NVT_V7 || ARCH_SDP) (selected by chip vendor)
+
+config HW_DECOMP_BLK_MMC_SUBSYSTEM
+	bool "HW decompression from the MMC layer"
+	depends on HW_DECOMPRESSOR
+    help
+        This option enables hardware decompression from MMC layer.
+        Fs layer should be aware of this special call and should
+        use it properly.
+
+config MMC_PROTECT_GPT_AREA_FROM_WRITING
+	bool "Protect GPT Area"
+	depends on MMC
+	default n
+	help
+	  This option protects GPT area from writing.
+
 
 source "drivers/mmc/core/Kconfig"
 

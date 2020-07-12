@@ -39,6 +39,8 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/filemap.h>
 
+#include <linux/vdfs_trace.h>	/* FlashFS : vdfs-trace */
+
 /*
  * FIXME: remove all knowledge of the buffer layer from the core VM
  */
@@ -791,9 +793,12 @@ void page_endio(struct page *page, int rw, int err)
 		unlock_page(page);
 	} else { /* rw == WRITE */
 		if (err) {
+			struct address_space *mapping;
+
 			SetPageError(page);
-			if (page->mapping)
-				mapping_set_error(page->mapping, err);
+			mapping = page_mapping(page);
+			if (mapping)
+				mapping_set_error(mapping, err);
 		}
 		end_page_writeback(page);
 	}
@@ -1442,6 +1447,10 @@ EXPORT_SYMBOL(find_get_pages_tag);
 static void shrink_readahead_size_eio(struct file *filp,
 					struct file_ra_state *ra)
 {
+#ifdef CONFIG_FS_SEL_READAHEAD
+	if (!ra->state)
+		return;
+#endif
 	ra->ra_pages /= 4;
 }
 
@@ -1470,6 +1479,7 @@ static ssize_t do_generic_file_read(struct file *filp, loff_t *ppos,
 	unsigned long offset;      /* offset into pagecache page */
 	unsigned int prev_offset;
 	int error = 0;
+	int ra_count = 0; /* Manish */
 
 	index = *ppos >> PAGE_CACHE_SHIFT;
 	prev_index = ra->prev_pos >> PAGE_CACHE_SHIFT;
@@ -1485,6 +1495,11 @@ static ssize_t do_generic_file_read(struct file *filp, loff_t *ppos,
 
 		cond_resched();
 find_page:
+		if (fatal_signal_pending(current)) {
+			error = -EINTR;
+			goto out;
+		}
+
 		page = find_get_page(mapping, index);
 		if (!page) {
 			page_cache_sync_readahead(mapping,
@@ -1637,6 +1652,22 @@ readpage:
 			unlock_page(page);
 		}
 
+		/*
+		 * Manish (m03.kumar@samsung.com):
+		 * This is just heuristic, not a solution.
+		 * Readahead size is scaled up as soon as we get sufficient
+		 * good pages to avoid permanent slowdown.
+		 */
+		if (!ra->ra_pages && ra_count >=
+			(2 * VM_MAX_READAHEAD * 1024 / PAGE_CACHE_SIZE)) {
+				ra->ra_pages = 2;
+				ra_count = 0;
+		} else if (!ra->ra_pages && ra_count <
+			(2 * VM_MAX_READAHEAD * 1024 / PAGE_CACHE_SIZE)) {
+				ra_count++;
+		}
+		/* Manish: I am done */
+
 		goto page_ok;
 
 readpage_error:
@@ -1782,6 +1813,7 @@ static void do_sync_mmap_readahead(struct vm_area_struct *vma,
 {
 	unsigned long ra_pages;
 	struct address_space *mapping = file->f_mapping;
+	VT_PREPARE_PARAM(vt_data);
 
 	/* If we don't want any read-ahead, don't bother */
 	if (vma->vm_flags & VM_RAND_READ)
@@ -1790,8 +1822,11 @@ static void do_sync_mmap_readahead(struct vm_area_struct *vma,
 		return;
 
 	if (vma->vm_flags & VM_SEQ_READ) {
+		VT_FAULT_START(vt_data, vma, offset, ra->ra_pages,
+				FAULT_SYNC_RA);
 		page_cache_sync_readahead(mapping, ra, file, offset,
 					  ra->ra_pages);
+		VT_FINISH(vt_data);
 		return;
 	}
 
@@ -1803,17 +1838,24 @@ static void do_sync_mmap_readahead(struct vm_area_struct *vma,
 	 * Do we miss much more than hit in this file? If so,
 	 * stop bothering with read-ahead. It will only hurt.
 	 */
-	if (ra->mmap_miss > MMAP_LOTSAMISS)
+	if (ra->mmap_miss > MMAP_LOTSAMISS) {
 		return;
+	}
 
 	/*
 	 * mmap read-around
 	 */
+#ifdef CONFIG_FS_SEL_READAHEAD
+	ra_pages = (!ra->state ? 0 : max_sane_readahead(file->f_ra.ra_pages));
+#else
 	ra_pages = max_sane_readahead(ra->ra_pages);
+#endif
 	ra->start = max_t(long, 0, offset - ra_pages / 2);
 	ra->size = ra_pages;
 	ra->async_size = ra_pages / 4;
+	VT_FAULT_START(vt_data, vma, ra->start, ra->size, FAULT_SYNC_RA);
 	ra_submit(ra, mapping, file);
+	VT_FINISH(vt_data);
 }
 
 /*
@@ -1827,15 +1869,20 @@ static void do_async_mmap_readahead(struct vm_area_struct *vma,
 				    pgoff_t offset)
 {
 	struct address_space *mapping = file->f_mapping;
+	VT_PREPARE_PARAM(vt_data);
 
 	/* If we don't want any read-ahead, don't bother */
 	if (vma->vm_flags & VM_RAND_READ)
 		return;
 	if (ra->mmap_miss > 0)
 		ra->mmap_miss--;
-	if (PageReadahead(page))
+	if (PageReadahead(page)) {
+		VT_FAULT_START(vt_data, vma, offset, ra->ra_pages,
+				FAULT_ASYNC_RA);
 		page_cache_async_readahead(mapping, ra, file,
 					   page, offset, ra->ra_pages);
+		VT_FINISH(vt_data);
+	}
 }
 
 /**
@@ -1873,6 +1920,8 @@ int filemap_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	struct page *page;
 	loff_t size;
 	int ret = 0;
+
+	VT_PREPARE_PARAM(vt_data);
 
 	size = round_up(i_size_read(inode), PAGE_CACHE_SIZE);
 	if (offset >= size >> PAGE_CACHE_SHIFT)
@@ -1939,7 +1988,10 @@ no_cached_page:
 	 * We're only likely to ever get here if MADV_RANDOM is in
 	 * effect.
 	 */
+	/* non read-ahead */
+	VT_FAULT_START(vt_data, vma, offset, 1, FAULT_NON_RA);
 	error = page_cache_read(file, offset);
+	VT_FINISH(vt_data);
 
 	/*
 	 * The page we want has now been added to the page cache.

@@ -11,3 +11,7 @@ obj-$(CONFIG_OMAP2PLUS_MBOX)	+= omap-mailbox.o
 obj-$(CONFIG_PCC)		+= pcc.o
 
 obj-$(CONFIG_ALTERA_MBOX)	+= mailbox-altera.o
+
+obj-$(CONFIG_SDP_MICOM_MSGBOX)	+= sdp_micom_msgbox.o
+
+obj-$(CONFIG_SDP_MICOM_CONTROLLER)	+= sdp_micom_ctrl.o

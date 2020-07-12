@@ -578,7 +578,11 @@ long work_on_cpu(int cpu, long (*fn)(void *), void *arg);
 
 #ifdef CONFIG_FREEZER
 extern void freeze_workqueues_begin(void);
+#ifdef CONFIG_INFO_TASK_FREEZE_FAIL
+extern bool freeze_workqueues_busy(bool dbg);
+#else
 extern bool freeze_workqueues_busy(void);
+#endif
 extern void thaw_workqueues(void);
 #endif /* CONFIG_FREEZER */
 

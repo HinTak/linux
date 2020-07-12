@@ -1,0 +1,62 @@
+/*
+ * Copyright 2019 NXP
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
+
+#include "fsl-imx8mm-sbp.dts"
+
+/ {
+	interrupt-parent = <&gpc>;
+};
+
+&{/psci} {
+	method = "hvc";
+};
+
+&CPU_SLEEP {
+	/*
+	 * Same content in fsl-imx8mm.dtsi, just be care
+	 * with jailhouse/jh-stub
+	 */
+};
+
+&{/busfreq} {
+	/* Disable busfreq, to avoid 1st Linux busfreq crash other inmates */
+	status = "okay";
+};
+
+&{/reserved-memory} {
+	ivshmem_reserved: ivshmem@0x7c180000 {
+		no-map;
+		reg = <0 0x7c180000 0x0 0x00280000>;
+	};
+
+	pci_reserved: pci@0x7c000000 {
+		no-map;
+		reg = <0 0x7c000000 0x0 0x00180000>;
+	};
+
+	loader_reserved: loader@0x7be00000 {
+		no-map;
+		reg = <0 0x7be00000 0x0 0x00200000>;
+	};
+
+	jh_reserved: jh@0x7dc00000 {
+		no-map;
+		reg = <0 0x7dc00000 0x0 0x00400000>;
+	};
+
+	inmate_reserved: inmate@0x7c400000 {
+		no-map;
+		reg = <0 0x7c400000 0x0 0x01800000>;
+	};
+};

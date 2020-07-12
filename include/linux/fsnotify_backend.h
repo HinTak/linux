@@ -183,6 +183,9 @@ struct fsnotify_group {
 			wait_queue_head_t access_waitq;
 			atomic_t bypass_perm;
 #endif /* CONFIG_FANOTIFY_ACCESS_PERMISSIONS */
+#if defined(CONFIG_SECURITY_SFD) && defined(CONFIG_SECURITY_SFD_SECURECONTAINER)
+			unsigned char container;
+#endif
 			int f_flags;
 			unsigned int max_marks;
 			struct user_struct *user;

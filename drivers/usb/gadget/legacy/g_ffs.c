@@ -88,6 +88,9 @@ MODULE_PARM_DESC(bDeviceProtocol, "USB Device protocol");
 module_param_array_named(functions, func_names, charp, &func_num, 0);
 MODULE_PARM_DESC(functions, "USB Functions list");
 
+#ifdef CONFIG_ARCH_MXC
+static const struct usb_descriptor_header *gfs_otg_desc[2];
+#else
 static const struct usb_descriptor_header *gfs_otg_desc[] = {
 	(const struct usb_descriptor_header *)
 	&(const struct usb_otg_descriptor) {
@@ -103,7 +106,7 @@ static const struct usb_descriptor_header *gfs_otg_desc[] = {
 
 	NULL
 };
-
+#endif
 /* String IDs are assigned dynamically */
 static struct usb_string gfs_strings[] = {
 	[USB_GADGET_MANUFACTURER_IDX].s = "",
@@ -411,7 +414,18 @@ static int gfs_bind(struct usb_composite_dev *cdev)
 	if (unlikely(ret < 0))
 		goto error_rndis;
 	gfs_dev_desc.iProduct = gfs_strings[USB_GADGET_PRODUCT_IDX].id;
+#ifdef CONFIG_ARCH_MXC
+	if (gadget_is_otg(cdev->gadget) && !gfs_otg_desc[0]) {
+		struct usb_descriptor_header *usb_desc;
 
+		usb_desc = usb_otg_descriptor_alloc(cdev->gadget);
+		if (!usb_desc)
+			goto error_rndis;
+		usb_otg_descriptor_init(cdev->gadget, usb_desc);
+		gfs_otg_desc[0] = usb_desc;
+		gfs_otg_desc[1] = NULL;
+	}
+#endif
 	for (i = 0; i < ARRAY_SIZE(gfs_configurations); ++i) {
 		struct gfs_configuration *c = gfs_configurations + i;
 		int sid = USB_GADGET_FIRST_AVAIL_IDX + i;
@@ -432,6 +446,10 @@ static int gfs_bind(struct usb_composite_dev *cdev)
 
 /* TODO */
 error_unbind:
+#ifdef CONFIG_ARCH_MXC
+	kfree(gfs_otg_desc[0]);
+	gfs_otg_desc[0] = NULL;
+#endif	
 error_rndis:
 #ifdef CONFIG_USB_FUNCTIONFS_RNDIS
 	usb_put_function_instance(fi_rndis);
@@ -472,7 +490,10 @@ static int gfs_unbind(struct usb_composite_dev *cdev)
 #endif
 	for (i = 0; i < N_CONF * func_num; ++i)
 		usb_put_function(*(f_ffs[0] + i));
-
+#ifdef CONFIG_ARCH_MXC
+	kfree(gfs_otg_desc[0]);
+	gfs_otg_desc[0] = NULL;
+#endif
 	return 0;
 }
 

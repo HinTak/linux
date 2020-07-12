@@ -21,6 +21,10 @@
 #include <linux/pid_namespace.h>
 #include <linux/parser.h>
 
+#ifdef CONFIG_FS_SEL_READAHEAD
+extern void readahead_init(void);
+#endif
+
 #include "internal.h"
 
 static int proc_test_super(struct super_block *sb, void *data)
@@ -180,6 +184,11 @@ void __init proc_root_init(void)
 	proc_mkdir("fs", NULL);
 	proc_mkdir("driver", NULL);
 	proc_create_mount_point("fs/nfsd"); /* somewhere for the nfsd filesystem to be mounted */
+ 	/* intialize readahead state */
+#ifdef CONFIG_FS_SEL_READAHEAD
+        readahead_init();
+#endif
+
 #if defined(CONFIG_SUN_OPENPROMFS) || defined(CONFIG_SUN_OPENPROMFS_MODULE)
 	/* just give it a mountpoint */
 	proc_create_mount_point("openprom");
@@ -261,6 +270,7 @@ int pid_ns_prepare_proc(struct pid_namespace *ns)
 		return PTR_ERR(mnt);
 
 	ns->proc_mnt = mnt;
+
 	return 0;
 }
 

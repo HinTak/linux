@@ -32,6 +32,58 @@
 #include "entry-header.S"
 #include <asm/entry-macro-multi.S>
 #include <asm/probes.h>
+#ifdef CONFIG_IRQ_STACK
+#include <asm/irq.h>
+
+	.macro  irq_stack_entry
+	/*
+	 * Back up of only r5 register required.
+	 * But as per ARM guide, sp should be 8 byte align
+	 * before new frame, so added r6 also.
+	 */
+	stmfd	sp!, {r5, r6}
+	mov	r8, sp		// preserve the original sp
+
+	this_cpu_ptr irq_stack_ptr, r7, r6
+	ldr	r7, [r7]
+	add	r6, r7, #IRQ_STACK_SIZE
+	mov	r5, r7
+
+	eor	r7, r7, r8
+	lsr	r7, #THREAD_SIZE_ORDER + PAGE_SHIFT
+	lsls	r7, #THREAD_SIZE_ORDER + PAGE_SHIFT
+	beq	9998f
+
+	/*
+	 * store thread info pointer on IRQ stack and
+	 * switch to the irq stack.
+	 */
+	get_thread_info r7
+#ifdef CONFIG_KERNEL_STACK_SMALL
+	add	r5, r5, #PAGE_SIZE
+	str	r7, [r5, #THREAD_START_SAVE - PAGE_SIZE]
+	sub	r5, r5, #PAGE_SIZE
+	sub	sp, r6, #16
+#else
+	str	r7, [r5]
+	mov	sp, r6
+#endif
+	str	fp, [r5, #4]
+	str	r8, [r5, #8]
+	mov	fp, r6
+9998:
+        .endm
+
+	/*
+	 * r5, r8 should be preserved between irq_stack_entry and
+	 * irq_stack_exit.
+	 */
+	.macro	irq_stack_exit
+	mov	sp, r8
+	ldr	fp, [r5, #4]
+	ldmfd	sp!, {r5, r6}
+       .endm
+#endif /* CONFIG_IRQ_STACK */
 
 /*
  * Interrupt handling.
@@ -41,11 +93,17 @@
 	ldr	r1, =handle_arch_irq
 	mov	r0, sp
 	adr	lr, BSYM(9997f)
+#ifdef CONFIG_IRQ_STACK
+	irq_stack_entry
+#endif
 	ldr	pc, [r1]
+9997:
+#ifdef CONFIG_IRQ_STACK
+	irq_stack_exit
+#endif
 #else
 	arch_irq_handler_default
 #endif
-9997:
 	.endm
 
 	.macro	pabt_helper
@@ -190,8 +248,73 @@ ENDPROC(__und_invalid)
 	.endif
 	.endm
 
+	.macro	check_overflow
+	str	r7, [r0, #12]	@ save r7, r8 to detect stack overflow
+	str	r8, [r0, #16]
+	get_thread_info	r7
+	ldr	r8, [r7, #TI_FLAGS]
+	tst	r8, #_TIF_VMAP_STACK_ALLOC	@ check if extra stack mapping requested.
+	bne	9998f
+	mrc	p15, 0, r7, c6, c0, 0   @ Read Data Fault Address Register
+	lsr	r7, #PAGE_SHIFT
+	lsl	r7, #PAGE_SHIFT
+	mov	r8, sp, lsr #PAGE_SHIFT
+	lsl	r8, #PAGE_SHIFT
+	cmp	r7, r8
+	beq	9998f
+	sub	r8, sp, r8
+	cmp	r8, #200	@ check 200 bytes available on stack or not.
+	bgt	9999f
+9998:				@ Fault Address point to Stack pointer
+				@ and it hits Gaurd Page or going to hit
+				@ if less than 200 bytes reamin on stack.
+	/* Switch to IRQ Stack */
+	str	r9, [r0, #20]	@ save r9 to handle stack overflow.
+	get_thread_info	r9
+	ldr	r8, [r9, #TI_FLAGS]
+	tst	r8, #_TIF_VM_STACK	@ check if extra stack is already mapped.
+	ldrne	r9, [r0, #20]
+	bne	9999f
+	this_cpu_ptr irq_stack_ptr, r7, r8
+	ldr	r7, [r7]
+	mov	r8, sp
+	add	r7, r7, #PAGE_SIZE
+	str	r9, [r7, #THREAD_START_SAVE - PAGE_SIZE]
+	sub	r7, r7, #PAGE_SIZE
+	str	fp, [r7, #4]
+	str	sp, [r7, #8]
+	add	r7, #IRQ_STACK_SIZE
+
+	sub	sp, r7, #(S_FRAME_SIZE + 8)
+	str	r8, [sp, #S_SP]         // Store SP
+	ldr	r7, [r0, #4]
+	str	r7, [sp, #S_PC]         // Store Return PC
+	str	lr, [sp, #S_LR]         // Store LR
+	ldr	r7, [r0, #8]
+	str	r7, [sp, #S_PSR]        // Store SPSR
+	ldr	r7, [r0, #12]           @ Restore r7
+	ldr	r8, [r0, #16]           @ Restore r8
+	ldr	r9, [r0, #20]           @ Restore r9
+	ldr	r0, [r0]
+	stmia	sp, {r0 - r12}
+
+	mov	r0, sp
+	mrc	p15, 0, r1, c6, c0, 0
+	mrc	p15, 0, r2, c5, c0, 0
+	bl	do_stackoverflow
+	ldr	r0, [sp, #S_PSR]
+	msr	spsr_cxsf, r0
+	ldmia	sp, {r0 - pc}^
+9999:
+	ldr	r7, [r0, #12]		@ Restore r7
+	ldr	r8, [r0, #16]		@ Restore r8
+	.endm
+
 	.align	5
 __dabt_svc:
+#ifdef CONFIG_KERNEL_STACK_SMALL
+	check_overflow
+#endif
 	svc_entry
 	mov	r2, sp
 	dabt_helper
@@ -222,6 +345,7 @@ ENDPROC(__irq_svc)
 	.ltorg
 
 #ifdef CONFIG_PREEMPT
+.pushsection .irqentry.text, "ax"
 svc_preempt:
 	mov	r8, lr
 1:	bl	preempt_schedule_irq		@ irq en/disable is done inside
@@ -229,6 +353,7 @@ svc_preempt:
 	tst	r0, #_TIF_NEED_RESCHED
 	reteq	r8				@ go again
 	b	1b
+.popsection
 #endif
 
 __und_fault:

@@ -20,6 +20,11 @@
 #include <linux/usb.h>
 #include <linux/usb/hcd.h>
 #include "usb.h"
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+#include <linux/priority_devconfig.h>
+void instant_resume_suspended_device(struct usb_device *udev);
+extern struct instant_resume_control instant_ctrl;
+#endif
 
 static inline const char *plural(int n)
 {
@@ -213,9 +218,50 @@ static int generic_suspend(struct usb_device *udev, pm_message_t msg)
 		rc = 0;
 	else
 		rc = usb_port_suspend(udev, msg);
-
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+	instant_resume_suspended_device(udev);
+#endif
 	return rc;
 }
+
+#if defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME)||defined(CONFIG_SAMSUNG_USB_PARALLEL_RESUME_MODULE)
+void inline instant_resume_suspended_device(struct usb_device *udev)
+{
+	struct resume_devnode *dev = udev->devnode;
+	struct instant_resume_tree *head;
+	unsigned long irq_flags;	
+
+	if(dev != NULL){
+		head = instant_ctrl.instant_tree[dev->busnum -1];
+		if((0 < dev->priority) && (dev->priority <= MAX_PRIORITY)){
+			mutex_lock(&head->priority_lock);
+			set_bit(udev->devnode->priority, &head->priority_count);
+			mutex_unlock(&head->priority_lock);
+			if(dev->usb_family == BT_FAMILY){
+				mutex_lock(&instant_ctrl.defer_lock);
+				set_bit(dev->priority, &instant_ctrl.family_ctrl);
+				mutex_unlock(&instant_ctrl.defer_lock);
+			}else if(dev->usb_family == WIFI_FAMILY){
+				set_bit(dev->priority, &instant_ctrl.wifi_ctrl);
+			}
+		}
+		if(dev->is_instant_point){
+			dev_info(&udev->dev, " gets into %s\n", __func__);
+			dev->head->will_resume = 1;
+			/*Controlling events to be added to khubd wq*/
+			spin_lock_irqsave(&instant_ctrl.off_khubd_lock, irq_flags);
+			instant_ctrl.off_khubd = true;
+			spin_unlock_irqrestore(&instant_ctrl.off_khubd_lock, irq_flags);
+#ifdef PARALLEL_RESET_RESUME_USER_PORT_DEVICES
+			mutex_lock(&instant_ctrl.defer_lock);
+			set_bit(dev->busnum, &instant_ctrl.instant_point_fail_count);
+			mutex_unlock(&instant_ctrl.defer_lock);
+			instant_ctrl.user_port_resume = true;
+#endif
+		}
+	}
+}
+#endif
 
 static int generic_resume(struct usb_device *udev, pm_message_t msg)
 {
@@ -243,5 +289,5 @@ struct usb_device_driver usb_generic_driver = {
 	.suspend = generic_suspend,
 	.resume = generic_resume,
 #endif
-	.supports_autosuspend = 1,
+	.supports_autosuspend = 0,
 };

@@ -162,8 +162,14 @@ int snd_usb_endpoint_next_packet_size(struct snd_usb_endpoint *ep)
 static void retire_outbound_urb(struct snd_usb_endpoint *ep,
 				struct snd_urb_ctx *urb_ctx)
 {
-	if (ep->retire_data_urb)
+	if (ep->retire_data_urb) {
+		if (ep->data_subs == NULL) {
+			snd_printk(KERN_ERR "substream is null. use_count: %d",
+			           ep->use_count);
+			return;
+		}
 		ep->retire_data_urb(ep->data_subs, urb_ctx->urb);
+	}
 }
 
 static void retire_inbound_urb(struct snd_usb_endpoint *ep,
@@ -179,8 +185,14 @@ static void retire_inbound_urb(struct snd_usb_endpoint *ep,
 	if (ep->sync_slave)
 		snd_usb_handle_sync_urb(ep->sync_slave, ep, urb);
 
-	if (ep->retire_data_urb)
+	if (ep->retire_data_urb) {
+		if (ep->data_subs == NULL) {
+			snd_printk(KERN_ERR "substream is null. use_count: %d",
+			           ep->use_count);
+			return;
+		}
 		ep->retire_data_urb(ep->data_subs, urb);
+	}
 }
 
 /*

@@ -1,0 +1,97 @@
+                           HW decompression simple porting guide
+                           -------------------------------------
+
+Table of contents
+-----------------
+
+1. Overview and history
+2. Must have file
+3. Which function, data structure must be provided
+4. consideration point
+
+1. Overview and history
+------------------------
+Originally, H/W decompress is used for SS internal chip case. 
+and When we did other project with external chip vendor, We also need HW 
+decompressor for performance. So we modify hw_decompressor.c for common usage. 
+And each chip vendor follow some rule to use it. this doc describe which point 
+must be satisfied
+
+2. Must have file
+----------------------------------
+
+  #include <mach/hw_decompress.h>
+
+Upper layer (normally Filesystem) call hw_decompress_sync(), get_hw_capability() for HW decompressor.  
+Upper layer assumes that hw_decompress.h includes this function and include this header file. 
+So chip vendor must implement it. Please refer following file to see 
+how to include header file
+- fs/vdfs4/inode.c
+- fs/squashfs/zlib_wrapper.c
+
+  #include "hw_decompress.h"
+
+This file is located at ./drivers/mmc/card/. This file includes function list which is called 
+at common HW decompressor (hw_decompressor.c) and ioctl (block.c). Chip vendor must support
+these function. Please refer following file to refer
+- drivers/mmc/card/block.c
+- drivers/mmc/card/hw_decompressor.c
+
+  #include "hw_decompress_types.h"
+
+- typedef void (*unzip_cb_t)(int err, int decompressed, void *arg);
+this file includes function pointer. and this function pointer is used unzip_decompress_async() 
+as argument. When you use unzip_decompress_async(), You must include this file
+
+3. Which function, data structure must be provided
+-------------------------------------------------------
+
+  struct unzip_buf {}
+you must include vaddr. hw_decompress_fn()(<- hw_decompress.c) use vaddr to calculate payload.
+
+And Each chip vendor must support following 5 functions. HW decompressor common code already 
+define hw_decompress.h(./drivers/mmc/card/) and include followings functions. 
+if H/W sha doesn't support, No need to support calculate_hash_hw_sha256();
+
+  struct unzip_buf *unzip_alloc(size_t len);
+  void unzip_free(struct unzip_buf *buf);
+  void unzip_update_endpointer(void);
+  int unzip_decompress_async(struct unzip_buf *buf, int off, struct page **opages, int npages, unzip_cb_t cb, void *arg, bool may_wait, bool last_input);
+  int unzip_decompress_wait(int npage, struct page ** opages)  
+  int calculate_hash_hw_sha256(unsigned char *buf, unsigned int buf_len, unsigned char *hash); 
+
+4. consideration point
+-------------------------------------------------------
+
+Basically, Chip vendor never modify hw_decompress.c for their purpose because this code affects
+other all project. So if chip vendor needs to modify their code in here. Chip vendor must use
+#ifdef CONFIG_XXXXXX (chip vendor config). and you need to consider following things too
+
+  last argument of unzip_decompress_async() calling
+
+unzip_decompress_async() is called twice in hw_decompressor.c.
+- preinit_decompressor()
+- do_decompression()
+in this time, Each chip vendor consider last argument handling of this function 
+(some chip case need to care last input indicator. other chip don't)
+
+  struct hw_req {}
+
+hw_decompressor.c supports basic structure. some chip vendor needs additional field to do decompress
+
+  hash support function
+
+hw decompressor also need to support hash calculation. some chip can support H/W sha and other can't.
+  relationship setting config HW_DECOMPRESSOR, HW_DECOMP_BLK_MMC_SUBSYSTEM
+
+if chip supports HW decompressor, Chip vendor must set a dependecy to HW_DECOMPRESSOR
+	(arch/arm/Kconfig)
+	config HW_DECOMPRESSOR
+        	bool "Platform has hardware decompressor"
+	        depends on (ARCH_NVT_V7 || ARCH_SDP)
+
+and chip must define a config and set a dependency to HW_DECOMP_BLK_MMC_SUBSYSTEM
+	(drivers/mmc/Kconfig)
+	config HW_DECOMP_BLK_MMC_SUBSYSTEM
+		bool "HW decompression from the MMC layer"
+		depends on SDP_UNZIP || NVT_UNZIP

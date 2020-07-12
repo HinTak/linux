@@ -1,0 +1,16 @@
+Device-Tree bindings for SUNXI IR controller found in sunXi SoC family
+
+Required properties:
+- compatible	    : "nvt,nvt-irb"
+- interrupts	    : should contain IRB IRQ number;
+- reg		    : should contain IO map address for IRB.
+
+Optional properties:
+
+Example:
+
+nvt_irb: nvt_irb@fd0a8000 {
+    compatible = "nvt,nvt-irb";
+    reg = <0xfd0a8000 0x200>;
+    interrupts = <0x0 0xb1 0x4>;
+};

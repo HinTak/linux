@@ -313,6 +313,11 @@ dtb-$(CONFIG_SOC_IMX6SX) += \
 	imx6sx-sabreauto.dtb \
 	imx6sx-sdb-reva.dtb \
 	imx6sx-sdb.dtb
+dtb-$(CONFIG_SOC_IMX8MM) += \
+	fsl-imx8mm-sbp-tizen.dtb \
+	fsl-imx8mm-sbp-root.dtb \
+	fsl-imx8mm-sbp-af.dtb \
+	fsl-imx8mm-sbp.dtb
 dtb-$(CONFIG_SOC_LS1021A) += \
 	ls1021a-qds.dtb \
 	ls1021a-twr.dtb
@@ -660,6 +665,8 @@ dtb-$(CONFIG_ARCH_MEDIATEK) += \
 	mt6592-evb.dtb \
 	mt8127-moose.dtb \
 	mt8135-evbp1.dtb
+dtb-$(CONFIG_ARCH_NVT72668) += nvtca9-72668.dtb
+dtb-$(CONFIG_ARCH_NVT72658) += nvtca9-72658.dtb
 endif
 
 always		:= $(dtb-y)

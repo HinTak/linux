@@ -14,6 +14,9 @@
 #include "power.h"
 
 typedef int (*pm_callback_t)(struct device *);
+#if defined(CONFIG_SCHED_HMP)
+extern int big_core;
+#endif
 
 static pm_callback_t __rpm_get_callback(struct device *dev, size_t cb_offset)
 {
@@ -334,7 +337,11 @@ static int rpm_idle(struct device *dev, int rpmflags)
 		dev->power.request = RPM_REQ_IDLE;
 		if (!dev->power.request_pending) {
 			dev->power.request_pending = true;
-			queue_work(pm_wq, &dev->power.work);
+#if defined(CONFIG_SCHED_HMP)
+			queue_work_on(big_core, pm_wq, &dev->power.work);
+#else
+ 			queue_work(pm_wq, &dev->power.work);
+#endif
 		}
 		trace_rpm_return_int(dev, _THIS_IP_, 0);
 		return 0;
@@ -452,7 +459,11 @@ static int rpm_suspend(struct device *dev, int rpmflags)
 			if (!(dev->power.timer_expires && time_before_eq(
 			    dev->power.timer_expires, expires))) {
 				dev->power.timer_expires = expires;
+#if defined(CONFIG_SCHED_HMP)
+				mod_timer_on(&dev->power.suspend_timer, big_core, expires);
+#else
 				mod_timer(&dev->power.suspend_timer, expires);
+#endif
 			}
 			dev->power.timer_autosuspends = 1;
 			goto out;
@@ -505,7 +516,11 @@ static int rpm_suspend(struct device *dev, int rpmflags)
 		    RPM_REQ_AUTOSUSPEND : RPM_REQ_SUSPEND;
 		if (!dev->power.request_pending) {
 			dev->power.request_pending = true;
+#if defined(CONFIG_SCHED_HMP)
+			queue_work_on(big_core, pm_wq, &dev->power.work);
+#else
 			queue_work(pm_wq, &dev->power.work);
+#endif
 		}
 		goto out;
 	}
@@ -688,7 +703,11 @@ static int rpm_resume(struct device *dev, int rpmflags)
 		dev->power.request = RPM_REQ_RESUME;
 		if (!dev->power.request_pending) {
 			dev->power.request_pending = true;
+#if defined(CONFIG_SCHED_HMP)
+			queue_work_on(big_core, pm_wq, &dev->power.work);
+#else
 			queue_work(pm_wq, &dev->power.work);
+#endif
 		}
 		retval = 0;
 		goto out;
@@ -857,7 +876,11 @@ int pm_schedule_suspend(struct device *dev, unsigned int delay)
 	dev->power.timer_expires = jiffies + msecs_to_jiffies(delay);
 	dev->power.timer_expires += !dev->power.timer_expires;
 	dev->power.timer_autosuspends = 0;
+#if defined(CONFIG_SCHED_HMP)
+	mod_timer_on(&dev->power.suspend_timer, big_core, dev->power.timer_expires);
+#else
 	mod_timer(&dev->power.suspend_timer, dev->power.timer_expires);
+#endif
 
  out:
 	spin_unlock_irqrestore(&dev->power.lock, flags);

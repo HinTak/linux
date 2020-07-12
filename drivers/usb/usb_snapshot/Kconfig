@@ -1,0 +1,19 @@
+#PRALLEL RESUME configauration
+
+config SAMSUNG_USB_PARALLEL_RESUME
+        tristate "Parallel Resume of Samsung Priority Device List"
+        depends on USB && PM
+        default n if USB && PM
+        help
+      if you say y here, it will Enable Fast and Parallel Resume
+      of Samsung Priority Device List.
+        
+config SAMSUNG_USB_SERDES_LOCK_CHECK
+    bool "Enable serdes lock check for KantM OC Model"
+    depends on SAMSUNG_USB_PARALLEL_RESUME
+    default n
+    help
+        KantM-(Built in, OCM or OC) => Y
+        Kant AV => N
+        Kant S => N
+

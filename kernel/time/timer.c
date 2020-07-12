@@ -816,7 +816,53 @@ out_unlock:
 
 	return ret;
 }
+#ifdef CONFIG_SCHED_HMP
+static inline int
+__mod_timer_on(struct timer_list *timer, int cpu,
+						unsigned long expires, bool pending_only)
+{
+	struct tvec_base *base, *new_base;
+	unsigned long flags;
+	int ret = 0;
 
+	timer_stats_timer_set_start_info(timer);
+	BUG_ON(!timer->function);
+
+	base = lock_timer_base(timer, &flags);
+
+	ret = detach_if_pending(timer, base, false);
+
+	if (!ret && pending_only)
+		goto out_unlock;
+
+	debug_activate(timer, expires);
+	new_base = per_cpu(tvec_bases, cpu);
+
+	if (base != new_base) {
+		/*
+		 * We are trying to schedule the timer on the local CPU.
+		 * However we can't change timer's base while it is running,
+		 * otherwise del_timer_sync() can't detect that the timer's
+		 * handler yet has not finished. This also guarantees that
+		 * the timer is serialized wrt itself.
+		 */
+		if (likely(base->running_timer != timer)) {
+			/* See the comment in lock_timer_base() */
+			timer_set_base(timer, NULL);
+			spin_unlock(&base->lock);
+			base = new_base;
+			spin_lock(&base->lock);
+			timer_set_base(timer, base);
+		}
+	}
+	timer->expires = expires;
+	internal_add_timer(base, timer);
+
+out_unlock:
+	spin_unlock_irqrestore(&base->lock, flags);
+	return ret;
+}
+#endif
 /**
  * mod_timer_pending - modify a pending timer's timeout
  * @timer: the pending timer to be modified
@@ -908,6 +954,22 @@ int mod_timer(struct timer_list *timer, unsigned long expires)
 }
 EXPORT_SYMBOL(mod_timer);
 
+#ifdef CONFIG_SCHED_HMP
+int mod_timer_on(struct timer_list *timer, int cpu, unsigned long expires)
+{
+	expires = apply_slack(timer, expires);
+	/*
+	 * This is a common optimization triggered by the
+	 * networking code - if the timer is re-modified
+	 * to be the same thing then just return:
+	 */
+	if (timer_pending(timer) && timer->expires == expires)
+		return 1;
+
+	return __mod_timer_on(timer, cpu, expires, false);
+}
+EXPORT_SYMBOL(mod_timer_on);
+#endif
 /**
  * mod_timer_pinned - modify a timer's timeout
  * @timer: the timer to be modified
@@ -1400,6 +1462,7 @@ void update_process_times(int user_tick)
 #endif
 	scheduler_tick();
 	run_posix_cpu_timers(p);
+
 }
 
 /*

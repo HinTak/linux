@@ -1,0 +1,24 @@
+#! /usr/bin/perl -w
+use strict;
+
+if( $#ARGV != 2)
+	{ die "Usage ./genIVT [Jump Locatioin] [Self Pointer] [CSF Pointer]\n" }
+
+#ARGV[0] : Jump Location
+#ARGV[1] : Self Pointer
+#ARGV[2] : CSF Pointer
+
+my $JumpLocation = hex($ARGV[0]);
+my $SelfPointer = hex($ARGV[1]);
+my $CSFPointer = hex($ARGV[2]);
+
+open(my $out, '>:raw', 'ivt.bin') or die "Unable to open: $!";
+print $out pack("V", 0x412000D1); # Signature
+print $out pack("V", $JumpLocation); # Jump Location 
+print $out pack("V", 0x0); # Reserved
+print $out pack("V", 0x0); # DCD pointer
+print $out pack("V", 0x0); # Boot Data
+print $out pack("V", $SelfPointer); # Self Pointer
+print $out pack("V", $CSFPointer); # CSF Pointer
+print $out pack("V", 0x0); # Reserved
+close($out);

@@ -31,7 +31,7 @@
 #define CORESIGHT_DEVID		0xfc8
 #define CORESIGHT_DEVTYPE	0xfcc
 
-#define TIMEOUT_US		100
+#define TIMEOUT_US		1000
 #define BMVAL(val, lsb, msb)	((val & GENMASK(msb, lsb)) >> lsb)
 
 static inline void CS_LOCK(void __iomem *addr)
@@ -58,6 +58,11 @@ extern int etm_writel_cp14(u32 off, u32 val);
 #else
 static inline int etm_readl_cp14(u32 off, unsigned int *val) { return 0; }
 static inline int etm_writel_cp14(u32 off, u32 val) { return 0; }
+#endif
+
+#ifdef CONFIG_CORESIGHT_DUMP_TMC
+extern int tmc_is_enabled(struct coresight_device *csdev);
+extern int tmc_savebuf(struct coresight_device *csdev);
 #endif
 
 #endif

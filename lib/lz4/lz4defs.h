@@ -59,6 +59,7 @@ typedef struct _U64_S { u64 v; } U64_S;
 #endif
 
 #define COPYLENGTH 8
+#define DYN_BIT 0x1
 #define ML_BITS  4
 #define ML_MASK  ((1U << ML_BITS) - 1)
 #define RUN_BITS (8 - ML_BITS)

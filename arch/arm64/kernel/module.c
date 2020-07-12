@@ -32,6 +32,19 @@
 #define	AARCH64_INSN_IMM_MOVNZ		AARCH64_INSN_IMM_MAX
 #define	AARCH64_INSN_IMM_MOVK		AARCH64_INSN_IMM_16
 
+#define MODULES_START MODULES_VADDR
+
+#ifdef CONFIG_MODULESUSED_PLUS
+unsigned long addr_modules_start;
+unsigned long addr_modules_end;
+
+void init_addr_modules(void)
+{
+	addr_modules_start = MODULES_START;
+	addr_modules_end = MODULES_END;
+}
+#endif
+
 void *module_alloc(unsigned long size)
 {
 	return __vmalloc_node_range(size, 1, MODULES_VADDR, MODULES_END,

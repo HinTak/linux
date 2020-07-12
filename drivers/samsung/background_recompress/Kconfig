@@ -1,0 +1,66 @@
+menu "Background ReCompress Support"
+
+config BACKGROUND_RECOMPRESS
+	bool "Background Re-Comporess Framwork"
+	depends on ZRAM && CRYPTO_ZSTD
+	default n
+	help
+	This frame-work is for re-compressing page with higher level in zstd to
+	save memory.
+	This feature is for only Tizen system.
+
+
+config BACKGROUND_RECOMPRESS_LEVEL
+	int "Background Re-compress compressing level"
+	depends on BACKGROUND_RECOMPRESS
+	default 19 if CRYPTO_ZSTD
+	default 1
+	help
+	This is compress level of selected algorithm.
+
+config BACKGROUND_RECOMPRESS_MIN_SIZE
+	int "Background Re-Comporess min threshold size value. If size is less than min, skip recompress"
+	depends on BACKGROUND_RECOMPRESS
+	default 100
+	help
+	If compressed size is bigger than threshold, trying recompress.
+
+config BACKGROUND_RECOMPRESS_MAX_SIZE
+	int "Background Re-Comporess max threshold size value. If size is bigger than max, skip recompress"
+	depends on BACKGROUND_RECOMPRESS
+	default 4095
+	help
+	If compressed size is less than threshold, trying recompress.
+
+config BACKGROUND_RECOMPRESS_CPU_THRESHOLD
+	int "Background Re-Comporess cpu threshold value which is regarded as idle state"
+	depends on BACKGROUND_RECOMPRESS
+	default 50
+	help
+	If cpu usage is smaller than threshold, trying recompress.
+
+config BACKGROUND_RECOMPRESS_SCAN_COUNT
+	int "Background Re-Comporess scan count at once in idle state"
+	depends on BACKGROUND_RECOMPRESS
+	default 128 
+	help
+	Scan count of trying recompress in idle state.
+
+config BACKGROUND_RECOMPRESS_INTERVAL
+	int "Background Re-Comporess interval value. Try to recompress after interval from saved time"
+	depends on BACKGROUND_RECOMPRESS
+	default 10
+	help
+	Min interval to try reompress.
+
+config BACKGROUND_RECOMPRESS_PROFILE_MODE
+	bool "Background Re-Comporess Profile Mode"
+	default n
+	depends on BACKGROUND_RECOMPRESS
+	depends on KDEBUGD || !CONFIG_OOM_PANIC
+	help
+	This option will enable profiling in background_re-compress framework. Now /proc/meminfo will show recompress
+	memeory status.
+
+endmenu
+

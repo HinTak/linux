@@ -1,0 +1,311 @@
+/*
+ * Copyright (C) 2013 Samsung Electronics Co.Ltd
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
+/ {
+	pinctrl{
+		gpio0: gpio0 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio1: gpio1 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio2: gpio2 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio3: gpio3 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio4: gpio4 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio5: gpio5 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio6: gpio6 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio7: gpio7 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio8: gpio8 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio9: gpio9 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio10: gpio10 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio11: gpio11 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio12: gpio12 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio13: gpio13 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio14: gpio14 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio15: gpio15 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio16: gpio16 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio17: gpio17 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio18: gpio18 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio19: gpio19 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio20: gpio20 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio21: gpio21 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio22: gpio22 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+		gpio23: gpio23{
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio24: gpio24 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio25: gpio25 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio26: gpio26 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio27: gpio27 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio28: gpio28 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio29: gpio29 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio30: gpio30 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio31: gpio31 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio32: gpio32 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio33: gpio33 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio34: gpio34 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio35: gpio35 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio37: gpio37 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio38: gpio38 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio39: gpio39 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio40: gpio40 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio41: gpio41 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio42: gpio42 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio43: gpio43 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio44: gpio44 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio45: gpio45 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio46: gpio46 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio47: gpio47 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio48: gpio48 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio49: gpio49 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+
+		gpio50: gpio50 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio51: gpio51 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio52: gpio52 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio53: gpio53 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio54: gpio54 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio55: gpio55 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio56: gpio56 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio57: gpio57 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio58: gpio58 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio59: gpio59 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+
+		gpio60: gpio60 {
+			gpio-controller;
+			#gpio-cells = <2>;
+		};
+	};
+};

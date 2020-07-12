@@ -1,0 +1,108 @@
+#
+# Security Filter Driver
+#
+
+menu "Security Filter Driver (Smart Security)"
+
+config SECURITY_SFD
+	bool "Security Filter Driver support"
+	default n
+	select SFLIB
+	help
+		This selects SFD, which filter system events. SFD working
+		in two modes:
+			1. Enforce
+			2. Permissive
+
+		TODO: To add more information later.
+
+		If you unsure how to answer this question, answer N.
+
+choice
+	prompt "Working mode"
+	depends on SECURITY_SFD
+	help
+		Select the Security Filter Driver working mode.
+
+	config SECURITY_SFD_MODE_PERMISSIVE
+		bool "Permissive mode"
+		help
+			Do not perform any blocking for the system routines.
+
+	config SECURITY_SFD_MODE_ENFORCE
+		bool "Enforce mode"
+		help
+			Blocks system routines that can not meet Security Filter Driver policy.
+
+endchoice
+
+
+choice
+	prompt "Working level"
+	depends on SECURITY_SFD
+	help
+		Select the working level for Security Filter Driver components.
+		The following work levels are possible:
+			1. Debug level
+			2. Release mode
+
+	config SECURITY_SFD_LEVEL_DEBUG
+		bool "Debug level"
+		help
+			This selects debug working level for Security Filter Driver and
+			all components.
+
+	config SECURITY_SFD_LEVEL_RELEASE
+		bool "Release level"
+		help
+			This selects release working level for Security Filter Driver and
+			all components.
+
+endchoice
+
+
+config SECURITY_SFD_SECURECONTAINER
+	bool "Secure Container support"
+	depends on SECURITY_SFD
+	default y
+	help
+		Sfd supports to prevent accessing to directory from processes which are not related to SecureContainer.
+
+
+choice
+	prompt "Secure Container Mode"
+	depends on SECURITY_SFD_SECURECONTAINER
+	help
+		Select the Secure Container working mode.
+
+	config SECURITY_SFD_SECURECONTAINER_MODE_PERMISSIVE
+		bool "Permissive mode"
+		help
+			Do not perform any blocking for Secure Container
+
+	config SECURITY_SFD_SECURECONTAINER_MODE_ENFORCE
+		bool "Enforce mode"
+		help
+			Blocks any access to path of Secure Container
+endchoice
+
+
+config SECURITY_SFD_RWDEV_PREFIXES
+	string "RW device name prefix for SFD"
+	default "/dev/partition:tmpfs:loop"
+	depends on SECURITY_SFD
+    help
+        SFD filters the behavior of file/network/process which occurs on only RW directory. To figure out the original path of file, this device prefix should be set.
+
+config SECURITY_SFD_CHECK_STATFS
+	bool "Check mount flag"
+	depends on SECURITY_SFD
+	default y
+	help
+		Sfd checks mount point(RO/RW) or directory(/opt,/tmp/...)
+
+source security/sfd/dispatcher/Kconfig
+source security/sfd/notifier/Kconfig
+source security/sfd/uep/Kconfig
+
+endmenu

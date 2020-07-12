@@ -229,6 +229,7 @@ static int blk_fill_sghdr_rq(struct request_queue *q, struct request *rq,
 {
 	if (copy_from_user(rq->cmd, hdr->cmdp, hdr->cmd_len))
 		return -EFAULT;
+
 	if (blk_verify_command(rq->cmd, mode & FMODE_WRITE))
 		return -EPERM;
 

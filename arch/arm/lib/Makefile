@@ -15,6 +15,10 @@ lib-y		:= backtrace.o changebit.o csumipv6.o csumpartial.o   \
 		   io-readsb.o io-writesb.o io-readsl.o io-writesl.o  \
 		   call_with_stack.o bswapsdi2.o
 
+ifeq ($(CONFIG_SMART_DEADLOCK_PROFILE_MODE),y)
+lib-y		+= smart_deadlock_kernel_backtrace.o
+endif
+
 mmu-y		:= clear_user.o copy_page.o getuser.o putuser.o       \
 		   copy_from_user.o copy_to_user.o
 

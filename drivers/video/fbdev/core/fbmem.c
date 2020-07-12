@@ -186,6 +186,22 @@ char* fb_get_buffer_offset(struct fb_info *info, struct fb_pixmap *buf, u32 size
 
 	return addr;
 }
+
+/* DTV_MALI_PORTING */
+struct fb_info* sdp_get_fb_info(int i)
+{
+	struct fb_info *fi = registered_fb[i];
+	return fi;
+}
+int sdp_set_fb_info(const struct fb_info*new_info,int i)
+{
+	struct fb_info *fi = registered_fb[i];
+	fi->ump_secure_id = new_info->ump_secure_id;	// currently changing only ump secure id;
+	printk(KERN_INFO"\n %s---------->fb = %d  secure id = %x\n",__FUNCTION__, i, fi->ump_secure_id );
+	return 1;
+}
+EXPORT_SYMBOL(sdp_get_fb_info);
+EXPORT_SYMBOL(sdp_set_fb_info);
 EXPORT_SYMBOL(fb_get_buffer_offset);
 
 #ifdef CONFIG_LOGO
@@ -1211,6 +1227,24 @@ static long do_fb_ioctl(struct fb_info *info, unsigned int cmd,
 		unlock_fb_info(info);
 		console_unlock();
 		break;
+/* DTV_MALI_PORTING */		
+#ifndef CONFIG_ARCH_NVT_V7
+	case GET_UMP_SECURE_ID:			// X11 mali ump
+	{
+		long var2 ;
+		printk(KERN_INFO"GET_UMP_SECURE_ID icotl recived\n");
+		if (!lock_fb_info(info))
+                        return -ENODEV;
+		console_lock();
+		var2 = info->ump_secure_id;
+		printk(KERN_INFO" UMP Secure ID %08x \n",info->ump_secure_id);
+		if (!ret && copy_to_user(argp, &var2, sizeof(var2)))
+                        ret = -EFAULT;
+		console_unlock();
+		unlock_fb_info(info);	
+	}
+		break;
+#endif
 	default:
 		if (!lock_fb_info(info))
 			return -ENODEV;

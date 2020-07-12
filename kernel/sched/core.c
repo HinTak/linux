@@ -87,8 +87,14 @@
 #include "../workqueue_internal.h"
 #include "../smpboot.h"
 
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/sched.h>
+
+#ifdef CONFIG_VDLP_VERSION_INFO
+#include <linux/vdlp_version.h>
+void show_kernel_patch_version(void);
+#endif
 
 void start_bandwidth_timer(struct hrtimer *period_timer, ktime_t period)
 {
@@ -304,7 +310,11 @@ __read_mostly int scheduler_running;
  * part of the period that we allow rt tasks to run in us.
  * default: 0.95s
  */
+#if defined(CONFIG_SCHED_HMP) && defined(CONFIG_VD_RELEASE)
+int sysctl_sched_rt_runtime = 700000;
+#else
 int sysctl_sched_rt_runtime = 950000;
+#endif
 
 /* cpus with isolated domains */
 cpumask_var_t cpu_isolated_map;
@@ -577,9 +587,9 @@ void resched_cpu(int cpu)
 	struct rq *rq = cpu_rq(cpu);
 	unsigned long flags;
 
-	if (!raw_spin_trylock_irqsave(&rq->lock, flags))
-		return;
-	resched_curr(rq);
+	raw_spin_lock_irqsave(&rq->lock, flags);
+	if (cpu_online(cpu) || cpu == smp_processor_id())
+		resched_curr(rq);
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
 }
 
@@ -1672,6 +1682,28 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	success = 1; /* we're going to change ->state */
 	cpu = task_cpu(p);
 
+	/*
+	 * Ensure we load p->on_rq _after_ p->state, otherwise it would
+	 * be possible to, falsely, observe p->on_rq == 0 and get stuck
+	 * in smp_cond_load_acquire() below.
+	 *
+	 * sched_ttwu_pending()                 try_to_wake_up()
+	 *   [S] p->on_rq = 1;                  [L] P->state
+	 *       UNLOCK rq->lock  -----.
+	 *                              \
+	 *				 +---   RMB
+	 * schedule()                   /
+	 *       LOCK rq->lock    -----'
+	 *       UNLOCK rq->lock
+	 *
+	 * [task p]
+	 *   [S] p->state = UNINTERRUPTIBLE     [L] p->on_rq
+	 *
+	 * Pairs with the UNLOCK+LOCK on rq->lock from the
+	 * last wakeup of our task and the schedule that got our task
+	 * current.
+	 */
+	smp_rmb();
 	if (p->on_rq && ttwu_remote(p, wake_flags))
 		goto stat;
 
@@ -1805,6 +1837,20 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->se.vruntime			= 0;
 #ifdef CONFIG_SMP
 	p->se.avg.decay_count		= 0;
+#ifdef CONFIG_SCHED_HMP
+ /* keep LOAD_AVG_MAX in sync with fair.c if load avg series is changed */
+#define LOAD_AVG_MAX 47742
+	p->se.avg.hmp_last_up_migration = 0;
+	p->se.avg.hmp_last_down_migration = 0;
+	if (hmp_task_should_forkboost(p)) {
+                p->se.avg.load_avg_ratio = 1023;
+                p->se.avg.load_avg_contrib =
+                                (1023 * scale_load_down(p->se.load.weight));
+                p->se.avg.avg_period = LOAD_AVG_MAX;
+                p->se.avg.runnable_avg_sum = LOAD_AVG_MAX;
+                p->se.avg.running_avg_sum = LOAD_AVG_MAX;
+        }
+#endif
 #endif
 	INIT_LIST_HEAD(&p->se.group_node);
 
@@ -2217,11 +2263,11 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 	 * If a task dies, then it sets TASK_DEAD in tsk->state and calls
 	 * schedule one last time. The schedule call will never return, and
 	 * the scheduled task must drop that reference.
-	 * The test for TASK_DEAD must occur while the runqueue locks are
-	 * still held, otherwise prev could be scheduled on another cpu, die
-	 * there before we look at prev->state, and then the reference would
-	 * be dropped twice.
-	 *		Manfred Spraul <manfred@colorfullife.com>
+	 *
+	 * We must observe prev->state before clearing prev->on_cpu (in
+	 * finish_lock_switch), otherwise a concurrent wakeup can get prev
+	 * running on another CPU and we could rave with its RUNNING -> DEAD
+	 * transition, resulting in a double drop.
 	 */
 	prev_state = prev->state;
 	vtime_task_switch(prev);
@@ -2314,11 +2360,14 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	arch_start_context_switch(prev);
 
 	if (!mm) {
+		map_kernel_stack(oldmm, next);
 		next->active_mm = oldmm;
 		atomic_inc(&oldmm->mm_count);
 		enter_lazy_tlb(oldmm, next);
-	} else
+	} else {
+		map_kernel_stack(mm, prev);
 		switch_mm(oldmm, mm, next);
+	}
 
 	if (!prev->mm) {
 		prev->active_mm = NULL;
@@ -2340,6 +2389,12 @@ context_switch(struct rq *rq, struct task_struct *prev,
 	return finish_task_switch(prev);
 }
 
+#ifdef CONFIG_SCHED_HMP
+unsigned long nr_running_cpu(unsigned int cpu)
+{
+	return cpu_rq(cpu)->nr_running;
+}
+#endif
 /*
  * nr_running and nr_context_switches:
  *
@@ -2612,6 +2667,9 @@ static noinline void __schedule_bug(struct task_struct *prev)
 
 	printk(KERN_ERR "BUG: scheduling while atomic: %s/%d/0x%08x\n",
 		prev->comm, prev->pid, preempt_count());
+#ifdef CONFIG_VDLP_VERSION_INFO
+	show_kernel_patch_version();
+#endif
 
 	debug_show_held_locks(prev);
 	print_modules();
@@ -2688,6 +2746,7 @@ again:
 
 	BUG(); /* the idle class will always have a runnable task */
 }
+
 
 /*
  * __schedule() is the main scheduler function.
@@ -2794,7 +2853,6 @@ static void __sched __schedule(void)
 		rq->nr_switches++;
 		rq->curr = next;
 		++*switch_count;
-
 		rq = context_switch(rq, prev, next); /* unlocks the rq */
 		cpu = cpu_of(rq);
 	} else
@@ -4225,7 +4283,7 @@ SYSCALL_DEFINE0(sched_yield)
 
 int __sched _cond_resched(void)
 {
-	if (should_resched()) {
+	if (should_resched(0)) {
 		preempt_schedule_common();
 		return 1;
 	}
@@ -4243,7 +4301,7 @@ EXPORT_SYMBOL(_cond_resched);
  */
 int __cond_resched_lock(spinlock_t *lock)
 {
-	int resched = should_resched();
+	int resched = should_resched(PREEMPT_LOCK_OFFSET);
 	int ret = 0;
 
 	lockdep_assert_held(lock);
@@ -4265,7 +4323,7 @@ int __sched __cond_resched_softirq(void)
 {
 	BUG_ON(!in_softirq());
 
-	if (should_resched()) {
+	if (should_resched(SOFTIRQ_DISABLE_OFFSET)) {
 		local_bh_enable();
 		preempt_schedule_common();
 		local_bh_disable();
@@ -4516,8 +4574,8 @@ void sched_show_task(struct task_struct *p)
 
 	if (state)
 		state = __ffs(state) + 1;
-	printk(KERN_INFO "%-15.15s %c", p->comm,
-		state < sizeof(stat_nam) - 1 ? stat_nam[state] : '?');
+	pr_err("%-15.15s %c", p->comm, 
+			state < sizeof(TASK_STATE_TO_CHAR_STR) - 1 ? stat_nam[state] : '?');
 #if BITS_PER_LONG == 32
 	if (state == TASK_RUNNING)
 		printk(KERN_CONT " running  ");
@@ -4537,14 +4595,20 @@ void sched_show_task(struct task_struct *p)
 	if (pid_alive(p))
 		ppid = task_pid_nr(rcu_dereference(p->real_parent));
 	rcu_read_unlock();
-	printk(KERN_CONT "%5lu %5d %6d 0x%08lx\n", free,
-		task_pid_nr(p), ppid,
-		(unsigned long)task_thread_info(p)->flags);
+	printk(KERN_CONT "%5lu %5d %6d 0x%08lx %llu\n", free,
+			task_pid_nr(p), ppid,
+			(unsigned long)task_thread_info(p)->flags, p->se.exec_start);
 
 	print_worker_info(KERN_INFO, p);
 	show_stack(p, NULL);
 }
 
+#ifdef CONFIG_TASK_STATE_BACKTRACE
+void wrap_show_task(struct task_struct *tsk)
+{
+	sched_show_task(tsk);
+}
+#endif
 void show_state_filter(unsigned long state_filter)
 {
 	struct task_struct *g, *p;
@@ -4554,8 +4618,9 @@ void show_state_filter(unsigned long state_filter)
 		"  task                PC stack   pid father\n");
 #else
 	printk(KERN_INFO
-		"  task                        PC stack   pid father\n");
+			"  task                        PC stack   pid father\n");
 #endif
+
 	rcu_read_lock();
 	for_each_process_thread(g, p) {
 		/*
@@ -4563,8 +4628,10 @@ void show_state_filter(unsigned long state_filter)
 		 * console might take a lot of time:
 		 */
 		touch_nmi_watchdog();
-		if (!state_filter || (p->state & state_filter))
+		if (!state_filter || (p->state & state_filter)) {
 			sched_show_task(p);
+			usleep_range(50000, 100000);
+		}
 	}
 
 	touch_all_softlockup_watchdogs();
@@ -4601,6 +4668,10 @@ void init_idle(struct task_struct *idle, int cpu)
 	raw_spin_lock_irqsave(&rq->lock, flags);
 
 	__sched_fork(0, idle);
+#ifdef CONFIG_SCHED_HMP
+	idle->se.avg.avg_period = 0;
+	idle->se.avg.runnable_avg_sum = 0;
+#endif
 	idle->state = TASK_RUNNING;
 	idle->se.exec_start = sched_clock();
 
@@ -6195,7 +6266,11 @@ sd_init(struct sched_domain_topology_level *tl, int cpu)
 		.wake_idx		= 0,
 		.forkexec_idx		= 0,
 
+#ifdef CONFIG_SCHED_HMP
+		.flags			= 0*SD_LOAD_BALANCE
+#else
 		.flags			= 1*SD_LOAD_BALANCE
+#endif
 					| 1*SD_BALANCE_NEWIDLE
 					| 1*SD_BALANCE_EXEC
 					| 1*SD_BALANCE_FORK
@@ -6207,6 +6282,9 @@ sd_init(struct sched_domain_topology_level *tl, int cpu)
 					| 0*SD_PREFER_SIBLING
 					| 0*SD_NUMA
 					| sd_flags
+#ifdef CONFIG_SCHED_HMP
+					| tl->flags
+#endif
 					,
 
 		.last_balance		= jiffies,
@@ -6248,7 +6326,9 @@ sd_init(struct sched_domain_topology_level *tl, int cpu)
 
 #endif
 	} else {
+#ifndef CONFIG_SCHED_HMP
 		sd->flags |= SD_PREFER_SIBLING;
+#endif
 		sd->cache_nice_tries = 1;
 		sd->busy_idx = 2;
 		sd->idle_idx = 1;
@@ -6977,17 +7057,16 @@ static int cpuset_cpu_active(struct notifier_block *nfb, unsigned long action,
 		 * operation in the resume sequence, just build a single sched
 		 * domain, ignoring cpusets.
 		 */
-		num_cpus_frozen--;
-		if (likely(num_cpus_frozen)) {
-			partition_sched_domains(1, NULL, NULL);
+		partition_sched_domains(1, NULL, NULL);
+		if (--num_cpus_frozen)
 			break;
-		}
 
 		/*
 		 * This is the last CPU online operation. So fall through and
 		 * restore the original sched domains by considering the
 		 * cpuset configurations.
 		 */
+		cpuset_force_rebuild();
 
 	case CPU_ONLINE:
 		cpuset_update_active_cpus(true);
@@ -7317,6 +7396,9 @@ void ___might_sleep(const char *file, int line, int preempt_offset)
 		"in_atomic(): %d, irqs_disabled(): %d, pid: %d, name: %s\n",
 			in_atomic(), irqs_disabled(),
 			current->pid, current->comm);
+#ifdef CONFIG_VDLP_VERSION_INFO
+	show_kernel_patch_version();
+#endif
 
 	if (task_stack_end_corrupted(current))
 		printk(KERN_EMERG "Thread overran stack, or stack corrupted\n");
@@ -7571,6 +7653,50 @@ void sched_move_task(struct task_struct *tsk)
 
 	task_rq_unlock(rq, tsk, &flags);
 }
+
+#ifdef CONFIG_SCHED_AUTOGROUP
+void sched_auto_move_task(struct task_struct *tsk, struct task_group *tg)
+{
+	int queued, running;
+	unsigned long flags;
+	struct rq *rq;
+	struct task_group *my_tg;
+
+	rq = task_rq_lock(tsk, &flags);
+
+	my_tg = container_of(task_css_check(tsk, cpu_cgrp_id, true),
+					struct task_group, css);  /* if cgroup exists no migration required */
+
+	if (my_tg != &root_task_group) {
+		task_rq_unlock(rq, tsk, &flags);
+		return;
+	}
+
+	running = task_current(rq, tsk);
+	queued = task_on_rq_queued(tsk);
+
+	if (queued)
+		dequeue_task(rq, tsk, 0);
+	if (unlikely(running))
+		put_prev_task(rq, tsk);
+
+	tsk->sched_task_group = tg;
+
+#ifdef CONFIG_FAIR_GROUP_SCHED
+	if (tsk->sched_class->task_move_group)
+		tsk->sched_class->task_move_group(tsk, queued);
+	else
+#endif
+		set_task_rq(tsk, task_cpu(tsk));
+
+	if (unlikely(running))
+		tsk->sched_class->set_curr_task(rq);
+	if (queued)
+		enqueue_task(rq, tsk, 0);
+
+	task_rq_unlock(rq, tsk, &flags);
+}
+#endif /* CONFIG_SCHED_AUTOGROUP */
 #endif /* CONFIG_CGROUP_SCHED */
 
 #ifdef CONFIG_RT_GROUP_SCHED

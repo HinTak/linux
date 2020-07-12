@@ -1245,7 +1245,8 @@ static void dx_insert_block(struct dx_frame *frame, u32 hash, ext4_lblk_t block)
 static inline int ext4_match(struct ext4_fname_crypto_ctx *ctx,
 			     struct ext4_str *fname_crypto_str,
 			     int len, const char * const name,
-			     struct ext4_dir_entry_2 *de)
+			     struct ext4_dir_entry_2 *de,
+			     bool is_case)
 {
 	int res;
 
@@ -1258,7 +1259,10 @@ static inline int ext4_match(struct ext4_fname_crypto_ctx *ctx,
 #endif
 	if (len != de->name_len)
 		return 0;
-	res = memcmp(name, de->name, len);
+	if (is_case)
+		res = strncasecmp(name, de->name, len);
+	else
+		res = memcmp(name, de->name, len);
 	return (res == 0) ? 1 : 0;
 }
 
@@ -1274,9 +1278,14 @@ int search_dir(struct buffer_head *bh, char *search_buf, int buf_size,
 	int de_len;
 	const char *name = d_name->name;
 	int namelen = d_name->len;
+	int res;
+	bool is_case_insensitive = 0;
+	struct ext4_sb_info *sbi = NULL;
 	struct ext4_fname_crypto_ctx *ctx = NULL;
 	struct ext4_str fname_crypto_str = {.name = NULL, .len = 0};
-	int res;
+
+	sbi = dir->i_sb->s_fs_info;
+	is_case_insensitive = sbi->is_case_insensitive;
 
 	ctx = ext4_get_fname_crypto_ctx(dir, EXT4_NAME_LEN);
 	if (IS_ERR(ctx))
@@ -1289,7 +1298,7 @@ int search_dir(struct buffer_head *bh, char *search_buf, int buf_size,
 		/* do minimal checking `by hand' */
 		if ((char *) de + de->name_len <= dlimit) {
 			res = ext4_match(ctx, &fname_crypto_str, namelen,
-					 name, de);
+					 name, de, is_case_insensitive);
 			if (res < 0) {
 				res = -1;
 				goto return_result;
@@ -1412,6 +1421,10 @@ static struct buffer_head * ext4_find_entry (struct inode *dir,
 			       "falling back\n"));
 	}
 	nblocks = dir->i_size >> EXT4_BLOCK_SIZE_BITS(sb);
+	if (!nblocks) {
+		ret = NULL;
+		goto cleanup_and_exit;
+	}
 	start = EXT4_I(dir)->i_dir_start_lookup;
 	if (start >= nblocks)
 		start = 0;
@@ -1804,9 +1817,16 @@ int ext4_find_dest_de(struct inode *dir, struct inode *inode,
 	int nlen, rlen;
 	unsigned int offset = 0;
 	char *top;
+	struct ext4_sb_info *sbi = NULL;
+	bool is_case_insensitive = 0;
 	struct ext4_fname_crypto_ctx *ctx = NULL;
 	struct ext4_str fname_crypto_str = {.name = NULL, .len = 0};
 	int res;
+
+	if(inode) {
+		sbi = inode->i_sb->s_fs_info;
+		is_case_insensitive = sbi->is_case_insensitive;
+	}
 
 	ctx = ext4_get_fname_crypto_ctx(dir, EXT4_NAME_LEN);
 	if (IS_ERR(ctx))
@@ -1831,7 +1851,8 @@ int ext4_find_dest_de(struct inode *dir, struct inode *inode,
 			goto return_result;
 		}
 		/* Provide crypto context and crypto buffer to ext4 match */
-		res = ext4_match(ctx, &fname_crypto_str, namelen, name, de);
+		res = ext4_match(ctx, &fname_crypto_str, namelen, name,
+						de, is_case_insensitive);
 		if (res < 0)
 			goto return_result;
 		if (res > 0) {
@@ -2897,7 +2918,7 @@ int ext4_orphan_add(handle_t *handle, struct inode *inode)
 			 * list entries can cause panics at unmount time.
 			 */
 			mutex_lock(&sbi->s_orphan_lock);
-			list_del(&EXT4_I(inode)->i_orphan);
+			list_del_init(&EXT4_I(inode)->i_orphan);
 			mutex_unlock(&sbi->s_orphan_lock);
 		}
 	}

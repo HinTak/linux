@@ -277,6 +277,12 @@ void calibrate_delay(void)
 	static bool printed;
 	int this_cpu = smp_processor_id();
 
+#ifdef CONFIG_LPJ_MANUAL_SETTING
+	pr_info("[VDLP] preset_lpj manual set to %lu\n",
+			(unsigned long)CONFIG_LPJ_VALUE);
+	preset_lpj = (unsigned long)CONFIG_LPJ_VALUE;
+#endif
+
 	if (per_cpu(cpu_loops_per_jiffy, this_cpu)) {
 		lpj = per_cpu(cpu_loops_per_jiffy, this_cpu);
 		if (!printed)

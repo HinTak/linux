@@ -203,6 +203,27 @@ err_out:
 	return retval;
 }
 
+
+#ifdef CONFIG_SDP_MICOM_IRB
+static char *lirc_devnode(struct device *dev, umode_t *mode)
+{
+        if(mode) {
+                *mode = 0666;
+        }
+        return NULL;
+}
+#endif
+
+#if (defined(CONFIG_IRB_NVT) || defined(CONFIG_IRS_NVT))
+static char *nvt_lirc_devnode(struct device *dev, umode_t *mode)
+{
+        if(mode) {
+                *mode = 0666;
+        }
+        return NULL;
+}
+#endif
+
 int lirc_register_driver(struct lirc_driver *d)
 {
 	struct irctl *ir;
@@ -340,6 +361,13 @@ int lirc_register_driver(struct lirc_driver *d)
 
 	ir->d = *d;
 
+#ifdef CONFIG_SDP_MICOM_IRB
+	lirc_class->devnode = lirc_devnode;
+#endif
+
+#if (defined(CONFIG_IRB_NVT) || defined(CONFIG_IRS_NVT))
+	lirc_class->devnode = nvt_lirc_devnode;
+#endif
 	device_create(lirc_class, ir->d.dev,
 		      MKDEV(MAJOR(lirc_base_dev), ir->d.minor), NULL,
 		      "lirc%u", ir->d.minor);

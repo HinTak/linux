@@ -1,0 +1,223 @@
+/*
+ * Copyright (C) 2013 Samsung Electronics Co.Ltd
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
+/dts-v1/;
+#include "sdp1307.dtsi"
+
+/ {
+	model = "Samsung STB based on SDP1307 SoC - Eval Board";
+	compatible = "samsung,stb", "samsung,sdp1307";
+
+	memory {
+		device_type = "memory";
+		reg =  <0x80000000 0x13A00000>, <0xc0000000 0x1B500000>, <0xe0000000 0x16D00000>;
+	};
+
+	chosen {
+		bootargs = "console=ttyS2,115200N8 root=/dev/mmcblk0p3 rootfstype=squashfs rootwait earlyprintk sdp_sparsemem";
+	};
+
+	fixed-rate-clocks {
+		fin {
+			compatible = "samsung,sdp-clock-fin";
+			clock-frequency = <24000000>;
+		};
+	};
+
+	emac@18830000 {/* EMAC */
+		status = "okay";
+	};
+
+	gmac@18860000 {/* GMAC*/
+		status = "okay";
+
+		fixed-link {/* for STB cable modem */
+			phy-id = <0>;
+			speed = <1000>;
+			duplex = <1>;
+			rgmii;
+		};
+	};
+
+	serial@18090A00 {
+		status = "okay";
+	};
+
+	serial@18090A40 {
+		status = "okay";
+	};
+
+	serial@18090A80 {
+		status = "okay";
+	};
+
+	i2c@18090100 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x180901F4>;
+		samsung,i2c-cpu-affinity = <1>;
+	};
+	
+	i2c@18090120 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x180901F4>;
+		samsung,i2c-cpu-affinity = <1>;
+
+		tps563900@60 {
+			compatible = "ti,tps563900";
+			reg = <0x60>;
+
+			regulator-min-microvolt = <680000>;
+			regulator-max-microvolt = <1630000>;
+			regulator-always-on;
+			regulator-boot-on;
+
+			vout1-name = "CORE_PW";
+			default_volt1 = <1100000>;
+
+			vout2-name = "GPU_PW";
+			default_volt2 = <1200000>;
+		};
+	};
+
+	i2c@18090140 { 
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x180901F4>;
+		samsung,i2c-cpu-affinity = <1>;
+
+		tps56520@37 {
+			compatible = "ti,tps56520";
+			reg = <0x37>;
+
+			regulator-name = "CPU_PW";
+			regulator-min-microvolt = <600000>;
+			regulator-max-microvolt = <1870000>;
+			regulator-always-on;
+			regulator-boot-on;
+
+			default_volt = <1280000>;
+		};
+	};
+
+	i2c@18090160 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x180901F4>;
+		samsung,i2c-cpu-affinity = <1>;
+	};
+
+	i2c@18090180 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x180901F4>;
+		samsung,i2c-cpu-affinity = <1>;
+	};
+
+	i2c@180901A0 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x180901F4>;
+		samsung,i2c-cpu-affinity = <1>;
+	};
+
+	i2c@180901C0 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x180901F4>;
+	//	samsung,i2c-pad-enable = <0x10B00C40 0x8000>;
+		samsung,i2c-cpu-affinity = <1>;
+	};
+
+	i2c@180901E0 {
+		status = "okay";
+		samsung,i2c-sda-delay = <1>;
+		samsung,i2c-max-bus-freq = <400000>;
+		samsung,i2c-irq-status-reg = <0x180901F4>;
+	//	samsung,i2c-pad-enable = <0x10B00C40 0x10000>;
+		samsung,i2c-cpu-affinity = <1>;
+
+	};
+
+/*
+	dummy_panel {
+		compatible = "dummy_panel";
+
+		display-timings {
+			native-mode = <&timing0>;
+
+			timing0: timing-0 {
+				 clock-frequency = <0>;
+				 hactive = <1920>;
+				 vactive = <1080>;
+				 hfront-porch = <0>;
+				 hback-porch = <0>;
+				 hsync-len = <0>;
+				 vfront-porch = <0>;
+				 vback-porch = <0>;
+				 vsync-len = <0>;
+			};
+		};
+	};
+*/
+
+	ehci@0x18800000 {
+		status = "okay";
+		samsung,sw-reset = <0x18090000 0x8F4 0x1000>;
+		samsung,ehci-gpr_reg1 = <0x18850000 0x18 0x002020>;
+		samsung,ehci-link-set =  <0x18850000 0x1c 0x8e0000>;
+		samsung,sw-reset-release = <0x18090000 0x8F4 0x1000>;
+		samsung,vbus-enable = <0x18090000 0xD5C 0x3000000 0x40>; 
+	};
+
+	ehci@0x18810000 {
+		status = "okay";
+		samsung,sw-reset = <0x18090000 0x8F4 0x2000>;
+		samsung,ehci-gpr_reg1 = <0x18850000 0x10 0x002020>;
+		samsung,ehci-link-set =  <0x18850000 0x14 0x8e0000>;
+		samsung,sw-reset-release = <0x18090000 0x8F4 0x2000>;
+		samsung,vbus-enable = <0x18090000 0xD5C 0x300000 0x20>;
+	};
+	
+	ehci@0x180E0000 {
+		status = "okay";
+		samsung,sw-reset = <0x18090000 0x8F4 0x4000>;
+		samsung,ehci-gpr_reg1 = <0x180a0000 0x10 0x002020>;
+		samsung,ehci-link-set = <0x180a0000 0x14 0x8e0000>;
+		samsung,sw-reset-release = <0x18090000 0x8F4 0x4000>;
+//		samsung,vbus-enable = <0x18090000 0xD5C 0x30000000 0x80>;
+	};
+
+	ohci@0x18808000 {
+		status = "okay";
+	};
+
+	ohci@0x18818000 {
+		status = "okay";
+	};
+	
+	ohci@0x180E8000 {
+		status = "okay";
+	};
+	
+	sata@18870000 {
+		status = "okay";
+	};
+
+	sata@18880000 {
+		status = "okay";
+	};
+};

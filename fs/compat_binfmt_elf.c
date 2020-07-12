@@ -143,3 +143,27 @@ static void cputime_to_compat_timeval(const cputime_t cputime,
  * We share all the actual code with the native (64-bit) version.
  */
 #include "binfmt_elf.c"
+
+#ifdef CONFIG_MINIMAL_CORE
+int minmal_core_fill_note(struct elfhdr *elf, int phdrs,
+				struct elf_note_info *info,
+				const siginfo_t *siginfo, struct pt_regs *regs);
+void minimal_core_fill_phdr(struct elf_phdr *phdr, int sz, loff_t offset);
+void minimal_core_free_note(struct elf_note_info *info);
+
+int minmal_core_fill_note(struct elfhdr *elf, int phdrs,
+			struct elf_note_info *info,
+			const siginfo_t *siginfo, struct pt_regs *regs)
+{
+	return fill_note_info(elf, phdrs, info, siginfo, regs);
+}
+void minimal_core_fill_phdr(struct elf_phdr *phdr, int sz, loff_t offset)
+{
+	fill_elf_note_phdr(phdr, sz, offset);
+}
+
+void minimal_core_free_note(struct elf_note_info *info)
+{
+	free_note_info(info);
+}
+#endif

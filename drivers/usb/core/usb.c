@@ -45,6 +45,63 @@
 #include "usb.h"
 
 
+#ifdef CONFIG_SAMSUNG_USB_TVKEY_SUPPORT
+#include "cas_cc_intf.c"
+#include "../storage/usb.h"
+#include <scsi/scsi_host.h>
+
+
+#define NAGRA_CAS_VENDOR_ID			0x139F
+#define NAGRA_CAS_PRODUCT_ID		0xCAD0
+#define NAGRA_CAS_VENDOR_ID_NEW		0x2D55
+#define NAGRA_CAS_PRODUCT_ID_NEW	0x0001
+
+#define STEP_CLASS_ID				0xEF
+#define STEP_SUBCLASS_ID			0x06
+#define STEP_PROTOCOL_TS_ID			0x01
+#define STEP_PROTOCOL_RAW_ID		0x02
+
+
+extern void register_scsi_cas_filter(int (*filter)(struct Scsi_Host *, int *, int *, int *, struct cas_port_info *));
+extern void unregister_scsi_cas_filter(void);
+
+
+// To be called from scsi layer. It will be registered on usbcore init.
+int cas_filter(struct Scsi_Host *host, int *vid, int *pid, int *serial, struct cas_port_info *port_info)
+{
+	int i = 0;
+	struct us_data *us = host_to_us(host);
+	struct usb_device *udev = us->pusb_dev;
+	struct usb_host_config *config = udev->actconfig;
+
+	for(i = 0; i < config->desc.bNumInterfaces; ++i)
+	{
+		struct usb_interface *cintf = config->interface[i];
+		struct usb_host_interface *intf = cintf->cur_altsetting;
+
+		if((intf->desc.bInterfaceClass == STEP_CLASS_ID) && (intf->desc.bInterfaceSubClass == STEP_SUBCLASS_ID) &&
+			((intf->desc.bInterfaceProtocol == STEP_PROTOCOL_TS_ID) || (intf->desc.bInterfaceProtocol == STEP_PROTOCOL_RAW_ID)))
+		{
+			*vid = udev->descriptor.idVendor;
+			*pid = udev->descriptor.idProduct;
+			*serial = udev->descriptor.iSerialNumber;
+			// Add dongle usb port info for connect/disconnect event. nagsam-mw will check for valid dongle port.
+			port_info->dev_path_len = snprintf(port_info->dev_path, MAX_DEV_PATH_LEN, "%d-%s", udev->bus->busnum, udev->devpath);
+			printk(KERN_EMERG "[%s] scsi event, dev_path=%s\n", __func__, port_info->dev_path);
+
+			return 1;
+		}
+		else
+		{
+			// To keep quiet prevent tool.
+		}
+	}
+
+	return 0;
+}
+#endif	// CONFIG_SAMSUNG_USB_TVKEY_SUPPORT
+
+
 const char *usbcore_name = "usbcore";
 
 static bool nousb;	/* Disable USB when built into kernel image */
@@ -325,6 +382,7 @@ static void usb_dev_complete(struct device *dev)
 	usb_resume_complete(dev);
 }
 
+#ifndef CONFIG_USB_NVT_EHCI_HCD
 static int usb_dev_suspend(struct device *dev)
 {
 	return usb_suspend(dev, PMSG_SUSPEND);
@@ -334,6 +392,7 @@ static int usb_dev_resume(struct device *dev)
 {
 	return usb_resume(dev, PMSG_RESUME);
 }
+#endif
 
 static int usb_dev_freeze(struct device *dev)
 {
@@ -358,8 +417,13 @@ static int usb_dev_restore(struct device *dev)
 static const struct dev_pm_ops usb_device_pm_ops = {
 	.prepare =	usb_dev_prepare,
 	.complete =	usb_dev_complete,
+#ifdef CONFIG_USB_NVT_EHCI_HCD
+	.suspend =	usb_dev_poweroff,
+	.resume =	usb_dev_restore,
+#else
 	.suspend =	usb_dev_suspend,
 	.resume =	usb_dev_resume,
+#endif
 	.freeze =	usb_dev_freeze,
 	.thaw =		usb_dev_thaw,
 	.poweroff =	usb_dev_poweroff,
@@ -492,6 +556,11 @@ struct usb_device *usb_alloc_dev(struct usb_device *parent,
 
 		dev->dev.parent = &parent->dev;
 		dev_set_name(&dev->dev, "%d-%s", bus->busnum, dev->devpath);
+#ifdef SAMSUNG_PATCH_WITH_USB_HOTPLUG
+                // change reported devicepath (device1-1.2)
+                 memset(dev->devbusportpath, 0x0, sizeof(dev->devbusportpath));
+                snprintf(dev->devbusportpath, sizeof(dev->devbusportpath), "%d-%s", bus->busnum, dev->devpath);
+#endif
 
 		/* hub driver sets up TT records */
 	}
@@ -1051,6 +1120,13 @@ static int __init usb_init(void)
 	}
 	usb_init_pool_max();
 
+
+#ifdef CONFIG_SAMSUNG_USB_TVKEY_SUPPORT
+	register_cas_cc_intf();
+	register_scsi_cas_filter(&cas_filter);
+#endif
+
+
 	retval = usb_debugfs_init();
 	if (retval)
 		goto out;
@@ -1104,6 +1180,13 @@ static void __exit usb_exit(void)
 	/* This will matter if shutdown/reboot does exitcalls. */
 	if (usb_disabled())
 		return;
+
+
+#ifdef CONFIG_SAMSUNG_USB_TVKEY_SUPPORT
+	unregister_cas_cc_intf();
+	unregister_scsi_cas_filter();
+#endif
+
 
 	usb_deregister_device_driver(&usb_generic_driver);
 	usb_major_cleanup();

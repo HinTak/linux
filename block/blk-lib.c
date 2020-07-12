@@ -76,6 +76,9 @@ int blkdev_issue_discard(struct block_device *bdev, sector_t sector,
 			return -EOPNOTSUPP;
 		type |= REQ_SECURE;
 	}
+	if (flags & BLKDEV_DISCARD_ZERO) {
+		type |= REQ_OP_WRITE_ZEROES;
+	}
 
 	atomic_set(&bb.done, 1);
 	bb.flags = 1 << BIO_UPTODATE;

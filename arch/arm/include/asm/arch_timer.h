@@ -80,20 +80,40 @@ static inline u32 arch_timer_get_cntfrq(void)
 
 static inline u64 arch_counter_get_cntpct(void)
 {
+#ifdef CONFIG_NVT_ARM_ERRATUM_858921
+	u64 old_ts, new_ts;
+
+	isb();
+	asm volatile("mrrc p15, 0, %Q0, %R0, c14" : "=r" (old_ts));
+	asm volatile("mrrc p15, 0, %Q0, %R0, c14" : "=r" (new_ts));
+
+	return (((old_ts ^ new_ts) >> 32) & 1) ? old_ts : new_ts;
+#else
 	u64 cval;
 
 	isb();
 	asm volatile("mrrc p15, 0, %Q0, %R0, c14" : "=r" (cval));
 	return cval;
+#endif
 }
 
 static inline u64 arch_counter_get_cntvct(void)
 {
+#ifdef CONFIG_NVT_ARM_ERRATUM_858921
+	u64 old_ts, new_ts;
+
+	isb();
+	asm volatile("mrrc p15, 1, %Q0, %R0, c14" : "=r" (old_ts));
+	asm volatile("mrrc p15, 1, %Q0, %R0, c14" : "=r" (new_ts));
+
+	return (((old_ts ^ new_ts) >> 32) & 1) ? old_ts : new_ts;
+#else
 	u64 cval;
 
 	isb();
 	asm volatile("mrrc p15, 1, %Q0, %R0, c14" : "=r" (cval));
 	return cval;
+#endif
 }
 
 static inline u32 arch_timer_get_cntkctl(void)

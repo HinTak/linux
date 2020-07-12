@@ -1,0 +1,21 @@
+[Header]
+    Version = 4.3
+    Hash Algorithm = sha256
+    Engine = CAAM
+    Engine Configuration = 0
+    Certificate Format = X509
+    Signature Format = CMS
+
+[Install SRK]
+    File = "/home/secos/bin/nxp_enc_sign_server/CHIP_NAME/crts/srk_table.bin"
+    Source index = 0
+
+[Install NOCAK]
+    File = "/home/secos/bin/nxp_enc_sign_server/CHIP_NAME/crts/SRK1_sha256_2048_65537_v3_usr_crt.pem"
+
+[Authenticate CSF]
+
+[Authenticate Data]
+    Verification index = 0
+    Blocks = LOAD_ADDR 0x0 DATA_SIZE "FILE_PAD_IVT"
+ 

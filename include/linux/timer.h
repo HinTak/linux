@@ -174,6 +174,9 @@ static inline int timer_pending(const struct timer_list * timer)
 extern void add_timer_on(struct timer_list *timer, int cpu);
 extern int del_timer(struct timer_list * timer);
 extern int mod_timer(struct timer_list *timer, unsigned long expires);
+#ifdef CONFIG_SCHED_HMP
+extern int mod_timer_on(struct timer_list *timer, int cpu, unsigned long expires);
+#endif
 extern int mod_timer_pending(struct timer_list *timer, unsigned long expires);
 extern int mod_timer_pinned(struct timer_list *timer, unsigned long expires);
 

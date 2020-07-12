@@ -33,6 +33,8 @@
 #include <linux/nfs_fs_sb.h>
 #include <linux/nfs_mount.h>
 
+#include <trace/early.h>
+
 #include "do_mounts.h"
 
 int __initdata rd_doload;	/* 1 = load RAM disk, 0 = don't load */
@@ -375,6 +377,9 @@ static int __init do_mount_root(char *name, char *fs, int flags, void *data)
 	       s->s_type->name,
 	       s->s_flags & MS_RDONLY ?  " readonly" : "",
 	       MAJOR(ROOT_DEV), MINOR(ROOT_DEV));
+#ifdef CONFIG_DPM_SHOW_TIME_IN_HWTRACING
+	trace_early_message("VFS: Mounted root");
+#endif
 	return 0;
 }
 
@@ -583,7 +588,11 @@ void __init prepare_namespace(void)
 			saved_root_name);
 		while (driver_probe_done() != 0 ||
 			(ROOT_DEV = name_to_dev_t(saved_root_name)) == 0)
+#if defined(CONFIG_REDUCE_ROOTWAIT_TIME)
+			msleep(5);
+#else
 			msleep(100);
+#endif
 		async_synchronize_full();
 	}
 

@@ -62,9 +62,10 @@ int seq_open(struct file *file, const struct seq_operations *op)
 	memset(p, 0, sizeof(*p));
 	mutex_init(&p->lock);
 	p->op = op;
-#ifdef CONFIG_USER_NS
-	p->user_ns = file->f_cred->user_ns;
-#endif
+
+	// No refcounting: the lifetime of 'p' is constrained
+	// to the lifetime of the file.
+	p->file = file;
 
 	/*
 	 * Wrappers around seq_open(e.g. swaps_open) need to be
@@ -425,6 +426,33 @@ int seq_printf(struct seq_file *m, const char *f, ...)
 	return ret;
 }
 EXPORT_SYMBOL(seq_printf);
+
+/**
+ *	seq_printk -	output to printk/seq_printf
+ *	@m: seq_file where to print
+ *	@f: format
+ *
+ *	Generalize your output to seq_file(s) and to console with seq_printk.
+ *	If seq_file parameter is NULL, print using printk,
+ *	print with seq_print otherwise.
+ */
+int seq_printk(struct seq_file *m, const char *f, ...)
+{
+	int ret;
+	va_list args;
+
+	if (NULL == m) {
+		va_start(args, f);
+		ret = vprintk(f, args);
+		va_end(args);
+	} else {
+		va_start(args, f);
+		ret = seq_vprintf(m, f, args);
+		va_end(args);
+	}
+
+	return ret;
+}
 
 /**
  *	mangle_path -	mangle and copy path to buffer beginning

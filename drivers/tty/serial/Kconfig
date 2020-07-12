@@ -7,6 +7,30 @@ if TTY
 menu "Serial drivers"
 	depends on HAS_IOMEM
 
+config SERIAL_SDP
+	tristate "SDP UART Controller support"
+	default y
+	depends on ARCH_SDP
+	select SERIAL_CORE
+	help
+	  This enables the driver for the on-chip UARTs of the Samsung DTV Chips
+	  Fox/Golf/Hawk/Jazz
+
+config SERIAL_SDP2
+	tristate "SDP UART Controller v2.0 support"
+	default y
+	depends on ARCH_SDP
+	select SERIAL_CORE
+	help
+	  This enables the driver for the on-chip UARTs of the Samsung DTV Chips
+	  Kant
+
+config SERIAL_SDP_CONSOLE
+	bool "Support Serial Console"
+	default y
+	depends on SERIAL_SDP || SERIAL_SDP2
+	select SERIAL_CORE_CONSOLE
+	
 config SERIAL_EARLYCON
 	bool
 	help
@@ -1593,5 +1617,14 @@ endmenu
 
 config SERIAL_MCTRL_GPIO
 	tristate
+
+config NVT_HSUART_SUPPORT
+	bool "NVT HS-UART Controller support"
+	depends on PLAT_NOVATEK
+	default n
+	select SERIAL_CORE
+	help
+	  This enables the setting for the on-chip HSUARTs of the NVT Chips
+	  With enable, of_serial will set related option to support high speed baud.
 
 endif # TTY

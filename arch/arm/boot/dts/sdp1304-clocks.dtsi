@@ -1,0 +1,73 @@
+/*
+ * Copyright (C) 2013 Samsung Electronics Co.Ltd
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
+/ {
+	clock: clock-controller@10b00800 {
+		ahb_clk: ahb_clk {
+			sdp,clock;
+			#clock-cells = <0>;
+		};
+		
+		apb_pclk: apb_pclk {
+			sdp,clock;
+			#clock-cells = <0>;
+		};
+
+		emmc_clk: emmc_clk {
+			sdp,clock;
+			#clock-cells = <0>;
+		};
+
+		rstn_uart: rstn_uart {
+			sdp,clock;
+			#clock-cells = <0>;
+		};
+
+		rstn_i2c: rstn_i2c {
+			sdp,clock;
+			#clock-cells = <0>;
+		};
+	};
+
+	clock_mp: clock-controller@18090800 {
+		disp_pclk_nr: disp_pclk_nr {
+			sdp,clock;
+			#clock-cells = <0>;
+		};
+
+		disp_pclk_dcar: disp_pclk_dcar {
+			sdp,clock;
+			#clock-cells = <0>;
+		};
+
+		disp_pclk_ipc: disp_pclk_ipc {
+			sdp,clock;
+			#clock-cells = <0>;
+		};
+
+		disp_pclk_ucar: disp_pclk_ucar {
+			sdp,clock;
+			#clock-cells = <0>;
+		};
+
+		dp_scl_osc_clk: dp_scl_osc_clk {
+			sdp,clock;
+			#clock-cells = <0>;
+		};
+
+		dp_scl_sub_clk: dp_scl_sub_clk {
+			sdp,clock;
+			#clock-cells = <0>;
+		};
+
+		dp_scl_pclk: dp_scl_pclk {
+			sdp,clock;
+			#clock-cells = <0>;
+		};
+	};
+};

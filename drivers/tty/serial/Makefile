@@ -2,6 +2,9 @@
 # Makefile for the kernel serial device drivers.
 #
 
+obj-$(CONFIG_SERIAL_SDP) += sdp_uart.o
+obj-$(CONFIG_SERIAL_SDP2) += sdp_uart2.o
+
 obj-$(CONFIG_SERIAL_CORE) += serial_core.o
 obj-$(CONFIG_SERIAL_21285) += 21285.o
 

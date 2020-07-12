@@ -43,7 +43,7 @@ void irq_move_masked_irq(struct irq_data *idata)
 	 * masking the irqs.
 	 */
 	if (cpumask_any_and(desc->pending_mask, cpu_online_mask) < nr_cpu_ids)
-		irq_do_set_affinity(&desc->irq_data, desc->pending_mask, false);
+		irq_do_set_affinity(&desc->irq_data, desc->pending_mask, false, true);
 
 	cpumask_clear(desc->pending_mask);
 }

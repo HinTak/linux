@@ -840,6 +840,13 @@ static char *mem_devnode(struct device *dev, umode_t *mode)
 
 static struct class *mem_class;
 
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+static int dev_mem_class_get_smack64_label(struct device *dev, char *buf, int size)
+{
+	snprintf(buf, size, "%s", "*");
+	return 0;
+}
+#endif
 static int __init chr_dev_init(void)
 {
 	int minor;
@@ -851,6 +858,9 @@ static int __init chr_dev_init(void)
 	if (IS_ERR(mem_class))
 		return PTR_ERR(mem_class);
 
+#ifdef CONFIG_SECURITY_SMACK_SET_DEV_SMK_LABEL
+	mem_class->get_smack64_label = dev_mem_class_get_smack64_label;
+#endif
 	mem_class->devnode = mem_devnode;
 	for (minor = 1; minor < ARRAY_SIZE(devlist); minor++) {
 		if (!devlist[minor].name)

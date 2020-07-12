@@ -486,9 +486,6 @@ __ww_mutex_lock_check_stamp(struct mutex *lock, struct ww_acquire_ctx *ctx)
 	if (!hold_ctx)
 		return 0;
 
-	if (unlikely(ctx == hold_ctx))
-		return -EALREADY;
-
 	if (ctx->stamp - hold_ctx->stamp <= LONG_MAX &&
 	    (ctx->stamp != hold_ctx->stamp || ctx > hold_ctx)) {
 #ifdef CONFIG_DEBUG_MUTEXES
@@ -513,6 +510,18 @@ __mutex_lock_common(struct mutex *lock, long state, unsigned int subclass,
 	struct mutex_waiter waiter;
 	unsigned long flags;
 	int ret;
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	struct smart_deadlock_profile smdl_profile;
+	struct smart_deadlock_kern_mutex smdl_mutex;
+
+	smdl_profile.type = SMART_DEADLOCK_PROFILE_INVALID;
+#endif
+
+	if (use_ww_ctx) {
+		struct ww_mutex *ww = container_of(lock, struct ww_mutex, base);
+		if (unlikely(ww_ctx == READ_ONCE(ww->ctx)))
+			return -EALREADY;
+	}
 
 	preempt_disable();
 	mutex_acquire_nest(&lock->dep_map, subclass, 0, nest_lock, ip);
@@ -531,6 +540,12 @@ __mutex_lock_common(struct mutex *lock, long state, unsigned int subclass,
 	 */
 	if (!mutex_is_locked(lock) && (atomic_xchg(&lock->count, 0) == 1))
 		goto skip_wait;
+
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	smart_deadlock_init_profile(SMART_DEADLOCK_PROFILE_KERN_MUTEX, &smdl_profile, (void *)&smdl_mutex);
+	smdl_mutex.lock = lock;
+	smart_deadlock_enter_profile(&smdl_profile);
+#endif
 
 	debug_mutex_lock_common(lock, &waiter);
 	debug_mutex_add_waiter(lock, &waiter, task_thread_info(task));
@@ -587,6 +602,9 @@ __mutex_lock_common(struct mutex *lock, long state, unsigned int subclass,
 	debug_mutex_free_waiter(&waiter);
 
 skip_wait:
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	smart_deadlock_leave_profile(&smdl_profile);
+#endif
 	/* got the lock - cleanup and rejoice! */
 	lock_acquired(&lock->dep_map, ip);
 	mutex_set_owner(lock);
@@ -601,6 +619,9 @@ skip_wait:
 	return 0;
 
 err:
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	smart_deadlock_leave_profile(&smdl_profile);
+#endif
 	mutex_remove_waiter(lock, &waiter, task_thread_info(task));
 	spin_unlock_mutex(&lock->wait_lock, flags);
 	debug_mutex_free_waiter(&waiter);

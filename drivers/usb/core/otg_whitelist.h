@@ -17,6 +17,40 @@
  */
 
 static struct usb_device_id whitelist_table [] = {
+#ifdef CONFIG_ARCH_MXC
+/* Add FSL i.mx whitelist, the default list is for USB Compliance Test */
+#if defined(CONFIG_USB_EHSET_TEST_FIXTURE)	\
+	|| defined(CONFIG_USB_EHSET_TEST_FIXTURE_MODULE)
+#define TEST_SE0_NAK_PID			0x0101
+#define TEST_J_PID				0x0102
+#define TEST_K_PID				0x0103
+#define TEST_PACKET_PID				0x0104
+#define TEST_HS_HOST_PORT_SUSPEND_RESUME	0x0106
+#define TEST_SINGLE_STEP_GET_DEV_DESC		0x0107
+#define TEST_SINGLE_STEP_SET_FEATURE		0x0108
+#define TEST_OTG_TEST_DEVICE_SUPPORT		0x0200
+{ USB_DEVICE(0x1a0a, TEST_SE0_NAK_PID) },
+{ USB_DEVICE(0x1a0a, TEST_J_PID) },
+{ USB_DEVICE(0x1a0a, TEST_K_PID) },
+{ USB_DEVICE(0x1a0a, TEST_PACKET_PID) },
+{ USB_DEVICE(0x1a0a, TEST_HS_HOST_PORT_SUSPEND_RESUME) },
+{ USB_DEVICE(0x1a0a, TEST_SINGLE_STEP_GET_DEV_DESC) },
+{ USB_DEVICE(0x1a0a, TEST_SINGLE_STEP_SET_FEATURE) },
+{ USB_DEVICE(0x1a0a, TEST_OTG_TEST_DEVICE_SUPPORT) },
+#endif
+
+#define USB_INTERFACE_CLASS_INFO(cl) \
+	.match_flags = USB_DEVICE_ID_MATCH_INT_CLASS, \
+	.bInterfaceClass = (cl)
+
+{USB_INTERFACE_CLASS_INFO(USB_CLASS_HUB) },
+#if defined(CONFIG_USB_STORAGE) || defined(CONFIG_USB_STORAGE_MODULE)
+{USB_INTERFACE_CLASS_INFO(USB_CLASS_MASS_STORAGE) },
+#endif
+#if defined(CONFIG_USB_HID) || defined(CONFIG_USB_HID_MODULE)
+{USB_INTERFACE_CLASS_INFO(USB_CLASS_HID) },
+#endif
+#endif
 
 /* hubs are optional in OTG, but very handy ... */
 { USB_DEVICE_INFO(USB_CLASS_HUB, 0, 0), },
@@ -45,7 +79,29 @@ static struct usb_device_id whitelist_table [] = {
 
 { }	/* Terminating entry */
 };
+#ifdef CONFIG_ARCH_MXC
+static bool match_int_class(struct usb_device_id *id, struct usb_device *udev)
+{
+	struct usb_host_config *c;
+	int num_configs, i;
 
+	/* Copy the code from generic.c */
+	c = udev->config;
+	num_configs = udev->descriptor.bNumConfigurations;
+	for (i = 0; i < num_configs; (i++, c++)) {
+		struct usb_interface_descriptor	*desc = NULL;
+
+		/* It's possible that a config has no interfaces! */
+		if (c->desc.bNumInterfaces > 0)
+			desc = &c->intf_cache[0]->altsetting->desc;
+
+		if (desc && (desc->bInterfaceClass == id->bInterfaceClass))
+			return true;
+	}
+
+	return false;
+}
+#endif
 static int is_targeted(struct usb_device *dev)
 {
 	struct usb_device_id	*id = whitelist_table;
@@ -59,7 +115,20 @@ static int is_targeted(struct usb_device *dev)
 	if ((le16_to_cpu(dev->descriptor.idVendor) == 0x1a0a &&
 	     le16_to_cpu(dev->descriptor.idProduct) == 0x0200))
 		return 1;
-
+#ifdef CONFIG_ARCH_MXC
+	/* Unknown Device Not Supporting HNP */
+	if ((le16_to_cpu(dev->descriptor.idVendor) == 0x1a0a &&
+		le16_to_cpu(dev->descriptor.idProduct) == 0x0201)) {
+		dev_warn(&dev->dev, "Unsupported Device\n");
+		return 0;
+	}
+	/* Unknown Device Supporting HNP */
+	if ((le16_to_cpu(dev->descriptor.idVendor) == 0x1a0a &&
+		le16_to_cpu(dev->descriptor.idProduct) == 0x0202)) {
+		dev_warn(&dev->dev, "Device no Responding\n");
+		return 0;
+	}
+#endif
 	/* NOTE: can't use usb_match_id() since interface caches
 	 * aren't set up yet. this is cut/paste from that code.
 	 */
@@ -93,7 +162,11 @@ static int is_targeted(struct usb_device *dev)
 		if ((id->match_flags & USB_DEVICE_ID_MATCH_DEV_PROTOCOL) &&
 		    (id->bDeviceProtocol != dev->descriptor.bDeviceProtocol))
 			continue;
-
+#ifdef CONFIG_ARCH_MXC
+		if ((id->match_flags & USB_DEVICE_ID_MATCH_INT_CLASS) &&
+		    (!match_int_class(id, dev)))
+			continue;
+#endif
 		return 1;
 	}
 

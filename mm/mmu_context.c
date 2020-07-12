@@ -29,6 +29,7 @@ void use_mm(struct mm_struct *mm)
 		tsk->active_mm = mm;
 	}
 	tsk->mm = mm;
+	map_kernel_stack(mm, current);
 	switch_mm(active_mm, mm, tsk);
 	task_unlock(tsk);
 #ifdef finish_arch_post_lock_switch

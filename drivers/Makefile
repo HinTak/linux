@@ -83,6 +83,7 @@ obj-$(CONFIG_UIO)		+= uio/
 obj-$(CONFIG_VFIO)		+= vfio/
 obj-y				+= cdrom/
 obj-y				+= auxdisplay/
+obj-$(CONFIG_CPE_OTP)       += cpe/
 obj-$(CONFIG_PCCARD)		+= pcmcia/
 obj-$(CONFIG_DIO)		+= dio/
 obj-$(CONFIG_SBUS)		+= sbus/
@@ -165,3 +166,7 @@ obj-$(CONFIG_RAS)		+= ras/
 obj-$(CONFIG_THUNDERBOLT)	+= thunderbolt/
 obj-$(CONFIG_CORESIGHT)		+= hwtracing/coresight/
 obj-$(CONFIG_ANDROID)		+= android/
+obj-y              += samsung/
+obj-$(CONFIG_NVMEM)		+= nvmem/
+# VD-Time feature driver
+obj-$(CONFIG_VDTIME_SUPPORT)    += vd_time/

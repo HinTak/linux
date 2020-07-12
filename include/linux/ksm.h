@@ -16,6 +16,20 @@
 struct stable_node;
 struct mem_cgroup;
 
+#ifdef CONFIG_KSM_ZERO_PAGE_MERGE_ONLY
+extern struct page *ksm_zero_page;
+#endif
+
+#ifdef CONFIG_KSM_KERNEL_MADVISE
+void ksm_set_vm_mergeable_if_possible(unsigned long *vm_flags);
+#else
+static inline void ksm_set_vm_mergeable_if_possible(unsigned long *vm_flags)
+{
+
+}
+#endif
+
+
 #ifdef CONFIG_KSM
 int ksm_madvise(struct vm_area_struct *vma, unsigned long start,
 		unsigned long end, int advice, unsigned long *vm_flags);
@@ -43,8 +57,7 @@ static inline struct stable_node *page_stable_node(struct page *page)
 static inline void set_page_stable_node(struct page *page,
 					struct stable_node *stable_node)
 {
-	page->mapping = (void *)stable_node +
-				(PAGE_MAPPING_ANON | PAGE_MAPPING_KSM);
+	page->mapping = (void *)((unsigned long)stable_node | PAGE_MAPPING_KSM);
 }
 
 /*
@@ -58,12 +71,45 @@ static inline void set_page_stable_node(struct page *page,
  * We'd like to make this conditional on vma->vm_flags & VM_MERGEABLE,
  * but what if the vma was unmerged while the page was swapped out?
  */
+#ifndef CONFIG_KSM_ZERO_PAGE_MERGE_ONLY
 struct page *ksm_might_need_to_copy(struct page *page,
 			struct vm_area_struct *vma, unsigned long address);
 
 int rmap_walk_ksm(struct page *page, struct rmap_walk_control *rwc);
 void ksm_migrate_page(struct page *newpage, struct page *oldpage);
-
+static inline int PageKzm(struct page *page)
+{
+	return 0;
+}
+#else
+/* 
+ * Not used in case of KZM as ksm_zero_page is kernel page which is not 
+ * swapped out.
+ */
+static inline struct page *ksm_might_need_to_copy(struct page *page,
+			struct vm_area_struct *vma, unsigned long address)
+{
+	return page;
+}
+/* 
+ * Not used in KZM.
+ */
+static inline int rmap_walk_ksm(struct page *page,
+			struct rmap_walk_control *rwc)
+{
+	return 0;
+}
+/* 
+ * Not used in case of KZM as ksm_zero_page is kernel page which does not migrate.
+ */
+static inline void ksm_migrate_page(struct page *newpage, struct page *oldpage)
+{
+}
+static inline int PageKzm(struct page *page)
+{
+	return (page == ksm_zero_page);
+}
+#endif
 #else  /* !CONFIG_KSM */
 
 static inline int ksm_fork(struct mm_struct *mm, struct mm_struct *oldmm)

@@ -559,13 +559,18 @@ struct usb_gadget {
 	struct device			dev;
 	unsigned			out_epnum;
 	unsigned			in_epnum;
-
+#ifdef CONFIG_ARCH_MXC	
+	struct usb_otg_caps		*otg_caps;
+#endif
 	unsigned			sg_supported:1;
 	unsigned			is_otg:1;
 	unsigned			is_a_peripheral:1;
 	unsigned			b_hnp_enable:1;
 	unsigned			a_hnp_support:1;
 	unsigned			a_alt_hnp_support:1;
+#ifdef CONFIG_ARCH_MXC	
+	unsigned			host_request_flag:1;
+#endif	
 	unsigned			quirk_ep_out_aligned_size:1;
 	unsigned			is_selfpowered:1;
 };
@@ -884,6 +889,10 @@ struct usb_gadget_driver {
 
 	/* FIXME support safe rmmod */
 	struct device_driver	driver;
+#ifdef CONFIG_ARCH_MXC
+	char			*udc_name;
+	struct list_head	pending;
+#endif	
 };
 
 
@@ -1001,7 +1010,12 @@ int usb_assign_descriptors(struct usb_function *f,
 		struct usb_descriptor_header **hs,
 		struct usb_descriptor_header **ss);
 void usb_free_all_descriptors(struct usb_function *f);
-
+#ifdef CONFIG_ARCH_MXC
+struct usb_descriptor_header *usb_otg_descriptor_alloc(
+				struct usb_gadget *gadget);
+int usb_otg_descriptor_init(struct usb_gadget *gadget,
+		struct usb_descriptor_header *otg_desc);
+#endif		
 /*-------------------------------------------------------------------------*/
 
 /* utility to simplify map/unmap of usb_requests to/from DMA */

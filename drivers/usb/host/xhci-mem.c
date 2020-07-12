@@ -2092,7 +2092,7 @@ static void xhci_add_in_port(struct xhci_hcd *xhci, unsigned int num_ports,
 			addr, port_offset, port_count, major_revision);
 	/* Port count includes the current port offset */
 	if (port_offset == 0 || (port_offset + port_count - 1) > num_ports)
-		/* WTF? "Valid values are ‘1’ to MaxPorts" */
+		/* WTF? "Valid values are ????to MaxPorts" */
 		return;
 
 	/* cache usb2 port capabilities */
@@ -2107,6 +2107,8 @@ static void xhci_add_in_port(struct xhci_hcd *xhci, unsigned int num_ports,
 		xhci->sw_lpm_support = 1;
 	}
 
+/* don't enable lpm support for NVT XHCI controller */
+#if !IS_ENABLED(CONFIG_USB_NVT_XHCI_HCD)
 	if ((xhci->hci_version >= 0x100) && (major_revision != 0x03)) {
 		xhci_dbg_trace(xhci, trace_xhci_dbg_init,
 				"xHCI 1.0: support USB2 software lpm");
@@ -2117,6 +2119,7 @@ static void xhci_add_in_port(struct xhci_hcd *xhci, unsigned int num_ports,
 			xhci->hw_lpm_support = 1;
 		}
 	}
+#endif
 
 	port_offset--;
 	for (i = port_offset; i < (port_offset + port_count); i++) {

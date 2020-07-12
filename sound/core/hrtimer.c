@@ -85,22 +85,25 @@ static int snd_hrtimer_close(struct snd_timer *t)
 	return 0;
 }
 
+/**[2017.11.30 SP.Audio] https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=2ba1fe7a06d3624f9a7586d672b55f08f7c670f3 **/
 static int snd_hrtimer_start(struct snd_timer *t)
 {
 	struct snd_hrtimer *stime = t->private_data;
 
 	atomic_set(&stime->running, 0);
-	hrtimer_cancel(&stime->hrt);
+	hrtimer_try_to_cancel(&stime->hrt);
 	hrtimer_start(&stime->hrt, ns_to_ktime(t->sticks * resolution),
 		      HRTIMER_MODE_REL);
 	atomic_set(&stime->running, 1);
 	return 0;
 }
 
+/** https://github.com/torvalds/linux/commit/2ba1fe7a06d3624f9a7586d672b55f08f7c670f3 */
 static int snd_hrtimer_stop(struct snd_timer *t)
 {
 	struct snd_hrtimer *stime = t->private_data;
 	atomic_set(&stime->running, 0);
+	hrtimer_try_to_cancel(&stime->hrt);
 	return 0;
 }
 

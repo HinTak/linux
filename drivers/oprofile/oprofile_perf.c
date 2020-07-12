@@ -71,6 +71,7 @@ static void op_perf_setup(void)
 	}
 }
 
+
 static int op_create_counter(int cpu, int event)
 {
 	struct perf_event *pevent;

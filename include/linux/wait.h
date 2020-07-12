@@ -19,7 +19,11 @@ int default_wake_function(wait_queue_t *wait, unsigned mode, int flags, void *ke
 
 struct __wait_queue {
 	unsigned int		flags;
+#ifdef __cplusplus
+	void *_private;
+#else
 	void			*private;
+#endif
 	wait_queue_func_t	func;
 	struct list_head	task_list;
 };
@@ -89,17 +93,25 @@ extern void __init_waitqueue_head(wait_queue_head_t *q, const char *name, struct
 
 static inline void init_waitqueue_entry(wait_queue_t *q, struct task_struct *p)
 {
-	q->flags	= 0;
-	q->private	= p;
-	q->func		= default_wake_function;
+	q->flags = 0;
+#ifdef __cplusplus
+	q->_private = p;
+#else
+	q->private = p;
+#endif
+	q->func = default_wake_function;
 }
 
 static inline void
 init_waitqueue_func_entry(wait_queue_t *q, wait_queue_func_t func)
 {
-	q->flags	= 0;
-	q->private	= NULL;
-	q->func		= func;
+	q->flags = 0;
+#ifdef __cplusplus
+	q->_private = NULL;
+#else
+	q->private = NULL;
+#endif
+	q->func = func;
 }
 
 static inline int waitqueue_active(wait_queue_head_t *q)

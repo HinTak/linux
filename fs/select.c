@@ -29,6 +29,7 @@
 #include <linux/sched/rt.h>
 #include <linux/freezer.h>
 #include <net/busy_poll.h>
+#include <linux/vmalloc.h>
 
 #include <asm/uaccess.h>
 
@@ -235,6 +236,11 @@ int poll_schedule_timeout(struct poll_wqueues *pwq, int state,
 			  ktime_t *expires, unsigned long slack)
 {
 	int rc = -EINTR;
+	struct pt_regs *regs;
+	if (current->mm) {
+		regs = task_pt_regs(current);
+		shrink_user_stack(regs->ARM_sp);
+	}
 
 	set_current_state(state);
 	if (!pwq->triggered)
@@ -405,6 +411,10 @@ int do_select(int n, fd_set_bits *fds, struct timespec *end_time)
 	unsigned long slack = 0;
 	unsigned int busy_flag = net_busy_loop_on() ? POLL_BUSY_LOOP : 0;
 	unsigned long busy_end = 0;
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	struct smart_deadlock_profile smdl_profile;
+	struct smart_deadlock_poll_select  smdl_select;
+#endif
 
 	rcu_read_lock();
 	retval = max_select_fd(n, fds);
@@ -424,6 +434,13 @@ int do_select(int n, fd_set_bits *fds, struct timespec *end_time)
 	if (end_time && !timed_out)
 		slack = select_estimate_accuracy(end_time);
 
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	smart_deadlock_init_profile(SMART_DEADLOCK_PROFILE_SELECT, &smdl_profile, (void *)&smdl_select);
+	smdl_select.t_expire.tv_sec = end_time ? end_time->tv_sec : -1;
+	smdl_select.t_expire.tv_nsec = end_time ? end_time->tv_nsec : -1;
+	smdl_select.fd.size = 0;
+	smdl_profile.type = SMART_DEADLOCK_PROFILE_INVALID;
+#endif
 	retval = 0;
 	for (;;) {
 		unsigned long *rinp, *routp, *rexp, *inp, *outp, *exp;
@@ -452,6 +469,11 @@ int do_select(int n, fd_set_bits *fds, struct timespec *end_time)
 				f = fdget(i);
 				if (f.file) {
 					const struct file_operations *f_op;
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+					if ((smdl_profile.type == SMART_DEADLOCK_PROFILE_INVALID) &&
+							(smdl_select.fd.size < SMDL_FD_SIZE))
+						smdl_select.fd.list[smdl_select.fd.size++] = i;
+#endif
 					f_op = f.file->f_op;
 					mask = DEFAULT_POLLMASK;
 					if (f_op->poll) {
@@ -497,6 +519,13 @@ int do_select(int n, fd_set_bits *fds, struct timespec *end_time)
 				*rexp = res_ex;
 			cond_resched();
 		}
+
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	if (smdl_profile.type == SMART_DEADLOCK_PROFILE_INVALID) {
+		smart_deadlock_init_profile(SMART_DEADLOCK_PROFILE_SELECT, &smdl_profile, (void *)&smdl_select);
+		smart_deadlock_enter_profile(&smdl_profile);
+	}
+#endif
 		wait->_qproc = NULL;
 		if (retval || timed_out || signal_pending(current))
 			break;
@@ -530,6 +559,9 @@ int do_select(int n, fd_set_bits *fds, struct timespec *end_time)
 					   to, slack))
 			timed_out = 1;
 	}
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	smart_deadlock_leave_profile(&smdl_profile);
+#endif
 
 	poll_freewait(&table);
 
@@ -550,7 +582,7 @@ int core_sys_select(int n, fd_set __user *inp, fd_set __user *outp,
 	fd_set_bits fds;
 	void *bits;
 	int ret, max_fds;
-	unsigned int size;
+	size_t size, alloc_size;
 	struct fdtable *fdt;
 	/* Allocate small arguments on the stack to save memory and be faster */
 	long stack_fds[SELECT_STACK_ALLOC/sizeof(long)];
@@ -577,7 +609,14 @@ int core_sys_select(int n, fd_set __user *inp, fd_set __user *outp,
 	if (size > sizeof(stack_fds) / 6) {
 		/* Not enough space in on-stack array; must use kmalloc */
 		ret = -ENOMEM;
-		bits = kmalloc(6 * size, GFP_KERNEL);
+		if (size > (SIZE_MAX / 6))
+			goto out_nofds;
+
+		alloc_size = 6 * size;
+		bits = kmalloc(alloc_size, GFP_KERNEL|__GFP_NOWARN);
+		if (!bits && alloc_size > PAGE_SIZE)
+			bits = vmalloc(alloc_size);
+
 		if (!bits)
 			goto out_nofds;
 	}
@@ -614,7 +653,7 @@ int core_sys_select(int n, fd_set __user *inp, fd_set __user *outp,
 
 out:
 	if (bits != stack_fds)
-		kfree(bits);
+		kvfree(bits);
 out_nofds:
 	return ret;
 }
@@ -787,6 +826,15 @@ static int do_poll(unsigned int nfds,  struct poll_list *list,
 	unsigned long slack = 0;
 	unsigned int busy_flag = net_busy_loop_on() ? POLL_BUSY_LOOP : 0;
 	unsigned long busy_end = 0;
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	struct smart_deadlock_profile smdl_profile;
+	struct smart_deadlock_poll_select  smdl_poll;
+
+	smdl_poll.t_expire.tv_sec = end_time ? end_time->tv_sec : -1;
+	smdl_poll.t_expire.tv_nsec = end_time ? end_time->tv_nsec : -1;
+	smdl_poll.fd.size = 0;
+	smdl_profile.type = SMART_DEADLOCK_PROFILE_INVALID;
+#endif
 
 	/* Optimise the no-wait case */
 	if (end_time && !end_time->tv_sec && !end_time->tv_nsec) {
@@ -814,6 +862,11 @@ static int do_poll(unsigned int nfds,  struct poll_list *list,
 				 * this. They'll get immediately deregistered
 				 * when we break out and return.
 				 */
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+				if ((smdl_profile.type == SMART_DEADLOCK_PROFILE_INVALID) &&
+				(pfd->fd > 0) && (smdl_poll.fd.size < SMDL_FD_SIZE))
+					smdl_poll.fd.list[smdl_poll.fd.size++] = pfd->fd;
+#endif
 				if (do_pollfd(pfd, pt, &can_busy_loop,
 					      busy_flag)) {
 					count++;
@@ -824,6 +877,14 @@ static int do_poll(unsigned int nfds,  struct poll_list *list,
 				}
 			}
 		}
+
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+		if (smdl_profile.type == SMART_DEADLOCK_PROFILE_INVALID) {
+			smart_deadlock_init_profile(SMART_DEADLOCK_PROFILE_POLL, &smdl_profile, (void *)&smdl_poll);
+			smart_deadlock_enter_profile(&smdl_profile);
+		}
+#endif
+
 		/*
 		 * All waiters have already been registered, so don't provide
 		 * a poll_table->_qproc to them on the next loop iteration.
@@ -861,6 +922,9 @@ static int do_poll(unsigned int nfds,  struct poll_list *list,
 		if (!poll_schedule_timeout(wait, TASK_INTERRUPTIBLE, to, slack))
 			timed_out = 1;
 	}
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	smart_deadlock_leave_profile(&smdl_profile);
+#endif
 	return count;
 }
 

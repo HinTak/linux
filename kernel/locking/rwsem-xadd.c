@@ -216,7 +216,10 @@ struct rw_semaphore __sched *rwsem_down_read_failed(struct rw_semaphore *sem)
 	long count, adjustment = -RWSEM_ACTIVE_READ_BIAS;
 	struct rwsem_waiter waiter;
 	struct task_struct *tsk = current;
-
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	struct smart_deadlock_profile smdl_profile;
+	struct smart_deadlock_kern_rwsem smdl_rwsem;
+#endif
 	/* set up my own style of waitqueue */
 	waiter.task = tsk;
 	waiter.type = RWSEM_WAITING_FOR_READ;
@@ -225,6 +228,13 @@ struct rw_semaphore __sched *rwsem_down_read_failed(struct rw_semaphore *sem)
 	raw_spin_lock_irq(&sem->wait_lock);
 	if (list_empty(&sem->wait_list))
 		adjustment += RWSEM_WAITING_BIAS;
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	if (!(current->flags & PF_KTHREAD)) {
+		smart_deadlock_init_profile(SMART_DEADLOCK_PROFILE_KERN_RWSEM, &smdl_profile, (void *)&smdl_rwsem);
+		smdl_rwsem.sem = sem;
+		smart_deadlock_enter_profile(&smdl_profile);
+	}
+#endif
 	list_add_tail(&waiter.list, &sem->wait_list);
 
 	/* we're now waiting on the lock, but no longer actively locking */
@@ -249,7 +259,10 @@ struct rw_semaphore __sched *rwsem_down_read_failed(struct rw_semaphore *sem)
 			break;
 		schedule();
 	}
-
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	if (!(current->flags & PF_KTHREAD))
+		smart_deadlock_leave_profile(&smdl_profile);
+#endif
 	__set_task_state(tsk, TASK_RUNNING);
 	return sem;
 }
@@ -425,7 +438,10 @@ struct rw_semaphore __sched *rwsem_down_write_failed(struct rw_semaphore *sem)
 	long count;
 	bool waiting = true; /* any queued threads before us */
 	struct rwsem_waiter waiter;
-
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	struct smart_deadlock_profile smdl_profile;
+	struct smart_deadlock_kern_rwsem smdl_rwsem;
+#endif
 	/* undo write bias from down_write operation, stop active locking */
 	count = rwsem_atomic_update(-RWSEM_ACTIVE_WRITE_BIAS, sem);
 
@@ -445,7 +461,13 @@ struct rw_semaphore __sched *rwsem_down_write_failed(struct rw_semaphore *sem)
 	/* account for this before adding a new element to the list */
 	if (list_empty(&sem->wait_list))
 		waiting = false;
-
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	if (!(current->flags & PF_KTHREAD)) {
+		smart_deadlock_init_profile(SMART_DEADLOCK_PROFILE_KERN_RWSEM, &smdl_profile, (void *)&smdl_rwsem);
+		smdl_rwsem.sem = sem;
+		smart_deadlock_enter_profile(&smdl_profile);
+	}
+#endif
 	list_add_tail(&waiter.list, &sem->wait_list);
 
 	/* we're now waiting on the lock, but no longer actively locking */
@@ -481,6 +503,10 @@ struct rw_semaphore __sched *rwsem_down_write_failed(struct rw_semaphore *sem)
 	__set_current_state(TASK_RUNNING);
 
 	list_del(&waiter.list);
+#ifdef CONFIG_SMART_DEADLOCK_PROFILE_MODE
+	if (!(current->flags & PF_KTHREAD))
+		smart_deadlock_leave_profile(&smdl_profile);
+#endif
 	raw_spin_unlock_irq(&sem->wait_lock);
 
 	return sem;

@@ -58,8 +58,12 @@ struct sched_param {
 #include <linux/uidgid.h>
 #include <linux/gfp.h>
 #include <linux/magic.h>
+#include <asm/irq.h>
 
 #include <asm/processor.h>
+#ifdef CONFIG_SMART_DEADLOCK
+#include <linux/smart-deadlock.h>
+#endif
 
 #define SCHED_ATTR_SIZE_VER0	48	/* sizeof first published struct */
 
@@ -171,6 +175,13 @@ extern bool single_task_running(void);
 extern unsigned long nr_iowait(void);
 extern unsigned long nr_iowait_cpu(int cpu);
 extern void get_iowait_load(unsigned long *nr_waiters, unsigned long *load);
+
+#ifdef CONFIG_SCHED_HMP
+extern unsigned long nr_running_cpu(unsigned int cpu);
+extern int register_hmp_task_migration_notifier(struct notifier_block *nb);
+#define HMP_UP_MIGRATION       0
+#define HMP_DOWN_MIGRATION     1
+#endif
 
 extern void calc_global_load(unsigned long ticks);
 extern void update_cpu_load_nohz(void);
@@ -364,6 +375,23 @@ extern void show_regs(struct pt_regs *);
  */
 extern void show_stack(struct task_struct *task, unsigned long *sp);
 
+extern int find_match_elf_name(struct task_struct *t, char *name,
+		unsigned long addr);
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+extern void show_pid_maps(struct task_struct *task);
+extern void show_user_stack(struct task_struct *task, struct pt_regs *regs);
+#if defined(CONFIG_ARM) || defined(CONFIG_ARM64)
+extern void dump_info(struct task_struct *task, struct pt_regs *regs,
+		unsigned long addr);
+#endif
+extern void dump_mem_kernel(const char *str, unsigned long bottom,
+		unsigned long top);
+#endif
+#ifdef CONFIG_SHOW_THREAD_GROUP_STACK
+	void __show_user_stack_tg(struct task_struct *task);
+#endif
+
+
 extern void cpu_init (void);
 extern void trap_init(void);
 extern void update_process_times(int user);
@@ -525,16 +553,29 @@ struct cpu_itimer {
 };
 
 /**
- * struct cputime - snaphsot of system and user cputime
+ * struct prev_cputime - snaphsot of system and user cputime
  * @utime: time spent in user mode
  * @stime: time spent in system mode
+ * @lock: protects the above two fields
  *
- * Gathers a generic snapshot of user and system time.
+ * Stores previous user/system time values such that we can guarantee
+ * monotonicity.
  */
-struct cputime {
+struct prev_cputime {
+#ifndef CONFIG_VIRT_CPU_ACCOUNTING_NATIVE
 	cputime_t utime;
 	cputime_t stime;
+	raw_spinlock_t lock;
+#endif
 };
+
+static inline void prev_cputime_init(struct prev_cputime *prev)
+{
+#ifndef CONFIG_VIRT_CPU_ACCOUNTING_NATIVE
+	prev->utime = prev->stime = 0;
+	raw_spin_lock_init(&prev->lock);
+#endif
+}
 
 /**
  * struct task_cputime - collected CPU time counts
@@ -542,22 +583,19 @@ struct cputime {
  * @stime:		time spent in kernel mode, in &cputime_t units
  * @sum_exec_runtime:	total time spent on the CPU, in nanoseconds
  *
- * This is an extension of struct cputime that includes the total runtime
- * spent by the task from the scheduler point of view.
- *
- * As a result, this structure groups together three kinds of CPU time
- * that are tracked for threads and thread groups.  Most things considering
- * CPU time want to group these counts together and treat all three
- * of them in parallel.
+ * This structure groups together three kinds of CPU time that are tracked for
+ * threads and thread groups.  Most things considering CPU time want to group
+ * these counts together and treat all three of them in parallel.
  */
 struct task_cputime {
 	cputime_t utime;
 	cputime_t stime;
 	unsigned long long sum_exec_runtime;
 };
+
 /* Alternate field names when used to cache expirations. */
-#define prof_exp	stime
 #define virt_exp	utime
+#define prof_exp	stime
 #define sched_exp	sum_exec_runtime
 
 #define INIT_CPUTIME	\
@@ -695,9 +733,7 @@ struct signal_struct {
 	cputime_t utime, stime, cutime, cstime;
 	cputime_t gtime;
 	cputime_t cgtime;
-#ifndef CONFIG_VIRT_CPU_ACCOUNTING_NATIVE
-	struct cputime prev_cputime;
-#endif
+	struct prev_cputime prev_cputime;
 	unsigned long nvcsw, nivcsw, cnvcsw, cnivcsw;
 	unsigned long min_flt, maj_flt, cmin_flt, cmaj_flt;
 	unsigned long inblock, oublock, cinblock, coublock;
@@ -751,6 +787,7 @@ struct signal_struct {
 	short oom_score_adj;		/* OOM kill score adjustment */
 	short oom_score_adj_min;	/* OOM kill score adjustment min value.
 					 * Only settable by CAP_SYS_RESOURCE. */
+	int   scenario_score_adj;	/* scenario score value */
 
 	struct mutex cred_guard_mutex;	/* guard against foreign influences on
 					 * credential calculations
@@ -773,6 +810,25 @@ struct signal_struct {
 
 #define SIGNAL_UNKILLABLE	0x00000040 /* for init: ignore fatal signals */
 
+#define SIGNAL_STOP_MASK (SIGNAL_CLD_MASK | SIGNAL_STOP_STOPPED | \
+			SIGNAL_STOP_CONTINUED)
+
+static inline void signal_set_stop_flags(struct signal_struct *sig,
+					unsigned int flags)
+{
+	WARN_ON(sig->flags & (SIGNAL_GROUP_EXIT|SIGNAL_GROUP_COREDUMP));
+	sig->flags = (sig->flags & ~SIGNAL_STOP_MASK) | flags;
+}
+
+#ifdef CONFIG_COREDUMP_SIGKILL_BLOCKED
+#define SIGNAL_GROUP_BLOCK_SIGKILL 0x00000080 /*Block SIGKILL*/
+#else
+#define SIGNAL_GROUP_BLOCK_SIGKILL 0x00000000 /*Block SIGKILL*/
+#endif
+
+#define signal_block_sigkill(tsk) \
+		(tsk->signal->flags & \
+		(SIGNAL_GROUP_BLOCK_SIGKILL | SIGNAL_GROUP_COREDUMP))
 /* If true, all threads except ->group_exit_task have pending SIGKILL */
 static inline int signal_group_exit(const struct signal_struct *sig)
 {
@@ -802,6 +858,8 @@ struct user_struct {
 	unsigned long mq_bytes;	/* How many bytes can be allocated to mqueue? */
 #endif
 	unsigned long locked_shm; /* How many pages of mlocked shm ? */
+	unsigned long unix_inflight;	/* How many files in flight in unix sockets */
+	atomic_long_t pipe_bufs;  /* how many pages are allocated in pipe buffers */
 
 #ifdef CONFIG_KEYS
 	struct key *uid_keyring;	/* UID specific keyring */
@@ -1050,6 +1108,30 @@ typedef int (*sched_domain_flags_f)(void);
 
 #define SDTL_OVERLAP	0x01
 
+#ifdef CONFIG_SCHED_HMP
+struct hmp_domain {
+	struct cpumask cpus;
+	struct cpumask possible_cpus;
+	struct list_head hmp_domains;
+};
+extern int set_hmp_boost(int enable);
+extern int set_hmp_semiboost(int enable);
+extern int set_hmp_boostpulse(int duration);
+#ifdef CONFIG_HMP_VARIABLE_SCALE
+extern int set_hmp_boostpulse_duration(int duration);
+extern int touch_hmp_boost(void);
+extern int get_hmp_boostpulse_duration(void);
+extern int get_hmp_boost_val(void);
+#endif
+extern int get_hmp_boost(void);
+extern int get_hmp_semiboost(void);
+extern int set_hmp_up_threshold(int value);
+extern int set_hmp_down_threshold(int value);
+extern int set_active_down_migration(int enable);
+extern int set_hmp_aggressive_up_migration(int enable);
+extern int set_hmp_aggressive_yield(int enable);
+#endif /* CONFIG_SCHED_HMP */
+
 struct sd_data {
 	struct sched_domain **__percpu sd;
 	struct sched_group **__percpu sg;
@@ -1127,6 +1209,11 @@ struct sched_avg {
 	 * weight of the task.
 	 */
 	unsigned long load_avg_contrib, utilization_avg_contrib;
+#ifdef CONFIG_SCHED_HMP
+	unsigned long load_avg_ratio;
+	u64 hmp_last_up_migration;
+	u64 hmp_last_down_migration;
+#endif
 	/*
 	 * These sums represent an infinite geometric series and so are bound
 	 * above by 1024/(1-y).  Thus we only need a u32 to store them for all
@@ -1139,6 +1226,14 @@ struct sched_avg {
 	 */
 	u32 runnable_avg_sum, avg_period, running_avg_sum;
 };
+
+#ifdef CONFIG_SCHED_HMP
+/*
+ * We want to avoid boosting any processes forked from init (PID 1)
+ * and kthreadd (assumed to be PID 2).
+ */
+#define hmp_task_should_forkboost(task) ((task->parent && task->parent->pid > 2))
+#endif
 
 #ifdef CONFIG_SCHEDSTATS
 struct sched_statistics {
@@ -1299,9 +1394,9 @@ struct task_struct {
 #ifdef CONFIG_SMP
 	struct llist_node wake_entry;
 	int on_cpu;
-	struct task_struct *last_wakee;
-	unsigned long wakee_flips;
+	unsigned int wakee_flips;
 	unsigned long wakee_flip_decay_ts;
+	struct task_struct *last_wakee;
 
 	int wake_cpu;
 #endif
@@ -1360,7 +1455,7 @@ struct task_struct {
 	unsigned brk_randomized:1;
 #endif
 	/* per-thread vma caching */
-	u32 vmacache_seqnum;
+	u64 vmacache_seqnum;
 	struct vm_area_struct *vmacache[VMACACHE_SIZE];
 #if defined(SPLIT_RSS_COUNTING)
 	struct task_rss_stat	rss_stat;
@@ -1384,6 +1479,10 @@ struct task_struct {
 
 #ifdef CONFIG_MEMCG_KMEM
 	unsigned memcg_kmem_skip_account:1;
+#endif
+
+#ifdef CONFIG_PROC_VD_SUSPEND_POLICY
+	unsigned suspend_last:1;
 #endif
 
 	unsigned long atomic_flags; /* Flags needing atomic access. */
@@ -1430,9 +1529,7 @@ struct task_struct {
 
 	cputime_t utime, stime, utimescaled, stimescaled;
 	cputime_t gtime;
-#ifndef CONFIG_VIRT_CPU_ACCOUNTING_NATIVE
-	struct cputime prev_cputime;
-#endif
+	struct prev_cputime prev_cputime;
 #ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN
 	seqlock_t vtime_seqlock;
 	unsigned long long vtime_snap;
@@ -1452,6 +1549,7 @@ struct task_struct {
 	struct list_head cpu_timers[3];
 
 /* process credentials */
+	const struct cred __rcu *ptracer_cred; /* Tracer's credentials at attach */
 	const struct cred __rcu *real_cred; /* objective and real subjective task
 					 * credentials (COW) */
 	const struct cred __rcu *cred;	/* effective (overridable) subjective task
@@ -1502,8 +1600,8 @@ struct task_struct {
 	struct seccomp seccomp;
 
 /* Thread group tracking */
-   	u32 parent_exec_id;
-   	u32 self_exec_id;
+	u32 parent_exec_id;
+	u32 self_exec_id;
 /* Protection of (de-)allocation: mm, files, fs, tty, keyrings, mems_allowed,
  * mempolicy */
 	spinlock_t alloc_lock;
@@ -1545,6 +1643,10 @@ struct task_struct {
 	unsigned int lockdep_recursion;
 	struct held_lock held_locks[MAX_LOCK_DEPTH];
 	gfp_t lockdep_reclaim_gfp;
+#endif
+
+#ifdef CONFIG_UBSAN
+        unsigned int                    in_ubsan;
 #endif
 
 /* journalling filesystem info */
@@ -1724,7 +1826,46 @@ struct task_struct {
 #ifdef CONFIG_DEBUG_ATOMIC_SLEEP
 	unsigned long	task_state_change;
 #endif
+#ifdef CONFIG_VMAP_STACK
+	struct vm_struct *stack_vm_area;
+#endif
+#ifdef CONFIG_SHOW_FAULT_TRACE_INFO
+	unsigned long user_ssp;  /* user mode start sp */
+#endif
+#ifdef CONFIG_SMART_DEADLOCK
+	struct smart_deadlock_task sm_tsk;
+#endif
+#ifdef CONFIG_STACK_RECLAIM
+	unsigned long stack_rec_time;
+#endif
+
+// jason77.lee@samsung.com
+#ifdef CONFIG_SECURITY_SFD_SECURECONTAINER
+	int uepLevel;
+#endif // CONFIG_SECURITY_SFD_SECURECONTAINER
+
+#ifdef CONFIG_VDFS4_TRACE
+	unsigned int vt_rep_idx;
+#endif
 };
+
+#ifdef CONFIG_VMAP_STACK
+static inline struct vm_struct *task_stack_vm_area(const struct task_struct *t)
+{
+	return t->stack_vm_area;
+}
+
+void map_kernel_stack(struct mm_struct *mm, struct task_struct *task);
+#else
+static inline struct vm_struct *task_stack_vm_area(const struct task_struct *t)
+{
+	return NULL;
+}
+
+static inline void map_kernel_stack(struct mm_struct *mm, struct task_struct *task)
+{
+}
+#endif
 
 /* Future-safe accessor for struct task_struct's cpus_allowed. */
 #define tsk_cpus_allowed(tsk) (&(tsk)->cpus_allowed)
@@ -1915,6 +2056,8 @@ static inline int is_global_init(struct task_struct *tsk)
 extern struct pid *cad_pid;
 
 extern void free_task(struct task_struct *tsk);
+extern void account_kernel_stack(struct task_struct *tsk, int account, struct page *page);
+extern void free_mapped_stack(struct task_struct *tsk);
 #define get_task_struct(tsk) do { atomic_inc(&(tsk)->usage); } while(0)
 
 extern void __put_task_struct(struct task_struct *t);
@@ -2690,7 +2833,11 @@ static inline void threadgroup_unlock(struct task_struct *tsk) {}
 
 #ifndef __HAVE_THREAD_FUNCTIONS
 
-#define task_thread_info(task)	((struct thread_info *)(task)->stack)
+#ifdef CONFIG_KERNEL_STACK_SMALL
+#define task_thread_info(task)	((struct thread_info *)(*(unsigned long *)(((unsigned long)((task)->stack)) + THREAD_START_SAVE)))
+#else
+#define task_thread_info(task) ((struct thread_info *)(task)->stack)
+#endif
 #define task_stack_page(task)	((task)->stack)
 
 static inline void setup_thread_stack(struct task_struct *p, struct task_struct *org)
@@ -2699,28 +2846,66 @@ static inline void setup_thread_stack(struct task_struct *p, struct task_struct 
 	task_thread_info(p)->task = p;
 }
 
+
+#ifdef CONFIG_IRQ_STACK
+static inline unsigned long *end_of_stack_irq(struct task_struct *p)
+{
+	unsigned long address = IRQ_STACK_BASE_PTR(raw_smp_processor_id());
+
+	return (unsigned long *)address;
+
+}
+static inline unsigned long *end_of_stack_svc(struct task_struct *p)
+{
+	unsigned long address = (unsigned long)task_stack_page(p);
+#ifdef CONFIG_KERNEL_STACK_SMALL
+	return (unsigned long *)(address + PAGE_SIZE) + 1;
+#else /* means CONFIG_KERNEL_STACK_LARGE is enabled */
+	return (unsigned long *)((struct thread_info *)address + 1);
+#endif
+}
+#else /* CONFIG_IRQ_STACK */
+static inline unsigned long *end_of_stack_svc(struct task_struct *p)
+{
+	struct thread_info *address = task_thread_info(p);
+
+#ifdef CONFIG_STACK_GROWSUP
+	return (unsigned long *)((unsigned long)address + THREAD_SIZE) - 1;
+#else
+	return (unsigned long *)(address + 1);
+#endif
+}
+static inline unsigned long *end_of_stack_irq(struct task_struct *p)
+{
+	return end_of_stack_svc(p);
+}
+#endif /* CONFIG_IRQ_STACK */
+
 /*
  * Return the address of the last usable long on the stack.
  *
  * When the stack grows down, this is just above the thread
- * info struct. Going any lower will corrupt the threadinfo.
+ * info struct or address of thread info struct if KERNEL_STACK_SMALL
+ * is selected . Going any lower will corrupt the threadinfo.
  *
  * When the stack grows up, this is the highest address.
  * Beyond that position, we corrupt data on the next page.
  */
 static inline unsigned long *end_of_stack(struct task_struct *p)
 {
-#ifdef CONFIG_STACK_GROWSUP
-	return (unsigned long *)((unsigned long)task_thread_info(p) + THREAD_SIZE) - 1;
-#else
-	return (unsigned long *)(task_thread_info(p) + 1);
-#endif
+	if (in_interrupt())
+		return end_of_stack_irq(p);
+	else
+		return end_of_stack_svc(p);
 }
 
 #endif
+#ifdef CONFIG_KERNEL_STACK_SMALL
+#define task_stack_end_corrupted(task) (false)
+#else
 #define task_stack_end_corrupted(task) \
 		(*(end_of_stack(task)) != STACK_END_MAGIC)
-
+#endif
 static inline int object_is_on_stack(void *obj)
 {
 	void *stack = task_stack_page(current);
@@ -2729,6 +2914,7 @@ static inline int object_is_on_stack(void *obj)
 }
 
 extern void thread_info_cache_init(void);
+extern void thread_info_struct_cache_init(void);
 
 #ifdef CONFIG_DEBUG_STACK_USAGE
 static inline unsigned long stack_not_used(struct task_struct *p)
@@ -2833,12 +3019,6 @@ extern int _cond_resched(void);
 })
 
 extern int __cond_resched_lock(spinlock_t *lock);
-
-#ifdef CONFIG_PREEMPT_COUNT
-#define PREEMPT_LOCK_OFFSET	PREEMPT_OFFSET
-#else
-#define PREEMPT_LOCK_OFFSET	0
-#endif
 
 #define cond_resched_lock(lock) ({				\
 	___might_sleep(__FILE__, __LINE__, PREEMPT_LOCK_OFFSET);\
